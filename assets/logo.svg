@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <rect width="512" height="512" rx="115" fill="#0B111E"/>
+  
+  <circle cx="256" cy="256" r="85" fill="none" stroke="#1E293B" stroke-width="1.5" stroke-dasharray="4 4" />
+  <circle cx="256" cy="256" r="150" fill="none" stroke="#1E293B" stroke-width="1.5" stroke-dasharray="4 4" />
+  <circle cx="256" cy="256" r="210" fill="none" stroke="#1E293B" stroke-width="1.5" stroke-dasharray="4 4" />
+  
+  <circle cx="256" cy="256" r="36" fill="#F0F9FF" filter="drop-shadow(0px 0px 8px rgba(240,249,255,0.35))" />
+  
+  <circle cx="341.00" cy="256.00" r="15.00" fill="#FEF08A" />
+  <circle cx="316.10" cy="316.10" r="15.00" fill="#FEF08A" />
+  <circle cx="256.00" cy="341.00" r="15.00" fill="#FEF08A" />
+  <circle cx="195.90" cy="316.10" r="15.00" fill="#FEF08A" />
+  <circle cx="171.00" cy="256.00" r="15.00" fill="#FEF08A" />
+  <circle cx="195.90" cy="195.90" r="15.00" fill="#FEF08A" />
+  <circle cx="256.00" cy="171.00" r="15.00" fill="#FEF08A" />
+  <circle cx="316.10" cy="195.90" r="15.00" fill="#FEF08A" />
+  
+  <circle cx="403.12" cy="285.26" r="9.00" fill="#FB923C" />
+  <circle cx="380.72" cy="339.34" r="9.00" fill="#FB923C" />
+  <circle cx="339.34" cy="380.72" r="9.00" fill="#FB923C" />
+  <circle cx="285.26" cy="403.12" r="9.00" fill="#FB923C" />
+  <circle cx="226.74" cy="403.12" r="9.00" fill="#FB923C" />
+  <circle cx="172.66" cy="380.72" r="9.00" fill="#FB923C" />
+  <circle cx="131.28" cy="339.34" r="9.00" fill="#FB923C" />
+  <circle cx="108.88" cy="285.26" r="9.00" fill="#FB923C" />
+  <circle cx="108.88" cy="226.74" r="9.00" fill="#FB923C" />
+  <circle cx="131.28" cy="172.66" r="9.00" fill="#FB923C" />
+  <circle cx="172.66" cy="131.28" r="9.00" fill="#FB923C" />
+  <circle cx="226.74" cy="108.88" r="9.00" fill="#FB923C" />
+  <circle cx="285.26" cy="108.88" r="9.00" fill="#FB923C" />
+  <circle cx="339.34" cy="131.28" r="9.00" fill="#FB923C" />
+  <circle cx="380.72" cy="172.66" r="9.00" fill="#FB923C" />
+  <circle cx="403.12" cy="226.74" r="9.00" fill="#FB923C" />
+  
+  <circle cx="466.00" cy="256.00" r="4.50" fill="#EF4444" />
+  <circle cx="461.96" cy="296.97" r="4.50" fill="#EF4444" />
+  <circle cx="450.01" cy="336.36" r="4.50" fill="#EF4444" />
+  <circle cx="430.61" cy="372.67" r="4.50" fill="#EF4444" />
+  <circle cx="404.49" cy="404.49" r="4.50" fill="#EF4444" />
+  <circle cx="372.67" cy="430.61" r="4.50" fill="#EF4444" />
+  <circle cx="336.36" cy="450.01" r="4.50" fill="#EF4444" />
+  <circle cx="296.97" cy="461.96" r="4.50" fill="#EF4444" />
+  <circle cx="256.00" cy="466.00" r="4.50" fill="#EF4444" />
+  <circle cx="215.03" cy="461.96" r="4.50" fill="#EF4444" />
+  <circle cx="175.64" cy="450.01" r="4.50" fill="#EF4444" />
+  <circle cx="139.33" cy="430.61" r="4.50" fill="#EF4444" />
+  <circle cx="107.51" cy="404.49" r="4.50" fill="#EF4444" />
+  <circle cx="81.39" cy="372.67" r="4.50" fill="#EF4444" />
+  <circle cx="61.99" cy="336.36" r="4.50" fill="#EF4444" />
+  <circle cx="50.04" cy="296.97" r="4.50" fill="#EF4444" />
+  <circle cx="46.00" cy="256.00" r="4.50" fill="#EF4444" />
+  <circle cx="50.04" cy="215.03" r="4.50" fill="#EF4444" />
+  <circle cx="61.99" cy="175.64" r="4.50" fill="#EF4444" />
+  <circle cx="81.39" cy="139.33" r="4.50" fill="#EF4444" />
+  <circle cx="107.51" cy="107.51" r="4.50" fill="#EF4444" />
+  <circle cx="139.33" cy="81.39" r="4.50" fill="#EF4444" />
+  <circle cx="175.64" cy="61.99" r="4.50" fill="#EF4444" />
+  <circle cx="215.03" cy="50.04" r="4.50" fill="#EF4444" />
+  <circle cx="256.00" cy="46.00" r="4.50" fill="#EF4444" />
+  <circle cx="296.97" cy="50.04" r="4.50" fill="#EF4444" />
+  <circle cx="336.36" cy="61.99" r="4.50" fill="#EF4444" />
+  <circle cx="372.67" cy="81.39" r="4.50" fill="#EF4444" />
+  <circle cx="404.49" cy="107.51" r="4.50" fill="#EF4444" />
+  <circle cx="430.61" cy="139.33" r="4.50" fill="#EF4444" />
+  <circle cx="450.01" cy="175.64" r="4.50" fill="#EF4444" />
+  <circle cx="461.96" cy="215.03" r="4.50" fill="#EF4444" />
+</svg>
