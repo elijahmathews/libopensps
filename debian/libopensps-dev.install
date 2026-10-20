@@ -1,0 +1,4 @@
+usr/include/opensps.h
+usr/include/fsps.h
+usr/lib/*/libopensps.so
+usr/lib/*/pkgconfig/opensps.pc

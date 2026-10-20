@@ -49,7 +49,7 @@ what comes next: `doc/ROADMAP.md`):
 
 Other tools: `tests/benchmark_phases`, `tests/benchmark_csp_batch` (timings);
 `tools/compare_builds/` (one build against another over the case matrix, e.g. GPU vs CPU);
-`tools/legacy_parity/` (against legacy FSPS on identical data); `tools/fsps_data/` (data
+`tools/legacy_parity/` (against legacy FSPS on identical data); `tools/opensps_data/` (data
 format, conversion, packing; format and workflows in `doc/DATA_FORMAT.md`).
 
 ## Correctness gates

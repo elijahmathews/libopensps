@@ -3,15 +3,15 @@ PROGRAM GENERATE_TEST_DATA
   ! Generates reference data for FSPS regression testing.
   ! Uses allocatable arrays to support multiple compile-time configurations.
 
-   USE fsps_precision, ONLY: WP
-   USE fsps_constants, ONLY: NEMLINE
-   USE fsps_types, ONLY: PARAMS, COMPSPOUT
-   use fsps_api, only: fsps_create, fsps_setup, fsps_destroy
-   USE fsps_csp, ONLY: compute_csp_scenario
-   use fsps_context, only: fsps_context_update_ssp_basis, fsps_context_move_to_device, &
-                           fsps_context_set_pset
-   USE fsps_context_types, ONLY: fsps_context_t
-   USE fsps_ssp, ONLY: generate_ssp_grid
+   USE opensps_precision, ONLY: WP
+   USE opensps_constants, ONLY: NEMLINE
+   USE opensps_types, ONLY: PARAMS, COMPSPOUT
+   use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
+   USE opensps_csp, ONLY: compute_csp_scenario
+   use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
+                           opensps_context_set_pset
+   USE opensps_context_types, ONLY: opensps_context_t
+   USE opensps_ssp, ONLY: generate_ssp_grid
   IMPLICIT NONE
 
   ! Variables for SSP generation (allocatable)
@@ -24,7 +24,7 @@ PROGRAM GENERATE_TEST_DATA
    TYPE(COMPSPOUT), ALLOCATABLE, DIMENSION(:) :: results
   
    ! Control variables
-   TYPE(fsps_context_t) :: ctx
+   TYPE(opensps_context_t) :: ctx
   TYPE(PARAMS) :: pset
    INTEGER :: i, unit_out, status, arg_count
    INTEGER :: nspec_ctx, ntfull_ctx, nbands_ctx, nt_ctx, nindx_ctx
@@ -98,16 +98,16 @@ PROGRAM GENERATE_TEST_DATA
    ! Initialize FSPS parameters (MIST/MILES defaults)
   ! We call this FIRST so we can be sure parameters like ntfull/nspec are set
   ! before we allocate (though they are static in the current codebase).
-   call fsps_create(ctx)
+   call opensps_create(ctx)
    ctx%imf_type_val = 1          
   pset%zmet = 10        
   
   ! Use defaults unless overridden by arguments
-  call fsps_setup(ctx, pset%zmet, isoc_type_in=TRIM(isoc_arg), &
+  call opensps_setup(ctx, pset%zmet, isoc_type_in=TRIM(isoc_arg), &
      spec_type_in=TRIM(spec_arg), dust_type_in=TRIM(dust_arg))
 
   ! Allocate the persistent CSP/SSP workspaces (mirrors test_runner.f90)
-  call fsps_context_move_to_device(ctx)
+  call opensps_context_move_to_device(ctx)
 
   ! Cache context dimensions for local allocations
   nspec_ctx = ctx%state%nspec
@@ -117,7 +117,7 @@ PROGRAM GENERATE_TEST_DATA
   nindx_ctx = ctx%state%nindx
 
   IF (nspec_ctx <= 0 .OR. ntfull_ctx <= 0) THEN
-   WRITE(*,*) 'ERROR: fsps_setup did not initialize dimensions.'
+   WRITE(*,*) 'ERROR: opensps_setup did not initialize dimensions.'
      WRITE(*,*) 'nspec=', nspec_ctx, ' ntfull=', ntfull_ctx
      STOP EXIT_FAILURE
   END IF
@@ -163,7 +163,7 @@ PROGRAM GENERATE_TEST_DATA
   pset%ssp_gen_age = 1
 
   ! Compute SSP
-   call fsps_context_set_pset(ctx, pset)
+   call opensps_context_set_pset(ctx, pset)
    CALL generate_ssp_grid(ctx, pset, mass_ssp, lbol_ssp, spec_ssp)
 
   ! Write SSP Data
@@ -181,14 +181,14 @@ PROGRAM GENERATE_TEST_DATA
   pset%dust2 = 0.3
   
   ! Re-run generate_ssp_grid
-   call fsps_context_set_pset(ctx, pset)
+   call opensps_context_set_pset(ctx, pset)
    CALL generate_ssp_grid(ctx, pset, mass_ssp, lbol_ssp, spec_ssp)
 
   ! Compute CSP
    mass_ssp2(:,1) = mass_ssp
    lbol_ssp2(:,1) = lbol_ssp
    spec_ssp3(:,:,1) = spec_ssp
-   call fsps_context_update_ssp_basis(ctx, spec_ssp3, mass_ssp2, lbol_ssp2, 1)
+   call opensps_context_update_ssp_basis(ctx, spec_ssp3, mass_ssp2, lbol_ssp2, 1)
    CALL compute_csp_scenario(ctx, pset, 1, results)
 
   ! Write CSP Data
@@ -213,7 +213,7 @@ PROGRAM GENERATE_TEST_DATA
   IF (ALLOCATED(pset%mag_compute)) DEALLOCATE(pset%mag_compute)
   IF (ALLOCATED(pset%ssp_gen_age)) DEALLOCATE(pset%ssp_gen_age)
   
-   call fsps_destroy(ctx)
+   call opensps_destroy(ctx)
 
   WRITE(*,*) 'Complete. Data saved.'
 

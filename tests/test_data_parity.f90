@@ -9,14 +9,14 @@ program test_data_parity
     !> and a CSP (spectrum, magnitudes, indices, line luminosities) to be identical too.
     !> Skipped when STANDARD_ROOT has no opensps-data.json (or the older fsps-data.json).
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
-    use fsps_precision, only: WP, KP
-    use fsps_types, only: PARAMS, COMPSPOUT
-    use fsps_api, only: fsps_create, fsps_setup, fsps_destroy, fsps_set_param_int, fsps_set_param_float
-    use fsps_context, only: fsps_context_update_ssp_basis, fsps_context_move_to_device, &
-                            fsps_context_set_pset, fsps_context_get_pset, fsps_context_prepare_pset
-    use fsps_context_types, only: fsps_context_t
-    use fsps_ssp, only: generate_ssp_grid
-    use fsps_csp, only: compute_csp_scenario
+    use opensps_precision, only: WP, KP
+    use opensps_types, only: PARAMS, COMPSPOUT
+    use opensps_api, only: opensps_create, opensps_setup, opensps_destroy, opensps_set_param_int, opensps_set_param_float
+    use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
+                            opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset
+    use opensps_context_types, only: opensps_context_t
+    use opensps_ssp, only: generate_ssp_grid
+    use opensps_csp, only: compute_csp_scenario
     use test_utils_mod, only: tap_finish, print_major_header, print_group, print_summary_line, assert_true
     implicit none
 
@@ -55,7 +55,7 @@ program test_data_parity
     inquire (file=trim(std_root)//'/opensps-data.json', exist=exists)
     if (.not. exists) inquire (file=trim(std_root)//'/fsps-data.json', exist=exists)
     if (.not. exists) then
-        write (*, '(A)') '1..0 # SKIP no standard data root at '//trim(std_root)//' (tools/fsps_data/convert_legacy.py)'
+        write (*, '(A)') '1..0 # SKIP no standard data root at '//trim(std_root)//' (tools/opensps_data/convert_legacy.py)'
         stop
     end if
     ! OPENSPS_DATA_HOME and SPS_HOME are searched before FSPS_DATA_HOME: set the first, clear the second
@@ -94,32 +94,32 @@ contains
     end subroutine use_root
 
     subroutine make_context(ctx, root, fmt, isoc, spec, dust, zmet, full)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         character(len=*), intent(in) :: root, fmt, isoc, spec, dust
         integer, intent(in) :: zmet
         logical, intent(in) :: full
         integer :: status
 
         call use_root(root, fmt)
-        call fsps_create(ctx)
-        call fsps_set_param_int(ctx, 'add_neb_emission', 1, status)
+        call opensps_create(ctx)
+        call opensps_set_param_int(ctx, 'add_neb_emission', 1, status)
         if (full) then
-            call fsps_set_param_int(ctx, 'add_agb_dust_model', 1, status)
-            call fsps_set_param_int(ctx, 'add_dust_emission', 1, status)
-            call fsps_set_param_int(ctx, 'add_xrb_emission', 1, status)
-            call fsps_set_param_int(ctx, 'cloudy_dust', 1, status)
+            call opensps_set_param_int(ctx, 'add_agb_dust_model', 1, status)
+            call opensps_set_param_int(ctx, 'add_dust_emission', 1, status)
+            call opensps_set_param_int(ctx, 'add_xrb_emission', 1, status)
+            call opensps_set_param_int(ctx, 'cloudy_dust', 1, status)
         end if
-        call fsps_setup(ctx, -1, isoc, spec, dust)
-        call fsps_context_move_to_device(ctx)
-        call fsps_set_param_int(ctx, 'zmet', zmet, status)
-        call fsps_set_param_int(ctx, 'sfh', 1, status)
-        call fsps_set_param_int(ctx, 'dust_type', 0, status)
-        call fsps_set_param_float(ctx, 'tau', 1.0_wp, status)
-        call fsps_set_param_float(ctx, 'tage', 3.0_wp, status)
-        call fsps_set_param_float(ctx, 'dust2', 0.3_wp, status)
+        call opensps_setup(ctx, -1, isoc, spec, dust)
+        call opensps_context_move_to_device(ctx)
+        call opensps_set_param_int(ctx, 'zmet', zmet, status)
+        call opensps_set_param_int(ctx, 'sfh', 1, status)
+        call opensps_set_param_int(ctx, 'dust_type', 0, status)
+        call opensps_set_param_float(ctx, 'tau', 1.0_wp, status)
+        call opensps_set_param_float(ctx, 'tage', 3.0_wp, status)
+        call opensps_set_param_float(ctx, 'dust2', 0.3_wp, status)
         if (full) then
-            call fsps_set_param_float(ctx, 'fagn', 0.1_wp, status)
-            call fsps_set_param_int(ctx, 'add_agn_dust', 1, status)
+            call opensps_set_param_float(ctx, 'fagn', 0.1_wp, status)
+            call opensps_set_param_int(ctx, 'add_agn_dust', 1, status)
         end if
     end subroutine make_context
 
@@ -127,7 +127,7 @@ contains
         character(len=*), intent(in) :: isoc, spec, dust
         integer, intent(in) :: zmet
         logical, intent(in) :: full
-        type(fsps_context_t) :: a, b
+        type(opensps_context_t) :: a, b
         type(COMPSPOUT), allocatable :: ra(:), rb(:)
         real(WP), allocatable :: ma(:), la(:), sa(:, :), mb(:), lb(:), sb(:, :)
         integer :: k
@@ -300,25 +300,25 @@ contains
                              'CSP mass and luminosity', total_tests, total_failures)
         end do
 
-        call fsps_destroy(a)
-        call fsps_destroy(b)
+        call opensps_destroy(a)
+        call opensps_destroy(b)
     end subroutine check_case
 
     subroutine run_csp(ctx, mass_ssp, lbol_ssp, spec_ssp, results)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         real(WP), allocatable, intent(inout) :: mass_ssp(:), lbol_ssp(:), spec_ssp(:, :)
         type(COMPSPOUT), allocatable, intent(inout) :: results(:)
         type(PARAMS) :: pset
         integer :: status
 
-        call fsps_context_prepare_pset(ctx)
-        call fsps_context_get_pset(ctx, pset)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
         if (allocated(mass_ssp)) deallocate (mass_ssp, lbol_ssp, spec_ssp)
         allocate (mass_ssp(ctx%state%ntfull), lbol_ssp(ctx%state%ntfull), &
                   spec_ssp(ctx%state%nspec, ctx%state%ntfull))
-        call fsps_context_set_pset(ctx, pset)
+        call opensps_context_set_pset(ctx, pset)
         call generate_ssp_grid(ctx, pset, mass_ssp, lbol_ssp, spec_ssp)
-        call fsps_context_update_ssp_basis(ctx, reshape(spec_ssp, [size(spec_ssp, 1), size(spec_ssp, 2), 1]), &
+        call opensps_context_update_ssp_basis(ctx, reshape(spec_ssp, [size(spec_ssp, 1), size(spec_ssp, 2), 1]), &
                                            reshape(mass_ssp, [size(mass_ssp), 1]), &
                                            reshape(lbol_ssp, [size(lbol_ssp), 1]), 1)
         if (allocated(results)) deallocate (results)

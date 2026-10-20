@@ -11,7 +11,7 @@ delete it here.
 - **SSP generation:** template-sum form with exact IMF integrals for every IMF type; one SSP
   grid (one metallicity, MIST + MILES) takes 0.11 s on one laptop core and 0.07 s with the
   template product on an A100.
-- **Batched CSP** (`compute_csp_batch`, C entry point `fsps_context_compute_csp_batch`): full
+- **Batched CSP** (`compute_csp_batch`, C entry point `opensps_context_compute_csp_batch`): full
   physics per model (SFH parameters or an SSP-weight matrix, dust, dust emission, nebular gas
   parameters, AGN, metallicity, redshift and IGM), with smoothing, indices and line
   luminosities. A100, FP32, N = 10^4, magnitudes only: 7.1 us per model with full physics and
@@ -107,7 +107,7 @@ depend on a pinned version of the C library, each with its own release cycle and
   the binary as `libopensps_jll`, R `opensps-r` (package `opensps`), Rust `opensps-rs` (crates
   `opensps-sys` and `opensps`).
 - **Python first** (`opensps-python`): a pip-installable package (meson-python) that builds the
-  core as a Meson subproject pinned to a tag, or links an installed `libfsps` found through
+  core as a Meson subproject pinned to a tag, or links an installed `libopensps` found through
   pkg-config; NumPy arrays in and out, the batch entry point with one array per parameter,
   device-resident outputs where available, and a layer compatible with python-fsps
   (`StellarPopulation`) so that Prospector and existing scripts can switch with few changes.
@@ -245,7 +245,7 @@ implicit `tofrom` of the context. The rules are in `doc/GPU_PLAN.md`. Remaining:
 - run the batch tests on the 780M from a text console (a GPU fault there resets the display
   GPU) and fix what remains;
 - rebase the four AMD branches onto `develop` after the performance stack (PRs #10, #11, #14,
-  #17), switch the batch output buffer (`o%spec`) to the `fsps_omp_data` helpers, and open one
+  #17), switch the batch output buffer (`o%spec`) to the `opensps_omp_data` helpers, and open one
   pull request;
 - a discrete AMD GPU (R9700) and Intel (ifx, Arc Pro B70) when available.
 

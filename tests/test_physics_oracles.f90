@@ -15,18 +15,18 @@ program test_physics_oracles
     !>   5. Single-age vs all-ages CSP: tage on a time-grid node reproduces that node of the
     !>      tage = 0 (all ages) output.
 
-    use fsps_precision, only: WP, KP
-    use fsps_constants, only: NEMLINE, L_SOL, H_PLANCK, C_LIGHT
-    use fsps_types, only: PARAMS, COMPSPOUT
-    use fsps_api, only: fsps_create, fsps_setup, fsps_destroy
-    use fsps_csp, only: compute_csp_scenario
-    use fsps_ssp, only: generate_ssp_grid, fsps_ssp_set_per_star
-    use fsps_photometry, only: compute_magnitudes
-    use fsps_integration, only: integrate_trapezoid_array
-    use fsps_context, only: fsps_context_update_ssp_basis, fsps_context_move_to_device, &
-                            fsps_context_set_pset, fsps_context_get_pset, fsps_context_prepare_pset, &
-                            fsps_context_set_param_int, fsps_context_set_param_float
-    use fsps_context_types, only: fsps_context_t
+    use opensps_precision, only: WP, KP
+    use opensps_constants, only: NEMLINE, L_SOL, H_PLANCK, C_LIGHT
+    use opensps_types, only: PARAMS, COMPSPOUT
+    use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
+    use opensps_csp, only: compute_csp_scenario
+    use opensps_ssp, only: generate_ssp_grid, opensps_ssp_set_per_star
+    use opensps_photometry, only: compute_magnitudes
+    use opensps_integration, only: integrate_trapezoid_array
+    use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
+                            opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
+                            opensps_context_set_param_int, opensps_context_set_param_float
+    use opensps_context_types, only: opensps_context_t
     use test_utils_mod, only: tap_finish, skip_without_data, print_major_header, print_group, print_summary_line, assert_true, &
                               assert_relative_error
     implicit none
@@ -56,7 +56,7 @@ contains
     ! ------------------------------------------------------------------------
 
     subroutine run_mist_miles_checks()
-        type(fsps_context_t) :: ctx
+        type(opensps_context_t) :: ctx
 
         call new_context(ctx, 'mist', 'miles', 10)
         call check_dust_energy_balance(ctx)
@@ -66,26 +66,26 @@ contains
         call check_solar_magnitudes(ctx)
         call check_single_vs_all_ages(ctx)
         call check_template_vs_per_star(ctx, "MIST + MILES")
-        call fsps_destroy(ctx)
+        call opensps_destroy(ctx)
     end subroutine run_mist_miles_checks
 
     subroutine run_padova_basel_checks()
-        type(fsps_context_t) :: ctx
+        type(opensps_context_t) :: ctx
 
         call new_context(ctx, 'pdva', 'basel', 20)
         call check_spectral_lbol(ctx, "Padova + BaSeL", 0.05_wp)
         call check_indices_defined(ctx, "Padova + BaSeL")
         call check_template_vs_per_star(ctx, "Padova + BaSeL")
-        call fsps_destroy(ctx)
+        call opensps_destroy(ctx)
     end subroutine run_padova_basel_checks
 
     !> BPASS has no isochrones; its L_bol must still describe its spectra.
     subroutine run_bpass_checks()
-        type(fsps_context_t) :: ctx
+        type(opensps_context_t) :: ctx
 
         call new_context(ctx, 'bpss', 'bpass', 10)
         call check_spectral_lbol(ctx, "BPASS", 1.0e-10_wp)
-        call fsps_destroy(ctx)
+        call opensps_destroy(ctx)
     end subroutine run_bpass_checks
 
     ! ------------------------------------------------------------------------
@@ -94,7 +94,7 @@ contains
 
     !> Every dust_type with dust emission on must conserve L_bol; with it off, light is lost.
     subroutine check_dust_energy_balance(ctx)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         type(COMPSPOUT), allocatable :: results(:)
         real(WP) :: l_ref, l_dusty
         integer :: dust_type
@@ -137,7 +137,7 @@ contains
     !> The frequency integral of each SSP spectrum (no dust, no nebular emission) matches the
     !> SSP L_bol at every age with non-negligible light, to within rel_tol.
     subroutine check_spectral_lbol(ctx, label, rel_tol)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         character(len=*), intent(in) :: label
         real(WP), intent(in) :: rel_tol
         real(WP), allocatable :: mass_ssp(:), lbol_ssp(:), spec_ssp(:, :)
@@ -171,11 +171,11 @@ contains
     ! ------------------------------------------------------------------------
 
     !> For a 3 Myr SSP without dust, L(H-beta) / Q(H0) must be the Case B ratio. Q is integrated
-    !> here, independently of fsps_gas, from the same SSP computed without nebular emission.
+    !> here, independently of opensps_gas, from the same SSP computed without nebular emission.
     !> Case B at 1e4 K and n_e = 100 cm^-3 gives 4.76e-13 erg (Osterbrock & Ferland 2006); the
     !> Cloudy grids span T_e ~ 7000-15000 K, so the ratio is allowed +-25%.
     subroutine check_hbeta_case_b(ctx)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         type(COMPSPOUT), allocatable :: results(:)
         real(WP), parameter :: LOG_AGE = 6.5_wp
         real(WP), parameter :: CASE_B_HBETA = 4.76e-13_wp
@@ -227,7 +227,7 @@ contains
     !> IRAC, PACS, SPIRE and IRAS bands are renormalized to the nu f_nu = const convention and
     !> MIPS to a beta = 2 blackbody (as in legacy FSPS), so they are excluded.
     subroutine check_flat_ab_source(ctx)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         real(WP), parameter :: PC_CM = 3.0856775814913673e18_wp
         real(WP), parameter :: AB_FNU = 3631.0e-23_wp
         integer, parameter :: renormalized(17) = [53, 54, 55, 56, 90, 91, 92, 95, 96, 97, 98, 99, 100, &
@@ -257,7 +257,7 @@ contains
     !> Absolute AB magnitudes of the Sun from Willmer (2018, ApJS 236, 47), Table 3, compared
     !> with the solar magnitudes FSPS computes from its solar spectrum and filter curves.
     subroutine check_solar_magnitudes(ctx)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         integer, parameter :: n_check = 8
         integer, parameter :: band(n_check) = [1, 10, 11, 12, 14, 15, 16, 17]
         character(len=8), parameter :: names(n_check) = [character(len=8) :: &
@@ -289,7 +289,7 @@ contains
     !> all-ages output is normalized to 1 Msun formed by the last age and reports the mass formed
     !> so far (mformed); a single age is normalized to 1 Msun formed by tage.
     subroutine check_single_vs_all_ages(ctx)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         type(COMPSPOUT), allocatable :: all_ages(:), single(:)
         real(WP), allocatable :: spec_all(:)
         real(WP) :: mass_all, lbol_all, t_node, mformed
@@ -337,7 +337,7 @@ contains
     !> star spectra, with default parameters (which include AGB stars with dust shells) and with
     !> modified populations (blue stragglers, horizontal branch, stronger AGB dust).
     subroutine check_template_vs_per_star(ctx, label)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         character(len=*), intent(in) :: label
         real(WP), allocatable :: mass_t(:), lbol_t(:), spec_t(:, :), mass_s(:), lbol_s(:), spec_s(:, :)
         integer :: pass
@@ -353,11 +353,11 @@ contains
                 call set_float(ctx, 'fbhb', 0.2_wp)
                 call set_float(ctx, 'agb_dust', 2.0_wp)
             end if
-            call fsps_ssp_set_per_star(.false.)
+            call opensps_ssp_set_per_star(.false.)
             call run_ssp(ctx, mass_t, lbol_t, spec_t)
-            call fsps_ssp_set_per_star(.true.)
+            call opensps_ssp_set_per_star(.true.)
             call run_ssp(ctx, mass_s, lbol_s, spec_s)
-            call fsps_ssp_set_per_star(.false.)
+            call opensps_ssp_set_per_star(.false.)
             ! FP64: every pixel to 1e-10. FP32 kernels: the two summation orders round differently,
             ! to ~1e-7 of the flux, so pixels more than 6 decades below an age's peak (near FP32
             ! underflow) are excluded
@@ -383,7 +383,7 @@ contains
 
     !> Spectral indices of an ordinary old population are finite on a coarse (20 A) grid.
     subroutine check_indices_defined(ctx, label)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         character(len=*), intent(in) :: label
         type(COMPSPOUT), allocatable :: results(:)
 
@@ -402,21 +402,21 @@ contains
     ! ------------------------------------------------------------------------
 
     subroutine new_context(ctx, isoc, spec, zmet)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         character(len=*), intent(in) :: isoc, spec
         integer, intent(in) :: zmet
 
-        call fsps_create(ctx)
+        call opensps_create(ctx)
         ctx%pset%zmet = zmet
-        call fsps_setup(ctx, zmet, isoc_type_in=isoc, spec_type_in=spec, dust_type_in='DL07')
-        call fsps_context_move_to_device(ctx)
+        call opensps_setup(ctx, zmet, isoc_type_in=isoc, spec_type_in=spec, dust_type_in='DL07')
+        call opensps_context_move_to_device(ctx)
         call set_int(ctx, 'zmet', zmet)
         call set_int(ctx, 'imf_type', 1)
     end subroutine new_context
 
     !> Restores the CSP parameters the checks change: Chabrier, SSP, no dust, no nebular.
     subroutine reset_csp_params(ctx)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
 
         call set_int(ctx, 'sfh', 0)
         call set_float(ctx, 'tage', 0.0_wp)
@@ -428,29 +428,29 @@ contains
     end subroutine reset_csp_params
 
     subroutine run_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         real(WP), allocatable, intent(out) :: mass_ssp(:), lbol_ssp(:), spec_ssp(:, :)
         type(PARAMS) :: pset
 
-        call fsps_context_prepare_pset(ctx)
-        call fsps_context_get_pset(ctx, pset)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
         allocate(mass_ssp(ctx%state%ntfull), lbol_ssp(ctx%state%ntfull), &
                  spec_ssp(ctx%state%nspec, ctx%state%ntfull))
-        call fsps_context_set_pset(ctx, pset)
+        call opensps_context_set_pset(ctx, pset)
         call generate_ssp_grid(ctx, pset, mass_ssp, lbol_ssp, spec_ssp)
     end subroutine run_ssp
 
     !> SSP grid followed by the CSP on that basis (mirrors generate_opensps_fixtures).
     subroutine run_csp(ctx, results)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         type(COMPSPOUT), allocatable, intent(inout) :: results(:)
         real(WP), allocatable :: mass_ssp(:), lbol_ssp(:), spec_ssp(:, :)
         type(PARAMS) :: pset
         integer :: status
 
         call run_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp)
-        call fsps_context_get_pset(ctx, pset)
-        call fsps_context_update_ssp_basis(ctx, reshape(spec_ssp, [size(spec_ssp, 1), size(spec_ssp, 2), 1]), &
+        call opensps_context_get_pset(ctx, pset)
+        call opensps_context_update_ssp_basis(ctx, reshape(spec_ssp, [size(spec_ssp, 1), size(spec_ssp, 2), 1]), &
                                            reshape(mass_ssp, [size(mass_ssp), 1]), &
                                            reshape(lbol_ssp, [size(lbol_ssp), 1]), 1)
         if (allocated(results)) deallocate(results)
@@ -463,7 +463,7 @@ contains
 
     !> L_bol (Lsun) of a spectrum in Lsun/Hz.
     real(WP) function spectral_lbol(ctx, spec)
-        type(fsps_context_t), intent(in) :: ctx
+        type(opensps_context_t), intent(in) :: ctx
         real(WP), intent(in) :: spec(:)
 
         spectral_lbol = integrate_trapezoid_array(ctx%state%spec_nu(1:size(spec)), spec)
@@ -471,8 +471,8 @@ contains
 
     !> Index of the emission line closest to the given wavelength (Angstrom), or 0.
     integer function emission_line_index(ctx, lambda)
-        use fsps_io, only: auxiliary_table_path
-        type(fsps_context_t), intent(in) :: ctx
+        use opensps_io, only: auxiliary_table_path
+        type(opensps_context_t), intent(in) :: ctx
         real(WP), intent(in) :: lambda
         emission_line_index = 0
         block
@@ -497,12 +497,12 @@ contains
     end function emission_line_index
 
     subroutine set_int(ctx, key, value)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         character(len=*), intent(in) :: key
         integer, intent(in) :: value
         integer :: status
 
-        call fsps_context_set_param_int(ctx, key, value, status)
+        call opensps_context_set_param_int(ctx, key, value, status)
         if (status /= 0) then
             write(*, *) 'ERROR: cannot set ', key
             stop 1
@@ -510,12 +510,12 @@ contains
     end subroutine set_int
 
     subroutine set_float(ctx, key, value)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         character(len=*), intent(in) :: key
         real(WP), intent(in) :: value
         integer :: status
 
-        call fsps_context_set_param_float(ctx, key, value, status)
+        call opensps_context_set_param_float(ctx, key, value, status)
         if (status /= 0) then
             write(*, *) 'ERROR: cannot set ', key
             stop 1

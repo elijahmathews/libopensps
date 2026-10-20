@@ -19,7 +19,7 @@ Contents:
 
 ### Locating the data
 
-`fsps_resolve_paths` (`src/core/fsps_environment.f90`) picks the data root `ctx%sps_home` from,
+`opensps_resolve_paths` (`src/core/opensps_environment.f90`) picks the data root `ctx%sps_home` from,
 in order (before this work): `SPS_HOME`, `FSPS_DATA_HOME`, `$XDG_DATA_HOME/fsps`, `~/.local/share/fsps`,
 `/usr/share/fsps`, `/usr/local/share/fsps`. A candidate is accepted if
 `<root>/data/allfilters.dat` or `<root>/data/FILTER_LIST` exists. Every reader builds paths as
@@ -28,16 +28,16 @@ over `FSPS_DATA_HOME` when both are set.
 
 ### Selecting a library
 
-Libraries are chosen at run time by name, through `fsps_setup(ctx, zin, isoc, spec, dust)`
+Libraries are chosen at run time by name, through `opensps_setup(ctx, zin, isoc, spec, dust)`
 (defaults `mist`, `miles`, `DL07`); nothing is selected at build time. The names are normalized in
-`normalize_library_names` (`src/core/fsps_initialization.f90`): isochrones `mist`, `pdva`
+`normalize_library_names` (`src/core/opensps_initialization.f90`): isochrones `mist`, `pdva`
 (Padova 2007), `prsc` (PARSEC), `bsti` (BaSTI), `gnva` (Geneva), `bpss` (BPASS, which forces the
 spectral library `bpass`); spectral libraries `miles`, `basel`, `c3k_*` (e.g. `c3k_afe+0.0`);
 dust emission `DL07` or `THEMIS`. Everything else (nebular grid, hot-star and AGB spectra,
 filters, ...) follows from these names or is fixed.
 
 All grid sizes are compile-time constants or `select case` branches on the names
-(`set_simulation_dimensions`, `configure_dust_model`, `src/core/fsps_constants.f90`), so a
+(`set_simulation_dimensions`, `configure_dust_model`, `src/core/opensps_constants.f90`), so a
 library with another size or name cannot be used without code changes:
 
 | Library | Sizes set in code | Other metadata set in code |
@@ -48,13 +48,13 @@ library with another size or name cannot be used without code changes:
 | Dust emission | `ndim_dustem`, `numin`, `nqpah` per name | the q_PAH and U_min grids are arrays in the code, not in the files |
 | Filters | `nbands` = 159 | the IR/MIPS calibration (indices and reference wavelengths) is hardcoded by filter index |
 | X-ray binaries | `NT_XRB` = 10, `NZ_XRB` = 11, `NSPEC_XRB` = 15000 | ages and [Fe/H] grid in the code |
-| Hot stars, AGB, post-AGB, dusty AGB, AGN, attenuation | all sizes are constants in `fsps_io` / `fsps_constants` | WMBasic log g grid (3.5, 4.0, 4.5) in the code |
+| Hot stars, AGB, post-AGB, dusty AGB, AGN, attenuation | all sizes are constants in `opensps_io` / `opensps_constants` | WMBasic log g grid (3.5, 4.0, 4.5) in the code |
 
 ### The files, their layouts and the implicit metadata
 
-All readers are in `src/io/fsps_io.f90` except `load_dusty_agb_spectra`,
+All readers are in `src/io/opensps_io.f90` except `load_dusty_agb_spectra`,
 `load_xray_nebular_grid`, `load_xrb_spectra` and the (log T, log g) grid
-(`src/core/fsps_initialization.f90`) and the user IMF table (`src/physics/fsps_ssp.f90`). Text
+(`src/core/opensps_initialization.f90`) and the user IMF table (`src/physics/opensps_ssp.f90`). Text
 files are read list-directed into FP64 (`WP`). "Processing" is what the reader does after
 reading; it stays in the code in the new design (Section 5).
 
@@ -76,7 +76,7 @@ reading; it stays in the code in the new design (Section 5).
 | AGB (`load_agb_spectra`) | `AGB_spectra/{Orich,Crich,Crich_Aringer}.{teff,spec}` | O-rich Teff tabulated per spectral type and 22 [Z/Zsun]; C-rich and `Crich_Aringer` one Teff per spectrum; spectra as rows (wavelength, one column per type) | Teff interpolated to the isochrone Z and logged; spectra linear onto the grid, floor 1e-308 |
 | Dusty AGB shells (`load_dusty_agb_spectra`) | `dust/dusty/{Orich,Crich}_dusty.spec` | number of wavelengths, wavelength line, then 6 Teff x 50 tau blocks: (Teff, tau) label and a transfer-function line | linear onto the grid from the first tabulated wavelength |
 | X-ray binaries (`load_xrb_spectra`) | `spectra/xrb/xsp.lambda`, `xsp_feh<feh>.spec` (11 [Fe/H]) | 10 lines (ages) of 15000 values each; ages and [Fe/H] in the code | linear onto the grid, floor 1e-308, x L_sun |
-| LSF, IMF, SFH (`load_lsf_data`, `fsps_ssp`, `load_tabular_sfh`) | `lsf.dat`, `imf.dat` (or `imf_filename`), `sfh.dat` (or `sfh_filename`) | small user-editable text tables | unchanged by this work |
+| LSF, IMF, SFH (`load_lsf_data`, `opensps_ssp`, `load_tabular_sfh`) | `lsf.dat`, `imf.dat` (or `imf_filename`), `sfh.dat` (or `sfh_filename`) | small user-editable text tables | unchanged by this work |
 
 Unit conventions that are implicit today (they become explicit `units` in the manifests):
 
@@ -123,7 +123,7 @@ Unit conventions that are implicit today (they become explicit `units` in the ma
 
 The Fortran side has to parse the manifest without external dependencies. JSON's grammar is
 small (six value types, no indentation rules, one string syntax), so a complete parser is a few
-hundred lines of Fortran (`src/io/fsps_json.f90`), and Python reads and writes it with the
+hundred lines of Fortran (`src/io/opensps_json.f90`), and Python reads and writes it with the
 standard library. TOML is pleasanter to edit by hand, but its grammar (tables, arrays of tables,
 dotted keys, four string forms, dates) needs a much larger parser, and Python's standard library
 can only read it. Manifests are written by tools, so hand-editing matters less than a parser that
@@ -140,7 +140,7 @@ is small and complete. JSON has no comments; manifests have `title` and `notes` 
                                       lsf.dat, imf.dat, sfh.dat, ...) and user input files
 ```
 
-`<kind>` is one of the kinds of Section 3, `<name>` the library name passed to `fsps_setup`
+`<kind>` is one of the kinds of Section 3, `<name>` the library name passed to `opensps_setup`
 (e.g. `libraries/stellar_spectra/miles`, `libraries/isochrones/mist`). The small text tables and
 user files (`sfh_filename`, `imf_filename`, `alt_filter_file`) keep their legacy formats and
 their legacy location under `data/`. A data root is self-contained: it holds everything a setup
@@ -176,7 +176,7 @@ their conventional path; `libraries` is for the tools (packing, verification).
   "notes": "free text",
   "provenance": {
     "converted_from": "legacy FSPS layout: data/spectra/MILES",
-    "converter": "tools/fsps_data/convert_legacy.py",
+    "converter": "tools/opensps_data/convert_legacy.py",
     "created": "2026-10-19T12:00:00Z"
   },
   "metadata": {"solar_metallicity": 0.019},
@@ -258,7 +258,7 @@ library changes.
 Each kind fixes the names and order of the axes its arrays must end with (any extra axes come
 first, Section 3.2), the arrays it needs and the metadata it reads. "Free" sizes may be anything;
 "fixed" sizes are set by arrays of the code and are checked on load. Library names are those
-passed to `fsps_setup` (lower case) or, for the kinds the code loads under a fixed name, the name
+passed to `opensps_setup` (lower case) or, for the kinds the code loads under a fixed name, the name
 shown. Units are those of the converted libraries; a new library must use the same.
 
 | Kind / name | Arrays (C order) | Axes, metadata | Sizes |
@@ -283,7 +283,7 @@ shown. Units are those of the converted libraries; a new library must use the sa
 What "a new library without code changes" covers today:
 
 - A new **spectral library** or **isochrone set** under a new name: all sizes and the solar
-  metallicity come from its manifest (`fsps_setup(ctx, zin, 'myisoc', 'myspec')`). The library
+  metallicity come from its manifest (`opensps_setup(ctx, zin, 'myisoc', 'myspec')`). The library
   is treated generically: physics that legacy FSPS ties to particular isochrone sets (log Mdot
   for Wolf-Rayet temperatures with `mist`, log g from (M, L, T) for `bsti`, horizontal-branch
   detection for `pdva`, the lower IMF bound for `gnva`) is applied by name only. A nebular grid
@@ -321,8 +321,8 @@ that depend on it, followed by the metallicity axis:
   The upstream alpha-enhanced MIST and C3K grids are regular (13 [Fe/H] x 5 [alpha/Fe]), so they
   need no mask.
 - **Selection**: an axis may declare a `default` coordinate. The library is loaded at the
-  default unless the name passed to `fsps_setup` selects another value:
-  `fsps_setup(ctx, -1, 'mist:afe=0.4', 'c3k_lr:afe=0.4')`. The selection is kept apart from the
+  default unless the name passed to `opensps_setup` selects another value:
+  `opensps_setup(ctx, -1, 'mist:afe=0.4', 'c3k_lr:afe=0.4')`. The selection is kept apart from the
   library name (`state%isoc_select`, `state%spec_select`; part of the setup-cache key), so
   name-based physics (`mist`) still applies. The same mechanism selects any other extra axis
   (`name:axis=value,axis=value`, a number or a label).
@@ -330,7 +330,7 @@ that depend on it, followed by the metallicity axis:
   default taken, loads exactly the data of the axis-free library (test `unit_standard_library`).
 
 Upstream layouts (converted by `convert_legacy.py --upstream-mist DIR --upstream-c3k DIR`,
-tested on synthetic inputs in `tools/fsps_data/test_fsps_data.py`; the fork's data tree does not
+tested on synthetic inputs in `tools/opensps_data/test_opensps_data.py`; the fork's data tree does not
 contain them):
 
 - MIST: `ISOCHRONES/MIST/zlegend.dat` with lines `(A4,F6.2)` (file tag `m250`, [Fe/H]), and
@@ -348,7 +348,7 @@ contain them):
 What SSP generation over [alpha/Fe] would need (not done here; the loaders read one slice):
 
 - Spectral library: `state%speclib(nspec, nz, nlogT, nlogg)` gains an afe dimension, as do
-  `speclib_agb_smooth`; `speclib_logt`/`speclib_logg` and the matching `fsps_setup_tables_t`
+  `speclib_agb_smooth`; `speclib_logt`/`speclib_logg` and the matching `opensps_setup_tables_t`
   entries must become allocatable to accept native grids; `NDIM_LOGT`/`NDIM_LOGG` go.
 - Isochrones: `mini_isoc`, `mact_isoc`, `logl_isoc`, `logt_isoc`, `logg_isoc`, `ffco_isoc`,
   `phase_isoc`, `lmdot_isoc` (nz, nt, NM), `nmass_isoc` and `timestep_isoc` (nz, nt) gain an afe
@@ -356,7 +356,7 @@ What SSP generation over [alpha/Fe] would need (not done here; the loaders read 
   (otherwise per afe, with `available`).
 - SSP outputs: `spec_ssp_zz(nspec, ntfull, nz)`, `mass_ssp_zz`, `lbol_ssp_zz` (and the
   template-sum weights of `generate_ssp_grid`) gain an afe dimension; the loops over metallicity
-  in `fsps_initialization` (spectral library onto the isochrone metallicities) and in the SSP
+  in `opensps_initialization` (spectral library onto the isochrone metallicities) and in the SSP
   driver gain an afe loop. The hot-star, AGB and post-AGB libraries have no [alpha/Fe] axis and
   stay shared.
 - Batched CSP with per-model [alpha/Fe]: the SSP basis (`ssp_basis_spec`, `csp_ssp_grid`,
@@ -369,20 +369,20 @@ All in `tools/` (Python >= 3.8; NumPy for everything except `fetch_data.py`):
 
 | Tool | Purpose |
 |---|---|
-| `fsps_data/fsps_data.py` | Library writer/reader and verification (`LibraryWriter`, `Library`), root index, and a reader of Fortran list-directed text |
-| `fsps_data/convert_legacy.py LEGACY_ROOT OUT_ROOT` | Converts all 37 libraries of the legacy layout (35 s); `--only kind[/name]`; `--upstream-mist`, `--upstream-c3k` for the upstream [alpha/Fe] layouts |
-| `fsps_data/make_test_library.py STANDARD_ROOT OUT` | Builds the test library of Section 6 |
-| `fsps_data/make_afe_variants.py` | [alpha/Fe] variants of the test library for `unit_standard_library` |
-| `fsps_data/provenance.py`, `bibtex.py`, `data_release.bib` | Source, version, citations (ADS bibcodes) and redistribution note of each library (written into the manifests and DATA_README.md) |
-| `fsps_data/pack_data.py ROOT OUTDIR --release data-vK [--previous M]` | Versioned library archives, release manifest, DATA_README.md (Section 6) |
-| `fsps_data/upload_release.sh OUTDIR data-vK` | Publishes a packed release as a GitHub release (run by hand after review) |
+| `opensps_data/opensps_data.py` | Library writer/reader and verification (`LibraryWriter`, `Library`), root index, and a reader of Fortran list-directed text |
+| `opensps_data/convert_legacy.py LEGACY_ROOT OUT_ROOT` | Converts all 37 libraries of the legacy layout (35 s); `--only kind[/name]`; `--upstream-mist`, `--upstream-c3k` for the upstream [alpha/Fe] layouts |
+| `opensps_data/make_test_library.py STANDARD_ROOT OUT` | Builds the test library of Section 6 |
+| `opensps_data/make_afe_variants.py` | [alpha/Fe] variants of the test library for `unit_standard_library` |
+| `opensps_data/provenance.py`, `bibtex.py`, `data_release.bib` | Source, version, citations (ADS bibcodes) and redistribution note of each library (written into the manifests and DATA_README.md) |
+| `opensps_data/pack_data.py ROOT OUTDIR --release data-vK [--previous M]` | Versioned library archives, release manifest, DATA_README.md (Section 6) |
+| `opensps_data/upload_release.sh OUTDIR data-vK` | Publishes a packed release as a GitHub release (run by hand after review) |
 | `fetch_data.py DEST [--release data-vK]` | Download from the mirrors, verify and unpack a release |
-| `fsps_data/test_fsps_data.py` | Tests of the tools (format round trip, list-directed reader, upstream converters) |
+| `opensps_data/test_opensps_data.py` | Tests of the tools (format round trip, list-directed reader, upstream converters) |
 
 Writing a library from Python:
 
 ```python
-from fsps_data import LibraryWriter
+from opensps_data import LibraryWriter
 lib = LibraryWriter(root, "stellar_spectra", "mylib", title="My library")
 lib.metadata["solar_metallicity"] = 0.0142
 lib.axis("Z", "mass fraction", values=z)                 # 1-D sequences
@@ -406,15 +406,15 @@ then `write_root_index(root, release)` once all libraries are in place.
   exported `OPENSPS_DATA_HOME` cannot override them.
 - **Transition alias**: the format was first named `fsps-data` (root index `fsps-data.json`,
   manifest and index `"format": "fsps-data"`, release manifest `"format": "fsps-data-release"`).
-  Readers (the Fortran loader, `fsps_data.py`, `fetch_data.py`) accept the old names as well as
+  Readers (the Fortran loader, `opensps_data.py`, `fetch_data.py`) accept the old names as well as
   `opensps-data`, `opensps-data.json` and `opensps-data-release`; writers produce only the new
   ones. The alias may be dropped once no root with the old names is in use.
 - `FSPS_DATA_FORMAT` = `auto` (default): each library is read from
   `libraries/<kind>/<name>/manifest.json` if that exists, otherwise from the legacy file
   under `data/`. `standard`: every library from the standard format (a missing manifest is an
   error). `legacy`: the legacy readers only. The format is part of the setup-cache key.
-- `src/io/fsps_json.f90` parses the manifests; `src/io/fsps_datalib.f90` validates them and
-  reads arrays with stream I/O, checking each file's size; `src/io/fsps_io.f90` holds, for each
+- `src/io/opensps_json.f90` parses the manifests; `src/io/opensps_datalib.f90` validates them and
+  reads arrays with stream I/O, checking each file's size; `src/io/opensps_io.f90` holds, for each
   library, a legacy and a standard reader that fill the same raw tables, followed by the shared
   processing (interpolation onto the model grids, unit conversions).
 - Exactness: `test_data_parity` (suite `data_parity`, `-Dstandard_data_home=<root>`) sets up
@@ -435,7 +435,7 @@ then `write_root_index(root, release)` once all libraries are in place.
 
 ## 6. Test library, data releases and CI
 
-- **Test library**: `tests/data/fsps-test-data` (6.0 MB, made by `make_test_library.py`):
+- **Test library**: `tests/data/opensps-test-data` (6.0 MB, made by `make_test_library.py`):
   everything a default setup (MIST + MILES + DL07, nebular emission) reads, at low resolution
   (two metallicities, every fifth isochrone age and fourth point, every 25th wavelength of
   MILES, 40 points per filter, FP32). `unit_standard_library` runs a setup, an SSP grid and a
@@ -455,9 +455,9 @@ then `write_root_index(root, release)` once all libraries are in place.
     later). A release reuses unchanged archives of an
     earlier one (`pack_data.py --previous`) instead of uploading them again.
   - `pack_data.py ROOT OUTDIR --release data-v1` writes the archives, the manifest,
-    `DATA_README.md` (what each library is and what to cite, from `tools/fsps_data/provenance.py`;
-    a copy is `tools/fsps_data/DATA_README.md`) and `UPLOAD.txt`;
-    `tools/fsps_data/upload_release.sh OUTDIR data-v1` publishes it with `gh release create` and
+    `DATA_README.md` (what each library is and what to cite, from `tools/opensps_data/provenance.py`;
+    a copy is `tools/opensps_data/DATA_README.md`) and `UPLOAD.txt`;
+    `tools/opensps_data/upload_release.sh OUTDIR data-v1` publishes it with `gh release create` and
     `gh release upload` after review (never run by the tools).
   - `fetch_data.py DEST --release data-v1` (or `--release-manifest`, `--mirror DIR`) tries the
     mirrors in order, checks archive and file checksums and unpacks; `OPENSPS_DATA_HOME` then
@@ -468,9 +468,9 @@ then `write_root_index(root, release)` once all libraries are in place.
   - Provenance: every manifest's `provenance` holds the source, version and notes, what to cite
     (`cite`, and `cite_code` for codes the data were computed with), the FSPS papers
     (`cite_also`) and the redistribution note. Citations are bibcodes of
-    `tools/fsps_data/data_release.bib`, an export from NASA ADS shipped in the base archive and
-    as a release asset; the references are rendered from it (`tools/fsps_data/bibtex.py`), never
-    typed by hand, and `test_fsps_data.py` checks that every bibcode resolves and every entry is
+    `tools/opensps_data/data_release.bib`, an export from NASA ADS shipped in the base archive and
+    as a release asset; the references are rendered from it (`tools/opensps_data/bibtex.py`), never
+    typed by hand, and `test_opensps_data.py` checks that every bibcode resolves and every entry is
     used. The license terms of the original data remain an open question (each manifest's `todo`).
 - **Tests and the data root**: the unit suite needs no data at all (tests that read real data
   use the test library through `FSPS_TEST_LIBRARY`). The regression and stress suites read the
@@ -486,7 +486,7 @@ then `write_root_index(root, release)` once all libraries are in place.
   job, which also fetches the optional C3K), run
   `tools/fetch_data.py $HOME/opensps-data --release $FSPS_DATA_RELEASE`, and configure with
   `-Ddata_home=$HOME/opensps-data`; `data_parity` is then skipped. To flip: publish the release
-  (`tools/fsps_data/upload_release.sh`), then *Settings > Secrets and variables > Actions >
+  (`tools/opensps_data/upload_release.sh`), then *Settings > Secrets and variables > Actions >
   Variables*: `FSPS_DATA_RELEASE = data-v1` (or `gh variable set FSPS_DATA_RELEASE --body data-v1
   --repo elijahmathews/fsps`); unset it to return to the checkout. Once CI is green on the
   release, `data/` can leave the tree (a fresh repository started from that commit). The
@@ -531,17 +531,17 @@ change):
    `tests/data`; `build/test_param_regression tests/data/param_cases.psv <dir> --generate` for the
    `.opsf` files), with the full data release as data root.
 2. Build the new library versions and the pin:
-   `tools/fsps_data/make_references.py <root> --sps-dir <dir> --param-dir <dir> --sps-version N+1
+   `tools/opensps_data/make_references.py <root> --sps-dir <dir> --param-dir <dir> --sps-version N+1
    --param-version M` (raise only the version whose files changed). It writes
    `<root>/libraries/references/{sps,param}` and `tests/data/references.json`; commit the pin and
    say why in the commit message.
 3. Test against them: copy or link the release's other libraries into `<root>` (or the new
-   libraries into a fetched release), `fsps_data.write_root_index(<root>, "data-vK")`, then
+   libraries into a fetched release), `opensps_data.write_root_index(<root>, "data-vK")`, then
    `meson setup build -Ddata_home=<root>` and the usual suites.
 4. Maintainer, after review: pack a data release that reuses everything else,
-   `tools/fsps_data/pack_data.py <root> <outdir> --release data-vK --previous <outdir of data-vK-1>/data-vK-1.json`
+   `tools/opensps_data/pack_data.py <root> <outdir> --release data-vK --previous <outdir of data-vK-1>/data-vK-1.json`
    (only the base archive and the changed references archive are new), publish it with
-   `tools/fsps_data/upload_release.sh <outdir> data-vK`, and set the CI variable
+   `tools/opensps_data/upload_release.sh <outdir> data-vK`, and set the CI variable
    `FSPS_DATA_RELEASE=data-vK`. Merge the PR after the release is published, so that the pin and
    the release agree.
 

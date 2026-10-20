@@ -1,7 +1,7 @@
-Source: fsps
+Source: opensps
 Section: libs
 Priority: optional
-Maintainer: FSPS Packager <23229627+elijahmathews@users.noreply.github.com>
+Maintainer: libopensps Packager <23229627+elijahmathews@users.noreply.github.com>
 Build-Depends:
  debhelper-compat (= 13),
  gfortran,
@@ -10,28 +10,28 @@ Build-Depends:
  pkgconf
 Standards-Version: 4.7.0
 Rules-Requires-Root: no
-Homepage: https://github.com/elijahmathews/fsps
+Homepage: https://github.com/elijahmathews/libopensps
 
-Package: libfsps3
+Package: libopensps0
 Section: libs
 Architecture: any
 Multi-Arch: same
 Depends:
  ${shlibs:Depends},
  ${misc:Depends}
-Description: FSPS shared library
- Shared library for FSPS (Flexible Stellar Population Synthesis).
+Description: libopensps shared library
+ Shared library of libopensps, derived from FSPS (Flexible Stellar Population Synthesis).
  This is the runtime dependency needed by language wrappers and
  external applications.
 
-Package: libfsps-dev
+Package: libopensps-dev
 Section: libdevel
 Architecture: any
 Multi-Arch: same
 Depends:
- libfsps3 (= ${binary:Version}),
+ libopensps0 (= ${binary:Version}),
  ${misc:Depends}
-Description: Development files for libfsps
+Description: Development files for libopensps
  Header files, unversioned linker symlink, static/development linker
  inputs, and pkg-config metadata for developing applications against
- libfsps.
+ libopensps.

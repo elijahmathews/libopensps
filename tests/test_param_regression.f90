@@ -22,16 +22,16 @@ program test_param_regression
     !> the whole run so that the shared setup cache is not freed between cases.
 
     use iso_fortran_env, only: int32, real64
-    use fsps_precision, only: WP
-    use fsps_constants, only: NEMLINE
-    use fsps_types, only: PARAMS, COMPSPOUT
-    use fsps_api, only: fsps_create, fsps_setup, fsps_destroy
-    use fsps_csp, only: compute_csp_scenario
-    use fsps_ssp, only: generate_ssp_grid
-    use fsps_context, only: fsps_context_update_ssp_basis, fsps_context_move_to_device, &
-                            fsps_context_set_pset, fsps_context_get_pset, fsps_context_prepare_pset, &
-                            fsps_context_set_param_int, fsps_context_set_param_float
-    use fsps_context_types, only: fsps_context_t
+    use opensps_precision, only: WP
+    use opensps_constants, only: NEMLINE
+    use opensps_types, only: PARAMS, COMPSPOUT
+    use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
+    use opensps_csp, only: compute_csp_scenario
+    use opensps_ssp, only: generate_ssp_grid
+    use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
+                            opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
+                            opensps_context_set_param_int, opensps_context_set_param_float
+    use opensps_context_types, only: opensps_context_t
     use test_utils_mod, only: tap_finish, skip_without_data, print_major_header, print_group, print_summary_line, assert_true
     implicit none
 
@@ -55,7 +55,7 @@ program test_param_regression
     integer :: unit_cases, ios, n_cases
     real(WP) :: rtol
     ! Contexts are ~2.4 MB each, so they live on the heap rather than the stack
-    type(fsps_context_t), allocatable :: pinned(:)
+    type(opensps_context_t), allocatable :: pinned(:)
     character(len=128) :: pinned_key(MAX_LIBRARIES) = ''
     integer :: n_pinned = 0
     integer :: total_tests = 0
@@ -122,7 +122,7 @@ program test_param_regression
     write(*, '(A,I0,A,I0,A)') '# Ran ', n_cases, ' cases (', n_skipped, ' not selected)'
     close(unit_cases)
     do ios = 1, n_pinned
-        call fsps_destroy(pinned(ios))
+        call opensps_destroy(pinned(ios))
     end do
     deallocate(pinned)
 
@@ -178,7 +178,7 @@ contains
     subroutine run_case(spec_line)
         character(len=*), intent(in) :: spec_line
         character(len=256) :: fields(6)
-        type(fsps_context_t), allocatable :: ctx
+        type(opensps_context_t), allocatable :: ctx
         type(PARAMS) :: pset
         type(COMPSPOUT), allocatable :: results(:)
         real(WP), allocatable :: spec_ssp(:, :), mass_ssp(:), lbol_ssp(:)
@@ -191,20 +191,20 @@ contains
         call pin_libraries(fields(2), fields(3), fields(4))
         allocate(ctx)
 
-        call fsps_create(ctx)
+        call opensps_create(ctx)
         ctx%pset%zmet = 10
         call apply_overrides(ctx, fields(6))
-        call fsps_setup(ctx, ctx%pset%zmet, isoc_type_in=trim(fields(2)), spec_type_in=trim(fields(3)), &
+        call opensps_setup(ctx, ctx%pset%zmet, isoc_type_in=trim(fields(2)), spec_type_in=trim(fields(3)), &
                         dust_type_in=trim(fields(4)))
-        call fsps_context_move_to_device(ctx)
+        call opensps_context_move_to_device(ctx)
         call apply_overrides(ctx, fields(6))
-        call fsps_context_prepare_pset(ctx)
-        call fsps_context_get_pset(ctx, pset)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
 
         nspec = ctx%state%nspec
         ntfull = ctx%state%ntfull
         allocate(spec_ssp(nspec, ntfull), mass_ssp(ntfull), lbol_ssp(ntfull))
-        call fsps_context_set_pset(ctx, pset)
+        call opensps_context_set_pset(ctx, pset)
         call generate_ssp_grid(ctx, pset, mass_ssp, lbol_ssp, spec_ssp)
 
         n_arrays = 0
@@ -217,7 +217,7 @@ contains
             call put('ssp/spec_sel', reshape(spec_ssp(:, i_age), [nspec * N_SSP_AGES]), [nspec, N_SSP_AGES])
         end if
 
-        call fsps_context_update_ssp_basis(ctx, reshape(spec_ssp, [nspec, ntfull, 1]), &
+        call opensps_context_update_ssp_basis(ctx, reshape(spec_ssp, [nspec, ntfull, 1]), &
                                            reshape(mass_ssp, [ntfull, 1]), reshape(lbol_ssp, [ntfull, 1]), 1)
         call compute_csp_scenario(ctx, pset, 1, results, status)
         if (status /= 0) then
@@ -244,7 +244,7 @@ contains
         call put('csp/indx_sel', [(results(sel(k))%indx(1:ctx%state%nindx), k = 1, size(sel))], &
                  [ctx%state%nindx, size(sel)])
         call put('csp/emlines_sel', [(results(sel(k))%emlines(1:NEMLINE), k = 1, size(sel))], [NEMLINE, size(sel)])
-        call fsps_destroy(ctx)
+        call opensps_destroy(ctx)
 
         if (generate) then
             call write_opsf(trim(ref_dir) // '/' // trim(fields(1)) // '.opsf')
@@ -266,8 +266,8 @@ contains
         if (n_pinned == MAX_LIBRARIES) return
         n_pinned = n_pinned + 1
         pinned_key(n_pinned) = key
-        call fsps_create(pinned(n_pinned))
-        call fsps_setup(pinned(n_pinned), 10, isoc_type_in=trim(isoc), spec_type_in=trim(spec), &
+        call opensps_create(pinned(n_pinned))
+        call opensps_setup(pinned(n_pinned), 10, isoc_type_in=trim(isoc), spec_type_in=trim(spec), &
                         dust_type_in=trim(dust))
     end subroutine pin_libraries
 
@@ -418,7 +418,7 @@ contains
 
     !> Applies space-separated key=value pairs, trying the integer setter before the float one.
     subroutine apply_overrides(ctx, text)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         character(len=*), intent(in) :: text
         character(len=256) :: token, key, valstr
         integer :: pos, sp, eq, ival, st, ios
@@ -441,11 +441,11 @@ contains
             st = 1
             if (scan(valstr, '.eE') == 0) then
                 read(valstr, *, iostat=ios) ival
-                if (ios == 0) call fsps_context_set_param_int(ctx, trim(key), ival, st)
+                if (ios == 0) call opensps_context_set_param_int(ctx, trim(key), ival, st)
             end if
             if (st /= 0) then
                 read(valstr, *, iostat=ios) rval
-                if (ios == 0) call fsps_context_set_param_float(ctx, trim(key), rval, st)
+                if (ios == 0) call opensps_context_set_param_float(ctx, trim(key), rval, st)
             end if
             if (st /= 0) then
                 write(*, *) 'ERROR: cannot apply ', trim(token)

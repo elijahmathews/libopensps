@@ -9,7 +9,7 @@ kernels that matter, with every step validated against the CPU build. Work on a 
 - **CPU (one Ryzen 7 7840U core, MIST + MILES, FP64):** SSP grid 0.147 s, CSP call 1.7 ms, CSP
   with nebular emission 16 ms (legacy FSPS: 10.6 s, 3.5 ms, 31 ms). `tests/benchmark_phases.f90`.
 - **SSP generation** is a sum over library templates (`accumulate_by_templates` in
-  `src/physics/fsps_ssp.f90`): per age, template weights are aggregated on the CPU in FP64 (cheap
+  `src/physics/opensps_ssp.f90`): per age, template weights are aggregated on the CPU in FP64 (cheap
   scalar work, ~40% of SSP time today), then each used template is added once (~40%). This is
   a matrix product: spectra(pixels x ages) = templates(pixels x templates) . W(templates x ages).
   Dust-shell AGB stars add one such product per dust-grid corner, multiplied by its transfer
@@ -18,7 +18,7 @@ kernels that matter, with every step validated against the CPU build. Work on a 
 - **FP32 kernels** (`-Dkernel_precision=single`) reproduce FP64 to ~3e-7 per pixel and 2e-7 mag;
   rules and evidence in `doc/MIXED_PRECISION.md`. Use them on the GPU from the start.
 - **Existing GPU code** is OpenACC (nvfortran, `-Daccel=gpu`, targets from `-Dgpu_arch`, default `cc80,cc90`): device
-  residency in `fsps_context.f90`, kernels in SSP (per star), dust, gas, CSP and indices, with
+  residency in `opensps_context.f90`, kernels in SSP (per star), dust, gas, CSP and indices, with
   host orchestration and `update host/device` between stages. It has only been run on CPU cores
   (OpenACC multicore) in CI; it has not been validated on a GPU recently. The long-term
   direction is OpenMP target offload (portable to AMD and Intel GPUs; `doc/CI.md`).
@@ -110,7 +110,7 @@ for N = 1, 100, 10 000:
 - age sum: basis(pixels x ages) . weights(ages x N), a GEMM (SFH weights computed on the CPU
   in FP64 per model, or on the device later);
 - attenuation and dust emission: element-wise plus per-model reductions (absorbed luminosity
-  integrated directly, as in `fsps_dust.f90`);
+  integrated directly, as in `opensps_dust.f90`);
 - magnitudes: bands(bands x pixels) . spectra(pixels x N), another GEMM.
 
 Forecast to compare against: ~4 us per model (FP32) on the A100 at large N.

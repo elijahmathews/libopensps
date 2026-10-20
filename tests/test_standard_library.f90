@@ -3,23 +3,23 @@ program test_standard_library
     !>
     !> Usage: test_standard_library TEST_ROOT [AFE_ROOT]
     !>
-    !> 1. With TEST_ROOT (tests/data/fsps-test-data, coarse subsets committed in the repository):
+    !> 1. With TEST_ROOT (tests/data/opensps-test-data, coarse subsets committed in the repository):
     !>    a full setup (MIST + MILES + DL07, nebular and dust emission) reads only standard-format
     !>    libraries, and an SSP grid and a CSP are finite and positive. No other data needed.
-    !> 2. With AFE_ROOT (tools/fsps_data/make_afe_variants.py): libraries with an [alpha/Fe] axis
+    !> 2. With AFE_ROOT (tools/opensps_data/make_afe_variants.py): libraries with an [alpha/Fe] axis
     !>    load exactly like the axis-free library when the axis has one value or the default
     !>    (afe = 0) is taken, and 'name:afe=0.4' selects the other block.
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
     use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
-    use fsps_precision, only: WP
-    use fsps_types, only: PARAMS, COMPSPOUT
-    use fsps_api, only: fsps_create, fsps_setup, fsps_destroy, fsps_set_param_int, fsps_set_param_float
-    use fsps_context, only: fsps_context_update_ssp_basis, fsps_context_move_to_device, &
-                            fsps_context_set_pset, fsps_context_get_pset, fsps_context_prepare_pset
-    use fsps_context_types, only: fsps_context_t
-    use fsps_ssp, only: generate_ssp_grid
-    use fsps_csp, only: compute_csp_scenario
-    use fsps_json, only: json_doc_t, json_parse_string, json_child, json_item, json_len, json_string, json_real, &
+    use opensps_precision, only: WP
+    use opensps_types, only: PARAMS, COMPSPOUT
+    use opensps_api, only: opensps_create, opensps_setup, opensps_destroy, opensps_set_param_int, opensps_set_param_float
+    use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
+                            opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset
+    use opensps_context_types, only: opensps_context_t
+    use opensps_ssp, only: generate_ssp_grid
+    use opensps_csp, only: compute_csp_scenario
+    use opensps_json, only: json_doc_t, json_parse_string, json_child, json_item, json_len, json_string, json_real, &
                          json_int, json_is_integer
     use, intrinsic :: iso_fortran_env, only: int64
     use test_utils_mod, only: tap_finish, print_major_header, print_group, print_summary_line, assert_true
@@ -95,7 +95,7 @@ contains
     end subroutine test_json_parser
 
     subroutine test_end_to_end()
-        type(fsps_context_t) :: ctx
+        type(opensps_context_t) :: ctx
         type(COMPSPOUT), allocatable :: res(:)
         type(PARAMS) :: pset
         real(WP), allocatable :: mass(:), lbol(:), spec(:, :)
@@ -103,30 +103,30 @@ contains
 
         call print_group('Setup, SSP and CSP from the test library alone')
         call use_root(test_root)
-        call fsps_create(ctx)
-        call fsps_set_param_int(ctx, 'add_neb_emission', 1, status)
-        call fsps_set_param_int(ctx, 'add_dust_emission', 1, status)
-        call fsps_setup(ctx, -1, 'mist', 'miles', 'DL07')
+        call opensps_create(ctx)
+        call opensps_set_param_int(ctx, 'add_neb_emission', 1, status)
+        call opensps_set_param_int(ctx, 'add_dust_emission', 1, status)
+        call opensps_setup(ctx, -1, 'mist', 'miles', 'DL07')
         call assert_true(ctx%data_format == 'standard' .and. ctx%state%nz == 2 .and. ctx%state%nzinit == 2, &
                          'library dimensions from the manifests', total_tests, total_failures)
-        call fsps_context_move_to_device(ctx)
-        call fsps_set_param_int(ctx, 'zmet', 2, status)
-        call fsps_set_param_int(ctx, 'sfh', 1, status)
-        call fsps_set_param_float(ctx, 'tau', 1.0_wp, status)
-        call fsps_set_param_float(ctx, 'tage', 3.0_wp, status)
-        call fsps_set_param_float(ctx, 'dust2', 0.3_wp, status)
+        call opensps_context_move_to_device(ctx)
+        call opensps_set_param_int(ctx, 'zmet', 2, status)
+        call opensps_set_param_int(ctx, 'sfh', 1, status)
+        call opensps_set_param_float(ctx, 'tau', 1.0_wp, status)
+        call opensps_set_param_float(ctx, 'tage', 3.0_wp, status)
+        call opensps_set_param_float(ctx, 'dust2', 0.3_wp, status)
 
-        call fsps_context_prepare_pset(ctx)
-        call fsps_context_get_pset(ctx, pset)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
         allocate (mass(ctx%state%ntfull), lbol(ctx%state%ntfull), spec(ctx%state%nspec, ctx%state%ntfull))
-        call fsps_context_set_pset(ctx, pset)
+        call opensps_context_set_pset(ctx, pset)
         call generate_ssp_grid(ctx, pset, mass, lbol, spec)
         call assert_true(all(ieee_is_finite(spec)) .and. all(spec >= 0.0_wp) .and. any(spec > 0.0_wp), &
                          'SSP spectra finite and non-negative', total_tests, total_failures)
         call assert_true(all(mass > 0.0_wp) .and. all(mass <= 1.0_wp) .and. all(ieee_is_finite(lbol)), &
                          'SSP masses in (0, 1], luminosities finite', total_tests, total_failures)
 
-        call fsps_context_update_ssp_basis(ctx, reshape(spec, [size(spec, 1), size(spec, 2), 1]), &
+        call opensps_context_update_ssp_basis(ctx, reshape(spec, [size(spec, 1), size(spec, 2), 1]), &
                                            reshape(mass, [size(mass), 1]), reshape(lbol, [size(lbol), 1]), 1)
         call compute_csp_scenario(ctx, pset, 1, res, status)
         call assert_true(status == 0, 'CSP computed', total_tests, total_failures)
@@ -136,18 +136,18 @@ contains
             call assert_true(ieee_is_finite(res(1)%mags(1)) .and. res(1)%mags(1) < 99.0_wp, &
                              'CSP V magnitude finite', total_tests, total_failures)
         end if
-        call fsps_destroy(ctx)
+        call opensps_destroy(ctx)
     end subroutine test_end_to_end
 
     subroutine setup_ctx(ctx, isoc, spec)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         character(len=*), intent(in) :: isoc, spec
-        call fsps_create(ctx)
-        call fsps_setup(ctx, -1, isoc, spec, 'DL07')
+        call opensps_create(ctx)
+        call opensps_setup(ctx, -1, isoc, spec, 'DL07')
     end subroutine setup_ctx
 
     subroutine test_afe_selection()
-        type(fsps_context_t) :: ref, one, def, sel
+        type(opensps_context_t) :: ref, one, def, sel
         real(WP) :: dt
         integer :: iz, it, m
 
@@ -176,14 +176,14 @@ contains
                              .or. ref%state%speclib < 1.0e-30), &
                          'afe = 0.4 selection: spectra of the 0.4 block', total_tests, total_failures)
 
-        call fsps_destroy(ref)
-        call fsps_destroy(one)
-        call fsps_destroy(def)
-        call fsps_destroy(sel)
+        call opensps_destroy(ref)
+        call opensps_destroy(one)
+        call opensps_destroy(def)
+        call opensps_destroy(sel)
     end subroutine test_afe_selection
 
     logical function same(a, b)
-        type(fsps_context_t), intent(in) :: a, b
+        type(opensps_context_t), intent(in) :: a, b
         same = all(a%state%zlegend == b%state%zlegend) .and. all(a%state%zlegendinit == b%state%zlegendinit) .and. &
                all(a%state%spec_lambda == b%state%spec_lambda) .and. all(a%state%spec_res == b%state%spec_res) .and. &
                all(a%state%speclib == b%state%speclib) .and. all(a%state%nmass_isoc == b%state%nmass_isoc) .and. &

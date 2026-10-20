@@ -13,7 +13,7 @@ must follow.
 meson setup build -Dkernel_precision=single     # default: double
 ```
 
-`src/core/fsps_precision.f90` defines two kinds:
+`src/core/opensps_precision.f90` defines two kinds:
 
 - `WP` (always FP64): setup, isochrones, IMF and SFH weights, masses, luminosities, all scalar
   bookkeeping, and the public API (C and Fortran interfaces stay double).
@@ -122,7 +122,7 @@ On the CPU, where this was developed, the FP32 build is slightly faster for SSP 
 the default stays FP64 there.
 
 SSP generation is computed as a sum over library templates (`accumulate_by_templates` in
-`fsps_ssp.f90`): each star is a combination of at most four templates, so the IMF-weighted
+`opensps_ssp.f90`): each star is a combination of at most four templates, so the IMF-weighted
 template weights are aggregated in FP64 and each used template is added once; AGB stars with a
 dust shell, which are bilinear (templates times the shell's transfer function), are aggregated
 per dust-grid corner. This is the matrix-vector form (templates x weights); batched over ages

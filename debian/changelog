@@ -1,8 +1,9 @@
-fsps (3.2.0-1) unstable; urgency=medium
+opensps (0.1.0-1) unstable; urgency=medium
 
+  * Renamed from fsps to opensps (libopensps 0.1.0, soname libopensps.so.0).
   * Initial Debian packaging.
   * Build with Meson and debhelper-compat 13.
-  * Split output into libfsps3 and libfsps-dev.
+  * Split output into libopensps3 and libopensps-dev.
   * Exclude installed runtime data payload from binary packages.
   * Set Meson baseline optimization to x86-64-v3.
 

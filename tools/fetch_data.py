@@ -6,7 +6,7 @@ Usage:
                              [--mirror DIR_OR_URL ...] [--with KIND/NAME ...] [--all]
                              [--cache DIR] [--list]
 
-Reads the release manifest (``<release>.json``, written by tools/fsps_data/pack_data.py; by
+Reads the release manifest (``<release>.json``, written by tools/opensps_data/pack_data.py; by
 default the one attached to the release tag on GitHub) and fetches every archive that is not
 optional (plus those named with --with, or all with --all) into a cache, trying the --mirror
 locations first (a directory or base URL holding the archive files; a local manifest's own

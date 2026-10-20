@@ -1,23 +1,23 @@
 program benchmark_ssp_operator
-    !> Costs of the batched SSP operator (fsps_ssp_operator) on one core, one metallicity:
+    !> Costs of the batched SSP operator (opensps_ssp_operator) on one core, one metallicity:
     !> generate_ssp_grid; building S once; the per-model part (IMF weights of all isochrone
     !> points and W = S . w_IMF, alone and split); the full SSP grid from S (per-model part +
     !> the template product + post-processing, as generate_ssp_grid).
     !> Usage: benchmark_ssp_operator [isoc spec zmet]   (default: mist miles 10)
 
-    use fsps_precision, only: WP
-    use fsps_types, only: PARAMS
-    use fsps_api, only: fsps_create, fsps_setup, fsps_destroy
-    use fsps_ssp, only: generate_ssp_grid, configure_imf_parameters
-    use fsps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_evaluate, &
+    use opensps_precision, only: WP
+    use opensps_types, only: PARAMS
+    use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
+    use opensps_ssp, only: generate_ssp_grid, configure_imf_parameters
+    use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_evaluate, &
                                  ssp_op_model_weights, ssp_op_imf_weights, ssp_op_spmv
-    use fsps_imf, only: imf_pack_params, IMF_NPAR
-    use fsps_context, only: fsps_context_get_pset, fsps_context_prepare_pset, fsps_context_set_param_int
-    use fsps_context_types, only: fsps_context_t
+    use opensps_imf, only: imf_pack_params, IMF_NPAR
+    use opensps_context, only: opensps_context_get_pset, opensps_context_prepare_pset, opensps_context_set_param_int
+    use opensps_context_types, only: opensps_context_t
     use, intrinsic :: iso_fortran_env, only: int64
     implicit none
 
-    type(fsps_context_t), allocatable :: ctx
+    type(opensps_context_t), allocatable :: ctx
     type(ssp_operator_t) :: op
     type(PARAMS) :: pset
     character(len=32) :: isoc = 'mist', spec = 'miles', arg
@@ -34,13 +34,13 @@ program benchmark_ssp_operator
         read(arg, *) zmet
     end if
     allocate(ctx)
-    call fsps_create(ctx)
+    call opensps_create(ctx)
     ctx%pset%zmet = zmet
-    call fsps_setup(ctx, zmet, isoc_type_in=trim(isoc), spec_type_in=trim(spec), dust_type_in='DL07')
-    call fsps_context_set_param_int(ctx, 'zmet', zmet, status)
-    call fsps_context_set_param_int(ctx, 'imf_type', 1, status)
-    call fsps_context_prepare_pset(ctx)
-    call fsps_context_get_pset(ctx, pset)
+    call opensps_setup(ctx, zmet, isoc_type_in=trim(isoc), spec_type_in=trim(spec), dust_type_in='DL07')
+    call opensps_context_set_param_int(ctx, 'zmet', zmet, status)
+    call opensps_context_set_param_int(ctx, 'imf_type', 1, status)
+    call opensps_context_prepare_pset(ctx)
+    call opensps_context_get_pset(ctx, pset)
     nt = ctx%state%ntfull
     ns = ctx%state%nspec
     allocate(m(nt), l(nt), s(ns, nt))
@@ -101,5 +101,5 @@ program benchmark_ssp_operator
     write(*, '(a, f10.3, a)') '   of which IMF weights              ', 1.0e3_wp * t_imf, ' ms'
     write(*, '(a, f10.3, a)') '   of which S . w                    ', 1.0e3_wp * t_spmv, ' ms'
     write(*, '(a, f10.3, a)') 'SSP grid from S (incl. templates)    ', 1.0e3_wp * t_eval, ' ms'
-    call fsps_destroy(ctx)
+    call opensps_destroy(ctx)
 end program benchmark_ssp_operator

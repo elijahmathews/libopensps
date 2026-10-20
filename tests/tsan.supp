@@ -46,15 +46,15 @@ mutex:MAIN__
 
 # ------------------------------------------------------------------------------
 # 4. FSPS Protected Initialization & I/O
-# The loading of stellar data is strictly serialized in  fsps_context.f90 using
+# The loading of stellar data is strictly serialized in  opensps_context.f90 using
 # an `!$omp critical` block. Because we guarantee that only one thread can
 # execute this setup at a time, any mutex warnings triggered inside these
 # specific IO/Setup modules are guaranteed to be underlying  libgfortran/HDF5
 # false positives bubbling up.
 # ------------------------------------------------------------------------------
-mutex:__fsps_io_MOD_load_zlegend_file
-mutex:__fsps_io_MOD_load_filter_data
-mutex:__fsps_io_MOD_load_isochrone_data
-mutex:__fsps_io_MOD_load_
-mutex:__fsps_io_MOD_read_
-mutex:__fsps_initialization_MOD_
+mutex:__opensps_io_MOD_load_zlegend_file
+mutex:__opensps_io_MOD_load_filter_data
+mutex:__opensps_io_MOD_load_isochrone_data
+mutex:__opensps_io_MOD_load_
+mutex:__opensps_io_MOD_read_
+mutex:__opensps_initialization_MOD_

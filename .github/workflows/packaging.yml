@@ -40,18 +40,18 @@ jobs:
       - name: Install build dependencies
         run: |
           dnf install -y rpm-build rpmdevtools
-          dnf builddep -y packaging/fsps.spec
+          dnf builddep -y packaging/opensps.spec
       - name: Build RPMs
         run: |
           rpmdev-setuptree
-          cp packaging/fsps.spec ~/rpmbuild/SPECS/
-          VERSION=$(grep -i '^Version:' packaging/fsps.spec | awk '{print $2}')
-          tar -czf ~/rpmbuild/SOURCES/fsps-$VERSION.tar.gz --transform "s|^\.|fsps-$VERSION|" --exclude='.git' .
-          rpmbuild -ba ~/rpmbuild/SPECS/fsps.spec
+          cp packaging/opensps.spec ~/rpmbuild/SPECS/
+          VERSION=$(grep -i '^Version:' packaging/opensps.spec | awk '{print $2}')
+          tar -czf ~/rpmbuild/SOURCES/opensps-$VERSION.tar.gz --transform "s|^\.|opensps-$VERSION|" --exclude='.git' .
+          rpmbuild -ba ~/rpmbuild/SPECS/opensps.spec
       - name: Install and check the library
         run: |
           dnf install -y ~/rpmbuild/RPMS/x86_64/*.rpm
-          ldconfig -p | grep libfsps
+          ldconfig -p | grep libopensps
       - uses: actions/upload-artifact@v6
         with:
           name: fedora-rpms
@@ -76,11 +76,11 @@ jobs:
           dpkg-buildpackage -us -uc -b
       - name: Install and check the library
         run: |
-          sudo apt-get install -y ../libfsps3_*.deb ../libfsps-dev_*.deb
+          sudo apt-get install -y ../libopensps0_*.deb ../libopensps-dev_*.deb
           sudo ldconfig
-          ldconfig -p | grep libfsps
+          ldconfig -p | grep libopensps
           mkdir -p dist
-          mv ../libfsps3_*.deb ../libfsps-dev_*.deb ../fsps_*.buildinfo ../fsps_*.changes dist/
+          mv ../libopensps0_*.deb ../libopensps-dev_*.deb ../opensps_*.buildinfo ../opensps_*.changes dist/
       - uses: actions/upload-artifact@v6
         with:
           name: ubuntu-debs

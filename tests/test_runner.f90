@@ -32,16 +32,16 @@ program test_runner
     !> - 1 on failure (setup/read errors or numerical mismatches).
 
     use, intrinsic :: ieee_arithmetic
-    use fsps_precision, only: WP
-    use fsps_constants, only: NEMLINE
-    use fsps_types, only: PARAMS, COMPSPOUT
-    use fsps_api, only: fsps_create, fsps_setup, fsps_destroy
-    use fsps_csp, only: compute_csp_scenario
-    use fsps_context_types, only: fsps_context_t
-    use fsps_context, only: fsps_context_set_pset, fsps_context_move_to_device, &
-                            fsps_context_remove_from_device, fsps_context_update_ssp_basis
-    use fsps_ssp, only: generate_ssp_grid
-    use fsps_environment, only: fsps_find_data_root
+    use opensps_precision, only: WP
+    use opensps_constants, only: NEMLINE
+    use opensps_types, only: PARAMS, COMPSPOUT
+    use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
+    use opensps_csp, only: compute_csp_scenario
+    use opensps_context_types, only: opensps_context_t
+    use opensps_context, only: opensps_context_set_pset, opensps_context_move_to_device, &
+                            opensps_context_remove_from_device, opensps_context_update_ssp_basis
+    use opensps_ssp, only: generate_ssp_grid
+    use opensps_environment, only: opensps_find_data_root
     implicit none
 
     ! Exit codes
@@ -66,7 +66,7 @@ program test_runner
     type(COMPSPOUT), allocatable, dimension(:) :: new_results
 
     ! Control variables
-    type(fsps_context_t) :: ctx
+    type(opensps_context_t) :: ctx
     type(PARAMS) :: pset
     integer :: i, unit_in, status, arg_count
     character(len=1024) :: filename_in, env_buffer, arg_val
@@ -178,7 +178,7 @@ program test_runner
         stop 77
     end if
     ! Likewise without a data root, which setup would otherwise stop on
-    if (.not. fsps_find_data_root(data_root)) then
+    if (.not. opensps_find_data_root(data_root)) then
         write(*, '(A)') 'SKIP: no data root found (fetch a data release with tools/fetch_data.py; ' // &
             'set OPENSPS_DATA_HOME or configure with -Ddata_home)'
         stop 77
@@ -225,19 +225,19 @@ program test_runner
     ! Note: We must initialize FSPS before allocating, but we must read the
     ! file header before we know if dimensions match.
 
-    call fsps_create(ctx)
+    call opensps_create(ctx)
     ctx%imf_type_val = 1
     pset%zmet = 10
 
     write(*, *) 'Initializing FSPS...'
     ! Always provide defaults that match the reference generator unless overridden
-    call fsps_setup(ctx, pset%zmet, isoc_type_in=trim(isoc_arg), spec_type_in=trim(spec_arg), &
+    call opensps_setup(ctx, pset%zmet, isoc_type_in=trim(isoc_arg), spec_type_in=trim(spec_arg), &
                     dust_type_in=trim(dust_arg))
 
     write(*, *) 'Moving FSPS Context to Device...'
-    call fsps_context_move_to_device(ctx)
+    call opensps_context_move_to_device(ctx)
 
-    if (verbose_output) call dump_state('AFTER fsps_setup', ctx, pset)
+    if (verbose_output) call dump_state('AFTER opensps_setup', ctx, pset)
 
     nspec_ctx = ctx%state%nspec
     ntfull_ctx = ctx%state%ntfull
@@ -245,7 +245,7 @@ program test_runner
     nt_ctx = ctx%state%nt
     nindx_ctx = ctx%state%nindx
 
-    ! Global dimensions are synchronized via fsps_context_apply_globals
+    ! Global dimensions are synchronized via opensps_context_apply_globals
 
     ! Allocate pset allocatable components
     if (allocated(pset%mag_compute)) deallocate(pset%mag_compute)
@@ -336,7 +336,7 @@ program test_runner
     pset%dust1 = 0.0_wp
     pset%dust2 = 0.0_wp
     ctx%add_neb_emission_val = 1
-    call fsps_context_set_pset(ctx, pset)
+    call opensps_context_set_pset(ctx, pset)
     if (verbose_output) call dump_state('BEFORE generate_ssp_grid (SSP)', ctx, pset)
     !$acc update device(ctx%state%mini_isoc, ctx%state%mact_isoc, ctx%state%logl_isoc, ctx%state%logt_isoc)
     !$acc update device(ctx%state%logg_isoc, ctx%state%phase_isoc, ctx%state%ffco_isoc, ctx%state%lmdot_isoc)
@@ -356,7 +356,7 @@ program test_runner
     pset%tau = 2.0_wp
     pset%dust1 = 1.0_wp
     pset%dust2 = 0.3_wp
-    call fsps_context_set_pset(ctx, pset)
+    call opensps_context_set_pset(ctx, pset)
     if (verbose_output) call dump_state('BEFORE generate_ssp_grid (CSP)', ctx, pset)
     !$acc update device(ctx%state%mini_isoc, ctx%state%mact_isoc, ctx%state%logl_isoc, ctx%state%logt_isoc)
     !$acc update device(ctx%state%logg_isoc, ctx%state%phase_isoc, ctx%state%ffco_isoc, ctx%state%lmdot_isoc)
@@ -376,7 +376,7 @@ program test_runner
     new_spec_ssp3(:, :, 1) = new_spec_ssp_ctx
 
     if (verbose_output) call dump_state('BEFORE compute_csp_scenario', ctx, pset)
-    call fsps_context_update_ssp_basis(ctx, new_spec_ssp3, new_mass_ssp2, new_lbol_ssp2, 1)
+    call opensps_context_update_ssp_basis(ctx, new_spec_ssp3, new_mass_ssp2, new_lbol_ssp2, 1)
 
     !$acc data copyin(pset) copy(new_spec_ssp_ctx)
     !$acc update device(pset)
@@ -425,8 +425,8 @@ program test_runner
     if (allocated(ref_ocompsp)) deallocate(ref_ocompsp)
 
     write(*, *) 'Removing FSPS Context from Device...'
-    call fsps_context_remove_from_device(ctx)
-    call fsps_destroy(ctx)
+    call opensps_context_remove_from_device(ctx)
+    call opensps_destroy(ctx)
 
     write(*, *) 'Total failures:', nfail
     if (test_passed) then
@@ -695,7 +695,7 @@ contains
     !> @param[in] pset  Active parameter set snapshot.
     subroutine dump_state(label, ctx, pset)
         character(*), intent(in) :: label
-        type(fsps_context_t), intent(in) :: ctx
+        type(opensps_context_t), intent(in) :: ctx
         type(PARAMS), intent(in) :: pset
 
         write(*, *) '--- STATE:', trim(label)
@@ -719,7 +719,7 @@ contains
     !> @param[in] lbol_ssp SSP bolometric luminosity history.
     subroutine dump_ssp_summary(label, ctx, mass_ssp, lbol_ssp)
         character(*), intent(in) :: label
-        type(fsps_context_t), intent(in) :: ctx
+        type(opensps_context_t), intent(in) :: ctx
         real(WP), dimension(:), intent(in) :: mass_ssp, lbol_ssp
         integer :: n
 

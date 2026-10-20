@@ -1,12 +1,12 @@
 program benchmark_hotpaths
     use iso_c_binding
-    use fsps_api
-    use fsps_types, only: COMPSPOUT
-    use fsps_context_types, only: fsps_context_t
-    use fsps_context, only: fsps_context_move_to_device, fsps_context_remove_from_device, fsps_context_set_fast_mode
+    use opensps_api
+    use opensps_types, only: COMPSPOUT
+    use opensps_context_types, only: opensps_context_t
+    use opensps_context, only: opensps_context_move_to_device, opensps_context_remove_from_device, opensps_context_set_fast_mode
     implicit none
 
-    type(fsps_context_t) :: ctx
+    type(opensps_context_t) :: ctx
     type(COMPSPOUT), allocatable :: compsp(:)
     real(kind=c_double), allocatable :: mass_ssp(:), lbol_ssp(:), spec_ssp(:,:)
     real(kind=c_double), allocatable :: mass_ssp_2d(:,:), lbol_ssp_2d(:,:), spec_ssp_3d(:,:,:)
@@ -82,13 +82,13 @@ program benchmark_hotpaths
     end do
 
     print *, "Creating FSPS Context..."
-    call fsps_create(ctx)
+    call opensps_create(ctx)
     
     print *, "Setting up FSPS..."
     print *, "  isoc = ", trim(isoc_arg)
     print *, "  spec = ", trim(spec_arg)
     print *, "  dust = ", trim(dust_arg)
-    call fsps_setup(ctx, 1, isoc_type_in=trim(isoc_arg), spec_type_in=trim(spec_arg), dust_type_in=trim(dust_arg))
+    call opensps_setup(ctx, 1, isoc_type_in=trim(isoc_arg), spec_type_in=trim(spec_arg), dust_type_in=trim(dust_arg))
 
     ! Get dimensions
     n_spec = ctx%state%nspec
@@ -111,32 +111,32 @@ program benchmark_hotpaths
     allocate(compsp(1))
 
     ! Disable heavy outputs
-    call fsps_set_param_int(ctx, mags_key, 0, status)
-    call fsps_set_param_int(ctx, indx_key, 0, status)
+    call opensps_set_param_int(ctx, mags_key, 0, status)
+    call opensps_set_param_int(ctx, indx_key, 0, status)
 
     ! Explicitly set tage > 0 to trigger the n_outputs == 1 hot path
-    call fsps_set_param_float(ctx, tage_key, 13.7d0, status)
+    call opensps_set_param_float(ctx, tage_key, 13.7d0, status)
     if (status /= 0) then
-        print *, "ERROR: fsps_set_param_float(tage) failed"
+        print *, "ERROR: opensps_set_param_float(tage) failed"
         stop 1
     end if
 
     ! Migrate the fully-populated context to the device
-    call fsps_context_move_to_device(ctx)
+    call opensps_context_move_to_device(ctx)
 
     ! Enable Fast Mode to bypass host post-processing and syncs
-    call fsps_context_set_fast_mode(ctx, .true.)
+    call opensps_context_set_fast_mode(ctx, .true.)
 
     ! Warmup
     print *, "Warming up..."
-    call fsps_compute_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp)
+    call opensps_compute_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp)
     
     ! Fill 3D buffers
     mass_ssp_2d(:,1) = mass_ssp
     lbol_ssp_2d(:,1) = lbol_ssp
     spec_ssp_3d(:,:,1) = spec_ssp
     
-    call fsps_compute_csp(ctx, 0, 1, "", mass_ssp_2d, lbol_ssp_2d, spec_ssp_3d, compsp)
+    call opensps_compute_csp(ctx, 0, 1, "", mass_ssp_2d, lbol_ssp_2d, spec_ssp_3d, compsp)
     if (ctx%state%ssp_basis_is_dirty) then
         print *, "ERROR: SSP basis dirty flag expected false after initial CSP warmup"
         stop 1
@@ -151,9 +151,9 @@ program benchmark_hotpaths
     
     do i = 1, n_iter_csp
         val = 0.1d0 + dble(i)*0.01d0
-        call fsps_set_param_float(ctx, dust2_key, val, status)
+        call opensps_set_param_float(ctx, dust2_key, val, status)
         if (status /= 0) then
-            print *, "ERROR: fsps_set_param_float(dust2) failed with status=", status
+            print *, "ERROR: opensps_set_param_float(dust2) failed with status=", status
             stop 1
         end if
         if (ctx%state%ssp_basis_is_dirty) then
@@ -161,7 +161,7 @@ program benchmark_hotpaths
             stop 1
         end if
         
-        call fsps_compute_csp(ctx, 0, 1, "", mass_ssp_2d, lbol_ssp_2d, spec_ssp_3d, compsp)
+        call opensps_compute_csp(ctx, 0, 1, "", mass_ssp_2d, lbol_ssp_2d, spec_ssp_3d, compsp)
         if (ctx%state%ssp_basis_is_dirty) then
             print *, "ERROR: CSP-only iteration should keep SSP basis clean"
             stop 1
@@ -182,9 +182,9 @@ program benchmark_hotpaths
     
     do i = 1, n_iter_ssp
         val = 1.3d0 + dble(i)*0.01d0
-        call fsps_set_param_float(ctx, imf3_key, val, status)
+        call opensps_set_param_float(ctx, imf3_key, val, status)
         if (status /= 0) then
-            print *, "ERROR: fsps_set_param_float(imf3) failed with status=", status
+            print *, "ERROR: opensps_set_param_float(imf3) failed with status=", status
             stop 1
         end if
         if (.not. ctx%state%ssp_basis_is_dirty) then
@@ -193,7 +193,7 @@ program benchmark_hotpaths
         end if
         
         ! Recompute SSP
-        call fsps_compute_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp)
+        call opensps_compute_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp)
         
         ! Copy to 3D buffers
         mass_ssp_2d(:,1) = mass_ssp
@@ -201,7 +201,7 @@ program benchmark_hotpaths
         spec_ssp_3d(:,:,1) = spec_ssp
         
         ! Compute CSP
-        call fsps_compute_csp(ctx, 0, 1, "", mass_ssp_2d, lbol_ssp_2d, spec_ssp_3d, compsp)
+        call opensps_compute_csp(ctx, 0, 1, "", mass_ssp_2d, lbol_ssp_2d, spec_ssp_3d, compsp)
         if (ctx%state%ssp_basis_is_dirty) then
             print *, "ERROR: SSP basis dirty flag should reset after CSP basis update"
             stop 1
@@ -212,8 +212,8 @@ program benchmark_hotpaths
     total_time = real(t2 - t1, kind=c_double) / real(rate, kind=c_double)
     print *, "SSP + CSP Avg Time (s): ", total_time / real(n_iter_ssp)
 
-    call fsps_context_remove_from_device(ctx)
-    call fsps_destroy(ctx)
+    call opensps_context_remove_from_device(ctx)
+    call opensps_destroy(ctx)
 
 end program benchmark_hotpaths
 
