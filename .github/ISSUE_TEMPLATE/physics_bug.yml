@@ -1,0 +1,44 @@
+name: Physics or numerical discrepancy
+description: An unexpected physical result, a difference from legacy FSPS, or an FP32/GPU precision issue
+labels: [bug, physics]
+body:
+  - type: textarea
+    id: what-was-computed
+    attributes:
+      label: What was computed
+      description: Model parameters (IMF, SFH, metallicity, age, dust, nebular, ...), stellar and isochrone libraries, data release, and libopensps version or commit.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-result
+    attributes:
+      label: Expected result and reference
+      description: Legacy FSPS output on identical data, an analytic identity, or a literature reference.
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed-difference
+    attributes:
+      label: Observed difference
+      description: Size and location (maximum relative difference, wavelength range, filter, SSP age/metallicity) and how to reproduce.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: fp64-cpu-repro
+    attributes:
+      label: Does it reproduce in an FP64 CPU build?
+      options:
+        - "Yes"
+        - "No (FP32 or GPU only)"
+        - "Not tested"
+    validations:
+      required: true
+
+  - type: input
+    id: build-config
+    attributes:
+      label: Build configuration
+      description: FP64/FP32, CPU/GPU, compiler.

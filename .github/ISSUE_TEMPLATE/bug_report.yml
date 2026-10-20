@@ -1,0 +1,64 @@
+name: Bug report
+description: A build failure, crash, C API bug, or GPU offload issue
+labels: [bug]
+body:
+  - type: textarea
+    id: what-went-wrong
+    attributes:
+      label: What went wrong
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behaviour
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal code, command line, or test case.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Compiler errors, or the failing part of build/meson-logs/testlog.txt.
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: libopensps version or commit
+    validations:
+      required: true
+
+  - type: input
+    id: compiler
+    attributes:
+      label: Compiler and version
+      placeholder: e.g. gfortran 15.1, nvfortran 26.1, flang 22
+    validations:
+      required: true
+
+  - type: input
+    id: meson-options
+    attributes:
+      label: Meson options
+      placeholder: e.g. -Dkernel_precision=single -Daccel=omp_gpu
+
+  - type: input
+    id: data-release
+    attributes:
+      label: Data release and OPENSPS_DATA_HOME
+      placeholder: e.g. data-v2
+
+  - type: input
+    id: os-hardware
+    attributes:
+      label: OS and hardware (GPU model if offloading)
