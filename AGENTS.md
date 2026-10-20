@@ -22,11 +22,51 @@ GPU offload, batched SSPs and CSPs for SED fitting).
 
 ## Build and test
 
-TODO: Adapt from `elijahmathews/fsps` `AGENTS.md` file.
+Data (stellar libraries, isochrones, nebular grids, dust, filters, regression references) is
+not in the repository: it comes from versioned releases of `elijahmathews/opensps-data`.
+
+```
+python3 tools/fetch_data.py ~/opensps-data --release <release pinned by the repository>
+export OPENSPS_DATA_HOME=~/opensps-data
+meson setup build --buildtype=release                              # CPU, FP64
+meson setup build32 --buildtype=release -Dkernel_precision=single  # FP32 kernels
+meson compile -C build
+meson test -C build --suite unit                       # needs no data
+meson test -C build --suite unit --suite regression    # needs OPENSPS_DATA_HOME
+```
+
+`-Ddata_home=<root>` points the test suites at another data root. Without data, the
+regression tests that need it are skipped with a message, not failed: say so when reporting.
+
+GPU builds (details and per-machine notes: `doc/GPU_PLAN.md`, results: `doc/GPU_RESULTS.md`;
+what comes next: `doc/ROADMAP.md`):
+
+- OpenACC: `FC=nvfortran CC=nvc meson setup b -Daccel=gpu -Dgpu_arch=cc80` (add
+  `-Dcublas=true` for cuBLAS batch products); `-Daccel=multicore` runs the same code on CPU
+  cores. OpenACC is frozen: new kernels get OpenMP directives first.
+- OpenMP target: `-Daccel=omp_gpu` with nvfortran or LLVM flang. Run with
+  `OMP_TARGET_OFFLOAD=MANDATORY` so a silent host fallback fails.
+
+Other tools: `tests/benchmark_phases`, `tests/benchmark_csp_batch` (timings);
+`tools/compare_builds/` (one build against another over the case matrix, e.g. GPU vs CPU);
+`tools/legacy_parity/` (against legacy FSPS on identical data); `tools/fsps_data/` (data
+format, conversion, packing; format and workflows in `doc/DATA_FORMAT.md`).
 
 ## Correctness gates
 
-TODO: Adapt from `elijahmathews/fsps` `AGENTS.md` file.
+- The unit and regression suites pass in FP64 **and** FP32 builds before a pull request.
+- Regression references change only for an intended, explained change: regenerate them with
+  the documented commands, bump the references version and pin
+  (`doc/DATA_FORMAT.md`, "regenerating the references"), and state the size of the change
+  and its cause in the pull request. Publishing the new references is the user's step.
+- Physics changes are checked against legacy FSPS (`tools/legacy_parity/run_matrix.sh`); every
+  deliberate difference is listed with its cause in `tools/legacy_parity/README.md`.
+- GPU builds match the CPU build: FP64 to ~1e-10 per pixel, FP32 to ~5e-7
+  (`tools/compare_builds`).
+- Data format changes keep reading the previous format (a documented transition alias) and
+  keep the parity suite bit-identical.
+- Never claim a test passed without having run it; report failures with their output, and
+  skipped tests as skipped.
 
 ## Hard rules
 
@@ -66,7 +106,11 @@ TODO: Adapt from `elijahmathews/fsps` `AGENTS.md` file.
 - Open pull requests against `main` (CI runs only there; see above rules for PRs); do not
   merge them, the user does. Stacked branches: say the merge order in the PR, or set up as
   a GitHub stack.
-- Commit messages: follow the format and style mandated in `CONTRIBUTING.md`.
+- Commit messages: follow the format and style mandated in `CONTRIBUTING.md` (Conventional
+  Commits). Because pull requests are squash-merged, the **pull request title and description
+  become the commit on `main`**: give the title a Conventional Commits form and the
+  description the body that commit needs (what changed, why, numbers, breaking changes),
+  ending with the `Co-Authored-By:` trailer.
 
 ## Machines
 
