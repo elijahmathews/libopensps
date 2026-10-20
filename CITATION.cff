@@ -2,30 +2,35 @@
 # listed under references: please cite them in any work that uses this library.
 cff-version: 1.2.0
 message: >-
-  If you use libopensps, please cite the FSPS papers listed under references
-  (Conroy, Gunn & White 2009; Conroy & Gunn 2010), as well as this software.
-type: software
-title: "libopensps: a modernized FSPS stellar population synthesis library"
+  If you use libopensps in your research, please cite it using this metadata,
+  and also cite the FSPS papers listed under references (Conroy, Gunn & White
+  2009; Conroy & Gunn 2010).
+title: "libopensps"
 abstract: >-
-  libopensps is a library for stellar population synthesis derived from FSPS
-  (Flexible Stellar Population Synthesis) by Charlie Conroy and contributors:
-  a thread-safe Fortran 2008 code with a stable C API, batched composite
-  populations for fitting, FP32 kernels and GPU offload.
-authors:
-  - family-names: Mathews
-    given-names: Elijah
-    # orcid: "https://orcid.org/TODO"
-repository-code: "https://github.com/elijahmathews/libopensps"
+  A high-performance, hardware-accelerated stellar population synthesis
+  library. libopensps is derived from FSPS (Flexible Stellar Population
+  Synthesis) by Charlie Conroy and contributors: a thread-safe Fortran 2008
+  code with a stable C API, batched composite populations for fitting, FP32
+  kernels and GPU offload.
+type: software
 license: MIT
+repository-code: "https://github.com/elijahmathews/libopensps"
+url: "https://github.com/elijahmathews/libopensps"
 keywords:
   - stellar population synthesis
   - galaxies
   - spectral energy distributions
   - astronomy
-# TODO at the first release:
-# version: "TODO"
-# date-released: "TODO"
-# doi: "TODO (archive DOI of the release, e.g. Zenodo)"
+authors:
+  - family-names: Mathews
+    given-names: Elijah P.
+    orcid: "https://orcid.org/0000-0003-0384-0681"
+    email: pgp@elijahmathews.com
+    affiliation: "The Pennsylvania State University"
+# At each release: version, date-released and the archive DOI of the release (e.g. Zenodo).
+# version: "0.1.0"
+# date-released: "YYYY-MM-DD"
+# doi: "10.5281/zenodo.TODO"
 references:
   - type: article
     title: >-
@@ -35,17 +40,27 @@ references:
     authors:
       - family-names: Conroy
         given-names: Charlie
+        orcid: "https://orcid.org/0000-0002-1590-8551"
+        affiliation: "Princeton University"
       - family-names: Gunn
         given-names: James E.
+        affiliation: "Princeton University"
       - family-names: White
         given-names: Martin
-    journal: The Astrophysical Journal
+        orcid: "https://orcid.org/0000-0001-9912-5070"
+        affiliation: "University of California Berkeley"
+    journal: "The Astrophysical Journal"
+    year: 2009
+    month: 7
     volume: 699
     issue: 1
     start: 486
     end: 506
-    year: 2009
     doi: 10.1088/0004-637X/699/1/486
+    identifiers:
+      - type: other
+        value: "arxiv:0809.4261"
+        description: The arXiv preprint of the paper
   - type: article
     title: >-
       The Propagation of Uncertainties in Stellar Population Synthesis Modeling.
@@ -53,12 +68,20 @@ references:
     authors:
       - family-names: Conroy
         given-names: Charlie
+        orcid: "https://orcid.org/0000-0002-1590-8551"
+        affiliation: "Princeton University"
       - family-names: Gunn
         given-names: James E.
-    journal: The Astrophysical Journal
+        affiliation: "Princeton University"
+    journal: "The Astrophysical Journal"
+    year: 2010
+    month: 4
     volume: 712
     issue: 2
     start: 833
     end: 857
-    year: 2010
     doi: 10.1088/0004-637X/712/2/833
+    identifiers:
+      - type: other
+        value: "arxiv:0911.3151"
+        description: The arXiv preprint of the paper
