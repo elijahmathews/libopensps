@@ -36,7 +36,7 @@ jobs:
             tsan: true
           - name: nvfortran OpenACC multicore
             install: nvidia-hpc
-            setup_args: -Daccel=multicore
+            setup_args: -Daccel=multicore -Dcpu_baseline=x86-64-v3
             stress_env: FSPS_STRESS_ITERS=20
     env:
       OMP_NUM_THREADS: 4
@@ -60,8 +60,8 @@ jobs:
         with:
           compiler: nvidia-hpc
           version: '26.1'
-      # Pin nvfortran's math-kernel table to avx2 instead of the CPUID choice, which aborted on
-      # runners reporting AVX-512 (see ci.yml, "nvfortran runtime libraries")
+      # Pin nvfortran's math-kernel table to avx2, matching the -Dcpu_baseline=x86-64-v3 build
+      # (see ci.yml, "nvfortran runtime libraries")
       - name: Pin nvfortran's math dispatch
         if: matrix.install == 'nvidia-hpc'
         run: echo "MTH_I_ARCH=avx2" >> "$GITHUB_ENV"

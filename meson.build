@@ -117,6 +117,16 @@ if get_option('buildtype') == 'release' and fc_id == 'gcc'
         add_project_arguments('-march=x86-64-v3', language: 'fortran')
     endif
 endif
+# nvfortran targets the build machine's CPU by default (-tp=host), and the target also selects
+# which variant of its math library is linked (libnvcpumath-avx2 / -avx512). A fixed baseline
+# makes a build independent of the machine it was built on; any build type, since the math
+# library is chosen at link time.
+nv_tp = {'native': '-tp=host', 'x86-64-v3': '-tp=haswell'}
+if fc_id == 'nvidia_hpc' and cpu_baseline in nv_tp and host_cpu == 'x86_64'
+    nv_langs = meson.get_compiler('c').get_id() == 'nvidia_hpc' ? ['fortran', 'c'] : ['fortran']
+    add_project_arguments(nv_tp[cpu_baseline], language: nv_langs)
+    add_project_link_arguments(nv_tp[cpu_baseline], language: nv_langs)
+endif
 
 # ===================================
 # Source Definitions
