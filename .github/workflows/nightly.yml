@@ -60,6 +60,11 @@ jobs:
         with:
           compiler: nvidia-hpc
           version: '26.1'
+      # Pin nvfortran's math-kernel table to avx2 instead of the CPUID choice, which aborted on
+      # runners reporting AVX-512 (see ci.yml, "nvfortran runtime libraries")
+      - name: Pin nvfortran's math dispatch
+        if: matrix.install == 'nvidia-hpc'
+        run: echo "MTH_I_ARCH=avx2" >> "$GITHUB_ENV"
       - run: pipx install meson && pipx install ninja
       - run: meson setup build -Denable_stress_testing=true ${{ matrix.setup_args }}
       - run: meson compile -C build
@@ -73,8 +78,7 @@ jobs:
             export TSAN_OPTIONS="suppressions=$PWD/tests/tsan.supp halt_on_error=1 second_deadlock_stack=1"
           fi
           lscpu | grep -m1 'Model name' || true
-          # nvfortran's math runtime picks a CPU-specific library at startup and occasionally
-          # aborts there ("Error during math dispatch processing") on some hosted-runner CPUs;
+          # Backstop for nvfortran's math-dispatch abort, which MTH_I_ARCH=avx2 should prevent:
           # retry once in that case only, so real failures still fail the job
           if ! env ${{ matrix.stress_env }} meson test -C build --suite stress --print-errorlogs --timeout-multiplier 3; then
             if grep -q 'Error during math dispatch' build/meson-logs/testlog.txt; then
