@@ -162,8 +162,13 @@ jobs:
           meson --version
           lscpu | grep -E 'Model name|Vendor ID' || true
 
-      # nvfortran's math runtime picks a CPU-specific library variant at startup, and has aborted
-      # ("Math dispatch table is either misconfigured or corrupted") on some hosted-runner CPUs
+      # nvfortran's math runtime (libpgmath) picks a table of math kernels from CPUID at program
+      # start: avx512 when the CPU reports AVX-512VL, else avx2, ... On the hosted runners whose
+      # virtual CPU reports AVX-512 (AMD EPYC 9V74) programs aborted there ("Error during math
+      # dispatch processing... Math dispatch table is either misconfigured or corrupted"), while
+      # the AVX2-only runners (EPYC 7763) were fine. MTH_I_ARCH overrides the detection: pin the
+      # avx2 table, which every x86-64-v3 runner supports, so the outcome no longer depends on
+      # the runner's CPU. The step logs what the detection would have chosen.
       - name: nvfortran runtime libraries
         if: matrix.toolchain == 'nvidia-hpc'
         run: |
@@ -171,6 +176,11 @@ jobs:
           sdk_lib=$(dirname "$(readlink -f "$(command -v nvfortran)")")/../lib
           ls "$sdk_lib" | grep -i -E 'nvcpumath|nvhpcatm|nvc\.' || true
           echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+          printf 'program p\nprint *, exp(0.5d0)\nend program p\n' > "$RUNNER_TEMP/mth.f90"
+          nvfortran "$RUNNER_TEMP/mth.f90" -o "$RUNNER_TEMP/mth"
+          echo "libpgmath detection:"; MTH_I_DEBUG=1 "$RUNNER_TEMP/mth" 2>&1 | grep __math_target || true
+          echo "MTH_I_ARCH=avx2" >> "$GITHUB_ENV"
+          echo "pinned:"; MTH_I_ARCH=avx2 MTH_I_DEBUG=1 "$RUNNER_TEMP/mth" 2>&1 | grep __math_target
 
       # Data from the published release instead of the checked-out data/ (doc/DATA_FORMAT.md,
       # Section 6). Off until the repository variable FSPS_DATA_RELEASE is set (e.g. data-v1);
@@ -194,9 +204,9 @@ jobs:
         run: meson compile -C build
 
       # Coverage instrumentation slows the tests several-fold, so that build gets longer timeouts
-      # nvfortran's math runtime picks a CPU-specific library at startup and occasionally aborts
-      # there ("Error during math dispatch processing") on some hosted-runner CPUs, before any
-      # test code runs; retry once in that case only, so real failures still fail the job
+      # Backstop for nvfortran's math-dispatch abort ("Error during math dispatch processing"),
+      # which MTH_I_ARCH=avx2 should prevent: retry once in that case only, so real failures still
+      # fail the job
       - name: Unit and regression tests
         run: |
           lscpu | grep -m1 'Model name' || true
