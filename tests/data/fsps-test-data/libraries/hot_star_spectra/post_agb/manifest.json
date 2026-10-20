@@ -1,0 +1,101 @@
+{
+ "format": "opensps-data",
+ "format_version": 1,
+ "kind": "hot_star_spectra",
+ "name": "post_agb",
+ "version": 1,
+ "title": "Hydrogen-deficient post-AGB spectra - coarse test subset of the full library; not for science",
+ "provenance": {
+  "converter": "tools/fsps_data",
+  "created": "2026-10-20T12:35:48Z",
+  "converted_from": "legacy FSPS layout: data/spectra/Hot_spectra/ipagb*",
+  "source": "Synthetic hydrogen-deficient post-AGB spectra, halo and solar compositions",
+  "cite": [
+   {
+    "bibcode": "2003A&A...403..709R",
+    "reference": "Rauch 2003, A&A, 403, 709",
+    "doi": "10.1051/0004-6361:20030412",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2003A&A...403..709R"
+   }
+  ],
+  "cite_also": [
+   {
+    "bibcode": "2009ApJ...699..486C",
+    "reference": "Conroy et al. 2009, ApJ, 699, 486",
+    "doi": "10.1088/0004-637X/699/1/486",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2009ApJ...699..486C"
+   },
+   {
+    "bibcode": "2010ApJ...712..833C",
+    "reference": "Conroy & Gunn 2010, ApJ, 712, 833",
+    "doi": "10.1088/0004-637X/712/2/833",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2010ApJ...712..833C"
+   }
+  ],
+  "bibliography": "data_release.bib (NASA ADS export, shipped with the data release)",
+  "redistribution": "Distributed publicly with FSPS (https://github.com/cconroy20/fsps), from whose data tree this library was converted. No separate license is stated in the FSPS distribution; the terms of the original data apply.",
+  "todo": [
+   "license or redistribution terms of the original data (not stated in the FSPS sources)"
+  ],
+  "subset_of": "hot_star_spectra/post_agb v1",
+  "subset": {
+   "wavelength": "slice(None, None, 40)"
+  }
+ },
+ "metadata": {},
+ "axes": {
+  "composition": {
+   "units": "",
+   "labels": [
+    "halo",
+    "solar"
+   ]
+  },
+  "teff": {
+   "units": "K",
+   "values": [
+    50000.0,
+    60000.0,
+    70000.0,
+    80000.0,
+    90000.0,
+    100000.0,
+    110000.0,
+    120000.0,
+    130000.0,
+    140000.0,
+    150000.0,
+    160000.0,
+    170000.0,
+    180000.0
+   ]
+  },
+  "wavelength": {
+   "units": "angstrom",
+   "file": "axis_wavelength.bin",
+   "dtype": "<f8",
+   "shape": [
+    233
+   ],
+   "sha256": "a61bf1d9ac04e2d3167cf7ee96f2f0a74ec58ff8f5a57c38f6bd177595c4fd56"
+  }
+ },
+ "arrays": {
+  "flux": {
+   "file": "flux.bin",
+   "dtype": "<f4",
+   "shape": [
+    2,
+    14,
+    233
+   ],
+   "axes": [
+    "composition",
+    "teff",
+    "wavelength"
+   ],
+   "units": "L_nu / L_bol (Hz^-1)",
+   "sha256": "41adb384b84b5d5bdb1fe9b5317d70e9ab42a5798ae5a4417f5e2eaf06097ec8"
+  }
+ }
+}

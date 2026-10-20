@@ -1,0 +1,113 @@
+{
+ "format": "opensps-data",
+ "format_version": 1,
+ "release": "test",
+ "title": "Coarse test subsets of the default libraries (not for science)",
+ "libraries": [
+  {
+   "kind": "agb_spectra",
+   "name": "crich",
+   "path": "libraries/agb_spectra/crich"
+  },
+  {
+   "kind": "agb_spectra",
+   "name": "crich_aringer",
+   "path": "libraries/agb_spectra/crich_aringer"
+  },
+  {
+   "kind": "agb_spectra",
+   "name": "orich",
+   "path": "libraries/agb_spectra/orich"
+  },
+  {
+   "kind": "agn_torus",
+   "name": "clumpy",
+   "path": "libraries/agn_torus/clumpy"
+  },
+  {
+   "kind": "attenuation",
+   "name": "dirty",
+   "path": "libraries/attenuation/dirty"
+  },
+  {
+   "kind": "attenuation",
+   "name": "smc_bar",
+   "path": "libraries/attenuation/smc_bar"
+  },
+  {
+   "kind": "dust_emission",
+   "name": "DL07",
+   "path": "libraries/dust_emission/DL07"
+  },
+  {
+   "kind": "dust_emission",
+   "name": "THEMIS",
+   "path": "libraries/dust_emission/THEMIS"
+  },
+  {
+   "kind": "dusty_agb",
+   "name": "crich",
+   "path": "libraries/dusty_agb/crich"
+  },
+  {
+   "kind": "dusty_agb",
+   "name": "orich",
+   "path": "libraries/dusty_agb/orich"
+  },
+  {
+   "kind": "filters",
+   "name": "allfilters",
+   "path": "libraries/filters/allfilters"
+  },
+  {
+   "kind": "hot_star_spectra",
+   "name": "cmfgen_wc",
+   "path": "libraries/hot_star_spectra/cmfgen_wc"
+  },
+  {
+   "kind": "hot_star_spectra",
+   "name": "cmfgen_wn",
+   "path": "libraries/hot_star_spectra/cmfgen_wn"
+  },
+  {
+   "kind": "hot_star_spectra",
+   "name": "post_agb",
+   "path": "libraries/hot_star_spectra/post_agb"
+  },
+  {
+   "kind": "hot_star_spectra",
+   "name": "wmbasic",
+   "path": "libraries/hot_star_spectra/wmbasic"
+  },
+  {
+   "kind": "isochrones",
+   "name": "mist",
+   "path": "libraries/isochrones/mist"
+  },
+  {
+   "kind": "nebular",
+   "name": "mist_nodust",
+   "path": "libraries/nebular/mist_nodust"
+  },
+  {
+   "kind": "reference_spectra",
+   "name": "sun",
+   "path": "libraries/reference_spectra/sun"
+  },
+  {
+   "kind": "reference_spectra",
+   "name": "vega",
+   "path": "libraries/reference_spectra/vega"
+  },
+  {
+   "kind": "stellar_spectra",
+   "name": "miles",
+   "path": "libraries/stellar_spectra/miles"
+  },
+  {
+   "kind": "xrb",
+   "name": "xsp",
+   "path": "libraries/xrb/xsp"
+  }
+ ]
+}

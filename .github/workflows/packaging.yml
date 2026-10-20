@@ -1,0 +1,87 @@
+# Distribution packages (Fedora RPM, Ubuntu DEB). Runs when packaging or build files change, on
+# pushes to master, weekly, and on demand: packaging does not change with ordinary source edits,
+# which ci.yml already builds and tests. Both builds run the test suite (%check, dh_auto_test)
+# with the distribution's own compiler, which on Fedora is a newer gfortran than ci.yml's.
+
+name: Packaging
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packaging/**'
+      - 'debian/**'
+      - 'meson.build'
+      - 'meson.options'
+      - '.github/workflows/packaging.yml'
+  schedule:
+    - cron: '43 5 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build-rpm:
+    name: Fedora RPM
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: fedora:latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install build dependencies
+        run: |
+          dnf install -y rpm-build rpmdevtools
+          dnf builddep -y packaging/fsps.spec
+      - name: Build RPMs
+        run: |
+          rpmdev-setuptree
+          cp packaging/fsps.spec ~/rpmbuild/SPECS/
+          VERSION=$(grep -i '^Version:' packaging/fsps.spec | awk '{print $2}')
+          tar -czf ~/rpmbuild/SOURCES/fsps-$VERSION.tar.gz --transform "s|^\.|fsps-$VERSION|" --exclude='.git' .
+          rpmbuild -ba ~/rpmbuild/SPECS/fsps.spec
+      - name: Install and check the library
+        run: |
+          dnf install -y ~/rpmbuild/RPMS/x86_64/*.rpm
+          ldconfig -p | grep libfsps
+      - uses: actions/upload-artifact@v6
+        with:
+          name: fedora-rpms
+          path: |
+            ~/rpmbuild/RPMS/*/*.rpm
+            ~/rpmbuild/SRPMS/*.rpm
+          retention-days: 7
+
+  build-deb:
+    name: Ubuntu DEB
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q debhelper build-essential gfortran meson ninja-build pkgconf devscripts
+      - name: Build packages
+        run: |
+          chmod +x debian/rules
+          dpkg-buildpackage -us -uc -b
+      - name: Install and check the library
+        run: |
+          sudo apt-get install -y ../libfsps3_*.deb ../libfsps-dev_*.deb
+          sudo ldconfig
+          ldconfig -p | grep libfsps
+          mkdir -p dist
+          mv ../libfsps3_*.deb ../libfsps-dev_*.deb ../fsps_*.buildinfo ../fsps_*.changes dist/
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ubuntu-debs
+          path: dist/
+          retention-days: 7

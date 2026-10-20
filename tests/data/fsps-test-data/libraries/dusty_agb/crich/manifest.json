@@ -1,0 +1,141 @@
+{
+ "format": "opensps-data",
+ "format_version": 1,
+ "kind": "dusty_agb",
+ "name": "crich",
+ "version": 1,
+ "title": "Circumstellar dust shells of C-rich AGB stars - coarse test subset of the full library; not for science",
+ "provenance": {
+  "converter": "tools/fsps_data",
+  "created": "2026-10-20T12:35:48Z",
+  "converted_from": "legacy FSPS layout: data/dust/dusty/Crich_dusty.spec",
+  "source": "Circumstellar dust shells of C-rich AGB stars computed with the radiative transfer code DUSTY (FSPS manual, section 1.11)",
+  "cite": [
+   {
+    "bibcode": "2015ApJ...806...82V",
+    "reference": "Villaume et al. 2015, ApJ, 806, 82",
+    "doi": "10.1088/0004-637X/806/1/82",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2015ApJ...806...82V"
+   }
+  ],
+  "cite_also": [
+   {
+    "bibcode": "2009ApJ...699..486C",
+    "reference": "Conroy et al. 2009, ApJ, 699, 486",
+    "doi": "10.1088/0004-637X/699/1/486",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2009ApJ...699..486C"
+   },
+   {
+    "bibcode": "2010ApJ...712..833C",
+    "reference": "Conroy & Gunn 2010, ApJ, 712, 833",
+    "doi": "10.1088/0004-637X/712/2/833",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2010ApJ...712..833C"
+   }
+  ],
+  "bibliography": "data_release.bib (NASA ADS export, shipped with the data release)",
+  "redistribution": "Distributed publicly with FSPS (https://github.com/cconroy20/fsps), from whose data tree this library was converted. No separate license is stated in the FSPS distribution; the terms of the original data apply.",
+  "todo": [
+   "license or redistribution terms of the original data (not stated in the FSPS sources)"
+  ],
+  "subset_of": "dusty_agb/crich v1",
+  "subset": {
+   "wavelength": "slice(None, None, 10)"
+  }
+ },
+ "metadata": {},
+ "axes": {
+  "teff": {
+   "units": "K",
+   "values": [
+    2400.0,
+    2800.0,
+    3200.0,
+    3600.0,
+    3800.0,
+    4000.0
+   ]
+  },
+  "tau": {
+   "units": "optical depth at 1 micron",
+   "values": [
+    -3.0,
+    -2.9,
+    -2.81,
+    -2.71,
+    -2.62,
+    -2.52,
+    -2.42,
+    -2.33,
+    -2.23,
+    -2.14,
+    -2.04,
+    -1.95,
+    -1.85,
+    -1.75,
+    -1.66,
+    -1.56,
+    -1.47,
+    -1.37,
+    -1.27,
+    -1.18,
+    -1.08,
+    -0.99,
+    -0.89,
+    -0.79,
+    -0.7,
+    -0.6,
+    -0.51,
+    -0.41,
+    -0.31,
+    -0.22,
+    -0.12,
+    -0.03,
+    0.07,
+    0.16,
+    0.26,
+    0.36,
+    0.45,
+    0.55,
+    0.64,
+    0.74,
+    0.84,
+    0.93,
+    1.03,
+    1.12,
+    1.22,
+    1.32,
+    1.41,
+    1.51,
+    1.6,
+    1.7
+   ]
+  },
+  "wavelength": {
+   "units": "angstrom",
+   "file": "axis_wavelength.bin",
+   "dtype": "<f8",
+   "shape": [
+    197
+   ],
+   "sha256": "1fa358b6a74415ee4d7d8b880402a8716b573b76fe279eb16b8d0580fe70ba25"
+  }
+ },
+ "arrays": {
+  "transfer": {
+   "file": "transfer.bin",
+   "dtype": "<f4",
+   "shape": [
+    6,
+    50,
+    197
+   ],
+   "axes": [
+    "teff",
+    "tau",
+    "wavelength"
+   ],
+   "units": "ratio of emergent to input spectrum",
+   "sha256": "239e932029733b21f11eb77c30d05ca9fd8986fb6d42e06ee2b6827175a26fb9"
+  }
+ }
+}

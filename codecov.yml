@@ -1,0 +1,3 @@
+# Don't track coverage of the tests themselves
+ignore:
+  - "tests"

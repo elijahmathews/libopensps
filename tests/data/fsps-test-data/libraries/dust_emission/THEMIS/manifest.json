@@ -1,0 +1,148 @@
+{
+ "format": "opensps-data",
+ "format_version": 1,
+ "kind": "dust_emission",
+ "name": "THEMIS",
+ "version": 1,
+ "title": "THEMIS dust emission templates (Milky Way grain mix, R_V = 3.1) - coarse test subset of the full library; not for science",
+ "provenance": {
+  "converter": "tools/fsps_data",
+  "created": "2026-10-20T12:35:45Z",
+  "converted_from": "legacy FSPS layout: data/dust/dustem/THEMIS_MW3.1_*.dat",
+  "source": "THEMIS dust emission model (files THEMIS_MW3.1_*)",
+  "cite": [
+   {
+    "bibcode": "2013A&A...558A..62J",
+    "reference": "Jones et al. 2013, A&A, 558, A62",
+    "doi": "10.1051/0004-6361/201321686",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2013A&A...558A..62J"
+   },
+   {
+    "bibcode": "2017A&A...602A..46J",
+    "reference": "Jones et al. 2017, A&A, 602, A46",
+    "doi": "10.1051/0004-6361/201630225",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2017A&A...602A..46J"
+   }
+  ],
+  "cite_also": [
+   {
+    "bibcode": "2009ApJ...699..486C",
+    "reference": "Conroy et al. 2009, ApJ, 699, 486",
+    "doi": "10.1088/0004-637X/699/1/486",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2009ApJ...699..486C"
+   },
+   {
+    "bibcode": "2010ApJ...712..833C",
+    "reference": "Conroy & Gunn 2010, ApJ, 712, 833",
+    "doi": "10.1088/0004-637X/712/2/833",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2010ApJ...712..833C"
+   }
+  ],
+  "bibliography": "data_release.bib (NASA ADS export, shipped with the data release)",
+  "redistribution": "Distributed publicly with FSPS (https://github.com/cconroy20/fsps), from whose data tree this library was converted. No separate license is stated in the FSPS distribution; the terms of the original data apply.",
+  "todo": [
+   "license or redistribution terms of the original data (not stated in the FSPS sources)"
+  ],
+  "subset_of": "dust_emission/THEMIS v1",
+  "subset": {
+   "wavelength": "slice(None, None, 8)"
+  }
+ },
+ "metadata": {},
+ "axes": {
+  "qpah": {
+   "units": "percent (PAH mass fraction)",
+   "values": [
+    0.9090909090909091,
+    2.727272727272727,
+    4.545454545454546,
+    6.363636363636364,
+    7.7272727272727275,
+    9.090909090909092,
+    10.909090909090908,
+    12.727272727272728,
+    14.545454545454545,
+    16.363636363636363,
+    18.181818181818183
+   ]
+  },
+  "umin": {
+   "units": "U_min (MW interstellar radiation field units)",
+   "values": [
+    0.1,
+    0.12,
+    0.15,
+    0.17,
+    0.2,
+    0.25,
+    0.3,
+    0.35,
+    0.4,
+    0.5,
+    0.6,
+    0.7,
+    0.8,
+    1.0,
+    1.2,
+    1.5,
+    1.7,
+    2.0,
+    2.5,
+    3.0,
+    3.5,
+    4.0,
+    5.0,
+    6.0,
+    7.0,
+    8.0,
+    10.0,
+    12.0,
+    15.0,
+    17.0,
+    20.0,
+    25.0,
+    30.0,
+    35.0,
+    40.0,
+    50.0,
+    80.0
+   ]
+  },
+  "component": {
+   "units": "",
+   "labels": [
+    "umin",
+    "umin_to_umax"
+   ]
+  },
+  "wavelength": {
+   "units": "angstrom",
+   "file": "axis_wavelength.bin",
+   "dtype": "<f8",
+   "shape": [
+    72
+   ],
+   "sha256": "cc26a6a85b07988f29279e34d59cf049312693bfb94b12643d88dd15b75ae8b4"
+  }
+ },
+ "arrays": {
+  "spectra": {
+   "file": "spectra.bin",
+   "dtype": "<f4",
+   "shape": [
+    11,
+    37,
+    2,
+    72
+   ],
+   "axes": [
+    "qpah",
+    "umin",
+    "component",
+    "wavelength"
+   ],
+   "units": "Jy cm^2 sr^-1 per H nucleon (L_nu)",
+   "sha256": "c25957cd4355108e362640633bef7eb4de92455016598707bcc96b089788e13e"
+  }
+ }
+}

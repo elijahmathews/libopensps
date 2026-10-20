@@ -1,0 +1,107 @@
+{
+ "format": "opensps-data",
+ "format_version": 1,
+ "kind": "xrb",
+ "name": "xsp",
+ "version": 1,
+ "title": "X-ray binary spectra of simple populations - coarse test subset of the full library; not for science",
+ "provenance": {
+  "converter": "tools/fsps_data",
+  "created": "2026-10-20T12:35:50Z",
+  "converted_from": "legacy FSPS layout: data/spectra/xrb",
+  "source": "X-ray binary spectra of simple populations (11 [Fe/H] x 10 ages)",
+  "notes": "Data from K. Garofali, added to FSPS in 2023.",
+  "cite": [
+   {
+    "bibcode": "2024ApJ...960...13G",
+    "reference": "Garofali et al. 2024, ApJ, 960, 13",
+    "doi": "10.3847/1538-4357/ad0a6a",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2024ApJ...960...13G"
+   }
+  ],
+  "cite_also": [
+   {
+    "bibcode": "2009ApJ...699..486C",
+    "reference": "Conroy et al. 2009, ApJ, 699, 486",
+    "doi": "10.1088/0004-637X/699/1/486",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2009ApJ...699..486C"
+   },
+   {
+    "bibcode": "2010ApJ...712..833C",
+    "reference": "Conroy & Gunn 2010, ApJ, 712, 833",
+    "doi": "10.1088/0004-637X/712/2/833",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2010ApJ...712..833C"
+   }
+  ],
+  "bibliography": "data_release.bib (NASA ADS export, shipped with the data release)",
+  "redistribution": "Distributed publicly with FSPS (https://github.com/cconroy20/fsps), from whose data tree this library was converted. No separate license is stated in the FSPS distribution; the terms of the original data apply.",
+  "todo": [
+   "license or redistribution terms of the original data (not stated in the FSPS sources)"
+  ],
+  "subset_of": "xrb/xsp v1",
+  "subset": {
+   "wavelength": "slice(None, None, 50)"
+  }
+ },
+ "metadata": {},
+ "axes": {
+  "feh": {
+   "units": "[Fe/H]",
+   "values": [
+    -1.3,
+    -1.0,
+    -0.8,
+    -0.7,
+    -0.5,
+    -0.4,
+    -0.3,
+    -0.2,
+    0.0,
+    0.2,
+    0.3
+   ]
+  },
+  "log_age": {
+   "units": "log10(yr)",
+   "values": [
+    6.0,
+    6.301029995663981,
+    6.477121254719663,
+    6.6020599913279625,
+    6.698970004336019,
+    6.903089986991944,
+    7.0,
+    7.100370545117563,
+    7.204119982655925,
+    7.301029995663981
+   ]
+  },
+  "wavelength": {
+   "units": "angstrom",
+   "file": "axis_wavelength.bin",
+   "dtype": "<f8",
+   "shape": [
+    300
+   ],
+   "sha256": "72ae333044af562ac04bb7bd29575bd37da55381c9d6441a6264b54ee11cc20f"
+  }
+ },
+ "arrays": {
+  "flux": {
+   "file": "flux.bin",
+   "dtype": "<f4",
+   "shape": [
+    11,
+    10,
+    300
+   ],
+   "axes": [
+    "feh",
+    "log_age",
+    "wavelength"
+   ],
+   "units": "L_sun Hz^-1 per M_sun (scaled by L_sun on load)",
+   "sha256": "7b06e92cea8ea85885e5055fd594eb12f35667c2d028d625bf48ab9a227e8ddb"
+  }
+ }
+}

@@ -1,0 +1,26 @@
+# Treat FSPS data as not code for language statistics
+*.cont       linguist-detectable=false
+*.dat        linguist-detectable=false
+*.lambda     linguist-detectable=false
+*.lines      linguist-detectable=false
+*.mass       linguist-detectable=false
+*.res        linguist-detectable=false
+*.SED        linguist-detectable=false
+*.spec       linguist-detectable=false
+*.teff       linguist-detectable=false
+*.mags       linguist-detectable=false
+*.out        linguist-detectable=false
+
+# Explicitly mark binary data
+*.spectra.bin binary
+*.bin         binary
+
+# ThreadSanitizer suppression files (ensure LF line endings for Linux CI)
+*.supp text eol=lf linguist-detectable=false
+
+# Explicitly mark various other files
+meson.options linguist-language=Meson linguist-detectable=true
+packaging/fsps.spec linguist-language=Specfile linguist-detectable=true
+
+# Mark documentation
+docs/** linguist-documentation

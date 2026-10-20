@@ -1,0 +1,944 @@
+{
+ "format": "opensps-data",
+ "format_version": 1,
+ "kind": "filters",
+ "name": "allfilters",
+ "version": 1,
+ "title": "Default filter set - coarse test subset of the full library; not for science",
+ "provenance": {
+  "converter": "tools/fsps_data",
+  "created": "2026-10-20T12:35:45Z",
+  "converted_from": "legacy FSPS layout: data/allfilters.dat, FILTER_LIST",
+  "source": "Filter transmission curves of data/allfilters.dat; the source of each curve is in its 'description' (from data/FILTER_LIST)",
+  "version": "159 filters",
+  "notes": "Cite the sources of the individual filter curves (per-filter descriptions).",
+  "cite": [],
+  "cite_also": [
+   {
+    "bibcode": "2009ApJ...699..486C",
+    "reference": "Conroy et al. 2009, ApJ, 699, 486",
+    "doi": "10.1088/0004-637X/699/1/486",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2009ApJ...699..486C"
+   },
+   {
+    "bibcode": "2010ApJ...712..833C",
+    "reference": "Conroy & Gunn 2010, ApJ, 712, 833",
+    "doi": "10.1088/0004-637X/712/2/833",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2010ApJ...712..833C"
+   }
+  ],
+  "bibliography": "data_release.bib (NASA ADS export, shipped with the data release)",
+  "redistribution": "Distributed publicly with FSPS (https://github.com/cconroy20/fsps), from whose data tree this library was converted. No separate license is stated in the FSPS distribution; the terms of the original data apply.",
+  "todo": [
+   "license or redistribution terms of the original data (not stated in the FSPS sources)"
+  ],
+  "subset_of": "filters/allfilters"
+ },
+ "metadata": {
+  "filters": [
+   {
+    "name": "V",
+    "description": "Johnson V (from Bessell 1990 via M. Blanton) - this defines the Vega system"
+   },
+   {
+    "name": "U",
+    "description": "Johnson U (from Bessell 1990 via M. Blanton)"
+   },
+   {
+    "name": "B",
+    "description": "Johnson B (from Bessell 1990 via M. Blanton)"
+   },
+   {
+    "name": "Buser_B",
+    "description": "Buser B2  (from BC03)"
+   },
+   {
+    "name": "Cousins_R",
+    "description": "Cousins R (from Bessell 1990 via M. Blanton)"
+   },
+   {
+    "name": "Cousins_I",
+    "description": "Cousins I (from Bessell 1990 via M. Blanton)"
+   },
+   {
+    "name": "CFHT_B",
+    "description": "CFHT B-band (from Blanton's kcorrect)"
+   },
+   {
+    "name": "CFHT_R",
+    "description": "CFHT R-band (from Blanton's kcorrect)"
+   },
+   {
+    "name": "CFHT_I",
+    "description": "CFHT I-band (from Blanton's kcorrect)"
+   },
+   {
+    "name": "2MASS_J",
+    "description": "2MASS J filter (total response w/atm)"
+   },
+   {
+    "name": "2MASS_H",
+    "description": "2MASS H filter (total response w/atm)"
+   },
+   {
+    "name": "2MASS_Ks",
+    "description": "2MASS Ks filter (total response w/atm)"
+   },
+   {
+    "name": "SDSS_u",
+    "description": "SDSS Camera u Response Function, airmass = 1.3 (June 2001)"
+   },
+   {
+    "name": "SDSS_g",
+    "description": "SDSS Camera g Response Function, airmass = 1.3 (June 2001)"
+   },
+   {
+    "name": "SDSS_r",
+    "description": "SDSS Camera r Response Function, airmass = 1.3 (June 2001)"
+   },
+   {
+    "name": "SDSS_i",
+    "description": "SDSS Camera i Response Function, airmass = 1.3 (June 2001)"
+   },
+   {
+    "name": "SDSS_z",
+    "description": "SDSS Camera z Response Function, airmass = 1.3 (June 2001)"
+   },
+   {
+    "name": "WFPC2_F255W",
+    "description": "HST WFPC2 F255W (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFPC2_F300W",
+    "description": "HST WFPC2 F300W (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFPC2_F336W",
+    "description": "HST WFPC2 F336W (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFPC2_F439W",
+    "description": "HST WFPC2 F439W (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFPC2_F450W",
+    "description": "HST WFPC2 F450W (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFPC2_F555W",
+    "description": "HST WFPC2 F555W (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFPC2_F606W",
+    "description": "HST WFPC2 F606W (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFPC2_F814W",
+    "description": "HST WFPC2 F814W (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFPC2_F850LP",
+    "description": "HST WFPC2 F850LP (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFC_ACS_F435W",
+    "description": "HST ACS F435W  (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFC_ACS_F475W",
+    "description": "HST ACS F475W  (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFC_ACS_F555W",
+    "description": "HST ACS F555W (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFC_ACS_F606W",
+    "description": "HST ACS F606W  (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFC_ACS_F625W",
+    "description": "HST ACS F625W  (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFC_ACS_F775W",
+    "description": "HST ACS F775W  (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFC_ACS_F814W",
+    "description": "HST ACS F814W  (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFC_ACS_F850LP",
+    "description": "HST ACS F850LP  (http://acs.pha.jhu.edu/instrument/photometry/)"
+   },
+   {
+    "name": "WFC3_UVIS_F218W",
+    "description": "HST WFC3 UVIS F218W (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/) Chip #1"
+   },
+   {
+    "name": "WFC3_UVIS_F225W",
+    "description": "HST WFC3 UVIS F225W (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/) Chip #1"
+   },
+   {
+    "name": "WFC3_UVIS_F275W",
+    "description": "HST WFC3 UVIS F275W (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/) Chip #1"
+   },
+   {
+    "name": "WFC3_UVIS_F336W",
+    "description": "HST WFC3 UVIS F336W (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/) Chip #1"
+   },
+   {
+    "name": "WFC3_UVIS_F390W",
+    "description": "HST WFC3 UVIS F390W (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/) Chip #1"
+   },
+   {
+    "name": "WFC3_UVIS_F438W",
+    "description": "HST WFC3 UVIS F438W (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/) Chip #1"
+   },
+   {
+    "name": "WFC3_UVIS_F475W",
+    "description": "HST WFC3 UVIS F475W (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/) Chip #1"
+   },
+   {
+    "name": "WFC3_UVIS_F555W",
+    "description": "HST WFC3 UVIS F555W (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/) Chip #1"
+   },
+   {
+    "name": "WFC3_UVIS_F606W",
+    "description": "HST WFC3 UVIS F606W (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/) Chip #1"
+   },
+   {
+    "name": "WFC3_UVIS_F775W",
+    "description": "HST WFC3 UVIS F775W (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/) Chip #1"
+   },
+   {
+    "name": "WFC3_UVIS_F814W",
+    "description": "HST WFC3 UVIS F814W (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/) Chip #1"
+   },
+   {
+    "name": "WFC3_UVIS_F850LP",
+    "description": "HST WFC3 UVIS F850LP (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/) Chip #1"
+   },
+   {
+    "name": "WFC3_IR_F098M",
+    "description": "HST WFC3 IR F098M (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/)"
+   },
+   {
+    "name": "WFC3_IR_F105W",
+    "description": "HST WFC3 IR F105W (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/)"
+   },
+   {
+    "name": "WFC3_IR_F110W",
+    "description": "HST WFC3 IR F110W (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/)"
+   },
+   {
+    "name": "WFC3_IR_F125W",
+    "description": "HST WFC3 IR F125W (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/)"
+   },
+   {
+    "name": "WFC3_IR_F140W",
+    "description": "HST WFC3 IR F140W (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/)"
+   },
+   {
+    "name": "WFC3_IR_F160W",
+    "description": "HST WFC3 IR F160W (http://www.stsci.edu/~WFC3/UVIS/SystemThroughput/)"
+   },
+   {
+    "name": "IRAC_1",
+    "description": "Spitzer IRAC Channel 1 (3.6um)",
+    "calibration": {
+     "lambda_ref": 35500.0,
+     "exponent": -1.0
+    }
+   },
+   {
+    "name": "IRAC_2",
+    "description": "Spitzer IRAC Channel 2 (4.5um)",
+    "calibration": {
+     "lambda_ref": 44930.0,
+     "exponent": -1.0
+    }
+   },
+   {
+    "name": "IRAC_3",
+    "description": "Spitzer IRAC Channel 3 (5.8um)",
+    "calibration": {
+     "lambda_ref": 57310.0,
+     "exponent": -1.0
+    }
+   },
+   {
+    "name": "IRAC_4",
+    "description": "Spitzer IRAC Channel 4 (8.0um)",
+    "calibration": {
+     "lambda_ref": 78720.0,
+     "exponent": -1.0
+    }
+   },
+   {
+    "name": "ISAAC_Ks",
+    "description": "ISAAC Ks"
+   },
+   {
+    "name": "FORS_V",
+    "description": "FORS V"
+   },
+   {
+    "name": "FORS_R",
+    "description": "FORS R"
+   },
+   {
+    "name": "NICMOS_F110W",
+    "description": "HST NICMOS F110W"
+   },
+   {
+    "name": "NICMOS_F160W",
+    "description": "HST NICMOS F160W"
+   },
+   {
+    "name": "GALEX_FUV",
+    "description": "GALEX FUV"
+   },
+   {
+    "name": "GALEX_NUV",
+    "description": "GALEX NUV"
+   },
+   {
+    "name": "DES_g",
+    "description": "DES g  (from Huan Lin, for DES camera)"
+   },
+   {
+    "name": "DES_r",
+    "description": "DES r  (from Huan Lin, for DES camera)"
+   },
+   {
+    "name": "DES_i",
+    "description": "DES i  (from Huan Lin, for DES camera)"
+   },
+   {
+    "name": "DES_z",
+    "description": "DES z  (from Huan Lin, for DES camera)"
+   },
+   {
+    "name": "DES_Y",
+    "description": "DES Y  (from Huan Lin, for DES camera)"
+   },
+   {
+    "name": "WFCAM_Z",
+    "description": "WFCAM (UKIRT) Z  (from Hewett et al. 2006, via A. Smith)"
+   },
+   {
+    "name": "WFCAM_Y",
+    "description": "WFCAM (UKIRT) Y  (from Hewett et al. 2006, via A. Smith)"
+   },
+   {
+    "name": "WFCAM_J",
+    "description": "WFCAM (UKIRT) J  (from Hewett et al. 2006, via A. Smith)"
+   },
+   {
+    "name": "WFCAM_H",
+    "description": "WFCAM (UKIRT) H  (from Hewett et al. 2006, via A. Smith)"
+   },
+   {
+    "name": "WFCAM_K",
+    "description": "WFCAM (UKIRT) K  (from Hewett et al. 2006, via A. Smith)"
+   },
+   {
+    "name": "Steidel_Un",
+    "description": "Steidel Un (via A. Shapley; see Steidel et al. 2003)"
+   },
+   {
+    "name": "Steidel_G",
+    "description": "Steidel G  (via A. Shapley; see Steidel et al. 2003)"
+   },
+   {
+    "name": "Steidel_Rs",
+    "description": "Steidel Rs (via A. Shapley; see Steidel et al. 2003)"
+   },
+   {
+    "name": "Steidel_I",
+    "description": "Steidel I  (via A. Shapley; see Steidel et al. 2003)"
+   },
+   {
+    "name": "MegaCam_u",
+    "description": "CFHT MegaCam u (via 3DHST filter list; includes atm transmission)"
+   },
+   {
+    "name": "MegaCam_g",
+    "description": "CFHT MegaCam g (via 3DHST filter list; includes atm transmission)"
+   },
+   {
+    "name": "MegaCam_r",
+    "description": "CFHT MegaCam r (via 3DHST filter list; includes atm transmission)"
+   },
+   {
+    "name": "MegaCam_i",
+    "description": "CFHT MegaCam i (via 3DHST filter list; includes atm transmission)"
+   },
+   {
+    "name": "MegaCam_z",
+    "description": "CFHT MegaCam z (via 3DHST filter list; includes atm transmission)"
+   },
+   {
+    "name": "WISE_W1",
+    "description": "WISE W1, 3.4um (http://www.astro.ucla.edu/~wright/WISE/passbands.html)"
+   },
+   {
+    "name": "WISE_W2",
+    "description": "WISE W2, 4.6um (http://www.astro.ucla.edu/~wright/WISE/passbands.html)"
+   },
+   {
+    "name": "WISE_W3",
+    "description": "WISE W3, 12um (http://www.astro.ucla.edu/~wright/WISE/passbands.html)"
+   },
+   {
+    "name": "WISE_W4",
+    "description": "WISE W4, 22um (http://www.astro.ucla.edu/~wright/WISE/passbands.html)"
+   },
+   {
+    "name": "UVOT_W2",
+    "description": "UVOT W2 (from Erik Hoversten, 2011)"
+   },
+   {
+    "name": "UVOT_M2",
+    "description": "UVOT M2 (from Erik Hoversten, 2011)"
+   },
+   {
+    "name": "UVOT_W1",
+    "description": "UVOT W1 (from Erik Hoversten, 2011)"
+   },
+   {
+    "name": "MIPS_24",
+    "description": "Spitzer MIPS 24um",
+    "calibration": {
+     "lambda_ref": 236800.0,
+     "exponent": -2.0
+    }
+   },
+   {
+    "name": "MIPS_70",
+    "description": "Spitzer MIPS 70um",
+    "calibration": {
+     "lambda_ref": 714200.0,
+     "exponent": -2.0
+    }
+   },
+   {
+    "name": "MIPS_160",
+    "description": "Spitzer MIPS 160um",
+    "calibration": {
+     "lambda_ref": 1559000.0,
+     "exponent": -2.0
+    }
+   },
+   {
+    "name": "SCUBA_450WB",
+    "description": "SCUBA 450WB (www.jach.hawaii.edu/JCMT/continuum/background/background.html)"
+   },
+   {
+    "name": "SCUBA_850WB",
+    "description": "SCUBA 850WB (www.jach.hawaii.edu/JCMT/continuum/background/background.html)"
+   },
+   {
+    "name": "PACS_70",
+    "description": "Herschel PACS   70um",
+    "calibration": {
+     "lambda_ref": 700000.0,
+     "exponent": -1.0
+    }
+   },
+   {
+    "name": "PACS_100",
+    "description": "Herschel PACS  100um",
+    "calibration": {
+     "lambda_ref": 1000000.0,
+     "exponent": -1.0
+    }
+   },
+   {
+    "name": "PACS_160",
+    "description": "Herschel PACS  160um",
+    "calibration": {
+     "lambda_ref": 1600000.0,
+     "exponent": -1.0
+    }
+   },
+   {
+    "name": "SPIRE_250",
+    "description": "Herschel SPIRE 250um",
+    "calibration": {
+     "lambda_ref": 2500000.0,
+     "exponent": -1.0
+    }
+   },
+   {
+    "name": "SPIRE_350",
+    "description": "Herschel SPIRE 350um",
+    "calibration": {
+     "lambda_ref": 3500000.0,
+     "exponent": -1.0
+    }
+   },
+   {
+    "name": "SPIRE_500",
+    "description": "Herschel SPIRE 500um",
+    "calibration": {
+     "lambda_ref": 5000000.0,
+     "exponent": -1.0
+    }
+   },
+   {
+    "name": "IRAS_12",
+    "description": "IRAS 12um",
+    "calibration": {
+     "lambda_ref": 120000.0,
+     "exponent": -1.0
+    }
+   },
+   {
+    "name": "IRAS_25",
+    "description": "IRAS 25um",
+    "calibration": {
+     "lambda_ref": 250000.0,
+     "exponent": -1.0
+    }
+   },
+   {
+    "name": "IRAS_60",
+    "description": "IRAS 60um",
+    "calibration": {
+     "lambda_ref": 600000.0,
+     "exponent": -1.0
+    }
+   },
+   {
+    "name": "IRAS_100",
+    "description": "IRAS 100um",
+    "calibration": {
+     "lambda_ref": 1000000.0,
+     "exponent": -1.0
+    }
+   },
+   {
+    "name": "Bessell_L",
+    "description": "Bessell L band  (Bessell & Brett 1988)"
+   },
+   {
+    "name": "Bessell_LP",
+    "description": "Bessell L' band (Bessell & Brett 1988)"
+   },
+   {
+    "name": "Bessell_M",
+    "description": "Bessell M band  (Bessell & Brett 1988)"
+   },
+   {
+    "name": "Stromgren_u",
+    "description": "Stromgren u (Bessell 2011)"
+   },
+   {
+    "name": "Stromgren_v",
+    "description": "Stromgren v (Bessell 2011)"
+   },
+   {
+    "name": "Stromgren_b",
+    "description": "Stromgren b (Bessell 2011)"
+   },
+   {
+    "name": "Stromgren_y",
+    "description": "Stromgren y (Bessell 2011)"
+   },
+   {
+    "name": "I1500",
+    "description": "Idealized 1500A bandpass with 15% bandwidth, FWHM = 225A from M. Dickinson"
+   },
+   {
+    "name": "I2300",
+    "description": "Idealized 2300A bandpass with 15% bandwidth, FWHM = 345A from M. Dickinson"
+   },
+   {
+    "name": "I2800",
+    "description": "Idealized 2800A bandpass with 15% bandwidth, FWHM = 420A from M. Dickinson"
+   },
+   {
+    "name": "JWST_F070W",
+    "description": "JWST F070W (https://jwst-docs.stsci.edu/jwst-near-infrared-camera/nircam-instrumentation/nircam-filters)"
+   },
+   {
+    "name": "JWST_F090W",
+    "description": "JWST F090W (https://jwst-docs.stsci.edu/jwst-near-infrared-camera/nircam-instrumentation/nircam-filters)"
+   },
+   {
+    "name": "JWST_F115W",
+    "description": "JWST F115W (https://jwst-docs.stsci.edu/jwst-near-infrared-camera/nircam-instrumentation/nircam-filters)"
+   },
+   {
+    "name": "JWST_F150W",
+    "description": "JWST F150W (https://jwst-docs.stsci.edu/jwst-near-infrared-camera/nircam-instrumentation/nircam-filters)"
+   },
+   {
+    "name": "JWST_F200W",
+    "description": "JWST F200W (https://jwst-docs.stsci.edu/jwst-near-infrared-camera/nircam-instrumentation/nircam-filters)"
+   },
+   {
+    "name": "JWST_F277W",
+    "description": "JWST F277W (https://jwst-docs.stsci.edu/jwst-near-infrared-camera/nircam-instrumentation/nircam-filters)"
+   },
+   {
+    "name": "JWST_F356W",
+    "description": "JWST F356W (https://jwst-docs.stsci.edu/jwst-near-infrared-camera/nircam-instrumentation/nircam-filters)"
+   },
+   {
+    "name": "JWST_F444W",
+    "description": "JWST F444W (https://jwst-docs.stsci.edu/jwst-near-infrared-camera/nircam-instrumentation/nircam-filters)"
+   },
+   {
+    "name": "NEWFIRM_J1",
+    "description": "NEWFIRM J1 (via 3DHST filter list)"
+   },
+   {
+    "name": "NEWFIRM_J2",
+    "description": "NEWFIRM J2 (via 3DHST filter list)"
+   },
+   {
+    "name": "NEWFIRM_J3",
+    "description": "NEWFIRM J3 (via 3DHST filter list)"
+   },
+   {
+    "name": "NEWFIRM_H1",
+    "description": "NEWFIRM H1 (via 3DHST filter list)"
+   },
+   {
+    "name": "NEWFIRM_H2",
+    "description": "NEWFIRM H2 (via 3DHST filter list)"
+   },
+   {
+    "name": "NEWFIRM_K",
+    "description": "NEWFIRM K  (via 3DHST filter list)"
+   },
+   {
+    "name": "VISTA_Y",
+    "description": "VISTA VIRCAM Y (http://www.astro.caltech.edu/~capak/filters/index.html)"
+   },
+   {
+    "name": "VISTA_J",
+    "description": "VISTA VIRCAM J (http://www.astro.caltech.edu/~capak/filters/index.html)"
+   },
+   {
+    "name": "VISTA_H",
+    "description": "VISTA VIRCAM H (http://www.astro.caltech.edu/~capak/filters/index.html)"
+   },
+   {
+    "name": "VISTA_K",
+    "description": "VISTA VIRCAM K (http://www.astro.caltech.edu/~capak/filters/index.html)"
+   },
+   {
+    "name": "SUPRIMECAM_B",
+    "description": "Subaru Suprime-Cam B (http://www.astro.caltech.edu/~capak/filters/index.html)"
+   },
+   {
+    "name": "SUPRIMECAM_g",
+    "description": "Subaru Suprime-Cam g+ (http://www.astro.caltech.edu/~capak/filters/index.html)"
+   },
+   {
+    "name": "SUPRIMECAM_V",
+    "description": "Subaru Suprime-Cam V (http://www.astro.caltech.edu/~capak/filters/index.html)"
+   },
+   {
+    "name": "SUPRIMECAM_r",
+    "description": "Subaru Suprime-Cam r+ (http://www.astro.caltech.edu/~capak/filters/index.html)"
+   },
+   {
+    "name": "SUPRIMECAM_i",
+    "description": "Subaru Suprime-Cam i+ (http://www.astro.caltech.edu/~capak/filters/index.html)"
+   },
+   {
+    "name": "SUPRIMECAM_z",
+    "description": "Subaru Suprime-Cam z+ (http://www.astro.caltech.edu/~capak/filters/index.html)"
+   },
+   {
+    "name": "PS1_g",
+    "description": "Pan-STARRS1 g (http://iopscience.iop.org/0004-637X/750/2/99/suppdata/apj425122t3_mrt.txt)"
+   },
+   {
+    "name": "PS1_r",
+    "description": "Pan-STARRS1 r (http://iopscience.iop.org/0004-637X/750/2/99/suppdata/apj425122t3_mrt.txt)"
+   },
+   {
+    "name": "PS1_i",
+    "description": "Pan-STARRS1 i (http://iopscience.iop.org/0004-637X/750/2/99/suppdata/apj425122t3_mrt.txt)"
+   },
+   {
+    "name": "PS1_z",
+    "description": "Pan-STARRS1 z (http://iopscience.iop.org/0004-637X/750/2/99/suppdata/apj425122t3_mrt.txt)"
+   },
+   {
+    "name": "PS1_y",
+    "description": "Pan-STARRS1 y (http://iopscience.iop.org/0004-637X/750/2/99/suppdata/apj425122t3_mrt.txt)"
+   },
+   {
+    "name": "LSST_u",
+    "description": "LSST u (version 1.5 https://github.com/lsst/throughputs/tree/master/baseline via SVO)"
+   },
+   {
+    "name": "LSST_g",
+    "description": "LSST g (version 1.5 https://github.com/lsst/throughputs/tree/master/baseline via SVO)"
+   },
+   {
+    "name": "LSST_r",
+    "description": "LSST r (version 1.5 https://github.com/lsst/throughputs/tree/master/baseline via SVO)"
+   },
+   {
+    "name": "LSST_i",
+    "description": "LSST i (version 1.5 https://github.com/lsst/throughputs/tree/master/baseline via SVO)"
+   },
+   {
+    "name": "LSST_z",
+    "description": "LSST z (version 1.5 https://github.com/lsst/throughputs/tree/master/baseline via SVO)"
+   },
+   {
+    "name": "LSST_y",
+    "description": "LSST y (version 1.5 https://github.com/lsst/throughputs/tree/master/baseline via SVO)"
+   },
+   {
+    "name": "Euclid_VIS",
+    "description": "Euclid VIS (Master Euclid mission database via SVO)"
+   },
+   {
+    "name": "Euclid_Y",
+    "description": "Euclid Y (Master Euclid mission database via SVO)"
+   },
+   {
+    "name": "Euclid_J",
+    "description": "Euclid J (Master Euclid mission database via SVO)"
+   },
+   {
+    "name": "Euclid_H",
+    "description": "Euclid H (Master Euclid mission database via SVO)"
+   },
+   {
+    "name": "Roman_F062",
+    "description": "Roman F062 (https://roman.gsfc.nasa.gov/science/Roman_Reference_Information.html via SVO)"
+   },
+   {
+    "name": "Roman_F087",
+    "description": "Roman F087 (https://roman.gsfc.nasa.gov/science/Roman_Reference_Information.html via SVO)"
+   },
+   {
+    "name": "Roman_F106",
+    "description": "Roman F106 (https://roman.gsfc.nasa.gov/science/Roman_Reference_Information.html via SVO)"
+   },
+   {
+    "name": "Roman_F129",
+    "description": "Roman F129 (https://roman.gsfc.nasa.gov/science/Roman_Reference_Information.html via SVO)"
+   },
+   {
+    "name": "Roman_F158",
+    "description": "Roman F158 (https://roman.gsfc.nasa.gov/science/Roman_Reference_Information.html via SVO)"
+   },
+   {
+    "name": "Roman_F184",
+    "description": "Roman F184 (https://roman.gsfc.nasa.gov/science/Roman_Reference_Information.html via SVO)"
+   }
+  ],
+  "calibration_note": "Each curve is normalized to integral T/lambda dlambda = 1 on the model grid; a filter with 'calibration' is then divided by integral (lambda/lambda_ref)^exponent T/lambda dlambda, the convention of IR instruments calibrated on a nu f_nu = const (exponent -1) or beta = 2 blackbody (exponent -2) source."
+ },
+ "axes": {
+  "filter": {
+   "units": "",
+   "labels": [
+    "V",
+    "U",
+    "B",
+    "Buser_B",
+    "Cousins_R",
+    "Cousins_I",
+    "CFHT_B",
+    "CFHT_R",
+    "CFHT_I",
+    "2MASS_J",
+    "2MASS_H",
+    "2MASS_Ks",
+    "SDSS_u",
+    "SDSS_g",
+    "SDSS_r",
+    "SDSS_i",
+    "SDSS_z",
+    "WFPC2_F255W",
+    "WFPC2_F300W",
+    "WFPC2_F336W",
+    "WFPC2_F439W",
+    "WFPC2_F450W",
+    "WFPC2_F555W",
+    "WFPC2_F606W",
+    "WFPC2_F814W",
+    "WFPC2_F850LP",
+    "WFC_ACS_F435W",
+    "WFC_ACS_F475W",
+    "WFC_ACS_F555W",
+    "WFC_ACS_F606W",
+    "WFC_ACS_F625W",
+    "WFC_ACS_F775W",
+    "WFC_ACS_F814W",
+    "WFC_ACS_F850LP",
+    "WFC3_UVIS_F218W",
+    "WFC3_UVIS_F225W",
+    "WFC3_UVIS_F275W",
+    "WFC3_UVIS_F336W",
+    "WFC3_UVIS_F390W",
+    "WFC3_UVIS_F438W",
+    "WFC3_UVIS_F475W",
+    "WFC3_UVIS_F555W",
+    "WFC3_UVIS_F606W",
+    "WFC3_UVIS_F775W",
+    "WFC3_UVIS_F814W",
+    "WFC3_UVIS_F850LP",
+    "WFC3_IR_F098M",
+    "WFC3_IR_F105W",
+    "WFC3_IR_F110W",
+    "WFC3_IR_F125W",
+    "WFC3_IR_F140W",
+    "WFC3_IR_F160W",
+    "IRAC_1",
+    "IRAC_2",
+    "IRAC_3",
+    "IRAC_4",
+    "ISAAC_Ks",
+    "FORS_V",
+    "FORS_R",
+    "NICMOS_F110W",
+    "NICMOS_F160W",
+    "GALEX_FUV",
+    "GALEX_NUV",
+    "DES_g",
+    "DES_r",
+    "DES_i",
+    "DES_z",
+    "DES_Y",
+    "WFCAM_Z",
+    "WFCAM_Y",
+    "WFCAM_J",
+    "WFCAM_H",
+    "WFCAM_K",
+    "Steidel_Un",
+    "Steidel_G",
+    "Steidel_Rs",
+    "Steidel_I",
+    "MegaCam_u",
+    "MegaCam_g",
+    "MegaCam_r",
+    "MegaCam_i",
+    "MegaCam_z",
+    "WISE_W1",
+    "WISE_W2",
+    "WISE_W3",
+    "WISE_W4",
+    "UVOT_W2",
+    "UVOT_M2",
+    "UVOT_W1",
+    "MIPS_24",
+    "MIPS_70",
+    "MIPS_160",
+    "SCUBA_450WB",
+    "SCUBA_850WB",
+    "PACS_70",
+    "PACS_100",
+    "PACS_160",
+    "SPIRE_250",
+    "SPIRE_350",
+    "SPIRE_500",
+    "IRAS_12",
+    "IRAS_25",
+    "IRAS_60",
+    "IRAS_100",
+    "Bessell_L",
+    "Bessell_LP",
+    "Bessell_M",
+    "Stromgren_u",
+    "Stromgren_v",
+    "Stromgren_b",
+    "Stromgren_y",
+    "I1500",
+    "I2300",
+    "I2800",
+    "JWST_F070W",
+    "JWST_F090W",
+    "JWST_F115W",
+    "JWST_F150W",
+    "JWST_F200W",
+    "JWST_F277W",
+    "JWST_F356W",
+    "JWST_F444W",
+    "NEWFIRM_J1",
+    "NEWFIRM_J2",
+    "NEWFIRM_J3",
+    "NEWFIRM_H1",
+    "NEWFIRM_H2",
+    "NEWFIRM_K",
+    "VISTA_Y",
+    "VISTA_J",
+    "VISTA_H",
+    "VISTA_K",
+    "SUPRIMECAM_B",
+    "SUPRIMECAM_g",
+    "SUPRIMECAM_V",
+    "SUPRIMECAM_r",
+    "SUPRIMECAM_i",
+    "SUPRIMECAM_z",
+    "PS1_g",
+    "PS1_r",
+    "PS1_i",
+    "PS1_z",
+    "PS1_y",
+    "LSST_u",
+    "LSST_g",
+    "LSST_r",
+    "LSST_i",
+    "LSST_z",
+    "LSST_y",
+    "Euclid_VIS",
+    "Euclid_Y",
+    "Euclid_J",
+    "Euclid_H",
+    "Roman_F062",
+    "Roman_F087",
+    "Roman_F106",
+    "Roman_F129",
+    "Roman_F158",
+    "Roman_F184"
+   ]
+  }
+ },
+ "arrays": {
+  "npoints": {
+   "file": "npoints.bin",
+   "dtype": "<i4",
+   "shape": [
+    159
+   ],
+   "axes": [
+    "filter"
+   ],
+   "units": "count",
+   "sha256": "2ef66ddde3fdc922629d3fed5c7c7150a5b05d56ce289ca0256578a2db7965ed"
+  },
+  "wavelength": {
+   "file": "wavelength.bin",
+   "dtype": "<f8",
+   "shape": [
+    6124
+   ],
+   "units": "angstrom",
+   "sha256": "078dd2528f31f4cde9a8db9d40306bcb299b4879cf2384fe5ecd37dab3bebfb3"
+  },
+  "transmission": {
+   "file": "transmission.bin",
+   "dtype": "<f8",
+   "shape": [
+    6124
+   ],
+   "units": "relative throughput",
+   "sha256": "b6e7f60af14aad849b57b0b86d49229dfdd7afc86e93fb8a0ecfec530014f083"
+  }
+ }
+}

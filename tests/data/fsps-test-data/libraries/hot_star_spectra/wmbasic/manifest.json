@@ -1,0 +1,120 @@
+{
+ "format": "opensps-data",
+ "format_version": 1,
+ "kind": "hot_star_spectra",
+ "name": "wmbasic",
+ "version": 1,
+ "title": "WMBasic O-star spectra - coarse test subset of the full library; not for science",
+ "provenance": {
+  "converter": "tools/fsps_data",
+  "created": "2026-10-20T12:35:47Z",
+  "converted_from": "legacy FSPS layout: data/spectra/Hot_spectra/WMBASIC_*",
+  "source": "WMBasic O-star spectral grid",
+  "notes": "Grid courtesy of J. J. Eldridge, M. Ng and G. Taylor (as distributed with FSPS); WM-basic code: see cite_code.",
+  "cite": [],
+  "cite_code": [
+   {
+    "bibcode": "2001A&A...375..161P",
+    "reference": "Pauldrach et al. 2001, A&A, 375, 161",
+    "doi": "10.1051/0004-6361:20010805",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2001A&A...375..161P"
+   }
+  ],
+  "cite_also": [
+   {
+    "bibcode": "2009ApJ...699..486C",
+    "reference": "Conroy et al. 2009, ApJ, 699, 486",
+    "doi": "10.1088/0004-637X/699/1/486",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2009ApJ...699..486C"
+   },
+   {
+    "bibcode": "2010ApJ...712..833C",
+    "reference": "Conroy & Gunn 2010, ApJ, 712, 833",
+    "doi": "10.1088/0004-637X/712/2/833",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2010ApJ...712..833C"
+   }
+  ],
+  "bibliography": "data_release.bib (NASA ADS export, shipped with the data release)",
+  "redistribution": "Distributed publicly with FSPS (https://github.com/cconroy20/fsps), from whose data tree this library was converted. No separate license is stated in the FSPS distribution; the terms of the original data apply.",
+  "todo": [
+   "license or redistribution terms of the original data (not stated in the FSPS sources)"
+  ],
+  "subset_of": "hot_star_spectra/wmbasic v1",
+  "subset": {
+   "wavelength": "slice(None, None, 25)"
+  }
+ },
+ "metadata": {},
+ "axes": {
+  "Z": {
+   "units": "mass fraction",
+   "values": [
+    0.0001,
+    0.001,
+    0.002,
+    0.003,
+    0.004,
+    0.006,
+    0.008,
+    0.01,
+    0.014,
+    0.02,
+    0.03,
+    0.04
+   ]
+  },
+  "logg": {
+   "units": "log10(cm s^-2)",
+   "values": [
+    3.5,
+    4.0,
+    4.5
+   ]
+  },
+  "logT": {
+   "units": "log10(K)",
+   "values": [
+    4.39794,
+    4.41996,
+    4.44871,
+    4.48001,
+    4.5092,
+    4.53908,
+    4.57054,
+    4.60206,
+    4.62941,
+    4.65992,
+    4.69897
+   ]
+  },
+  "wavelength": {
+   "units": "angstrom",
+   "file": "axis_wavelength.bin",
+   "dtype": "<f8",
+   "shape": [
+    221
+   ],
+   "sha256": "66a6814e241a77127bc22e0458a783ee8ed5bb9cd439b2bfd05bfc63e54cbace"
+  }
+ },
+ "arrays": {
+  "flux": {
+   "file": "flux.bin",
+   "dtype": "<f4",
+   "shape": [
+    12,
+    3,
+    11,
+    221
+   ],
+   "axes": [
+    "Z",
+    "logg",
+    "logT",
+    "wavelength"
+   ],
+   "units": "L_nu / L_bol (Hz^-1)",
+   "sha256": "6103db4c64e7c30ff8b779eb94a503af06180c50eff1cb7d1e25772122735be3"
+  }
+ }
+}

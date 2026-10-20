@@ -1,0 +1,60 @@
+# ==============================================================================
+# ThreadSanitizer (TSan) Suppression File for FSPS
+#
+# TSan is primarily designed for C/C++ (pthreads/C++11 atomics) and frequently
+# misunderstands the internal thread-safety mechanisms of the GNU Fortran
+# runtime (libgfortran). This file suppresses known false positives so that only
+# actual data races in the FSPS physics loops are surfaced.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Fortran & OpenMP Runtime Libraries
+# TSan frequently flags internal thread-pool management, memory allocation,  and
+# state-tracking within the compiler's own runtime libraries as races.
+# ------------------------------------------------------------------------------
+deadlock:libgfortran
+race:libgfortran
+race:__gfortran
+called_from_lib:libgfortran.so
+mutex:libgfortran
+race:libgomp
+called_from_lib:libgomp.so
+race:libquadmath
+
+# ------------------------------------------------------------------------------
+# 2. Fortran I/O Internals (Logical Units)
+# Fortran standard I/O (read, write, open, close) is inherently thread-safe in 
+# GCC. libgfortran uses internal mutexes to lock logical "units" during I/O to
+# prevent threads from interleaving data. TSan's C-centric logic falsely flags 
+# these internal unit locks as lock-order inversions or data races. 
+# 'insert_unit' and 'close_unit_1' are specific libgfortran I/O functions.
+# ------------------------------------------------------------------------------
+deadlock:insert_unit
+deadlock:close_unit_1
+race:insert_unit
+race:close_unit_1
+
+# ------------------------------------------------------------------------------
+# 3. Sanitizer Internals & Main Program Setup
+# Prevents TSan from tracking the internal operations of other sanitizers  (if
+# linked simultaneously) or flagging the implicit Fortran environment 
+# initialization injected into the main program entry point.
+# ------------------------------------------------------------------------------
+race:libasan
+race:libubsan
+mutex:MAIN__
+
+# ------------------------------------------------------------------------------
+# 4. FSPS Protected Initialization & I/O
+# The loading of stellar data is strictly serialized in  fsps_context.f90 using
+# an `!$omp critical` block. Because we guarantee that only one thread can
+# execute this setup at a time, any mutex warnings triggered inside these
+# specific IO/Setup modules are guaranteed to be underlying  libgfortran/HDF5
+# false positives bubbling up.
+# ------------------------------------------------------------------------------
+mutex:__fsps_io_MOD_load_zlegend_file
+mutex:__fsps_io_MOD_load_filter_data
+mutex:__fsps_io_MOD_load_isochrone_data
+mutex:__fsps_io_MOD_load_
+mutex:__fsps_io_MOD_read_
+mutex:__fsps_initialization_MOD_

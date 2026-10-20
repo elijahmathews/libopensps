@@ -1,0 +1,157 @@
+# Nightly (and on demand): the long-running and opt-in checks kept out of per-change CI.
+#   - Stress tests: every phase, more iterations, under ASan/UBSan, TSan and nvfortran OpenACC.
+#   - Newest toolchains: catch compiler regressions before they reach the pinned ones in ci.yml.
+#   - GPU: OpenACC on an NVIDIA GPU, on a self-hosted runner (enabled by the repository variable
+#     GPU_RUNNER = true; GitHub-hosted runners have no GPU).
+# Scheduled runs use the default branch. See doc/CI.md.
+
+name: Nightly
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    name: Stress / ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: AddressSanitizer + UBSan
+            install: apt
+            setup_args: -Db_sanitize=address,undefined
+            stress_env: FSPS_STRESS_ITERS=10
+            regression: true
+          - name: ThreadSanitizer
+            install: apt
+            setup_args: -Db_sanitize=thread -Denable_openmp=true
+            stress_env: FSPS_STRESS_ITERS=8
+            tsan: true
+          - name: nvfortran OpenACC multicore
+            install: nvidia-hpc
+            setup_args: -Daccel=multicore
+            stress_env: FSPS_STRESS_ITERS=20
+    env:
+      OMP_NUM_THREADS: 4
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/data/spectra/C3K/
+      - name: Install gfortran
+        if: matrix.install == 'apt'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gfortran
+          echo "FC=gfortran" >> "$GITHUB_ENV"
+      - name: Install nvfortran
+        if: matrix.install == 'nvidia-hpc'
+        uses: fortran-lang/setup-fortran@v1
+        with:
+          compiler: nvidia-hpc
+          version: '26.1'
+      - run: pipx install meson && pipx install ninja
+      - run: meson setup build -Denable_stress_testing=true ${{ matrix.setup_args }}
+      - run: meson compile -C build
+      # Real-data code paths under ASan (too slow, ~6 min, for per-change CI)
+      - name: Unit and regression tests
+        if: matrix.regression
+        run: meson test -C build --suite unit --suite regression --print-errorlogs --timeout-multiplier 3
+      - name: Stress tests
+        run: |
+          if [ "${{ matrix.tsan }}" = "true" ]; then
+            export TSAN_OPTIONS="suppressions=$PWD/tests/tsan.supp halt_on_error=1 second_deadlock_stack=1"
+          fi
+          lscpu | grep -m1 'Model name' || true
+          # nvfortran's math runtime picks a CPU-specific library at startup and occasionally
+          # aborts there ("Error during math dispatch processing") on some hosted-runner CPUs;
+          # retry once in that case only, so real failures still fail the job
+          if ! env ${{ matrix.stress_env }} meson test -C build --suite stress --print-errorlogs --timeout-multiplier 3; then
+            if grep -q 'Error during math dispatch' build/meson-logs/testlog.txt; then
+              echo "::warning::nvfortran math dispatch abort; retrying once"
+              env ${{ matrix.stress_env }} meson test -C build --suite stress --print-errorlogs --timeout-multiplier 3
+            else
+              exit 1
+            fi
+          fi
+      - if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-stress-${{ strategy.job-index }}
+          path: build/meson-logs/
+          retention-days: 14
+
+  newest-toolchains:
+    name: Newest / ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gfortran 15 / Linux
+            os: ubuntu-24.04
+            toolchain: gcc
+            version: 15
+          - name: gfortran 15 / macOS arm64
+            os: macos-15
+            toolchain: gcc
+            version: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/data/spectra/C3K/
+      - uses: fortran-lang/setup-fortran@v1
+        with:
+          compiler: ${{ matrix.toolchain }}
+          version: ${{ matrix.version }}
+      - run: pipx install meson && pipx install ninja
+      - run: meson setup build --buildtype=release
+      - run: meson compile -C build
+      - run: meson test -C build --suite unit --suite regression --print-errorlogs
+      - if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-newest-${{ strategy.job-index }}
+          path: build/meson-logs/
+          retention-days: 14
+
+  # Self-hosted NVIDIA GPU runner with the NVIDIA HPC SDK installed (labels: self-hosted, linux,
+  # gpu-nvidia). Set the repository variable GPU_RUNNER to 'true' once such a runner is registered.
+  gpu-openacc:
+    name: GPU / nvfortran OpenACC
+    if: vars.GPU_RUNNER == 'true'
+    runs-on: [self-hosted, linux, gpu-nvidia]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - name: Toolchain and device
+        run: |
+          nvfortran --version
+          nvidia-smi
+      - run: meson setup build --buildtype=release -Daccel=gpu
+        env:
+          FC: nvfortran
+          CC: nvc
+      - run: meson compile -C build
+      - run: meson test -C build --suite unit --suite regression --print-errorlogs
+      - if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-gpu
+          path: build/meson-logs/
+          retention-days: 14

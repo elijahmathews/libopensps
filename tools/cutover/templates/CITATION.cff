@@ -1,0 +1,64 @@
+# Citation metadata of libopensps (https://citation-file-format.github.io). The FSPS papers are
+# listed under references: please cite them in any work that uses this library.
+cff-version: 1.2.0
+message: >-
+  If you use libopensps, please cite the FSPS papers listed under references
+  (Conroy, Gunn & White 2009; Conroy & Gunn 2010), as well as this software.
+type: software
+title: "libopensps: a modernized FSPS stellar population synthesis library"
+abstract: >-
+  libopensps is a library for stellar population synthesis derived from FSPS
+  (Flexible Stellar Population Synthesis) by Charlie Conroy and contributors:
+  a thread-safe Fortran 2008 code with a stable C API, batched composite
+  populations for fitting, FP32 kernels and GPU offload.
+authors:
+  - family-names: Mathews
+    given-names: Elijah
+    # orcid: "https://orcid.org/TODO"
+repository-code: "https://github.com/elijahmathews/libopensps"
+license: MIT
+keywords:
+  - stellar population synthesis
+  - galaxies
+  - spectral energy distributions
+  - astronomy
+# TODO at the first release:
+# version: "TODO"
+# date-released: "TODO"
+# doi: "TODO (archive DOI of the release, e.g. Zenodo)"
+references:
+  - type: article
+    title: >-
+      The Propagation of Uncertainties in Stellar Population Synthesis Modeling.
+      I. The Relevance of Uncertain Aspects of Stellar Evolution and the Initial
+      Mass Function to the Derived Physical Properties of Galaxies
+    authors:
+      - family-names: Conroy
+        given-names: Charlie
+      - family-names: Gunn
+        given-names: James E.
+      - family-names: White
+        given-names: Martin
+    journal: The Astrophysical Journal
+    volume: 699
+    issue: 1
+    start: 486
+    end: 506
+    year: 2009
+    doi: 10.1088/0004-637X/699/1/486
+  - type: article
+    title: >-
+      The Propagation of Uncertainties in Stellar Population Synthesis Modeling.
+      III. Model Calibration, Comparison, and Evaluation
+    authors:
+      - family-names: Conroy
+        given-names: Charlie
+      - family-names: Gunn
+        given-names: James E.
+    journal: The Astrophysical Journal
+    volume: 712
+    issue: 2
+    start: 833
+    end: 857
+    year: 2010
+    doi: 10.1088/0004-637X/712/2/833

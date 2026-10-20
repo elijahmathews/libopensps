@@ -1,0 +1,53 @@
+{
+ "comment": "Regression references this tree expects (libraries references/sps and references/param of the data release); written by tools/fsps_data/make_references.py",
+ "references/sps": {
+  "version": 1,
+  "files": {
+   "sps_ref_MILES-1_MIST-1.bin": "437d6368e0c22192e8eb53008fc659e44fd1016d2f8cc573683e05d3b34e6d6c",
+   "sps_ref_MILES-0_MIST-0_BASEL-1_PADOVA-1.bin": "6ed0d532295d11d4bf3b8b13a1b1d4676f2bde4b93c4b79c04c72bc196c1ebd5",
+   "sps_ref_MILES-1_MIST-1_THEMIS-1_DL07-0.bin": "c51313b3ed86f2e5e8a36eb13d96add71cb34bb118580461386618ae3fb269b2",
+   "sps_ref_MILES-0_C3K-1_MIST-1.bin": "3ddb30d8e4617373a3fb77ddab034035427b42d46c9c4593b9f3454798ab7d04",
+   "sps_ref_MIST-0_BPASS-1.bin": "4aabd4c0948d63c63d6c16e11d944b1deae0b4bcd944beb42d84d333acc1268c"
+  }
+ },
+ "references/param": {
+  "version": 1,
+  "files": {
+   "csp_agn.opsf": "48e6d40f157430e2482b6ca2ecbfc00406f795f56fb778d6de3e25204ced9c43",
+   "csp_delayed.opsf": "f05963bd434f3220ceae92253a052ba6edeaf9bae3a95b58e03c6d37678f60e0",
+   "csp_delayed_trunc_burst.opsf": "ccb67d42591ef6d71b2de18a694286b4f9760f4dde2fec10b7a1396bf99c950d",
+   "csp_dust0.opsf": "19b70c82d815605280d793c2bd626c7d24f23ffef682a9affb2dddeb1f428648",
+   "csp_dust0_full.opsf": "df3eee5a5492082cd9899861e696d08f22f88269212f00dcbf9807d92ee45545",
+   "csp_dust1.opsf": "b6ca69b1c028ddb6363ad459c8fbbc51cfa173e397ef82fcf35f0295e472b5e1",
+   "csp_dust2.opsf": "30eb18a6d30a30f7632cc9b4f335a09bfa7e561e8d0d80900565a1604eda197d",
+   "csp_dust3.opsf": "54d5d786eb5fc55f868c875c507c34d1355af37f037124d64137dd14eecfaec6",
+   "csp_dust4.opsf": "d4eb75bd182e69b143a87ee4d867858b6003c024e15c31635f15dd45da619d09",
+   "csp_dust5.opsf": "0c27c180c2302d862ae487c22eb6045abf0eef268f8395c2d3622b5c3f0933ca",
+   "csp_dust6.opsf": "2dd902f45ee0a941b144c514fb6f3e98cdcbb570b8a9a01d30d0ba143e32582b",
+   "csp_duste_off.opsf": "488c0e858190210266d8b5c29940c48c8c02cdf7d26a68930115d982afade904",
+   "csp_duste_qpah.opsf": "6fd776f83b6bac0283b19083e30df4dce62234ca79c69e48daa2ce1999f9a032",
+   "csp_igm.opsf": "a27521f8128bd3e70baa158081efaa4e4c1d7d19a737a6a816fc304b468308df",
+   "csp_nebular.opsf": "7d7e23f352033a05267c527d753247c1a1ac806f6990faa821f24bad524eec78",
+   "csp_sfh5.opsf": "a218fbf12feac30a22a34f94d02f505e3332c59511107148d25730b06caf1f27",
+   "csp_sfstart.opsf": "81dfc7510f2a2ce90214536474545bca5392fc450464d742e59d2376ce2948f3",
+   "csp_smooth.opsf": "696f97e856375b828ae87a6e5d3280a3eeb29c784edc803d0e1f74666f90d60a",
+   "csp_ssp_offgrid.opsf": "26045d7eb8295534874a377537c5a4a9af47b3a0e23d742a08e7dbb6d7883cbf",
+   "csp_tau.opsf": "fd2fe089a87a3a5ef37162fb9745ba66dc4a663154b5eff7d0eaaff7a0f24f9f",
+   "csp_tau_allages.opsf": "96eaada7d2521c5099b5be25a93600fe8e4a196bc229a784d688b371e19ac0ec",
+   "lib_bpass.opsf": "c9b8820313594697e8a39ad7cca80d6c5bba0ef362c885670379452871fedbd8",
+   "lib_mist_c3k.opsf": "002cdeffdbfa84a95bbcdc28e4a0f1da7101d8890f623d8f64788d6fe7aea6c1",
+   "lib_padova_basel.opsf": "11bebb4b81bbde5f6eeb2949382c4eb101188fe90309915b056c93343773d17a",
+   "lib_padova_basel_offgrid.opsf": "9a6774db6e8f7005614f1d8b818a5e53e73e76924b596109378fad0fff932377",
+   "lib_themis.opsf": "c432ecd65a58e99adde741884cec0ab7feec4af7b7a6ddf25b8c83a754944a70",
+   "ssp_agbdust2.opsf": "d0a5112914ffe8f64dbacc61087b3927b92e8cb1829271ef31201c6d67562bd3",
+   "ssp_chabrier.opsf": "ec356d308a669855f198e747de3105ac1d05a3aec90fd8f5b0cbf33841cef7c8",
+   "ssp_dave.opsf": "28c17f93a2ca21b694212dd6c68a9b5e583adbe5935b9b2aa542c98e22226578",
+   "ssp_kroupa.opsf": "0fc73cc911a2502ba88bfe436d60ca2883232e31e328d6933bd369f2759868b4",
+   "ssp_kroupa_zlow.opsf": "7aa9cc5f261f8bda242bd9883edfa5de3e085774a62135a180c13924397370c7",
+   "ssp_mods.opsf": "1ba2f4930e8bcd9a41a4c95cc4dddd622b07a44f4dc66888bee9d74ff720c7ec",
+   "ssp_plain.opsf": "2213e02e5d023fb18e4eed638995a69297fab3e416c498825346f912bffedf94",
+   "ssp_salpeter.opsf": "c2a7f8d2c02e45a5dc12e2b68a1a8dc4b08684c8c5b2d082854a3a1503723f10",
+   "ssp_vandokkum.opsf": "02f1eb8a3b703b91a68ebd95af3bede3f7f02c277bd24755d04aaab50f7944ee"
+  }
+ }
+}

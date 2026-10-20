@@ -1,0 +1,34 @@
+# Authors
+
+libopensps is derived from FSPS, Flexible Stellar Population Synthesis, the work of Charlie
+Conroy and contributors (https://github.com/cconroy20/fsps). The models are described in
+Conroy, Gunn & White (2009, ApJ, 699, 486) and Conroy & Gunn (2010, ApJ, 712, 833); please cite
+both papers in work that uses this library (CITATION.cff).
+
+The code was imported from the modernized fork elijahmathews/fsps at commit
+675e8ef98dda173c81fe720e8121c0aa7038e5b8
+without its history. The full history, which records who wrote what, stays available in that
+repository (tag fsps-final). The lists below are derived from it, ordered by number of commits.
+
+## FSPS (commit history up to 82a873508d50, where the fork began)
+
+- Charlie Conroy
+- Benjamin Johnson
+- Nell Byler
+- Chris Usher
+- Minjung Park
+- Phil Rosenfield
+- Ben Kimock
+- Dan Foreman-Mackey
+- Joel Leja
+- Jonathan Sick
+- Lizhou Sha
+
+Contributors from the Google Code era of FSPS, known only by these handles: tomorrowsville, avillaum.
+
+## The modernized fork (elijahmathews/fsps)
+
+- Elijah Mathews
+
+Much of the fork's code was written with AI coding agents (Claude, by Anthropic) under the
+direction and review of the fork's maintainer; the commit messages record them as co-authors.
