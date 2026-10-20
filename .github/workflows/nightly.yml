@@ -41,7 +41,7 @@ jobs:
     env:
       OMP_NUM_THREADS: 4
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           filter: blob:none
           sparse-checkout-cone-mode: false
@@ -89,7 +89,7 @@ jobs:
             fi
           fi
       - if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-stress-${{ strategy.job-index }}
           path: build/meson-logs/
@@ -112,7 +112,7 @@ jobs:
             toolchain: gcc
             version: 15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           filter: blob:none
           sparse-checkout-cone-mode: false
@@ -128,7 +128,7 @@ jobs:
       - run: meson compile -C build
       - run: meson test -C build --suite unit --suite regression --print-errorlogs
       - if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-newest-${{ strategy.job-index }}
           path: build/meson-logs/
@@ -142,7 +142,7 @@ jobs:
     runs-on: [self-hosted, linux, gpu-nvidia]
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Toolchain and device
         run: |
           nvfortran --version
@@ -154,7 +154,7 @@ jobs:
       - run: meson compile -C build
       - run: meson test -C build --suite unit --suite regression --print-errorlogs
       - if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-gpu
           path: build/meson-logs/

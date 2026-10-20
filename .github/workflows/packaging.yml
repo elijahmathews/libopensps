@@ -36,7 +36,7 @@ jobs:
     container:
       image: fedora:latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install build dependencies
         run: |
           dnf install -y rpm-build rpmdevtools
@@ -52,7 +52,7 @@ jobs:
         run: |
           dnf install -y ~/rpmbuild/RPMS/x86_64/*.rpm
           ldconfig -p | grep libopensps
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: fedora-rpms
           path: |
@@ -65,7 +65,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install build dependencies
         run: |
           sudo apt-get update -q
@@ -81,7 +81,7 @@ jobs:
           ldconfig -p | grep libopensps
           mkdir -p dist
           mv ../libopensps0_*.deb ../libopensps-dev_*.deb ../opensps_*.buildinfo ../opensps_*.changes dist/
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: ubuntu-debs
           path: dist/
