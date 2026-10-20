@@ -9,6 +9,11 @@ export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 override_dh_auto_configure:
 	dh_auto_configure -- -Dcpu_baseline=x86-64-v3
 
+# The package is built without the data (a separate release, doc/DATA_FORMAT.md): run the unit
+# suite, which needs neither data nor network
+override_dh_auto_test:
+	dh_auto_test -- --suite unit
+
 override_dh_auto_install:
 	dh_auto_install
 	rm -rf debian/tmp/usr/share/fsps

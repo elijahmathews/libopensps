@@ -19,6 +19,7 @@ module fsps_environment
     private
 
     public :: fsps_resolve_paths
+    public :: fsps_find_data_root
     public :: fsps_cleanup
     public :: fsps_print_env_info
 
@@ -51,93 +52,16 @@ contains
         type(fsps_context_t), intent(inout) :: ctx
 
         character(len=4096) :: env_buffer
-        character(len=4096) :: candidate
-        logical :: found
         integer :: stat_len, stat_status
 
         ctx%data_home = ''
         ctx%output_home = ''
-        found = .false.
 
         ! ------------------------------------------------------------------------
         ! 1. SEARCH FOR DATA DIRECTORY
         ! ------------------------------------------------------------------------
 
-        call get_environment_variable("OPENSPS_DATA_HOME", value=env_buffer, length=stat_len, status=stat_status)
-        if (stat_status == 0 .and. stat_len > 0) then
-            candidate = trim(env_buffer)
-            if (check_data_exists(candidate)) then
-                ctx%sps_home = trim(candidate)
-                found = .true.
-            end if
-        end if
-
-        ! Then the legacy variable SPS_HOME
-        if (.not. found) call get_environment_variable("SPS_HOME", value=env_buffer, length=stat_len, &
-                                                       status=stat_status)
-        if (.not. found .and. stat_status == 0 .and. stat_len > 0) then
-            candidate = trim(env_buffer)
-            if (check_data_exists(candidate)) then
-                ctx%sps_home = trim(candidate)
-                found = .true.
-            end if
-        end if
-
-        ! Check FSPS_DATA_HOME (Modern Variable)
-        if (.not. found) then
-            call get_environment_variable("FSPS_DATA_HOME", value=env_buffer, length=stat_len, status=stat_status)
-            if (stat_status == 0 .and. stat_len > 0) then
-                candidate = trim(env_buffer)
-                if (check_data_exists(candidate)) then
-                    ctx%sps_home = trim(candidate)
-                    found = .true.
-                end if
-            end if
-        end if
-
-        ! Check XDG_DATA_HOME
-        if (.not. found) then
-            call get_environment_variable("XDG_DATA_HOME", value=env_buffer, length=stat_len, status=stat_status)
-            if (stat_status == 0 .and. stat_len > 0) then
-                candidate = trim(env_buffer)//'/fsps'
-                if (check_data_exists(candidate)) then
-                    ctx%sps_home = trim(candidate)
-                    found = .true.
-                end if
-            end if
-        end if
-
-        ! Check HOME standard location
-        if (.not. found) then
-            call get_environment_variable("HOME", value=env_buffer, length=stat_len, status=stat_status)
-            if (stat_status == 0 .and. stat_len > 0) then
-                candidate = trim(env_buffer)//'/.local/share/fsps'
-                if (check_data_exists(candidate)) then
-                    ctx%sps_home = trim(candidate)
-                    found = .true.
-                end if
-            end if
-        end if
-
-        ! Check System Paths
-        if (.not. found) then
-            candidate = '/usr/share/fsps'
-            if (check_data_exists(candidate)) then
-                ctx%sps_home = trim(candidate)
-                found = .true.
-            end if
-        end if
-
-        if (.not. found) then
-            candidate = '/usr/local/share/fsps'
-            if (check_data_exists(candidate)) then
-                ctx%sps_home = trim(candidate)
-                found = .true.
-            end if
-        end if
-
-        ! ERROR: Not found
-        if (.not. found) then
+        if (.not. fsps_find_data_root(ctx%sps_home)) then
             write (error_unit, '(A)') '[FSPS_ENV] Error: FSPS data path not found.'
             write (error_unit, '(A)') '           Please set OPENSPS_DATA_HOME (or FSPS_DATA_HOME / SPS_HOME).'
             error stop 1
@@ -176,6 +100,53 @@ contains
         end if
 
     end subroutine fsps_resolve_paths
+
+    !> @brief Searches for the data root, without stopping when there is none.
+    !>
+    !> @details
+    !> The search of fsps_resolve_paths, in its order (see there). Lets a caller, such as a test
+    !> program, find out whether setup can run before calling it: fsps_resolve_paths stops the
+    !> program when no data root is found.
+    !>
+    !> @param[out] root The data root found, or '' if none.
+    !> @return .true. if a data root was found.
+    logical function fsps_find_data_root(root) result(found)
+        character(len=*), intent(out) :: root
+
+        character(len=4096) :: env_buffer
+        integer :: stat_len, stat_status
+
+        root = ''
+        found = .false.
+
+        ! OPENSPS_DATA_HOME, then the legacy SPS_HOME, then FSPS_DATA_HOME
+        call try_env('OPENSPS_DATA_HOME', '')
+        if (.not. found) call try_env('SPS_HOME', '')
+        if (.not. found) call try_env('FSPS_DATA_HOME', '')
+        ! XDG_DATA_HOME/fsps, then ~/.local/share/fsps
+        if (.not. found) call try_env('XDG_DATA_HOME', '/fsps')
+        if (.not. found) call try_env('HOME', '/.local/share/fsps')
+        ! System paths
+        if (.not. found) call try_path('/usr/share/fsps')
+        if (.not. found) call try_path('/usr/local/share/fsps')
+
+    contains
+
+        subroutine try_env(name, suffix)
+            character(len=*), intent(in) :: name, suffix
+            call get_environment_variable(name, value=env_buffer, length=stat_len, status=stat_status)
+            if (stat_status == 0 .and. stat_len > 0) call try_path(trim(env_buffer)//suffix)
+        end subroutine try_env
+
+        subroutine try_path(candidate)
+            character(len=*), intent(in) :: candidate
+            if (check_data_exists(candidate)) then
+                root = trim(candidate)
+                found = .true.
+            end if
+        end subroutine try_path
+
+    end function fsps_find_data_root
 
     !> @brief Prints a summary of the current FSPS runtime environment.
     !> @details Useful for debugging and verification during startup.

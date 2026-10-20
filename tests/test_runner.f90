@@ -41,6 +41,7 @@ program test_runner
     use fsps_context, only: fsps_context_set_pset, fsps_context_move_to_device, &
                             fsps_context_remove_from_device, fsps_context_update_ssp_basis
     use fsps_ssp, only: generate_ssp_grid
+    use fsps_environment, only: fsps_find_data_root
     implicit none
 
     ! Exit codes
@@ -69,6 +70,7 @@ program test_runner
     type(PARAMS) :: pset
     integer :: i, unit_in, status, arg_count
     character(len=1024) :: filename_in, env_buffer, arg_val
+    character(len=4096) :: data_root
     character(len=20) :: isoc_arg, spec_arg, dust_arg
     logical :: isoc_set, spec_set, dust_set
 
@@ -173,6 +175,12 @@ program test_runner
     if (.not. ref_exists) then
         write(*, '(A)') 'SKIP: regression reference ' // trim(filename_in) // ' not found (data release library ' // &
             'references/sps; set OPENSPS_DATA_HOME or -Ddata_home)'
+        stop 77
+    end if
+    ! Likewise without a data root, which setup would otherwise stop on
+    if (.not. fsps_find_data_root(data_root)) then
+        write(*, '(A)') 'SKIP: no data root found (fetch a data release with tools/fetch_data.py; ' // &
+            'set OPENSPS_DATA_HOME or configure with -Ddata_home)'
         stop 77
     end if
 

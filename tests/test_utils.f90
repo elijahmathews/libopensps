@@ -8,6 +8,7 @@ module test_utils_mod
     !>     so meson reports every assertion individually (console, testlog.json, testlog.junit.xml).
     !>     Programs call tap_finish() at the end to print the plan line.
     use fsps_precision, only: WP
+    use fsps_environment, only: fsps_find_data_root
     use, intrinsic :: ieee_arithmetic, only: ieee_is_nan, ieee_class, ieee_negative_inf, ieee_class_type, operator(==)
     implicit none
 
@@ -21,7 +22,7 @@ module test_utils_mod
     public :: assert_float_equals, assert_int_equals, assert_true
     public :: assert_is_nan, assert_is_neg_inf, assert_relative_error
     public :: print_major_header, print_minor_header, print_group, print_summary_line
-    public :: tap_finish
+    public :: tap_finish, skip_without_data
     public :: C_RESET, C_BOLD, C_RED, C_GREEN, C_RED_BOLD
 
     logical, save, private :: mode_checked = .false.
@@ -49,6 +50,23 @@ contains
     subroutine tap_finish()
         if (tap_mode()) write(*, '(A,I0)') '1..', tap_count
     end subroutine tap_finish
+
+    !> Skips the test program (exit status 77, or a TAP plan of 0 with a SKIP directive) when
+    !> no data root is found, the search of the library's setup (fsps_find_data_root): setup
+    !> would otherwise stop the program with an error. Call before the first setup.
+    subroutine skip_without_data()
+        character(len=4096) :: root
+        character(len=*), parameter :: REASON = 'no data root found (fetch a data release with ' // &
+            'tools/fetch_data.py; set OPENSPS_DATA_HOME or configure with -Ddata_home)'
+
+        if (fsps_find_data_root(root)) return
+        if (tap_mode()) then
+            write(*, '(2A)') '1..0 # SKIP ', REASON
+            stop
+        end if
+        write(*, '(2A)') 'SKIP: ', REASON
+        stop 77
+    end subroutine skip_without_data
 
     !> @brief Print a major section header in Bold
     subroutine print_major_header(text)

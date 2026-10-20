@@ -4,8 +4,9 @@
  * non-parametric SFH as an SSP-weight matrix (logmass is a caller-side scaling). The arrays
  * (one per parameter, length n) are checked against the same models set one at a time on the
  * context, and the error statuses for a parameter that changes the SSPs and an unknown one.
- * Requires the FSPS data tree (SPS_HOME), like the regression tests. */
+ * Requires a data root (OPENSPS_DATA_HOME), like the regression tests; skipped without one. */
 #include "fsps.h"
+#include "test_c_data.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -16,6 +17,7 @@
 #define N_PAR 12
 
 int main(void) {
+    skip_without_data();
     int status = 0, h = 0, nspec = 0, ntfull = 0, nbands = 0, failures = 0;
     const char *names[N_PAR] = {"logzsol", "dust2", "dust1", "dust_index", "fagn", "agn_tau",
                                 "gas_logz", "gas_logu", "duste_umin", "duste_gamma", "duste_qpah", "zred"};

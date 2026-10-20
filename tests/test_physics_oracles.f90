@@ -27,7 +27,7 @@ program test_physics_oracles
                             fsps_context_set_pset, fsps_context_get_pset, fsps_context_prepare_pset, &
                             fsps_context_set_param_int, fsps_context_set_param_float
     use fsps_context_types, only: fsps_context_t
-    use test_utils_mod, only: tap_finish, print_major_header, print_group, print_summary_line, assert_true, &
+    use test_utils_mod, only: tap_finish, skip_without_data, print_major_header, print_group, print_summary_line, assert_true, &
                               assert_relative_error
     implicit none
 
@@ -38,6 +38,7 @@ program test_physics_oracles
     ! KP-computed quantities use max(tol, KP_RTOL) so the FP64 build keeps its original tolerance
     real(WP), parameter :: KP_RTOL = 100.0_wp * real(epsilon(1.0_KP), WP)
 
+    call skip_without_data()
     call print_major_header("Physics Oracles (independent identities and published values)")
 
     call run_mist_miles_checks()

@@ -62,9 +62,9 @@ for developing applications against libfsps.
 rm -rf %{buildroot}%{_datadir}/fsps
 
 %check
-# Meson inherently handles FSPS_DATA_HOME via the regression_env object 
-# defined in meson.build, so we can just run the native macro.
-%meson_test
+# The package is built without the data (a separate release, doc/DATA_FORMAT.md):
+# run the unit suite, which needs neither data nor network.
+%meson_test --suite unit
 
 # ------------------------------------------------------------------
 # File Manifests

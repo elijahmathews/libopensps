@@ -1,7 +1,8 @@
 # Distribution packages (Fedora RPM, Ubuntu DEB). Runs when packaging or build files change, on
-# pushes to master, weekly, and on demand: packaging does not change with ordinary source edits,
-# which ci.yml already builds and tests. Both builds run the test suite (%check, dh_auto_test)
-# with the distribution's own compiler, which on Fedora is a newer gfortran than ci.yml's.
+# pushes to main, weekly, and on demand: packaging does not change with ordinary source edits,
+# which ci.yml already builds and tests. Both builds run the unit suite (%check, dh_auto_test; the
+# data is not in the source tree) with the distribution's own compiler, which on Fedora is a newer
+# gfortran than ci.yml's.
 
 name: Packaging
 
