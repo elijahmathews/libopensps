@@ -106,7 +106,7 @@ jobs:
     steps:
       - name: Checkout (without the C3K library)
         if: ${{ !matrix.full_data }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           filter: blob:none
           sparse-checkout-cone-mode: false
@@ -116,7 +116,7 @@ jobs:
 
       - name: Checkout (full data)
         if: ${{ matrix.full_data }}
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install gfortran (apt)
         if: matrix.install == 'apt-gfortran'
@@ -187,7 +187,7 @@ jobs:
       # the verified archives are cached per release, so a release is downloaded once.
       - name: Cache the data release
         if: env.DATA_RELEASE != ''
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/opensps-data
           key: opensps-data-${{ env.DATA_RELEASE }}${{ matrix.full_data && '-all' || '' }}
@@ -232,7 +232,7 @@ jobs:
       # Every assertion is a JUnit test case (the suites print TAP, which meson converts)
       - name: Report test results
         if: ${{ !cancelled() }}
-        uses: mikepenz/action-junit-report@v5
+        uses: mikepenz/action-junit-report@v6
         with:
           report_paths: build/meson-logs/testlog.junit.xml
           check_name: ${{ matrix.name }}
@@ -242,7 +242,7 @@ jobs:
 
       - name: Upload test log on failure
         if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: testlog-${{ strategy.job-index }}
           path: build/meson-logs/
@@ -255,7 +255,7 @@ jobs:
       # Pull requests from forks have no Codecov token; the push build reports their coverage
       - name: Upload coverage to Codecov
         if: matrix.coverage && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./build/meson-logs/coverage.xml
@@ -273,7 +273,7 @@ jobs:
     outputs:
       threading: ${{ steps.filter.outputs.threading }}
     steps:
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -297,7 +297,7 @@ jobs:
       CC: ccache gcc
       DATA_RELEASE: ${{ vars.FSPS_DATA_RELEASE }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           filter: blob:none
           sparse-checkout-cone-mode: false
@@ -319,7 +319,7 @@ jobs:
       # the verified archives are cached per release, so a release is downloaded once.
       - name: Cache the data release
         if: env.DATA_RELEASE != ''
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/opensps-data
           key: opensps-data-${{ env.DATA_RELEASE }}
@@ -336,7 +336,7 @@ jobs:
         run: FSPS_STRESS_PHASES=AC FSPS_STRESS_ITERS=3 meson test -C build --suite stress --print-errorlogs
       - name: Report test results
         if: ${{ !cancelled() }}
-        uses: mikepenz/action-junit-report@v5
+        uses: mikepenz/action-junit-report@v6
         with:
           report_paths: build/meson-logs/testlog.junit.xml
           check_name: asan
@@ -344,7 +344,7 @@ jobs:
           detailed_summary: true
           include_passed: false
       - if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: asan-log
           path: build/meson-logs/
@@ -367,7 +367,7 @@ jobs:
       # Suppress known false positives in the uninstrumented Fortran/OpenMP runtimes (all steps)
       TSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/tsan.supp halt_on_error=1 second_deadlock_stack=1
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           filter: blob:none
           sparse-checkout-cone-mode: false
@@ -389,7 +389,7 @@ jobs:
       # the verified archives are cached per release, so a release is downloaded once.
       - name: Cache the data release
         if: env.DATA_RELEASE != ''
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/opensps-data
           key: opensps-data-${{ env.DATA_RELEASE }}
@@ -406,7 +406,7 @@ jobs:
         run: FSPS_STRESS_PHASES=BD FSPS_STRESS_ITERS=4 meson test -C build --suite stress --print-errorlogs
       - name: Report test results
         if: ${{ !cancelled() }}
-        uses: mikepenz/action-junit-report@v5
+        uses: mikepenz/action-junit-report@v6
         with:
           report_paths: build/meson-logs/testlog.junit.xml
           check_name: tsan
@@ -414,7 +414,7 @@ jobs:
           detailed_summary: true
           include_passed: false
       - if: failure()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: tsan-log
           path: build/meson-logs/
