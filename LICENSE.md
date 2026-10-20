@@ -1,7 +1,7 @@
 The MIT License (MIT)
 =====================
 
-Copyright © 2009-2026 Charlie Conroy & contributors; 2026-2026 Elijah Mathews & contributors
+Copyright © 2009-2026 Charlie Conroy & contributors; Copyright © 2026-2026 Elijah Mathews & contributors
 
 Permission is hereby granted, free of charge, to any person
 obtaining a copy of this software and associated documentation
