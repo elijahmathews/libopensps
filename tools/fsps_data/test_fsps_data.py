@@ -3,21 +3,29 @@
 
 Synthetic inputs in a temporary directory: the format's write/read round trip, the Fortran
 list-directed reader, and the converters of the upstream [alpha/Fe] layouts (alpha-enhanced
-MIST isochrones, per-[alpha/Fe] C3K spectra), including an irregular grid.
+MIST isochrones, per-[alpha/Fe] C3K spectra), including an irregular grid; and the retries of
+tools/fetch_data.py against a local HTTP server (no network). Without NumPy only the latter run,
+and the test reports SKIP (exit status 77) if they pass.
 """
+import http.server
 import importlib.util
 import os
 import sys
 import tempfile
+import threading
+import urllib.error
 
-if importlib.util.find_spec("numpy") is None:
-    print("NumPy not found: skipped")
-    sys.exit(77)
-import numpy as np  # noqa: E402
+HAVE_NUMPY = importlib.util.find_spec("numpy") is not None
+if HAVE_NUMPY:
+    import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from fsps_data import Library, LibraryWriter, ListReader, fortran_float  # noqa: E402
-from convert_legacy import Converter  # noqa: E402
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.dirname(HERE))  # tools/, for fetch_data
+import fetch_data  # noqa: E402
+if HAVE_NUMPY:
+    from fsps_data import Library, LibraryWriter, ListReader, fortran_float
+    from convert_legacy import Converter
 
 FAILED = []
 
@@ -190,14 +198,91 @@ def test_bibliography(tmp):
           and not any("TODO" in c["reference"] for c in rec["cite"]), "manifest provenance cites by bibcode")
 
 
+class ScriptedHandler(http.server.BaseHTTPRequestHandler):
+    """Answers each GET with the next status of the server's script (200 sends BODY); counts
+    the requests."""
+    BODY = b"archive bytes"
+
+    def do_GET(self):  # noqa: N802 - http.server's name
+        srv = self.server
+        srv.requests += 1
+        code = srv.script.pop(0) if srv.script else 200
+        self.send_response(code)
+        if code == 429:
+            self.send_header("Retry-After", "1")
+        body = self.BODY if code == 200 else b"error"
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def scripted_fetch(tmp, name, script, attempts=5):
+    """Fetches from a local server that answers with the statuses of `script`; returns
+    (exception or None, number of requests, delays slept, file content or None)."""
+    srv = http.server.HTTPServer(("127.0.0.1", 0), ScriptedHandler)
+    srv.script, srv.requests = list(script), 0
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    delays, dest, err = [], os.path.join(tmp, name), None
+    try:
+        fetch_data.fetch(f"http://127.0.0.1:{srv.server_address[1]}/{name}", dest, attempts=attempts,
+                         base_delay=1.0, sleep=delays.append)
+    except Exception as exc:  # noqa: BLE001
+        err = exc
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    content = open(dest, "rb").read() if os.path.exists(dest) else None
+    return err, srv.requests, delays, content
+
+
+def test_fetch_retry(tmp):
+    err, n, delays, content = scripted_fetch(tmp, "a", [500, 503, 502])
+    check(err is None and n == 4 and content == ScriptedHandler.BODY, "HTTP 5xx retried until the download succeeds")
+    check(len(delays) == 3 and all(0.5 * 2 ** k <= d < 1.5 * 2 ** k for k, d in enumerate(delays)),
+          f"exponential backoff with jitter between attempts ({', '.join(f'{d:.2f}' for d in delays)} s)")
+    err, n, delays, content = scripted_fetch(tmp, "b", [429])
+    check(err is None and n == 2 and delays[0] >= 1.0, "HTTP 429 retried, honouring Retry-After")
+    err, n, delays, content = scripted_fetch(tmp, "c", [404, 200])
+    check(isinstance(err, urllib.error.HTTPError) and err.code == 404 and n == 1 and not delays and content is None,
+          "HTTP 404 not retried")
+    err, n, delays, content = scripted_fetch(tmp, "d", [500] * 9, attempts=3)
+    check(isinstance(err, urllib.error.HTTPError) and err.code == 500 and n == 3 and len(delays) == 2,
+          "a persistent HTTP 500 raised after the last attempt")
+    # A refused connection (a port nobody listens on) is transient
+    srv = http.server.HTTPServer(("127.0.0.1", 0), ScriptedHandler)
+    port = srv.server_address[1]
+    srv.server_close()
+    delays = []
+    try:
+        fetch_data.fetch(f"http://127.0.0.1:{port}/e", os.path.join(tmp, "e"), attempts=3, base_delay=0.0,
+                         sleep=delays.append)
+        err = None
+    except Exception as exc:  # noqa: BLE001
+        err = exc
+    check(isinstance(err, urllib.error.URLError) and len(delays) == 2, "connection errors retried")
+    check(not fetch_data.is_transient(OSError("disk full")), "local I/O errors not retried")
+
+
 def main():
+    tests = [test_fetch_retry]
+    if HAVE_NUMPY:
+        tests += [test_round_trip, test_list_reader, test_upstream_mist, test_upstream_c3k, test_bibliography]
     with tempfile.TemporaryDirectory() as tmp:
-        for t in (test_round_trip, test_list_reader, test_upstream_mist, test_upstream_c3k, test_bibliography):
+        for t in tests:
             d = os.path.join(tmp, t.__name__)
             os.makedirs(d)
             t(d)
     print(f"{'FAILED: ' + str(len(FAILED)) if FAILED else 'all passed'}")
-    return 1 if FAILED else 0
+    if FAILED:
+        return 1
+    if not HAVE_NUMPY:
+        print("NumPy not found: the tests of the format tools skipped")
+        return 77
+    return 0
 
 
 if __name__ == "__main__":

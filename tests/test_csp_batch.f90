@@ -24,7 +24,7 @@ program test_csp_batch
                             fsps_context_set_param_int, fsps_context_set_param_float
     use fsps_context_types, only: fsps_context_t
     use fsps_interpolation, only: find_interval
-    use test_utils_mod, only: tap_finish, print_major_header, print_group, print_summary_line, assert_true
+    use test_utils_mod, only: tap_finish, skip_without_data, print_major_header, print_group, print_summary_line, assert_true
     implicit none
 
     integer, parameter :: N_MOD = 12
@@ -44,6 +44,7 @@ program test_csp_batch
     real(WP), parameter :: ZLIST(N_MOD) = [0.0_wp, 0.1_wp, 0.5_wp, 1.2_wp, 2.0_wp, 3.0_wp, &
                                            0.02_wp, 0.8_wp, 1.6_wp, 2.5_wp, 0.3_wp, 0.0_wp]
 
+    call skip_without_data()
     call print_major_header("Batched CSP vs compute_csp_scenario")
 
     allocate(ctx)

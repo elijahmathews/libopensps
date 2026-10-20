@@ -16,7 +16,7 @@ program test_ssp_operator
     use fsps_context, only: fsps_context_get_pset, fsps_context_prepare_pset, &
                             fsps_context_set_param_int, fsps_context_set_param_float
     use fsps_context_types, only: fsps_context_t
-    use test_utils_mod, only: tap_finish, print_major_header, print_group, print_summary_line, assert_true
+    use test_utils_mod, only: tap_finish, skip_without_data, print_major_header, print_group, print_summary_line, assert_true
     implicit none
 
     integer :: total_tests = 0
@@ -29,6 +29,7 @@ program test_ssp_operator
     type(fsps_context_t), allocatable :: ctx
     type(ssp_operator_t) :: op
 
+    call skip_without_data()
     call print_major_header("Batched SSP operator vs generate_ssp_grid")
 
     ! ---------------- MIST + MILES ----------------

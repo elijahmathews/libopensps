@@ -10,8 +10,9 @@
  *    restored);
  *  - a tabular SFH (sfh = 3) of constant SFR reproduces sfh = 1 with const = 1;
  *  - error statuses (no CSP yet, no magnitudes in fast mode, bad zcontinuous, sfh = 3 without a table, bad handle).
- * Requires the FSPS data tree (SPS_HOME), like the regression tests. */
+ * Requires a data root (OPENSPS_DATA_HOME), like the regression tests; skipped without one. */
 #include "fsps.h"
+#include "test_c_data.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -34,6 +35,7 @@ static double spec_diff(const double *a, const double *b, int n) {
 }
 
 int main(void) {
+    skip_without_data();
     int status = 0, h = 0, nspec = 0, ntfull = 0, nbands = 0, nz = 0, nline = 0, n_out = 0;
     int major = 0, minor = 0, patch = 0;
 

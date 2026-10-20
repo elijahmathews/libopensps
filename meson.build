@@ -310,6 +310,18 @@ endif
 
 # 3a. Regression Tests (run through Meson test framework)
 fs = import('fs')
+# Without a data root (neither a standard root with opensps-data.json, or the older fsps-data.json,
+# nor a legacy tree with data/), as in a package build from the source tree, the tests that need it
+# are still registered and report SKIP with the reason: each program checks for a data root at run
+# time, as the tests of the regression references do (so a root unpacked after configuring is used).
+data_available = (fs.is_file(join_paths(data_home, 'opensps-data.json')) or
+                  fs.is_file(join_paths(data_home, 'fsps-data.json')) or
+                  fs.is_file(join_paths(data_home, 'data/allfilters.dat')) or
+                  fs.is_file(join_paths(data_home, 'data/FILTER_LIST')))
+if not data_available
+    message('No data found in ' + data_home + ': the regression tests that need it are skipped ' +
+            '(tools/fetch_data.py; set OPENSPS_DATA_HOME or -Ddata_home)')
+endif
 # The C3K library (~600 MB) may be absent (e.g. a sparse CI clone, or a release fetched without the
 # optional archive); its tests are then skipped rather than failing on missing files.
 c3k_available = (fs.is_dir(join_paths(data_home, 'data/spectra/C3K')) or

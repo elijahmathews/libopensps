@@ -32,7 +32,7 @@ program test_param_regression
                             fsps_context_set_pset, fsps_context_get_pset, fsps_context_prepare_pset, &
                             fsps_context_set_param_int, fsps_context_set_param_float
     use fsps_context_types, only: fsps_context_t
-    use test_utils_mod, only: tap_finish, print_major_header, print_group, print_summary_line, assert_true
+    use test_utils_mod, only: tap_finish, skip_without_data, print_major_header, print_group, print_summary_line, assert_true
     implicit none
 
     integer, parameter :: MAX_ARRAYS = 32
@@ -96,6 +96,7 @@ program test_param_regression
                 ' (data release library references/param; set OPENSPS_DATA_HOME or -Ddata_home)'
             stop
         end if
+        call skip_without_data()
     end if
 
     call print_major_header("Parameterized Regression (parity case matrix)")

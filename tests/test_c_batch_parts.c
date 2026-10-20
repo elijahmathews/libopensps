@@ -6,8 +6,9 @@
  *  - the other outputs equal those of fsps_context_compute_csp_batch;
  *  - young / old are required (status 3).
  * Tolerances: 1e-12 with FP64 kernels; with FP32 kernels the parts are rounded to single
- * precision before the rebuild, so 1e-6. Requires the FSPS data tree (SPS_HOME). */
+ * precision before the rebuild, so 1e-6. Requires a data root (OPENSPS_DATA_HOME); skipped without one. */
 #include "fsps.h"
+#include "test_c_data.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -24,6 +25,7 @@ static void check(int ok, const char *what) {
 }
 
 int main(void) {
+    skip_without_data();
     int status = 0, h = 0, nspec = 0, nbands = 0;
     const char *names[N_PAR] = {"logzsol", "tau", "tage", "dust1", "dust2", "dust_index", "dust1_index",
                                 "frac_obrun", "frac_nodust", "dust3"};

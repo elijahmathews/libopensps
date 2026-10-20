@@ -13,6 +13,8 @@ locations first (a directory or base URL holding the archive files; a local mani
 directory is one), then each archive's mirror URLs. It checks each archive's SHA-256, unpacks it
 into DEST, and checks the size and SHA-256 of every file the unpacked manifests list. Archives
 already in the cache with the right checksum are not fetched again (CI caches that directory).
+A download that fails transiently (HTTP 5xx or 429, a connection error or a timeout) is retried
+with exponential backoff and jitter, up to 5 attempts per URL, before the next mirror is tried.
 Then point OPENSPS_DATA_HOME at DEST (e.g. ~/opensps-data).
 
 Standard library only (Python >= 3.8); .tar.zst archives need Python >= 3.14, the zstandard
@@ -20,19 +22,30 @@ module or the zstd command.
 """
 import argparse
 import hashlib
+import http.client
 import io
 import json
 import os
+import random
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
+import time
+import urllib.error
 import urllib.request
 
 GITHUB_REPO = "elijahmathews/opensps-data"
 MANIFEST_URL = "https://github.com/" + GITHUB_REPO + "/releases/download/{tag}/{tag}.json"
 DEFAULT_RELEASE = "data-v2"
 CHUNK = 1 << 22
+# Retries of a URL after a transient failure: attempts in all, and the first delay in seconds,
+# doubled at each retry and multiplied by a random factor in [0.5, 1.5) (jitter, so that parallel
+# CI jobs do not retry in step); a server's Retry-After is honoured up to RETRY_MAX_DELAY
+RETRY_ATTEMPTS = 5
+RETRY_BASE_DELAY = 2.0
+RETRY_MAX_DELAY = 60.0
 
 
 def sha256(path):
@@ -47,14 +60,50 @@ def is_url(s):
     return "://" in s and not s.startswith("file://")
 
 
-def fetch(src, dest):
-    """Copies a local path or downloads a URL to dest (through a temporary file)."""
+def is_transient(exc):
+    """Whether a failed download is worth retrying: HTTP 5xx and 429 (too many requests),
+    connection errors and timeouts; not other HTTP 4xx (the URL is wrong or forbidden)."""
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code >= 500 or exc.code == 429
+    if isinstance(exc, urllib.error.URLError):  # no response: refused, reset, DNS, timeout
+        return True
+    return isinstance(exc, (ConnectionError, TimeoutError, socket.timeout, http.client.HTTPException))
+
+
+def retry_delay(attempt, exc, base_delay):
+    """Seconds to wait before retry number `attempt` (1, 2, ...)."""
+    delay = base_delay * 2 ** (attempt - 1) * random.uniform(0.5, 1.5)
+    retry_after = exc.headers.get("Retry-After") if isinstance(exc, urllib.error.HTTPError) and exc.headers else None
+    if retry_after and retry_after.strip().isdigit():
+        delay = max(delay, float(retry_after))
+    return min(delay, RETRY_MAX_DELAY)
+
+
+def download(url, tmp):
+    with urllib.request.urlopen(url, timeout=60) as r, open(tmp, "wb") as f:
+        shutil.copyfileobj(r, f, CHUNK)
+
+
+def fetch(src, dest, attempts=None, base_delay=None, sleep=time.sleep):
+    """Copies a local path or downloads a URL to dest (through a temporary file). A download
+    that fails transiently (is_transient) is retried, up to `attempts` in all, with exponential
+    backoff and jitter; other failures, and the last one, are raised."""
+    attempts = RETRY_ATTEMPTS if attempts is None else attempts
+    base_delay = RETRY_BASE_DELAY if base_delay is None else base_delay
     tmp = dest + ".part"
     if not is_url(src):
         shutil.copyfile(src.replace("file://", ""), tmp)
     else:
-        with urllib.request.urlopen(src, timeout=60) as r, open(tmp, "wb") as f:
-            shutil.copyfileobj(r, f, CHUNK)
+        for attempt in range(1, attempts + 1):
+            try:
+                download(src, tmp)
+                break
+            except Exception as exc:  # noqa: BLE001 - classified by is_transient
+                if attempt == attempts or not is_transient(exc):
+                    raise
+                delay = retry_delay(attempt, exc, base_delay)
+                print(f"  attempt {attempt} of {attempts} failed ({exc}); retrying in {delay:.1f} s", flush=True)
+                sleep(delay)
     os.replace(tmp, dest)
 
 

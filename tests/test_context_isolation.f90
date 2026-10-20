@@ -21,7 +21,7 @@ program test_context_isolation
     use fsps_initialization, only: fsps_shared_load_count
     use fsps_ssp, only: generate_ssp_grid
     use fsps_csp, only: compute_csp_scenario
-    use test_utils_mod, only: tap_finish, print_major_header, print_group, print_summary_line, assert_true, &
+    use test_utils_mod, only: tap_finish, skip_without_data, print_major_header, print_group, print_summary_line, assert_true, &
                               assert_int_equals
     implicit none
 
@@ -31,6 +31,7 @@ program test_context_isolation
     integer :: total_tests = 0
     integer :: total_failures = 0
 
+    call skip_without_data()
     call print_major_header("Context Isolation (shared setup cache)")
 
     call test_setup_kernels_follow_own_smoothing()
