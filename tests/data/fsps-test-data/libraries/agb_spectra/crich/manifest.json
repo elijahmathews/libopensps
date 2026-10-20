@@ -1,0 +1,102 @@
+{
+ "format": "opensps-data",
+ "format_version": 1,
+ "kind": "agb_spectra",
+ "name": "crich",
+ "version": 1,
+ "title": "Empirical C-rich TP-AGB spectra - coarse test subset of the full library; not for science",
+ "provenance": {
+  "converter": "tools/fsps_data",
+  "created": "2026-10-20T12:35:48Z",
+  "converted_from": "legacy FSPS layout: data/spectra/AGB_spectra/Crich.{teff,spec}",
+  "source": "Averaged empirical C-rich TP-AGB spectra (data/spectra/AGB_spectra/README), extrapolated as described in the FSPS manual (section 1.3)",
+  "notes": "The second reference is for the extrapolation of the spectra.",
+  "cite": [
+   {
+    "bibcode": "2002A&A...393..167L",
+    "reference": "Lan\u00e7on & Mouhcine 2002, A&A, 393, 167",
+    "doi": "10.1051/0004-6361:20020585",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2002A&A...393..167L"
+   },
+   {
+    "bibcode": "2000A&AS..146..217L",
+    "reference": "Lan\u00e7on & Wood 2000, A&AS, 146, 217",
+    "doi": "10.1051/aas:2000269",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2000A&AS..146..217L"
+   }
+  ],
+  "cite_also": [
+   {
+    "bibcode": "2009ApJ...699..486C",
+    "reference": "Conroy et al. 2009, ApJ, 699, 486",
+    "doi": "10.1088/0004-637X/699/1/486",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2009ApJ...699..486C"
+   },
+   {
+    "bibcode": "2010ApJ...712..833C",
+    "reference": "Conroy & Gunn 2010, ApJ, 712, 833",
+    "doi": "10.1088/0004-637X/712/2/833",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2010ApJ...712..833C"
+   }
+  ],
+  "bibliography": "data_release.bib (NASA ADS export, shipped with the data release)",
+  "redistribution": "Distributed publicly with FSPS (https://github.com/cconroy20/fsps), from whose data tree this library was converted. No separate license is stated in the FSPS distribution; the terms of the original data apply.",
+  "todo": [
+   "license or redistribution terms of the original data (not stated in the FSPS sources)"
+  ],
+  "subset_of": "agb_spectra/crich v1",
+  "subset": {
+   "wavelength": "slice(None, None, 25)"
+  }
+ },
+ "metadata": {},
+ "axes": {
+  "type": {
+   "units": "spectral type index",
+   "values": [
+    1.0,
+    2.0,
+    3.0,
+    4.0,
+    5.0
+   ]
+  },
+  "wavelength": {
+   "units": "angstrom",
+   "file": "axis_wavelength.bin",
+   "dtype": "<f8",
+   "shape": [
+    246
+   ],
+   "sha256": "b08c7c4132cc8305f0dd8ce14b4680210d0e60abcc214c5191848fab9e6d98a7"
+  }
+ },
+ "arrays": {
+  "teff": {
+   "file": "teff.bin",
+   "dtype": "<f4",
+   "shape": [
+    5
+   ],
+   "axes": [
+    "type"
+   ],
+   "units": "K",
+   "sha256": "a9be0f5b1ea1c77380267f7378716122e96e5925157ab3d12ae604ce6ad32519"
+  },
+  "flux": {
+   "file": "flux.bin",
+   "dtype": "<f4",
+   "shape": [
+    5,
+    246
+   ],
+   "axes": [
+    "type",
+    "wavelength"
+   ],
+   "units": "F_lambda normalized to unit integral over angstrom",
+   "sha256": "48779c9330bec9644e1c14a6f649e789b66765cfbf2221aa9fe40d559dc8b291"
+  }
+ }
+}

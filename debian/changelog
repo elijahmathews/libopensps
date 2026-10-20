@@ -1,0 +1,9 @@
+fsps (3.2.0-1) unstable; urgency=medium
+
+  * Initial Debian packaging.
+  * Build with Meson and debhelper-compat 13.
+  * Split output into libfsps3 and libfsps-dev.
+  * Exclude installed runtime data payload from binary packages.
+  * Set Meson baseline optimization to x86-64-v3.
+
+ -- FSPS Packager <23229627+elijahmathews@users.noreply.github.com>  Tue, 24 Feb 2026 12:00:00 +0000

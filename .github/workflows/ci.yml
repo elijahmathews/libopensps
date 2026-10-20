@@ -1,0 +1,411 @@
+# Per-change CI: every push to develop/master and every pull request.
+#
+# Breadth over compilers and hardware, each job running the full unit + regression suites
+# (physics oracles, regression references, the 34-case parameterized matrix), plus two sanitizer
+# jobs aimed at memory errors and thread safety. Heavier runs (long stress tests, newest
+# compilers, GPUs) are in nightly.yml, packaging in packaging.yml. See doc/CI.md.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'doc/**'
+      - 'tools/**'
+      - 'CITATION.bib'
+      - 'LICENSE.md'
+      - '.github/workflows/nightly.yml'
+      - '.github/workflows/packaging.yml'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'doc/**'
+      - 'tools/**'
+      - 'CITATION.bib'
+      - 'LICENSE.md'
+      - '.github/workflows/nightly.yml'
+      - '.github/workflows/packaging.yml'
+  workflow_dispatch:
+
+# A newer push to the same pull request supersedes the running one
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Reference build: the only job that checks out the 600 MB C3K library; coverage
+          - name: gfortran / Linux x86-64 / coverage
+            os: ubuntu-24.04
+            install: apt-gfortran
+            full_data: true
+            coverage: true
+            setup_args: -Db_coverage=true
+
+          - name: gfortran / Linux arm64
+            os: ubuntu-24.04-arm
+            install: apt-gfortran
+
+          - name: gfortran / macOS arm64
+            os: macos-15
+            install: setup-fortran
+            toolchain: gcc
+            version: 14
+
+          - name: LLVM flang / Linux x86-64
+            os: ubuntu-24.04
+            install: apt-flang
+
+          - name: Intel ifx / Linux x86-64
+            os: ubuntu-24.04
+            install: setup-fortran
+            toolchain: intel
+            version: '2026.1'
+
+          # OpenACC directive paths, executed on host cores (hosted runners have no GPU)
+          - name: nvfortran / OpenACC multicore / Linux x86-64
+            os: ubuntu-24.04
+            install: setup-fortran
+            toolchain: nvidia-hpc
+            version: '26.1'
+            setup_args: -Daccel=multicore
+            fflags: -Minfo=accel
+
+          # FP32 kernels (-Dkernel_precision=single), the configuration a consumer GPU would run;
+          # the regression suite checks them against the FP64 references
+          - name: gfortran / FP32 kernels / Linux x86-64
+            os: ubuntu-24.04
+            install: apt-gfortran
+            setup_args: -Dkernel_precision=single
+
+          - name: nvfortran / OpenACC multicore / FP32 kernels / Linux x86-64
+            os: ubuntu-24.04
+            install: setup-fortran
+            toolchain: nvidia-hpc
+            version: '26.1'
+            setup_args: -Daccel=multicore -Dkernel_precision=single
+            fflags: -Minfo=accel
+
+    env:
+      FFLAGS: ${{ matrix.fflags }}
+      DATA_RELEASE: ${{ vars.FSPS_DATA_RELEASE }}
+
+    steps:
+      - name: Checkout (without the C3K library)
+        if: ${{ !matrix.full_data }}
+        uses: actions/checkout@v6
+        with:
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/data/spectra/C3K/
+
+      - name: Checkout (full data)
+        if: ${{ matrix.full_data }}
+        uses: actions/checkout@v6
+
+      - name: Install gfortran (apt)
+        if: matrix.install == 'apt-gfortran'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gfortran ccache
+          echo "FC=ccache gfortran" >> "$GITHUB_ENV"
+          echo "CC=ccache gcc" >> "$GITHUB_ENV"
+
+      - name: Install LLVM flang (apt)
+        if: matrix.install == 'apt-flang'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q flang-20 clang-20 ccache
+          echo "FC=ccache flang-20" >> "$GITHUB_ENV"
+          echo "CC=ccache clang-20" >> "$GITHUB_ENV"
+
+      - name: Install ${{ matrix.toolchain }} ${{ matrix.version }}
+        if: matrix.install == 'setup-fortran'
+        uses: fortran-lang/setup-fortran@v1
+        with:
+          compiler: ${{ matrix.toolchain }}
+          version: ${{ matrix.version }}
+
+      - name: Cache compiler output
+        if: startsWith(matrix.install, 'apt-')
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ matrix.os }}-${{ matrix.install }}
+          max-size: 200M
+
+      # gcovr comes from Ubuntu (7.x): gcovr 8.6 discards the coverage of every library module
+      # built by meson (each source is listed with no lines), which reported ~4% coverage
+      - name: Install Meson, Ninja and gcovr
+        run: |
+          pipx install meson
+          pipx install ninja
+          if [ "${{ matrix.coverage }}" = "true" ]; then sudo apt-get install -y -q gcovr; fi
+
+      - name: Toolchain versions
+        run: |
+          $FC --version
+          meson --version
+          lscpu | grep -E 'Model name|Vendor ID' || true
+
+      # nvfortran's math runtime picks a CPU-specific library variant at startup, and has aborted
+      # ("Math dispatch table is either misconfigured or corrupted") on some hosted-runner CPUs
+      - name: nvfortran runtime libraries
+        if: matrix.toolchain == 'nvidia-hpc'
+        run: |
+          grep -o -m1 -E 'avx512[a-z]*' /proc/cpuinfo | sort -u | head -3 || true
+          sdk_lib=$(dirname "$(readlink -f "$(command -v nvfortran)")")/../lib
+          ls "$sdk_lib" | grep -i -E 'nvcpumath|nvhpcatm|nvc\.' || true
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+
+      # Data from the published release instead of the checked-out data/ (doc/DATA_FORMAT.md,
+      # Section 6). Off until the repository variable FSPS_DATA_RELEASE is set (e.g. data-v1);
+      # the verified archives are cached per release, so a release is downloaded once.
+      - name: Cache the data release
+        if: env.DATA_RELEASE != ''
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/opensps-data
+          key: opensps-data-${{ env.DATA_RELEASE }}${{ matrix.full_data && '-all' || '' }}
+      - name: Fetch the data release
+        if: env.DATA_RELEASE != ''
+        run: |
+          python3 tools/fetch_data.py "$HOME/opensps-data" --release "$DATA_RELEASE"${{ matrix.full_data && ' --all' || '' }}
+          echo "DATA_ARGS=-Ddata_home=$HOME/opensps-data" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: meson setup build --buildtype=release ${{ matrix.setup_args }} $DATA_ARGS
+
+      - name: Build
+        run: meson compile -C build
+
+      # Coverage instrumentation slows the tests several-fold, so that build gets longer timeouts
+      # nvfortran's math runtime picks a CPU-specific library at startup and occasionally aborts
+      # there ("Error during math dispatch processing") on some hosted-runner CPUs, before any
+      # test code runs; retry once in that case only, so real failures still fail the job
+      - name: Unit and regression tests
+        run: |
+          lscpu | grep -m1 'Model name' || true
+          args="--suite unit --suite regression --print-errorlogs ${{ matrix.coverage && '--timeout-multiplier 3' || '' }}"
+          if ! meson test -C build $args; then
+            if grep -q 'Error during math dispatch' build/meson-logs/testlog.txt; then
+              echo "::warning::nvfortran math dispatch abort; retrying once"
+              meson test -C build $args
+            else
+              exit 1
+            fi
+          fi
+
+      # The standard data format (doc/DATA_FORMAT.md): convert the checked-out legacy tree and
+      # require every loaded array and SSP/CSP output to be bit-for-bit those of the legacy reader
+      - name: Standard data format parity
+        if: matrix.full_data && env.DATA_RELEASE == ''
+        run: |
+          sudo apt-get install -y -q python3-numpy
+          python3 tools/fsps_data/convert_legacy.py . opensps-data
+          meson test -C build --suite data_parity --print-errorlogs ${{ matrix.coverage && '--timeout-multiplier 3' || '' }}
+
+      # Every assertion is a JUnit test case (the suites print TAP, which meson converts)
+      - name: Report test results
+        if: ${{ !cancelled() }}
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: build/meson-logs/testlog.junit.xml
+          check_name: ${{ matrix.name }}
+          annotate_only: true
+          detailed_summary: true
+          include_passed: false
+
+      - name: Upload test log on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: testlog-${{ strategy.job-index }}
+          path: build/meson-logs/
+          retention-days: 7
+
+      - name: Coverage report
+        if: matrix.coverage
+        run: ninja -C build coverage-xml
+
+      # Pull requests from forks have no Codecov token; the push build reports their coverage
+      - name: Upload coverage to Codecov
+        if: matrix.coverage && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./build/meson-logs/coverage.xml
+          fail_ci_if_error: true
+
+  # Which pull requests can affect thread safety: ThreadSanitizer is the slowest check (~15 min),
+  # so it runs on pull requests that touch shared state, and every night.
+  changes:
+    name: Detect threading-relevant changes
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      threading: ${{ steps.filter.outputs.threading }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            threading:
+              - 'src/core/**'
+              - 'src/bindings/**'
+              - 'tests/stress_test.f90'
+              - 'tests/tsan.supp'
+              - 'meson.build'
+              - '.github/workflows/ci.yml'
+
+  # AddressSanitizer + UBSan: unit tests, then the stress phases that exercise allocation (A: create,
+  # compute, destroy; C: parameter mutations that reallocate). Every phase runs nightly.
+  asan:
+    name: AddressSanitizer + UBSan / stress A, C
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      FFLAGS: -ffpe-summary=invalid,zero,overflow
+      FC: ccache gfortran
+      CC: ccache gcc
+      DATA_RELEASE: ${{ vars.FSPS_DATA_RELEASE }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/data/spectra/C3K/
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gfortran ccache
+          pipx install meson
+          pipx install ninja
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: asan
+          max-size: 200M
+      # Data from the published release instead of the checked-out data/ (doc/DATA_FORMAT.md,
+      # Section 6). Off until the repository variable FSPS_DATA_RELEASE is set (e.g. data-v1);
+      # the verified archives are cached per release, so a release is downloaded once.
+      - name: Cache the data release
+        if: env.DATA_RELEASE != ''
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/opensps-data
+          key: opensps-data-${{ env.DATA_RELEASE }}
+      - name: Fetch the data release
+        if: env.DATA_RELEASE != ''
+        run: |
+          python3 tools/fetch_data.py "$HOME/opensps-data" --release "$DATA_RELEASE"
+          echo "DATA_ARGS=-Ddata_home=$HOME/opensps-data" >> "$GITHUB_ENV"
+
+      - run: meson setup build -Denable_stress_testing=true -Db_sanitize=address,undefined $DATA_ARGS
+      - run: meson compile -C build
+      - run: meson test -C build --suite unit --print-errorlogs
+      - name: Stress phases A and C
+        run: FSPS_STRESS_PHASES=AC FSPS_STRESS_ITERS=3 meson test -C build --suite stress --print-errorlogs
+      - name: Report test results
+        if: ${{ !cancelled() }}
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: build/meson-logs/testlog.junit.xml
+          check_name: asan
+          annotate_only: true
+          detailed_summary: true
+          include_passed: false
+      - if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: asan-log
+          path: build/meson-logs/
+          retention-days: 7
+
+  # ThreadSanitizer: the concurrent phases (B: per-thread setup and compute; D: concurrent
+  # setup/release of one shared cache entry). The harness makes its threads with OpenMP.
+  tsan:
+    name: ThreadSanitizer / stress B, D
+    needs: changes
+    if: always() && (needs.changes.outputs.threading == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      FFLAGS: -ffpe-summary=invalid,zero,overflow
+      FC: ccache gfortran
+      CC: ccache gcc
+      DATA_RELEASE: ${{ vars.FSPS_DATA_RELEASE }}
+      OMP_NUM_THREADS: 2
+      # Suppress known false positives in the uninstrumented Fortran/OpenMP runtimes (all steps)
+      TSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/tsan.supp halt_on_error=1 second_deadlock_stack=1
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/data/spectra/C3K/
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gfortran ccache
+          pipx install meson
+          pipx install ninja
+      - uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: tsan
+          max-size: 200M
+      # Data from the published release instead of the checked-out data/ (doc/DATA_FORMAT.md,
+      # Section 6). Off until the repository variable FSPS_DATA_RELEASE is set (e.g. data-v1);
+      # the verified archives are cached per release, so a release is downloaded once.
+      - name: Cache the data release
+        if: env.DATA_RELEASE != ''
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/opensps-data
+          key: opensps-data-${{ env.DATA_RELEASE }}
+      - name: Fetch the data release
+        if: env.DATA_RELEASE != ''
+        run: |
+          python3 tools/fetch_data.py "$HOME/opensps-data" --release "$DATA_RELEASE"
+          echo "DATA_ARGS=-Ddata_home=$HOME/opensps-data" >> "$GITHUB_ENV"
+
+      - run: meson setup build -Denable_stress_testing=true -Db_sanitize=thread -Denable_openmp=true $DATA_ARGS
+      - run: meson compile -C build
+      - run: meson test -C build --suite unit --print-errorlogs
+      - name: Stress phases B and D
+        run: FSPS_STRESS_PHASES=BD FSPS_STRESS_ITERS=4 meson test -C build --suite stress --print-errorlogs
+      - name: Report test results
+        if: ${{ !cancelled() }}
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: build/meson-logs/testlog.junit.xml
+          check_name: tsan
+          annotate_only: true
+          detailed_summary: true
+          include_passed: false
+      - if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: tsan-log
+          path: build/meson-logs/
+          retention-days: 7

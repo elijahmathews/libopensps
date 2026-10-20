@@ -1,0 +1,27 @@
+# Identities merged when AUTHORS is generated (git mailmap format: Proper Name <proper@email>
+# Commit Name <commit@email>). Only identities that are certainly the same person are merged;
+# the evidence is noted for each. Handles that cannot be tied to a name stay as they are and are
+# listed separately in AUTHORS (resolve them here, not in AUTHORS, if their owners are known).
+
+# Charlie Conroy: the Google Code (SVN) import, GitHub and institutional addresses
+Charlie Conroy <conroy.charlie@gmail.com> conroy.charlie <conroy.charlie@f62a1bdd-e74c-edee-77cd-83dda710d615>
+Charlie Conroy <conroy.charlie@gmail.com> <conroy.charlie@gmail.com@f62a1bdd-e74c-edee-77cd-83dda710d615>
+Charlie Conroy <conroy.charlie@gmail.com> <cconroy20@users.noreply.github.com>
+Charlie Conroy <conroy.charlie@gmail.com> <cconroy@cfa.harvard.edu>
+Charlie Conroy <conroy.charlie@gmail.com> <cconroy@Charlies-MacBook-Pro.local>
+
+# Benjamin Johnson: personal address and the bd-j GitHub account
+Benjamin Johnson <benjamin.duncan.johnson@gmail.com> <bd-j@users.noreply.github.com>
+Benjamin Johnson <benjamin.duncan.johnson@gmail.com> Ben Johnson <bd-j@users.noreply.github.com>
+
+# Nell Byler: the nell-byler account at two institutions (doc/REVISION_HISTORY credits Nell Byler)
+Nell Byler <ebyler@astro.washington.edu> nell-byler <ebyler@astro.washington.edu>
+Nell Byler <ebyler@astro.washington.edu> Nell <ebyler@astro.washington.edu>
+Nell Byler <ebyler@astro.washington.edu> nell-byler <eleanor.byler@anu.edu.au>
+
+# Elijah Mathews: signing address and GitHub web commits
+Elijah Mathews <pgp@elijahmathews.com> <elijahmathews@users.noreply.github.com>
+
+# Display names for short commit names (the name is unambiguous from the address)
+Dan Foreman-Mackey <foreman.mackey@gmail.com> Dan F-M <foreman.mackey@gmail.com>
+Minjung Park <minjung.park@cfa.harvard.edu> mjpark <minjung.park@cfa.harvard.edu>

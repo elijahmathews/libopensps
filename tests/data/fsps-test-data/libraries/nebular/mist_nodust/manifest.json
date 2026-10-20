@@ -1,0 +1,157 @@
+{
+ "format": "opensps-data",
+ "format_version": 1,
+ "kind": "nebular",
+ "name": "mist_nodust",
+ "version": 1,
+ "title": "Nebular continuum and lines for the mist isochrones, without dust in the ionized gas - coarse test subset of the full library; not for science",
+ "provenance": {
+  "converter": "tools/fsps_data",
+  "created": "2026-10-20T12:35:32Z",
+  "converted_from": "legacy FSPS layout: data/nebular/ZAU_ND_mist.{cont,lines}",
+  "source": "Cloudy photoionization tables provided by Nell Byler, ionized by the mist SSPs, without dust in the ionized gas (FSPS manual, section 1.13)",
+  "cite": [
+   {
+    "bibcode": "2017ApJ...840...44B",
+    "reference": "Byler et al. 2017, ApJ, 840, 44",
+    "doi": "10.3847/1538-4357/aa6c66",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2017ApJ...840...44B"
+   }
+  ],
+  "cite_code": [
+   {
+    "bibcode": "2013RMxAA..49..137F",
+    "reference": "Ferland et al. 2013, RMxAA, 49, 137",
+    "doi": "10.48550/arXiv.1302.4485",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2013RMxAA..49..137F"
+   }
+  ],
+  "cite_also": [
+   {
+    "bibcode": "2009ApJ...699..486C",
+    "reference": "Conroy et al. 2009, ApJ, 699, 486",
+    "doi": "10.1088/0004-637X/699/1/486",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2009ApJ...699..486C"
+   },
+   {
+    "bibcode": "2010ApJ...712..833C",
+    "reference": "Conroy & Gunn 2010, ApJ, 712, 833",
+    "doi": "10.1088/0004-637X/712/2/833",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2010ApJ...712..833C"
+   }
+  ],
+  "bibliography": "data_release.bib (NASA ADS export, shipped with the data release)",
+  "redistribution": "Distributed publicly with FSPS (https://github.com/cconroy20/fsps), from whose data tree this library was converted. No separate license is stated in the FSPS distribution; the terms of the original data apply.",
+  "todo": [
+   "license or redistribution terms of the original data (not stated in the FSPS sources)"
+  ],
+  "subset_of": "nebular/mist_nodust v1",
+  "subset": {
+   "wavelength": "slice(None, None, 10)"
+  }
+ },
+ "metadata": {},
+ "axes": {
+  "logZ": {
+   "units": "log10(Z/Z_sun)",
+   "values": [
+    -1.98,
+    -1.5,
+    -0.98,
+    -0.58,
+    -0.39,
+    -0.3,
+    -0.2,
+    -0.1,
+    0.0,
+    0.1,
+    0.2
+   ]
+  },
+  "age": {
+   "units": "yr",
+   "values": [
+    500000.0,
+    1000000.0,
+    2000000.0,
+    3000000.0,
+    4000000.0,
+    5000000.0,
+    6000000.0,
+    7000000.0,
+    10000000.0,
+    20000000.0
+   ]
+  },
+  "logU": {
+   "units": "log10(ionization parameter)",
+   "values": [
+    -4.0,
+    -3.5,
+    -3.0,
+    -2.5,
+    -2.0,
+    -1.5,
+    -1.0
+   ]
+  },
+  "wavelength": {
+   "units": "angstrom",
+   "medium": "vacuum",
+   "file": "axis_wavelength.bin",
+   "dtype": "<f8",
+   "shape": [
+    197
+   ],
+   "sha256": "08f3f3ae2058302af95d433796a46b15582e4cfbdbc049358a44fa2e1ae32c25"
+  },
+  "line_wavelength": {
+   "units": "angstrom",
+   "medium": "vacuum",
+   "file": "axis_line_wavelength.bin",
+   "dtype": "<f8",
+   "shape": [
+    166
+   ],
+   "sha256": "efa9d846efcb29640c82707ef66d384c59cd33c2f0071243325880a4eb1a97f8"
+  }
+ },
+ "arrays": {
+  "continuum": {
+   "file": "continuum.bin",
+   "dtype": "<f4",
+   "shape": [
+    11,
+    10,
+    7,
+    197
+   ],
+   "axes": [
+    "logZ",
+    "age",
+    "logU",
+    "wavelength"
+   ],
+   "units": "L_sun Hz^-1 per unit ionizing photon rate (s^-1)",
+   "sha256": "9b1383e17056bf25dc3bafb030a1beec5c7718caf22a698b6435c5dc39d99b2f"
+  },
+  "lines": {
+   "file": "lines.bin",
+   "dtype": "<f4",
+   "shape": [
+    11,
+    10,
+    7,
+    166
+   ],
+   "axes": [
+    "logZ",
+    "age",
+    "logU",
+    "line_wavelength"
+   ],
+   "units": "L_sun per unit ionizing photon rate (s^-1)",
+   "sha256": "6e57f45daa64214aca1f219d889c4191be74e424b1b1499b3e0c7f4ffdae1431"
+  }
+ }
+}

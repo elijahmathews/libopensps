@@ -1,0 +1,72 @@
+{
+ "format": "opensps-data",
+ "format_version": 1,
+ "kind": "reference_spectra",
+ "name": "sun",
+ "version": 1,
+ "title": "The Sun - coarse test subset of the full library; not for science",
+ "provenance": {
+  "converter": "tools/fsps_data",
+  "created": "2026-10-20T12:35:45Z",
+  "converted_from": "legacy FSPS layout: data/spectra/SUN_STScI.SED",
+  "source": "Solar spectrum, f_nu at 10 pc (file SUN_STScI.SED)",
+  "notes": "Likely source (STScI absolute solar spectrum; not stated in the file).",
+  "cite": [
+   {
+    "bibcode": "1996AJ....112..307C",
+    "reference": "Colina et al. 1996, AJ, 112, 307",
+    "doi": "10.1086/118016",
+    "ads": "https://ui.adsabs.harvard.edu/abs/1996AJ....112..307C"
+   }
+  ],
+  "cite_also": [
+   {
+    "bibcode": "2009ApJ...699..486C",
+    "reference": "Conroy et al. 2009, ApJ, 699, 486",
+    "doi": "10.1088/0004-637X/699/1/486",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2009ApJ...699..486C"
+   },
+   {
+    "bibcode": "2010ApJ...712..833C",
+    "reference": "Conroy & Gunn 2010, ApJ, 712, 833",
+    "doi": "10.1088/0004-637X/712/2/833",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2010ApJ...712..833C"
+   }
+  ],
+  "bibliography": "data_release.bib (NASA ADS export, shipped with the data release)",
+  "redistribution": "Distributed publicly with FSPS (https://github.com/cconroy20/fsps), from whose data tree this library was converted. No separate license is stated in the FSPS distribution; the terms of the original data apply.",
+  "todo": [
+   "license or redistribution terms of the original data (not stated in the FSPS sources)"
+  ],
+  "subset_of": "reference_spectra/sun v1",
+  "subset": {}
+ },
+ "metadata": {
+  "flux_density": "f_nu"
+ },
+ "axes": {
+  "wavelength": {
+   "units": "angstrom",
+   "file": "axis_wavelength.bin",
+   "dtype": "<f8",
+   "shape": [
+    1221
+   ],
+   "sha256": "4d7b107e03044ca0cf5035f4049127d102dba92e55f1ab9db06d7ee42e2fe0af"
+  }
+ },
+ "arrays": {
+  "flux": {
+   "file": "flux.bin",
+   "dtype": "<f4",
+   "shape": [
+    1221
+   ],
+   "axes": [
+    "wavelength"
+   ],
+   "units": "erg s^-1 cm^-2 Hz^-1 at 10 pc",
+   "sha256": "42dec4bf9bdb761cd2f77b94d0ceaf74241534d3935971e79b78d6d892bf1002"
+  }
+ }
+}

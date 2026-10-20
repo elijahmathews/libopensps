@@ -1,0 +1,4 @@
+self-hosted-runner:
+  # Self-hosted NVIDIA GPU runner used by nightly.yml (see doc/CI.md)
+  labels:
+    - gpu-nvidia

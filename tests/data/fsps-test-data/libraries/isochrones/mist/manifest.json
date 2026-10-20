@@ -1,0 +1,189 @@
+{
+ "format": "opensps-data",
+ "format_version": 1,
+ "kind": "isochrones",
+ "name": "mist",
+ "version": 1,
+ "title": "MIST isochrones - coarse test subset of the full library; not for science",
+ "provenance": {
+  "converter": "tools/fsps_data",
+  "created": "2026-10-20T12:35:23Z",
+  "converted_from": "legacy FSPS layout: data/isochrones/MIST",
+  "source": "MIST isochrones (solar metallicity 0.0142)",
+  "cite": [
+   {
+    "bibcode": "2016ApJ...823..102C",
+    "reference": "Choi et al. 2016, ApJ, 823, 102",
+    "doi": "10.3847/0004-637X/823/2/102",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2016ApJ...823..102C"
+   },
+   {
+    "bibcode": "2016ApJS..222....8D",
+    "reference": "Dotter 2016, ApJS, 222, 8",
+    "doi": "10.3847/0067-0049/222/1/8",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2016ApJS..222....8D"
+   }
+  ],
+  "cite_also": [
+   {
+    "bibcode": "2009ApJ...699..486C",
+    "reference": "Conroy et al. 2009, ApJ, 699, 486",
+    "doi": "10.1088/0004-637X/699/1/486",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2009ApJ...699..486C"
+   },
+   {
+    "bibcode": "2010ApJ...712..833C",
+    "reference": "Conroy & Gunn 2010, ApJ, 712, 833",
+    "doi": "10.1088/0004-637X/712/2/833",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2010ApJ...712..833C"
+   }
+  ],
+  "bibliography": "data_release.bib (NASA ADS export, shipped with the data release)",
+  "redistribution": "Distributed publicly with FSPS (https://github.com/cconroy20/fsps), from whose data tree this library was converted. No separate license is stated in the FSPS distribution; the terms of the original data apply.",
+  "todo": [
+   "license or redistribution terms of the original data (not stated in the FSPS sources)"
+  ],
+  "subset_of": "isochrones/mist"
+ },
+ "metadata": {
+  "solar_metallicity": 0.0142
+ },
+ "axes": {
+  "Z": {
+   "units": "mass fraction",
+   "values": [
+    0.0014200000000000003,
+    0.0142
+   ]
+  },
+  "age_index": {
+   "units": "index",
+   "values": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22
+   ]
+  }
+ },
+ "arrays": {
+  "npoints": {
+   "file": "npoints.bin",
+   "dtype": "<i4",
+   "shape": [
+    2,
+    22
+   ],
+   "axes": [
+    "Z",
+    "age_index"
+   ],
+   "units": "count",
+   "sha256": "84b8beaf437c46c66987597ff341abc03e65e093ac8b0510796f670e3259c394"
+  },
+  "log_age": {
+   "file": "log_age.bin",
+   "dtype": "<f8",
+   "shape": [
+    2,
+    22
+   ],
+   "axes": [
+    "Z",
+    "age_index"
+   ],
+   "units": "log10(yr)",
+   "sha256": "f51b329d4b2ab3bbf5b142780de6f5aa87e06935a916309c79ea0d867f0a8580"
+  },
+  "mini": {
+   "file": "mini.bin",
+   "dtype": "<f8",
+   "shape": [
+    10752
+   ],
+   "units": "M_sun (initial mass)",
+   "sha256": "8c1c5c332c25ae1c4f809105fb0ffd46401137b7303ae824a29148d3038c8302"
+  },
+  "mact": {
+   "file": "mact.bin",
+   "dtype": "<f8",
+   "shape": [
+    10752
+   ],
+   "units": "M_sun (current mass)",
+   "sha256": "e3413a0a77747c17098c506e16c9038c59f3b657085ec3d5aeb5729a246821c1"
+  },
+  "logl": {
+   "file": "logl.bin",
+   "dtype": "<f8",
+   "shape": [
+    10752
+   ],
+   "units": "log10(L/L_sun)",
+   "sha256": "2ab8799b6a6498c7c21611ecf2d8e8e4705412226e37497fc5a2c3ccd9e5d921"
+  },
+  "logt": {
+   "file": "logt.bin",
+   "dtype": "<f8",
+   "shape": [
+    10752
+   ],
+   "units": "log10(Teff/K)",
+   "sha256": "cb03bad7943bcbedd4a691a3c35fd071c1017541f8f7c0ce65190e8b8d98366c"
+  },
+  "logg": {
+   "file": "logg.bin",
+   "dtype": "<f8",
+   "shape": [
+    10752
+   ],
+   "units": "log10(g / cm s^-2)",
+   "sha256": "9504d7ffee16ec2f906c43828b14ffb413d72428819f20b07bd78face4cc7910"
+  },
+  "composition": {
+   "file": "composition.bin",
+   "dtype": "<f8",
+   "shape": [
+    10752
+   ],
+   "units": "C/O ratio or surface abundance flag, as the legacy column",
+   "sha256": "20f1b625c5c25b7ec76dd23b47bdf28ea9cb9f29835d0fca4b9d15026dd4663a"
+  },
+  "phase": {
+   "file": "phase.bin",
+   "dtype": "<f8",
+   "shape": [
+    10752
+   ],
+   "units": "evolutionary phase code",
+   "sha256": "b4c06894ba648498db02ef68a2ee5a6679e24df933a514afe22c12888ff9515f"
+  },
+  "log_mdot": {
+   "file": "log_mdot.bin",
+   "dtype": "<f8",
+   "shape": [
+    10752
+   ],
+   "units": "log10(Mdot / M_sun yr^-1)",
+   "sha256": "96ebee69dfa699d36c548dc3b83178372a4834ba8c644014a936b6075abc2c93"
+  }
+ }
+}

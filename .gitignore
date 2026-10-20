@@ -1,0 +1,46 @@
+.DS_Store
+nr
+data/spectra/CKC14/*
+OUTPUTS/
+tmp/
+CodeToDo.txt
+runsps.f90
+metalml.f90
+colorteff.f90
+bytype.f90
+Makefile.prv
+
+# Ignore compiler outputs
+build*/
+*.o
+*.mod
+*.exe
+compile_commands.json
+
+# Ignore test outputs
+tmp/
+data/imf_test.dat
+
+# Ignore profiling outputs
+*.out
+gmon_*
+
+# Main executables produced by Makefile
+autosps
+simple
+lesssimple
+spec_bin
+
+# Test executables
+generate_test_data
+test_cache
+test_contexts
+test_fsps
+test_runner
+tests_units
+# Python bytecode
+__pycache__/
+
+# Standard-format data root converted from data/ (tools/fsps_data/convert_legacy.py)
+/opensps-data/
+/fsps-data/

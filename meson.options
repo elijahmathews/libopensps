@@ -1,0 +1,32 @@
+option('enable_openmp', type: 'boolean', value: false, 
+  description: 'Enable OpenMP multi-threading for CPU execution')
+
+option('accel', type: 'combo', choices: ['none', 'multicore', 'gpu', 'omp_gpu'], value: 'none', 
+  description: 'Hardware acceleration target (requires nvfortran): OpenACC multicore or GPU, or (omp_gpu) OpenMP target offload of the template product and the whole batched CSP')
+
+option('cpu_baseline', type: 'combo', choices: ['generic', 'native', 'x86-64-v3'], value: 'generic',
+  description: 'CPU instruction set optimization level')
+
+option('enable_stress_testing', type: 'boolean', value: false,
+  description: 'Build and register stress-test executables for CI and profiling')
+
+option('kernel_precision', type: 'combo', choices: ['double', 'single'], value: 'double',
+  description: 'Precision of the per-pixel kernels (spectral templates, SSP/CSP sums, dust, nebular, photometry); setup, isochrones and weights stay double')
+
+option('gpu_arch', type: 'string', value: 'cc80,cc90',
+  description: 'nvfortran -gpu= targets for -Daccel=gpu (cc80 = A100, cc90 = H100; add cc70 for V100 with HPC SDK < 26, which dropped Volta)')
+
+option('cublas', type: 'boolean', value: false,
+  description: 'With -Daccel=gpu: run the batched CSP matrix products through cuBLAS (NVIDIA only; the OpenACC loops are the portable default)')
+
+option('tests', type: 'boolean', value: true,
+  description: 'Build the test and benchmark programs (off when built as a subproject of a binding package)')
+
+option('install_data', type: 'boolean', value: true,
+  description: 'Install the data tree under datadir/fsps (1.3 GB)')
+
+option('standard_data_home', type: 'string', value: '',
+  description: 'Standard-format data root for the data_parity suite (default: <source>/opensps-data)')
+
+option('data_home', type: 'string', value: '',
+  description: 'Data root of the regression and stress suites: a legacy tree with data/ or a standard-format root (default: OPENSPS_DATA_HOME at configure time, else the source tree)')

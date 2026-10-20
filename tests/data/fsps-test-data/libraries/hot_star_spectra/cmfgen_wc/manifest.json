@@ -1,0 +1,151 @@
+{
+ "format": "opensps-data",
+ "format_version": 1,
+ "kind": "hot_star_spectra",
+ "name": "cmfgen_wc",
+ "version": 1,
+ "title": "CMFGEN Wolf-Rayet spectra (WC) - coarse test subset of the full library; not for science",
+ "provenance": {
+  "converter": "tools/fsps_data",
+  "created": "2026-10-20T12:35:47Z",
+  "converted_from": "legacy FSPS layout: data/spectra/Hot_spectra/CMFGEN_WC*",
+  "source": "CMFGEN Wolf-Rayet spectra, carbon sequence",
+  "notes": "Dataset: the O and Wolf-Rayet ionizing-flux grid; the WR models were computed with CMFGEN (code references in cite_code).",
+  "cite": [
+   {
+    "bibcode": "2002MNRAS.337.1309S",
+    "reference": "Smith et al. 2002, MNRAS, 337, 1309",
+    "doi": "10.1046/j.1365-8711.2002.06042.x",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2002MNRAS.337.1309S"
+   }
+  ],
+  "cite_code": [
+   {
+    "bibcode": "1987ApJS...63..947H",
+    "reference": "Hillier 1987, ApJS, 63, 947",
+    "doi": "10.1086/191187",
+    "ads": "https://ui.adsabs.harvard.edu/abs/1987ApJS...63..947H"
+   },
+   {
+    "bibcode": "1990A&A...231..116H",
+    "reference": "Hillier 1990, A&A, 231, 116",
+    "ads": "https://ui.adsabs.harvard.edu/abs/1990A&A...231..116H"
+   },
+   {
+    "bibcode": "1998ApJ...496..407H",
+    "reference": "Hillier & Miller 1998, ApJ, 496, 407",
+    "doi": "10.1086/305350",
+    "ads": "https://ui.adsabs.harvard.edu/abs/1998ApJ...496..407H"
+   },
+   {
+    "bibcode": "1999ApJ...519..354H",
+    "reference": "Hillier & Miller 1999, ApJ, 519, 354",
+    "doi": "10.1086/307339",
+    "ads": "https://ui.adsabs.harvard.edu/abs/1999ApJ...519..354H"
+   },
+   {
+    "bibcode": "2003ASPC..288..199H",
+    "reference": "Hillier 2003, ASP Conf. Ser., 288, 199",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2003ASPC..288..199H"
+   },
+   {
+    "bibcode": "2005AJ....129..454B",
+    "reference": "Busche & Hillier 2005, AJ, 129, 454",
+    "doi": "10.1086/426362",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2005AJ....129..454B"
+   },
+   {
+    "bibcode": "2012IAUS..282..229H",
+    "reference": "Hillier 2012, IAU Symp., 282, 229",
+    "doi": "10.1017/S1743921311027426",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2012IAUS..282..229H"
+   },
+   {
+    "bibcode": "2012MNRAS.424..252H",
+    "reference": "Hillier & Dessart 2012, MNRAS, 424, 252",
+    "doi": "10.1111/j.1365-2966.2012.21192.x",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2012MNRAS.424..252H"
+   }
+  ],
+  "cite_also": [
+   {
+    "bibcode": "2009ApJ...699..486C",
+    "reference": "Conroy et al. 2009, ApJ, 699, 486",
+    "doi": "10.1088/0004-637X/699/1/486",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2009ApJ...699..486C"
+   },
+   {
+    "bibcode": "2010ApJ...712..833C",
+    "reference": "Conroy & Gunn 2010, ApJ, 712, 833",
+    "doi": "10.1088/0004-637X/712/2/833",
+    "ads": "https://ui.adsabs.harvard.edu/abs/2010ApJ...712..833C"
+   }
+  ],
+  "bibliography": "data_release.bib (NASA ADS export, shipped with the data release)",
+  "redistribution": "Distributed publicly with FSPS (https://github.com/cconroy20/fsps), from whose data tree this library was converted. No separate license is stated in the FSPS distribution; the terms of the original data apply.",
+  "todo": [
+   "license or redistribution terms of the original data (not stated in the FSPS sources)"
+  ],
+  "subset_of": "hot_star_spectra/cmfgen_wc v1",
+  "subset": {
+   "wavelength": "slice(None, None, 10)"
+  }
+ },
+ "metadata": {},
+ "axes": {
+  "Z": {
+   "units": "mass fraction",
+   "values": [
+    0.001,
+    0.004,
+    0.008,
+    0.02,
+    0.04
+   ]
+  },
+  "logT": {
+   "units": "log10(K)",
+   "values": [
+    4.60206,
+    4.63347,
+    4.66276,
+    4.69897,
+    4.74036,
+    4.77815,
+    4.8451,
+    4.90309,
+    4.95424,
+    5.0,
+    5.07918,
+    5.14613
+   ]
+  },
+  "wavelength": {
+   "units": "angstrom",
+   "file": "axis_wavelength.bin",
+   "dtype": "<f8",
+   "shape": [
+    197
+   ],
+   "sha256": "08f3f3ae2058302af95d433796a46b15582e4cfbdbc049358a44fa2e1ae32c25"
+  }
+ },
+ "arrays": {
+  "flux": {
+   "file": "flux.bin",
+   "dtype": "<f4",
+   "shape": [
+    5,
+    12,
+    197
+   ],
+   "axes": [
+    "Z",
+    "logT",
+    "wavelength"
+   ],
+   "units": "L_nu / L_bol (Hz^-1)",
+   "sha256": "2a77cc65b3184f005fa24c0a02bc92a073d161269bad481b0de177a3a6fecbf5"
+  }
+ }
+}
