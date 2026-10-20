@@ -1,13 +1,13 @@
-/* The batch's intrinsic young and old components (fsps_context_compute_csp_batch_parts):
+/* The batch's intrinsic young and old components (opensps_context_compute_csp_batch_parts):
  *  - the full attenuated spectrum is rebuilt from the parts with the documented dust model
  *    (power-law curve, dust_type 0; birth-cloud dust1 with dust1_index, diffuse dust2, dust3 on
  *    the old part, frac_obrun, frac_nodust; nebular emission on), per model, per pixel;
  *  - the masses and luminosities of the parts add up to the totals;
- *  - the other outputs equal those of fsps_context_compute_csp_batch;
+ *  - the other outputs equal those of opensps_context_compute_csp_batch;
  *  - young / old are required (status 3).
  * Tolerances: 1e-12 with FP64 kernels; with FP32 kernels the parts are rounded to single
  * precision before the rebuild, so 1e-6. Requires a data root (OPENSPS_DATA_HOME); skipped without one. */
-#include "fsps.h"
+#include "opensps.h"
 #include "test_c_data.h"
 
 #include <math.h>
@@ -41,17 +41,17 @@ int main(void) {
     double dust3[N_MOD] = {0.0, 0.0, 0.0, 0.2, 0.0, 0.1};
     const double *values[N_PAR] = {logz, tau, tage, dust1, dust2, dindex, d1index, fob, fnd, dust3};
 
-    fsps_context_create(&h, &status);
-    fsps_context_setup(-1, "mist", "miles", "DL07", h, &status);
+    opensps_context_create(&h, &status);
+    opensps_context_setup(-1, "mist", "miles", "DL07", h, &status);
     if (status != 0) { printf("setup failed\n"); return 1; }
-    fsps_context_set_int(h, "sfh", 4, &status);
-    fsps_context_set_int(h, "dust_type", 0, &status);
-    fsps_context_set_int(h, "add_dust_emission", 0, &status);
-    fsps_context_set_int(h, "add_neb_emission", 1, &status);
-    fsps_context_get_nspec(h, &nspec, &status);
-    fsps_context_get_nbands(h, &nbands, &status);
+    opensps_context_set_int(h, "sfh", 4, &status);
+    opensps_context_set_int(h, "dust_type", 0, &status);
+    opensps_context_set_int(h, "add_dust_emission", 0, &status);
+    opensps_context_set_int(h, "add_neb_emission", 1, &status);
+    opensps_context_get_nspec(h, &nspec, &status);
+    opensps_context_get_nbands(h, &nbands, &status);
     double *lam = malloc(sizeof(double) * nspec);
-    fsps_context_get_lambda(h, lam, &status);
+    opensps_context_get_lambda(h, lam, &status);
 
     size_t ns = (size_t)nspec * N_MOD;
     double *spec = malloc(sizeof(double) * ns), *young = malloc(sizeof(double) * ns);
@@ -59,7 +59,7 @@ int main(void) {
     double *mags = malloc(sizeof(double) * nbands * N_MOD), *mags_ref = malloc(sizeof(double) * nbands * N_MOD);
     double mass[N_MOD], lbol[N_MOD], my[N_MOD], mo[N_MOD], ly[N_MOD], lo[N_MOD], mass_ref[N_MOD], lbol_ref[N_MOD];
 
-    fsps_context_compute_csp_batch_parts(h, N_MOD, N_PAR, names, values, NULL, mags, spec, mass, lbol, NULL, NULL,
+    opensps_context_compute_csp_batch_parts(h, N_MOD, N_PAR, names, values, NULL, mags, spec, mass, lbol, NULL, NULL,
                                          NULL, NULL, young, old, my, mo, ly, lo, &status);
     check(status == 0, "batch with parts: status 0");
     if (status != 0) return 1;
@@ -67,7 +67,7 @@ int main(void) {
     /* Kernel precision: the bytes per value of the batch spectra */
     void *p = NULL;
     int bn = 0, bnspec = 0, bytes = 0, st2 = 0;
-    fsps_context_batch_spec_host(h, &p, &bnspec, &bn, &bytes, &st2);
+    opensps_context_batch_spec_host(h, &p, &bnspec, &bn, &bytes, &st2);
     double tol = bytes == 4 ? 1e-6 : 1e-12;
     printf("# kernel precision: %d bytes, tolerance %.0e\n", bytes, tol);
 
@@ -102,7 +102,7 @@ int main(void) {
     check(both, "young and old parts non-empty (every model is older than dust_tesc)");
 
     /* The other outputs equal those of the plain batch */
-    fsps_context_compute_csp_batch(h, N_MOD, N_PAR, names, values, NULL, mags_ref, spec_ref, mass_ref, lbol_ref,
+    opensps_context_compute_csp_batch(h, N_MOD, N_PAR, names, values, NULL, mags_ref, spec_ref, mass_ref, lbol_ref,
                                    NULL, NULL, NULL, NULL, &status);
     double d_spec = 0.0, d_mag = 0.0;
     for (size_t k = 0; k < ns; k++)
@@ -113,11 +113,11 @@ int main(void) {
     check(status == 0 && d_spec <= tol && d_mag <= 1e3 * tol, "outputs = plain batch");
 
     /* young and old are required */
-    fsps_context_compute_csp_batch_parts(h, N_MOD, N_PAR, names, values, NULL, mags, spec, mass, lbol, NULL, NULL,
+    opensps_context_compute_csp_batch_parts(h, N_MOD, N_PAR, names, values, NULL, mags, spec, mass, lbol, NULL, NULL,
                                          NULL, NULL, NULL, old, NULL, NULL, NULL, NULL, &status);
     check(status == 3, "young NULL: status 3");
 
-    fsps_context_destroy(h, &status);
+    opensps_context_destroy(h, &status);
     free(lam); free(spec); free(young); free(old); free(spec_ref); free(mags); free(mags_ref);
     printf(failures ? "FAILED\n" : "PASSED\n");
     return failures ? 1 : 0;

@@ -20,7 +20,7 @@
 
 # Explicitly mark various other files
 meson.options linguist-language=Meson linguist-detectable=true
-packaging/fsps.spec linguist-language=Specfile linguist-detectable=true
+packaging/opensps.spec linguist-language=Specfile linguist-detectable=true
 
 # Mark documentation
 docs/** linguist-documentation

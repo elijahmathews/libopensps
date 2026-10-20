@@ -14,8 +14,8 @@ exe, test_root, work = sys.argv[1:4]
 here = os.path.dirname(os.path.abspath(__file__))
 args = [exe, test_root]
 if importlib.util.find_spec("numpy") is not None:
-    afe_root = os.path.join(os.path.abspath(work), "fsps-test-data-afe")
-    subprocess.run([sys.executable, os.path.join(here, "..", "tools", "fsps_data", "make_afe_variants.py"),
+    afe_root = os.path.join(os.path.abspath(work), "opensps-test-data-afe")
+    subprocess.run([sys.executable, os.path.join(here, "..", "tools", "opensps_data", "make_afe_variants.py"),
                     test_root, afe_root], check=True)
     args.append(afe_root)
 else:

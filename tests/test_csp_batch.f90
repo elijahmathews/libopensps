@@ -8,22 +8,22 @@ program test_csp_batch
     !> SSP interpolated in log Z the same way). Requires the FSPS data tree, like the regression
     !> tests.
 
-    use fsps_precision, only: WP, KP
-    use fsps_constants, only: NEMLINE
-    use fsps_types, only: PARAMS, COMPSPOUT
-    use fsps_api, only: fsps_create, fsps_setup, fsps_destroy
-    use fsps_csp, only: compute_csp_scenario, set_scenario_batch
-    use fsps_csp_batch, only: compute_csp_batch, batch_spectra_device, batch_spectra_host
+    use opensps_precision, only: WP, KP
+    use opensps_constants, only: NEMLINE
+    use opensps_types, only: PARAMS, COMPSPOUT
+    use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
+    use opensps_csp, only: compute_csp_scenario, set_scenario_batch
+    use opensps_csp_batch, only: compute_csp_batch, batch_spectra_device, batch_spectra_host
     use, intrinsic :: iso_c_binding, only: c_ptr, c_associated, c_loc, c_size_t, c_f_pointer
 #if defined(OMP_TARGET)
     use omp_lib, only: omp_target_memcpy, omp_get_initial_device, omp_get_default_device
 #endif
-    use fsps_ssp, only: generate_ssp_grid
-    use fsps_context, only: fsps_context_update_ssp_basis, fsps_context_move_to_device, &
-                            fsps_context_set_pset, fsps_context_get_pset, fsps_context_prepare_pset, &
-                            fsps_context_set_param_int, fsps_context_set_param_float
-    use fsps_context_types, only: fsps_context_t
-    use fsps_interpolation, only: find_interval
+    use opensps_ssp, only: generate_ssp_grid
+    use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
+                            opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
+                            opensps_context_set_param_int, opensps_context_set_param_float
+    use opensps_context_types, only: opensps_context_t
+    use opensps_interpolation, only: find_interval
     use test_utils_mod, only: tap_finish, skip_without_data, print_major_header, print_group, print_summary_line, assert_true
     implicit none
 
@@ -38,7 +38,7 @@ program test_csp_batch
     real(WP), parameter :: MAG_TOL = merge(1.0e-9_wp, 1.0e-5_wp, KP == WP)
     ! Spectral indices (absolute, as tools/compare_builds)
     real(WP), parameter :: INDX_TOL = merge(1.0e-8_wp, 1.0e-4_wp, KP == WP)
-    type(fsps_context_t), allocatable :: ctx
+    type(opensps_context_t), allocatable :: ctx
     real(WP) :: smooth_sigma = 0.0_wp   ! sigma_smooth of every model
     logical  :: zred_per_model = .false.  ! models at the redshifts ZLIST instead of one
     real(WP), parameter :: ZLIST(N_MOD) = [0.0_wp, 0.1_wp, 0.5_wp, 1.2_wp, 2.0_wp, 3.0_wp, &
@@ -48,13 +48,13 @@ program test_csp_batch
     call print_major_header("Batched CSP vs compute_csp_scenario")
 
     allocate(ctx)
-    call fsps_create(ctx)
+    call opensps_create(ctx)
     ! The reference is the old single-call path (an independent implementation) and its SFH
     ! weights, whatever FSPS_SCENARIO_BATCH says
     call set_scenario_batch(.false.)
     ctx%pset%zmet = 10
-    call fsps_setup(ctx, 10, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
-    call fsps_context_move_to_device(ctx)
+    call opensps_setup(ctx, 10, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
+    call opensps_context_move_to_device(ctx)
     call set_int('zmet', 10)
     call set_int('imf_type', 1)
     call set_int('add_dust_emission', 1)
@@ -84,7 +84,7 @@ program test_csp_batch
     ! Per-model metallicity: all bases resident, logzsol varied
     call check_batch_z()
 
-    call fsps_destroy(ctx)
+    call opensps_destroy(ctx)
     deallocate(ctx)
     call print_summary_line("Batched CSP", total_tests - total_failures, total_tests)
     call tap_finish()
@@ -97,13 +97,13 @@ contains
         type(PARAMS) :: pset
         real(WP), allocatable :: mass_ssp(:), lbol_ssp(:), spec_ssp(:, :)
 
-        call fsps_context_prepare_pset(ctx)
-        call fsps_context_get_pset(ctx, pset)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
         allocate(mass_ssp(ctx%state%ntfull), lbol_ssp(ctx%state%ntfull), &
                  spec_ssp(ctx%state%nspec, ctx%state%ntfull))
-        call fsps_context_set_pset(ctx, pset)
+        call opensps_context_set_pset(ctx, pset)
         call generate_ssp_grid(ctx, pset, mass_ssp, lbol_ssp, spec_ssp)
-        call fsps_context_update_ssp_basis(ctx, reshape(spec_ssp, [size(spec_ssp, 1), size(spec_ssp, 2), 1]), &
+        call opensps_context_update_ssp_basis(ctx, reshape(spec_ssp, [size(spec_ssp, 1), size(spec_ssp, 2), 1]), &
                                            reshape(mass_ssp, [size(mass_ssp), 1]), &
                                            reshape(lbol_ssp, [size(lbol_ssp), 1]), 1)
     end subroutine build_basis
@@ -186,8 +186,8 @@ contains
 
         do m = 1, N_MOD
             call set_model(m, merge(ZLIST(m), zred, zred_per_model))
-            call fsps_context_prepare_pset(ctx)
-            call fsps_context_get_pset(ctx, psets(m))
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
             call compute_csp_scenario(ctx, psets(m), 1, results, status)
             if (status /= 0) then
                 write(*, *) 'ERROR: compute_csp_scenario returned status ', status
@@ -302,9 +302,9 @@ contains
         allocate(spec_z(nspec, nt, nz), mass_z(nt, nz), lbol_z(nt, nz))
         do z = 1, nz
             call set_int('zmet', z)
-            call fsps_context_prepare_pset(ctx)
-            call fsps_context_get_pset(ctx, pset)
-            call fsps_context_set_pset(ctx, pset)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pset)
+            call opensps_context_set_pset(ctx, pset)
             call generate_ssp_grid(ctx, pset, mass_z(:, z), lbol_z(:, z), spec_z(:, :, z))
         end do
         call set_int('zmet', 10)
@@ -319,14 +319,14 @@ contains
         do m = 1, N_MOD
             call set_model(m, 0.5_wp)
             call set_float('logzsol', logz(m))
-            call fsps_context_prepare_pset(ctx)
-            call fsps_context_get_pset(ctx, psets(m))
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
             ! The interpolated SSP (compute_interpolated_ssp, simple Z interpolation)
             zlo = max(1, min(find_interval(log10(ctx%state%zlegend(1:nz) / ctx%state%zsol), logz(m)), nz - 1))
             dz = (logz(m) - log10(ctx%state%zlegend(zlo) / ctx%state%zsol)) / &
                  (log10(ctx%state%zlegend(zlo + 1) / ctx%state%zsol) - log10(ctx%state%zlegend(zlo) / ctx%state%zsol))
             ctx%state%ssp_basis_is_dirty = .true.
-            call fsps_context_update_ssp_basis(ctx, &
+            call opensps_context_update_ssp_basis(ctx, &
                 reshape((1.0_wp - dz) * spec_z(:, :, zlo) + dz * spec_z(:, :, zlo + 1), [nspec, nt, 1]), &
                 reshape((1.0_wp - dz) * mass_z(:, zlo) + dz * mass_z(:, zlo + 1), [nt, 1]), &
                 reshape((1.0_wp - dz) * lbol_z(:, zlo) + dz * lbol_z(:, zlo + 1), [nt, 1]), 1)
@@ -344,7 +344,7 @@ contains
         end do
 
         ctx%state%ssp_basis_is_dirty = .true.
-        call fsps_context_update_ssp_basis(ctx, spec_z, mass_z, lbol_z, nz)
+        call opensps_context_update_ssp_basis(ctx, spec_z, mass_z, lbol_z, nz)
         call compute_csp_batch(ctx, psets, mags, status, spec=spec, mass=mass, lbol=lbol, emlines=eml, indx=indx)
         call assert_true(status == 0, "status 0", total_tests, total_failures)
         if (status /= 0) return
@@ -418,7 +418,7 @@ contains
         integer, intent(in) :: value
         integer :: status
 
-        call fsps_context_set_param_int(ctx, key, value, status)
+        call opensps_context_set_param_int(ctx, key, value, status)
         if (status /= 0) then
             write(*, *) 'ERROR: cannot set ', key
             stop 1
@@ -430,7 +430,7 @@ contains
         real(WP), intent(in) :: value
         integer :: status
 
-        call fsps_context_set_param_float(ctx, key, value, status)
+        call opensps_context_set_param_float(ctx, key, value, status)
         if (status /= 0) then
             write(*, *) 'ERROR: cannot set ', key
             stop 1

@@ -47,7 +47,7 @@ def main():
     if bad:
         print("Regression references do not match tests/data/references.json:\n  " + "\n  ".join(bad))
         print("Use the data release that provides the pinned versions (tools/fetch_data.py), or, after an intended "
-              "physics change, regenerate them and run tools/fsps_data/make_references.py (doc/DATA_FORMAT.md, "
+              "physics change, regenerate them and run tools/opensps_data/make_references.py (doc/DATA_FORMAT.md, "
               "Section 7).")
         return 1
     return 0

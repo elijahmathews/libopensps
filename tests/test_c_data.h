@@ -1,6 +1,6 @@
 /* Shared by the C test programs that need the data: skip (exit status 77, meson's SKIP) when no
  * data root is found, instead of letting setup stop the program with an error. The search is
- * the library's (fsps_find_data_root in src/core/fsps_environment.f90), in its order:
+ * the library's (opensps_find_data_root in src/core/opensps_environment.f90), in its order:
  * OPENSPS_DATA_HOME, SPS_HOME, FSPS_DATA_HOME, $XDG_DATA_HOME/fsps, ~/.local/share/fsps,
  * /usr/share/fsps, /usr/local/share/fsps; a root is a standard one (opensps-data.json, or the
  * older fsps-data.json) or a legacy tree (data/allfilters.dat or data/FILTER_LIST). */

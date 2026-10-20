@@ -1,5 +1,5 @@
 program test_ssp_operator
-    !> The batched SSP operator (fsps_ssp_operator) against generate_ssp_grid: S is built once
+    !> The batched SSP operator (opensps_ssp_operator) against generate_ssp_grid: S is built once
     !> per isochrone set and non-IMF parameter set, then evaluated for many IMFs (all six types,
     !> changed slopes, characteristic and break masses, mass limits, a tabulated user IMF), and
     !> its spectra, masses and L_bol are compared with generate_ssp_grid run for each IMF.
@@ -7,15 +7,15 @@ program test_ssp_operator
     !> weights and shifts), for MIST (HB tagged) and Padova (HB detected, 10 blue stars per HB
     !> point). Requires the FSPS data tree, like the regression tests.
 
-    use fsps_precision, only: WP, KP
-    use fsps_types, only: PARAMS
-    use fsps_api, only: fsps_create, fsps_setup, fsps_destroy
-    use fsps_ssp, only: generate_ssp_grid, configure_imf_parameters
-    use fsps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_evaluate, ssp_operator_free
-    use fsps_imf, only: imf_pack_params, IMF_NPAR
-    use fsps_context, only: fsps_context_get_pset, fsps_context_prepare_pset, &
-                            fsps_context_set_param_int, fsps_context_set_param_float
-    use fsps_context_types, only: fsps_context_t
+    use opensps_precision, only: WP, KP
+    use opensps_types, only: PARAMS
+    use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
+    use opensps_ssp, only: generate_ssp_grid, configure_imf_parameters
+    use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_evaluate, ssp_operator_free
+    use opensps_imf, only: imf_pack_params, IMF_NPAR
+    use opensps_context, only: opensps_context_get_pset, opensps_context_prepare_pset, &
+                            opensps_context_set_param_int, opensps_context_set_param_float
+    use opensps_context_types, only: opensps_context_t
     use test_utils_mod, only: tap_finish, skip_without_data, print_major_header, print_group, print_summary_line, assert_true
     implicit none
 
@@ -26,7 +26,7 @@ program test_ssp_operator
     real(WP), parameter :: SPEC_RTOL = merge(1.0e-12_wp, 100.0_wp * real(epsilon(1.0_KP), WP), KP == WP)
     real(WP), parameter :: MASS_RTOL = 1.0e-13_wp
     real(WP), parameter :: LBOL_ATOL = 1.0e-13_wp
-    type(fsps_context_t), allocatable :: ctx
+    type(opensps_context_t), allocatable :: ctx
     type(ssp_operator_t) :: op
 
     call skip_without_data()
@@ -34,9 +34,9 @@ program test_ssp_operator
 
     ! ---------------- MIST + MILES ----------------
     allocate(ctx)
-    call fsps_create(ctx)
+    call opensps_create(ctx)
     ctx%pset%zmet = 10
-    call fsps_setup(ctx, 10, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
+    call opensps_setup(ctx, 10, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
     call set_int('zmet', 10)
     call set_int('imf_type', 0)
     call build("MIST, default isochrone")
@@ -57,14 +57,14 @@ program test_ssp_operator
     call set_float('imf1', 0.9_wp); call set_float('imf2', 1.9_wp); call set_float('imf3', 2.8_wp)
     call check("MIST modified, Kroupa 0.9/1.9/2.8")
     call ssp_operator_free(op)
-    call fsps_destroy(ctx)
+    call opensps_destroy(ctx)
     deallocate(ctx)
 
     ! ---------------- Padova + BaSeL ----------------
     allocate(ctx)
-    call fsps_create(ctx)
+    call opensps_create(ctx)
     ctx%pset%zmet = 15
-    call fsps_setup(ctx, 15, isoc_type_in='pdva', spec_type_in='basel', dust_type_in='DL07')
+    call opensps_setup(ctx, 15, isoc_type_in='pdva', spec_type_in='basel', dust_type_in='DL07')
     call set_int('zmet', 15)
     call set_int('imf_type', 0)
     call set_float('fbhb', 0.3_wp)
@@ -78,7 +78,7 @@ program test_ssp_operator
     call set_float('vdmc', 0.3_wp)
     call check("Padova modified, van Dokkum mc = 0.3")
     call ssp_operator_free(op)
-    call fsps_destroy(ctx)
+    call opensps_destroy(ctx)
     deallocate(ctx)
 
     call print_summary_line("Batched SSP operator", total_tests - total_failures, total_tests)
@@ -120,8 +120,8 @@ contains
     subroutine build(label)
         character(len=*), intent(in) :: label
         type(PARAMS) :: pset
-        call fsps_context_prepare_pset(ctx)
-        call fsps_context_get_pset(ctx, pset)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
         call ssp_operator_build(ctx, pset, op)
         call print_group("S built: " // label)
         write(*, '(a, i0, a, i0, a, i0, a, i0, a, i0)') '#   points ', op%n_pts, ', rows ', op%n_rows, &
@@ -137,8 +137,8 @@ contains
         integer :: nt, ns, t, i
         character(len=200) :: msg
 
-        call fsps_context_prepare_pset(ctx)
-        call fsps_context_get_pset(ctx, pset)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
         nt = ctx%state%ntfull
         ns = ctx%state%nspec
         allocate(m_ref(nt), l_ref(nt), s_ref(ns, nt), m_op(nt), l_op(nt), s_op(ns, nt))
@@ -178,7 +178,7 @@ contains
         character(len=*), intent(in) :: key
         integer, intent(in) :: value
         integer :: status
-        call fsps_context_set_param_int(ctx, key, value, status)
+        call opensps_context_set_param_int(ctx, key, value, status)
         if (status /= 0) then
             write(*, *) 'ERROR: cannot set ', key
             stop 1
@@ -189,7 +189,7 @@ contains
         character(len=*), intent(in) :: key
         real(WP), intent(in) :: value
         integer :: status
-        call fsps_context_set_param_float(ctx, key, value, status)
+        call opensps_context_set_param_float(ctx, key, value, status)
         if (status /= 0) then
             write(*, *) 'ERROR: cannot set ', key
             stop 1

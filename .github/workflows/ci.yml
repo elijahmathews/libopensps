@@ -216,7 +216,7 @@ jobs:
         if: matrix.full_data && env.DATA_RELEASE == ''
         run: |
           sudo apt-get install -y -q python3-numpy
-          python3 tools/fsps_data/convert_legacy.py . opensps-data
+          python3 tools/opensps_data/convert_legacy.py . opensps-data
           meson test -C build --suite data_parity --print-errorlogs ${{ matrix.coverage && '--timeout-multiplier 3' || '' }}
 
       # Every assertion is a JUnit test case (the suites print TAP, which meson converts)

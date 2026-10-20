@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: fsps
-Source: https://github.com/elijahmathews/fsps
+Upstream-Name: opensps
+Source: https://github.com/elijahmathews/libopensps
 
 Files: *
 Copyright: 2009-2026 Charlie Conroy & contributors.

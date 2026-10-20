@@ -1,4 +1,4 @@
-#include "fsps.h"
+#include "opensps.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -19,45 +19,45 @@ int main(void) {
 
     printf("--- FSPS Context Isolation Test ---\n");
 
-    fsps_context_create(&h1, &status);
+    opensps_context_create(&h1, &status);
     if (status != 0) {
         printf("[C] Failed to create context 1\n");
         return 1;
     }
-    fsps_context_create(&h2, &status);
+    opensps_context_create(&h2, &status);
     if (status != 0) {
         printf("[C] Failed to create context 2\n");
         return 1;
     }
 
-    fsps_context_setup(-1, "mist", "miles", "DL07", h1, &status);
+    opensps_context_setup(-1, "mist", "miles", "DL07", h1, &status);
     if (status != 0) {
         printf("[C] Failed to setup context 1\n");
         return 1;
     }
-    fsps_context_setup(-1, "mist", "miles", "DL07", h2, &status);
+    opensps_context_setup(-1, "mist", "miles", "DL07", h2, &status);
     if (status != 0) {
         printf("[C] Failed to setup context 2\n");
         return 1;
     }
 
-    fsps_context_set_int(h1, "zmet", 1, &status);
+    opensps_context_set_int(h1, "zmet", 1, &status);
     if (status != 0) {
         printf("[C] Failed to set zmet for context 1\n");
         return 1;
     }
-    fsps_context_set_int(h2, "zmet", 2, &status);
+    opensps_context_set_int(h2, "zmet", 2, &status);
     if (status != 0) {
         printf("[C] Failed to set zmet for context 2\n");
         return 1;
     }
 
-    fsps_context_get_nspec(h1, &nspec, &status);
+    opensps_context_get_nspec(h1, &nspec, &status);
     if (status != 0) {
         printf("[C] Failed to get nspec for context 1\n");
         return 1;
     }
-    fsps_context_get_ntfull(h1, &ntfull, &status);
+    opensps_context_get_ntfull(h1, &ntfull, &status);
     if (status != 0) {
         printf("[C] Failed to get ntfull for context 1\n");
         return 1;
@@ -80,12 +80,12 @@ int main(void) {
         return 1;
     }
 
-    fsps_context_compute_ssp(h1, spec1, mass1, lbol1, &status);
+    opensps_context_compute_ssp(h1, spec1, mass1, lbol1, &status);
     if (status != 0) {
         printf("[C] SSP compute failed for context 1\n");
         return 1;
     }
-    fsps_context_compute_ssp(h2, spec2, mass2, lbol2, &status);
+    opensps_context_compute_ssp(h2, spec2, mass2, lbol2, &status);
     if (status != 0) {
         printf("[C] SSP compute failed for context 2\n");
         return 1;
@@ -102,8 +102,8 @@ int main(void) {
         return 1;
     }
 
-    fsps_context_destroy(h1, &status);
-    fsps_context_destroy(h2, &status);
+    opensps_context_destroy(h1, &status);
+    opensps_context_destroy(h2, &status);
 
     free(spec1);
     free(spec2);

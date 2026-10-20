@@ -7,8 +7,8 @@ module test_utils_mod
     !>     or "not ok N - ..." line per assertion, with headers and failure details as "#" comments,
     !>     so meson reports every assertion individually (console, testlog.json, testlog.junit.xml).
     !>     Programs call tap_finish() at the end to print the plan line.
-    use fsps_precision, only: WP
-    use fsps_environment, only: fsps_find_data_root
+    use opensps_precision, only: WP
+    use opensps_environment, only: opensps_find_data_root
     use, intrinsic :: ieee_arithmetic, only: ieee_is_nan, ieee_class, ieee_negative_inf, ieee_class_type, operator(==)
     implicit none
 
@@ -52,14 +52,14 @@ contains
     end subroutine tap_finish
 
     !> Skips the test program (exit status 77, or a TAP plan of 0 with a SKIP directive) when
-    !> no data root is found, the search of the library's setup (fsps_find_data_root): setup
+    !> no data root is found, the search of the library's setup (opensps_find_data_root): setup
     !> would otherwise stop the program with an error. Call before the first setup.
     subroutine skip_without_data()
         character(len=4096) :: root
         character(len=*), parameter :: REASON = 'no data root found (fetch a data release with ' // &
             'tools/fetch_data.py; set OPENSPS_DATA_HOME or configure with -Ddata_home)'
 
-        if (fsps_find_data_root(root)) return
+        if (opensps_find_data_root(root)) return
         if (tap_mode()) then
             write(*, '(2A)') '1..0 # SKIP ', REASON
             stop

@@ -1,0 +1,218 @@
+module opensps_environment
+    !> @brief
+    !> Handles system environment interactions, path resolution, and resource cleanup
+    !> for the FSPS library.
+    !>
+    !> @details
+    !> This module replaces the legacy `sps_setup_utils`. It is responsible for:
+    !> 1. Locating the FSPS data directory via environment variables or standard paths.
+    !> 2. Setting up the output directory.
+    !> 3. Tearing down the context and releasing cache resources.
+    !> 4. Reporting runtime environment details (Version, OpenMP threads).
+
+    use iso_fortran_env, only: error_unit, output_unit
+    use opensps_context_types, only: opensps_context_t, opensps_context_state_destroy
+    use opensps_cache, only: opensps_cache_release_setup
+    use opensps_datalib, only: datalib_format_from_env, datalib_root_is_standard
+
+    implicit none
+    private
+
+    public :: opensps_resolve_paths
+    public :: opensps_find_data_root
+    public :: opensps_cleanup
+    public :: opensps_print_env_info
+
+    ! ---------------------------------------------------------------------
+    ! Module constants
+    ! ---------------------------------------------------------------------
+
+    !> @brief Hardcoded version string for the library
+    character(len=*), parameter :: FSPS_VERSION = "3.2"
+
+contains
+
+    !> @brief Resolves the root paths for FSPS data and output.
+    !>
+    !> @details
+    !> Searches for the FSPS data directory in the following order:
+    !> 1. `OPENSPS_DATA_HOME` environment variable (preferred).
+    !> 2. `SPS_HOME` environment variable (legacy FSPS).
+    !> 3. `FSPS_DATA_HOME` environment variable.
+    !> 4. `XDG_DATA_HOME/fsps` (Linux standard).
+    !> 5. `~/.local/share/fsps` (User local).
+    !> 6. `/usr/share/fsps` (System wide).
+    !> 7. `/usr/local/share/fsps` (Local system wide).
+    !>
+    !> If found, populates `ctx%sps_home` and `ctx%data_home`.
+    !> Also resolves `ctx%output_home` based on write permissions and standards.
+    !>
+    !> @param[inout] ctx The FSPS context to populate.
+    subroutine opensps_resolve_paths(ctx)
+        type(opensps_context_t), intent(inout) :: ctx
+
+        character(len=4096) :: env_buffer
+        integer :: stat_len, stat_status
+
+        ctx%data_home = ''
+        ctx%output_home = ''
+
+        ! ------------------------------------------------------------------------
+        ! 1. SEARCH FOR DATA DIRECTORY
+        ! ------------------------------------------------------------------------
+
+        if (.not. opensps_find_data_root(ctx%sps_home)) then
+            write (error_unit, '(A)') '[OPENSPS_ENV] Error: FSPS data path not found.'
+            write (error_unit, '(A)') '           Please set OPENSPS_DATA_HOME (or FSPS_DATA_HOME / SPS_HOME).'
+            error stop 1
+        end if
+
+        ! Set Data Home
+        ctx%data_home = trim(ctx%sps_home)//'/data'
+
+        ! Library format: libraries with a manifest under <root>/libraries are read in the
+        ! standard format unless FSPS_DATA_FORMAT=legacy (doc/DATA_FORMAT.md, Section 5)
+        ctx%data_format = datalib_format_from_env()
+
+        ! ------------------------------------------------------------------------
+        ! 2. RESOLVE OUTPUT DIRECTORY
+        ! ------------------------------------------------------------------------
+
+        call get_environment_variable("FSPS_OUTPUT_HOME", value=env_buffer, length=stat_len, status=stat_status)
+
+        if (stat_status == 0 .and. stat_len > 0) then
+            ! Explicit override
+            ctx%output_home = trim(env_buffer)
+        else
+            ! Logic: If installed in a system directory (e.g. /usr/), we cannot write there.
+            ! Default to user home or current directory.
+            if (index(ctx%sps_home, '/usr/') == 1) then
+                call get_environment_variable("HOME", value=env_buffer, length=stat_len, status=stat_status)
+                if (stat_status == 0 .and. stat_len > 0) then
+                    ctx%output_home = trim(env_buffer)//'/.local/share/fsps'
+                else
+                    ctx%output_home = '.'
+                end if
+            else
+                ! If local installation, output to root
+                ctx%output_home = trim(ctx%sps_home)
+            end if
+        end if
+
+    end subroutine opensps_resolve_paths
+
+    !> @brief Searches for the data root, without stopping when there is none.
+    !>
+    !> @details
+    !> The search of opensps_resolve_paths, in its order (see there). Lets a caller, such as a test
+    !> program, find out whether setup can run before calling it: opensps_resolve_paths stops the
+    !> program when no data root is found.
+    !>
+    !> @param[out] root The data root found, or '' if none.
+    !> @return .true. if a data root was found.
+    logical function opensps_find_data_root(root) result(found)
+        character(len=*), intent(out) :: root
+
+        character(len=4096) :: env_buffer
+        integer :: stat_len, stat_status
+
+        root = ''
+        found = .false.
+
+        ! OPENSPS_DATA_HOME, then the legacy SPS_HOME, then FSPS_DATA_HOME
+        call try_env('OPENSPS_DATA_HOME', '')
+        if (.not. found) call try_env('SPS_HOME', '')
+        if (.not. found) call try_env('FSPS_DATA_HOME', '')
+        ! XDG_DATA_HOME/fsps, then ~/.local/share/fsps
+        if (.not. found) call try_env('XDG_DATA_HOME', '/fsps')
+        if (.not. found) call try_env('HOME', '/.local/share/fsps')
+        ! System paths
+        if (.not. found) call try_path('/usr/share/fsps')
+        if (.not. found) call try_path('/usr/local/share/fsps')
+
+    contains
+
+        subroutine try_env(name, suffix)
+            character(len=*), intent(in) :: name, suffix
+            call get_environment_variable(name, value=env_buffer, length=stat_len, status=stat_status)
+            if (stat_status == 0 .and. stat_len > 0) call try_path(trim(env_buffer)//suffix)
+        end subroutine try_env
+
+        subroutine try_path(candidate)
+            character(len=*), intent(in) :: candidate
+            if (check_data_exists(candidate)) then
+                root = trim(candidate)
+                found = .true.
+            end if
+        end subroutine try_path
+
+    end function opensps_find_data_root
+
+    !> @brief Prints a summary of the current FSPS runtime environment.
+    !> @details Useful for debugging and verification during startup.
+    subroutine opensps_print_env_info(ctx)
+        type(opensps_context_t), intent(in) :: ctx
+
+        write (output_unit, '(A)') '--------------------------------------------------'
+        write (output_unit, '(A, A)') ' FSPS Version:  ', FSPS_VERSION
+        write (output_unit, '(A, A)') ' Data Root:     ', trim(ctx%sps_home)
+        write (output_unit, '(A, A)') ' Output Root:   ', trim(ctx%output_home)
+
+        ! Note: OMP_GET_MAX_THREADS is intrinsic in many modern compilers,
+        ! but strict F2008 standard compliance often requires the `omp_lib` module.
+        ! We leave this simple print for now to avoid compilation complexity if OpenMP is off.
+#ifdef _OPENMP
+        write (output_unit, '(A)') ' OpenMP Status: Enabled'
+#else
+        write (output_unit, '(A)') ' OpenMP Status: Disabled (Serial)'
+#endif
+        write (output_unit, '(A)') '--------------------------------------------------'
+    end subroutine opensps_print_env_info
+
+    !> @brief Tears down the FSPS context and releases global cache resources.
+    !>
+    !> @details
+    !> Disconnects the context from the shared cache and destroys any context-specific
+    !> state. If this was the last context using the cache, the cache memory is freed.
+    !>
+    !> @param[inout] ctx The FSPS context to destroy.
+    subroutine opensps_cleanup(ctx)
+        type(opensps_context_t), intent(inout) :: ctx
+
+        if (associated(ctx%setup_cache)) then
+            call opensps_cache_release_setup(ctx%setup_cache)
+            nullify (ctx%setup_cache)
+        end if
+
+        call opensps_context_state_destroy(ctx%state)
+
+        ctx%initialized = .false.
+
+    end subroutine opensps_cleanup
+
+    ! ------------------------------------------------------------------------
+    ! PRIVATE HELPERS
+    ! ------------------------------------------------------------------------
+
+    !> @brief Checks if the 'data' subdirectory exists within a given path.
+    !> @param[in] path The root directory candidate.
+    !> @return .true. if `path` is a standard data root (`opensps-data.json`, or the older `fsps-data.json`) or a legacy one
+    !>         (`path/data/allfilters.dat` or `path/data/FILTER_LIST` exists).
+    logical function check_data_exists(path)
+        character(len=*), intent(in) :: path
+        logical :: file_exists
+
+        check_data_exists = datalib_root_is_standard(path)
+        if (check_data_exists) return
+
+        ! Check for critical data file to confirm valid directory
+        inquire (file=trim(path)//'/data/allfilters.dat', exist=file_exists)
+
+        if (.not. file_exists) then
+            inquire (file=trim(path)//'/data/FILTER_LIST', exist=file_exists)
+        end if
+
+        check_data_exists = file_exists
+    end function check_data_exists
+
+end module opensps_environment

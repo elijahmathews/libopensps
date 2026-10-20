@@ -9,10 +9,10 @@ entries below. The A100 session (2026-10-16) is first; the P100 session's status
 questions of the A100 session were answered on 2026-10-16:
 
 1. Legacy C API `compute_interpolated_ssp` calls: fix them. Done (argument order and keywords;
-   the clashing `fsps_compute_ssp` / `fsps_compute_csp` imports renamed). The legacy layer
-   (`FSPS_ENABLE_LEGACY`, not built by meson) still does not compile: it refers to globals that
+   the clashing `opensps_compute_ssp` / `opensps_compute_csp` imports renamed). The legacy layer
+   (`OPENSPS_ENABLE_LEGACY`, not built by meson) still does not compile: it refers to globals that
    no longer exist (`om0`, `ol0`, `h0`, `tiny_logt`, ..., `ntabmax`) and has a shape error at
-   `fsps_c_api.f90` ~1900; left as an open problem.
+   `opensps_c_api.f90` ~1900; left as an open problem.
 2. Fitting parameters: logmass, logzsol, dust2, dust_ratio, dust_index, the non-parametric SFH
    (logsfr_ratio_i via the SSP-weight matrix), fagn, agn_tau, gas_logz, gas_logu, duste_umin,
    duste_gamma, duste_qpah, zred. `c_batch` now varies exactly these (dust1 = dust_ratio * dust2
@@ -26,7 +26,7 @@ Session 2 (2026-10-19), new questions (conservative choice taken, work continued
 6. The batch now keeps its spectra in a context-owned buffer between calls (on the device,
    host copy page-locked): needed for device-resident output and to avoid re-allocating and
    re-pinning per call, but it holds nspec x N kernel-precision values (240 MB FP32 / 480 MB
-   FP64 at N = 10000) until `fsps_context_remove_from_device` / destroy. Kept resident; should
+   FP64 at N = 10000) until `opensps_context_remove_from_device` / destroy. Kept resident; should
    there be an explicit release call (or a size cap) for callers that run one huge batch?
 7. Page-locking that buffer (`cuMemHostRegister`) is on by default in NVIDIA GPU builds;
    `FSPS_NO_PIN=1` turns it off. Fine as a default on shared nodes?
@@ -51,10 +51,10 @@ light-weighted ages, fast mode, and anything the batch rejects (status /= 0: smo
 than the device velocity kernel, invalid dust settings). The old path is the default until
 the new one passes everywhere; `set_scenario_batch(.false.)` selects it in code (used by the
 tests that inspect its internals or use it as the batch's reference).
-- Structure: `sfh_weights_core` / `convert_sfhparams` moved from `fsps_csp` to `fsps_sfh`
+- Structure: `sfh_weights_core` / `convert_sfhparams` moved from `opensps_csp` to `opensps_sfh`
   (re-exported), and the batch of one is an external procedure
-  (`src/physics/fsps_scenario_batch.f90`): `fsps_context` uses `fsps_csp`, and
-  `fsps_csp_batch` uses `fsps_context`, so `fsps_csp` cannot use the batch module directly.
+  (`src/physics/opensps_scenario_batch.f90`): `opensps_context` uses `opensps_csp`, and
+  `opensps_csp_batch` uses `opensps_context`, so `opensps_csp` cannot use the batch module directly.
   (Lesson: ninja stops without an error message on a Fortran module cycle, and the stale
   library then made the old path look like the new one; confirm the path with
   `NVCOMPILER_ACC_NOTIFY=1`, which lists the batch's kernels.)
@@ -118,8 +118,8 @@ main tree `build_a100_nightly_asan` (gfortran ASan + UBSan, nightly configuratio
 Local runs need `SPS_HOME` unset (it overrides `FSPS_DATA_HOME`).
 
 **1. Nightly AddressSanitizer** (PR #11): `test_csp_batch` never deallocated its allocatable
-context after `fsps_destroy` (LeakSanitizer: 2,556,536 bytes in 3 allocations, from `MAIN__`
-and `fsps_context_set_pset`). Fixed with `deallocate(ctx)` (also two benchmarks). The nightly
+context after `opensps_destroy` (LeakSanitizer: 2,556,536 bytes in 3 allocations, from `MAIN__`
+and `opensps_context_set_pset`). Fixed with `deallocate(ctx)` (also two benchmarks). The nightly
 job reproduced locally on the PR #10 tip (gfortran 13.4, `-Denable_stress_testing=true
 -Db_sanitize=address,undefined`): leak without the fix; with it unit + regression 33/33
 (`--timeout-multiplier 3`) and the stress suite (all phases, `FSPS_STRESS_ITERS=10`,
@@ -135,7 +135,7 @@ batch kernels use and stops naming the culprit; to run on the 780M.
 
 **2. Spectra copy-back** (`gpu/a100-copyback`). The batch's spectra live in a context-owned
 buffer (`ctx%state%batch_out`): allocated on the device only when a batch outgrows it (x1.5),
-its host copy page-locked through the CUDA driver (`src/core/fsps_pinned.c`, resolved with
+its host copy page-locked through the CUDA driver (`src/core/opensps_pinned.c`, resolved with
 `dlopen` at run time; `FSPS_NO_PIN=1` disables). Findings:
 - registering the buffer alone gained nothing: the OpenACC runtime stages `update self`
   through its own pinned buffers even for registered memory (~4.6 GB/s effective). The copy now
@@ -146,8 +146,8 @@ its host copy page-locked through the CUDA driver (`src/core/fsps_pinned.c`, res
   empty section (`size=5994x0` in the runtime trace); the chunk copy is a separate routine with
   the bounds as arguments;
 - new outputs for callers working on the device or in single precision:
-  `batch_spectra_device` / `fsps_context_batch_spec_device` (device address, no copy) and
-  `batch_spectra_host` / `fsps_context_batch_spec_host` (the page-locked host buffer at kernel
+  `batch_spectra_device` / `opensps_context_batch_spec_device` (device address, no copy) and
+  `batch_spectra_host` / `opensps_context_batch_spec_host` (the page-locked host buffer at kernel
   precision, one DMA, no conversion). Tested in `test_csp_batch` (values through the returned
   addresses equal the copied-back spectra, every group) and `test_c_batch`.
 - `benchmark_csp_batch` now touches `spec` once before timing (a fitting loop reuses its
@@ -421,7 +421,7 @@ full).
   `compute_csp_batch` (branch `gpu/a100-batch-nebular`, stacked on `gpu/a100-cublas-threshold`):
   per model, as `compute_csp_scenario` does to each young SSP (EUV escape, continuum and lines
   from the CLOUDY grid in gas_logz / gas_logu, FP64 log space), summed over ages; line
-  luminosities attenuated as in `fsps_dust` (birth cloud, diffuse dust at the line wavelength),
+  luminosities attenuated as in `opensps_dust` (birth cloud, diffuse dust at the line wavelength),
   their absorbed part added to the energy balance when lines are not in the spectrum; AGN
   after the IGM. `test_csp_batch` 80/80 in all ten builds (new groups: nebular; IGM + nebular
   + AGN; AGN; lines not in the spectrum). Worst differences against `compute_csp_scenario`,
@@ -463,7 +463,7 @@ full).
   timings and experiments.
 
 - Per-model metallicity (branch `gpu/a100-batch-metallicity`, stacked): with the SSP bases of
-  all metallicities resident (`fsps_context_update_ssp_basis(..., nz)`), each model is
+  all metallicities resident (`opensps_context_update_ssp_basis(..., nz)`), each model is
   interpolated in log Z at its logzsol between the bracketing bases (`compute_interpolated_ssp`'s
   simple Z interpolation: linear in spectra, mass and log L_bol, not clamped): age sums with
   per-model bases (`age_sums_z`, portable kernel, also used in cuBLAS builds), mass and L_bol
@@ -492,11 +492,11 @@ full).
     `compute_igm_transmission`, which now calls it: same results), observed-frame resampling per
     (pixel, model) on the device, distance term per model, shared filters. New test group
     (z = 0 ... 3, IGM, nebular, AGN): FP32 spectra 6.5e-7, mags 2.5e-7; FP64 1e-11.
-  - C API `fsps_context_compute_csp_batch(handle, n, n_params, names, values, ssp_weights, mags,
-    spec, mass, lbol, mdust, sfr, emlines, indx, status)` (`include/fsps.h`): one array of n
+  - C API `opensps_context_compute_csp_batch(handle, n, n_params, names, values, ssp_weights, mags,
+    spec, mass, lbol, mdust, sfr, emlines, indx, status)` (`include/opensps.h`): one array of n
     doubles per named parameter on top of the context's parameters; builds the SSP basis on
     demand (all metallicities if logzsol is among the names); SSP parameters give status 2,
-    unknown names status 3 (message via `fsps_get_last_error`). New C test `c_batch`
+    unknown names status 3 (message via `opensps_get_last_error`). New C test `c_batch`
     (regression suite): 6 models with tau, tage, dust2, gas_logu, zred, logzsol varied through
     the arrays = the same models set one at a time (identical), plus the error statuses.
   - nvfortran 25.1 bug found: with `-acc=gpu`, a disassociated pointer passed to an optional
@@ -566,12 +566,12 @@ full).
 - OpenMP target offload of the whole batch (branch `gpu/a100-omp-batch`, stacked; "Next" item 1
   of `doc/GPU_PLAN.md`):
   - Device residency: an OpenMP twin of every OpenACC enter / exit / update directive of the
-    context (`fsps_context_move_to_device`, `remove_from_device`, `update_ssp_basis`, the
+    context (`opensps_context_move_to_device`, `remove_from_device`, `update_ssp_basis`, the
     settings sync, the batch caches), `!$omp declare target` beside each `!$acc routine seq`
     (63 device routines), and `target data` regions beside the OpenACC data regions. nvfortran
     attaches the pointer components of `ctx%state` correctly (checked in a small program first).
   - Kernels: the OpenMP directive on the same loop as the OpenACC one (36 kernels in
-    `fsps_csp_batch.f90`, `fsps_batch_photometry.f90` and the indices); the two separate OpenMP
+    `opensps_csp_batch.f90`, `opensps_batch_photometry.f90` and the indices); the two separate OpenMP
     copies of the age sums and band fluxes are gone. Gang + inner vector-reduction loops map to
     `target teams distribute` + inner `parallel do reduction`.
   - Fixed on the way: (1) the band-flux kernel as `teams distribute` over (band, block) with an
@@ -668,7 +668,7 @@ full).
   paused). Still open after the mapping fix of that branch; to debug from a text console (next:
   `LIBOMPTARGET_INFO=-1` / `LIBOMPTARGET_DEBUG` to find the failing construct, then a reduced
   batch, e.g. one model without nebular emission).
-- Legacy C API (`FSPS_ENABLE_LEGACY`): does not compile (see Questions, 1).
+- Legacy C API (`OPENSPS_ENABLE_LEGACY`): does not compile (see Questions, 1).
 - Nsight Compute cannot run: `RmProfilingAdminOnly: 1` on this node and `ncu` fails with
   `ERR_NVGPUCTRPERM` (GPU performance counters for admins only). Kernels are tuned from Nsight
   Systems timings instead.
@@ -712,7 +712,7 @@ full).
 
 - Continuation items 2-3 (branches `gpu/p100-csp-allages`, `gpu/p100-device-mags`, stacked):
   all-ages CSP sum collapsed over outputs (8x); magnitudes of all outputs computed on the
-  device (`fsps_batch_photometry`, shared with the batch); single-output SFH weights on the
+  device (`opensps_batch_photometry`, shared with the batch); single-output SFH weights on the
   host. P100 `compute_csp_scenario`: single call 1.93 -> 0.66 ms (FP64), 5.8 -> 0.66 ms (FP32);
   all-ages call (107 outputs) 94 -> 6.0 ms (FP64), 500 -> 5.0 ms (FP32). All builds 32/32.
 
@@ -777,7 +777,7 @@ full).
 - Compilers: `module load nvhpc/25.1` (nvfortran/nvc 25.1-0, Nsight Systems 2024.7.1);
   CPU reference built with `module load gcc/13.4.0` (the system gfortran is 8.5).
   meson 1.10.1, numpy 1.26.4.
-- Build fix: meson linked the test executables with `nvc` (libfsps has one C source) and
+- Build fix: meson linked the test executables with `nvc` (libopensps has one C source) and
   nvc 25.1 does not link `libnvf`, so every Fortran program failed with
   `undefined reference to pgf90io_*`. Added `link_language : 'fortran'` to every Fortran
   executable (the library already had it). CPU builds are unaffected.
@@ -788,14 +788,14 @@ full).
 First run of `meson test -C build_gpu --suite unit --suite regression` on the P100:
 6 failures, all host/device mapping bugs that OpenACC multicore (CI) cannot see:
 
-1. `fsps_destroy` never removed a context from the device. Its freed host arrays kept their
+1. `opensps_destroy` never removed a context from the device. Its freed host arrays kept their
    present-table entries; the next context's arrays, allocated at overlapping host addresses,
    then failed with "variable in data clause is partially present"
-   (`ctx%state%gaussnebarr`, `fsps_context_move_to_device`). Broke param_regression_* and
+   (`ctx%state%gaussnebarr`, `opensps_context_move_to_device`). Broke param_regression_* and
    physics_oracles. Fix: `ctx%on_device` flag; destroy, setup (which repoints and reallocates
-   state arrays) and `sps_takedown` call `fsps_context_remove_from_device` first; a second
+   state arrays) and `sps_takedown` call `opensps_context_remove_from_device` first; a second
    `move_to_device` refreshes instead of stacking reference counts.
-2. `fsps_context_remove_from_device` on a context never mapped, as the first OpenACC operation
+2. `opensps_context_remove_from_device` on a context never mapped, as the first OpenACC operation
    in the process, segfaults inside the 25.1 runtime (`__pgi_uacc_select_devid`). Hit by the
    photometry unit tests' teardown-before-setup. Fix: it returns when `.not. ctx%on_device`.
 3. `apply_agn_dust_emission` had `present(settings)` for the caller's host `pset`. Fix:
@@ -934,7 +934,7 @@ grid, so it was not timed separately.
 ### 2026-10-16: goal 3, batched CSP (branch `gpu/p100-batched-csp`)
 
 **New entry point** `compute_csp_batch(ctx, psets, mags, status [, spec, mass, lbol, mdust, sfr])`
-in `src/physics/fsps_csp_batch.f90` (`compute_csp_scenario` unchanged). N single-age models
+in `src/physics/opensps_csp_batch.f90` (`compute_csp_scenario` unchanged). N single-age models
 (`tage > 0`) against the resident SSP basis (one metallicity), sharing zred / igm_factor;
 SFH, dust attenuation (dust1/2/3, indices, birth-cloud age, frac_obrun, frac_nodust, curve
 parameters) and dust emission (U_min, q_PAH, gamma) vary per model. Status 2 for nebular
@@ -945,7 +945,7 @@ stages that are matrix products or element-wise; these are listed as open items)
    factored out of `compute_sfh_weights` with caller-provided scratch), split into young/old
    at each model's `dust_tesc`, cast once to KP; mass and L_bol from them (FP64).
 2. Age sums: one product basis(pixels x ages) . [W_young W_old](ages x 2N).
-3. Attenuation + absorbed light density: element-wise over (pixel, model), as in `fsps_dust`.
+3. Attenuation + absorbed light density: element-wise over (pixel, model), as in `opensps_dust`.
 4. Dust emission: per-model reductions (gang per model), Draine & Li template interpolated per
    model on the device from the resident grid, added with the energy-balance normalization.
 5. Magnitudes: observed-frame interpolation, then per-(band, model) filter integrals over each
@@ -973,7 +973,7 @@ All builds pass unit + regression (32 tests, including the new one); case matrix
   IGM absorption, and all dust types used the first one. This affects `compute_csp_scenario`
   too (any caller that changes a setting after moving the context). Fix: the setters mark the
   context dirty and the compute entry points refresh the device copy
-  (`fsps_context_sync_device_settings`).
+  (`opensps_context_sync_device_settings`).
 - *Device heap exhaustion.* The batch crashed at N = 10000 (illegal address; fine at 1000;
   `compute-sanitizer` pointed at local memory in `compute_ssp_weights`; a larger stack did not
   help, a 256 MB device heap did). Device code allocated temporaries on the 8 MB device heap
@@ -1098,12 +1098,12 @@ libraries + dust corners 133 ms (of which: aggregation 56, other libraries ~10, 
 CPU builds keep the per-age host sums (unchanged results). SSP grid, P100: FP64 0.38 -> 0.27 s,
 FP32 0.33 -> 0.27 s (nvfortran CPU: 0.45 s; gfortran CPU 0.48 s, one Broadwell core).
 
-**Test gap found:** `physics_oracles` (template sum = per-star sum) set `fsps_ssp::ssp_per_star`
+**Test gap found:** `physics_oracles` (template sum = per-star sum) set `opensps_ssp::ssp_per_star`
 by assignment from the test program. With nvfortran, a program that assigns a module variable
 of a shared library changes its own copy (the library keeps its own): both runs used the
 template path, the check printed 0.00 and passed vacuously in every nvfortran build
 (including CI's multicore job, where it compared per-star with per-star). New setter
-`fsps_ssp_set_per_star`; the oracle now compares the two paths on the GPU: FP64 8.9e-12 per
+`opensps_ssp_set_per_star`; the oracle now compares the two paths on the GPU: FP64 8.9e-12 per
 pixel (tolerance 1e-10), FP32 within KP_RTOL above 1e-6 of the peak (the printed maximum,
 1.8e5, is from pixels near FP32 underflow, ~1e-30 of the grid maximum, which the GPU flushes
 to zero).
@@ -1120,7 +1120,7 @@ nvfortran CPU 1.6e-11 per pixel, 1.3e-11 mag; FP32 GPU vs FP64 CPU 3.8e-7, 4.6e-
 
 New build mode `-Daccel=omp_gpu` (nvfortran `-mp=gpu`, `-DOMP_TARGET`, OpenACC off): OpenMP
 `target teams distribute parallel do` versions of the main-library template product
-(`main_templates_omp` in `fsps_ssp.f90`), the batched age sums and the band fluxes (same
+(`main_templates_omp` in `opensps_ssp.f90`), the batched age sums and the band fluxes (same
 arithmetic as the OpenACC kernels; arrays mapped per call with `map(to:/from:)`, no device
 residency yet). Everything else runs on the host in this mode.
 

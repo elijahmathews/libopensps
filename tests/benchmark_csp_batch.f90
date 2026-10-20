@@ -10,20 +10,20 @@ program benchmark_csp_batch
     !> Prints one line per metric: name, value. Per batch size: magnitudes only; with spectra
     !> copied back to a host array (reused, as in a fitting loop); with spectra left on the device.
 
-    use fsps_precision, only: WP
-    use fsps_types, only: PARAMS, COMPSPOUT
-    use fsps_api, only: fsps_create, fsps_setup, fsps_destroy
-    use fsps_csp, only: compute_csp_scenario
-    use fsps_csp_batch, only: compute_csp_batch, batch_spectra_device, batch_spectra_host
+    use opensps_precision, only: WP
+    use opensps_types, only: PARAMS, COMPSPOUT
+    use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
+    use opensps_csp, only: compute_csp_scenario
+    use opensps_csp_batch, only: compute_csp_batch, batch_spectra_device, batch_spectra_host
     use, intrinsic :: iso_c_binding, only: c_ptr, c_associated
-    use fsps_ssp, only: generate_ssp_grid
-    use fsps_context, only: fsps_context_update_ssp_basis, fsps_context_move_to_device, &
-                            fsps_context_set_pset, fsps_context_get_pset, fsps_context_prepare_pset, &
-                            fsps_context_set_param_int, fsps_context_set_param_float
-    use fsps_context_types, only: fsps_context_t
+    use opensps_ssp, only: generate_ssp_grid
+    use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
+                            opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
+                            opensps_context_set_param_int, opensps_context_set_param_float
+    use opensps_context_types, only: opensps_context_t
     implicit none
 
-    type(fsps_context_t), allocatable :: ctx
+    type(opensps_context_t), allocatable :: ctx
     type(PARAMS) :: pset
     type(PARAMS), allocatable :: psets(:)
     type(COMPSPOUT), allocatable :: results(:)
@@ -51,10 +51,10 @@ program benchmark_csp_batch
     call system_clock(count_rate=rate)
 
     allocate(ctx)
-    call fsps_create(ctx)
+    call opensps_create(ctx)
     ctx%pset%zmet = 10
-    call fsps_setup(ctx, 10, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
-    call fsps_context_move_to_device(ctx)
+    call opensps_setup(ctx, 10, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
+    call opensps_context_move_to_device(ctx)
     call set_int('imf_type', 1)
     call set_int('zmet', 10)
     call set_int('sfh', 1)
@@ -74,30 +74,30 @@ program benchmark_csp_batch
         call set_int('smooth_velocity', 1)
         call set_float('sigma_smooth', 150.0_wp)
     end if
-    call fsps_context_prepare_pset(ctx)
-    call fsps_context_get_pset(ctx, pset)
+    call opensps_context_prepare_pset(ctx)
+    call opensps_context_get_pset(ctx, pset)
 
     nspec = ctx%state%nspec
     ntfull = ctx%state%ntfull
     allocate(spec_ssp(nspec, ntfull), mass_ssp(ntfull), lbol_ssp(ntfull))
-    call fsps_context_set_pset(ctx, pset)
+    call opensps_context_set_pset(ctx, pset)
     write(*, '(A,A)') 'config ', trim(config)
     call generate_ssp_grid(ctx, pset, mass_ssp, lbol_ssp, spec_ssp)
-    call fsps_context_update_ssp_basis(ctx, reshape(spec_ssp, [nspec, ntfull, 1]), &
+    call opensps_context_update_ssp_basis(ctx, reshape(spec_ssp, [nspec, ntfull, 1]), &
                                        reshape(mass_ssp, [ntfull, 1]), reshape(lbol_ssp, [ntfull, 1]), 1)
     if (zvar) then
         ! The bases of all metallicities (the single call keeps the zmet = 10 basis)
         allocate(spec_z(nspec, ntfull, ctx%state%nz), mass_z(ntfull, ctx%state%nz), lbol_z(ntfull, ctx%state%nz))
         do z = 1, ctx%state%nz
             call set_int('zmet', z)
-            call fsps_context_prepare_pset(ctx)
-            call fsps_context_get_pset(ctx, pset)
-            call fsps_context_set_pset(ctx, pset)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pset)
+            call opensps_context_set_pset(ctx, pset)
             call generate_ssp_grid(ctx, pset, mass_z(:, z), lbol_z(:, z), spec_z(:, :, z))
         end do
         call set_int('zmet', 10)
-        call fsps_context_prepare_pset(ctx)
-        call fsps_context_get_pset(ctx, pset)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
     end if
 
     ! One compute_csp_scenario call per model (the existing path)
@@ -116,7 +116,7 @@ program benchmark_csp_batch
     ! Batched, magnitudes only and with spectra
     if (zvar) then
         ctx%state%ssp_basis_is_dirty = .true.
-        call fsps_context_update_ssp_basis(ctx, spec_z, mass_z, lbol_z, ctx%state%nz)
+        call opensps_context_update_ssp_basis(ctx, spec_z, mass_z, lbol_z, ctx%state%nz)
     end if
     allocate(psets(n_max))
     do i = 1, n_max
@@ -177,7 +177,7 @@ program benchmark_csp_batch
     end do
     if (total /= total) write(*, *) total   ! keep the results live
 
-    call fsps_destroy(ctx)
+    call opensps_destroy(ctx)
     deallocate(ctx)
 
 contains
@@ -217,14 +217,14 @@ contains
     subroutine set_int(key, value)
         character(len=*), intent(in) :: key
         integer, intent(in) :: value
-        call fsps_context_set_param_int(ctx, key, value, status)
+        call opensps_context_set_param_int(ctx, key, value, status)
         if (status /= 0) stop 1
     end subroutine set_int
 
     subroutine set_float(key, value)
         character(len=*), intent(in) :: key
         real(WP), intent(in) :: value
-        call fsps_context_set_param_float(ctx, key, value, status)
+        call opensps_context_set_param_float(ctx, key, value, status)
         if (status /= 0) stop 1
     end subroutine set_float
 

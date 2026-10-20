@@ -35,12 +35,12 @@ spec_bin
 generate_test_data
 test_cache
 test_contexts
-test_fsps
+test_opensps
 test_runner
 tests_units
 # Python bytecode
 __pycache__/
 
-# Standard-format data root converted from data/ (tools/fsps_data/convert_legacy.py)
+# Standard-format data root converted from data/ (tools/opensps_data/convert_legacy.py)
 /opensps-data/
 /fsps-data/

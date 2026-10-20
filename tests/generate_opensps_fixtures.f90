@@ -5,8 +5,8 @@ PROGRAM GENERATE_OPENSPS_FIXTURES
   ! Usage:
   !   generate_opensps_fixtures --isoc mist --spec miles [--dust DL07] --out case.opsf key=value ...
   !
-  ! Each key=value pair is applied through fsps_context_set_param_int/float (the same
-  ! keys accepted by the C API), both before fsps_setup (setup-time flags) and after it.
+  ! Each key=value pair is applied through opensps_context_set_param_int/float (the same
+  ! keys accepted by the C API), both before opensps_setup (setup-time flags) and after it.
   !
   ! Output format ("OPSF" container, little-endian stream):
   !   char(4)  magic = 'OPSF'
@@ -17,24 +17,24 @@ PROGRAM GENERATE_OPENSPS_FIXTURES
   !     real64 data(product(dims))
 
    use iso_fortran_env, only: int32, real64
-   use fsps_precision, only: WP
-   use fsps_constants, only: NEMLINE
-   use fsps_types, only: PARAMS, COMPSPOUT
-   use fsps_api, only: fsps_create, fsps_setup, fsps_destroy
-   use fsps_csp, only: compute_csp_scenario
-   use fsps_csp_batch, only: compute_csp_batch
-   use fsps_ssp, only: generate_ssp_grid, configure_imf_parameters
-   use fsps_imf, only: compute_imf_weights
-   use fsps_context, only: fsps_context_update_ssp_basis, fsps_context_move_to_device, &
-                           fsps_context_set_pset, fsps_context_get_pset, fsps_context_prepare_pset, &
-                           fsps_context_set_param_int, fsps_context_set_param_float
-   use fsps_context_types, only: fsps_context_t
+   use opensps_precision, only: WP
+   use opensps_constants, only: NEMLINE
+   use opensps_types, only: PARAMS, COMPSPOUT
+   use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
+   use opensps_csp, only: compute_csp_scenario
+   use opensps_csp_batch, only: compute_csp_batch
+   use opensps_ssp, only: generate_ssp_grid, configure_imf_parameters
+   use opensps_imf, only: compute_imf_weights
+   use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
+                           opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
+                           opensps_context_set_param_int, opensps_context_set_param_float
+   use opensps_context_types, only: opensps_context_t
    implicit none
 
    integer, parameter :: MAX_OVERRIDES = 64
    integer, parameter :: EXIT_FAILURE = 1
 
-   type(fsps_context_t) :: ctx
+   type(opensps_context_t) :: ctx
    type(PARAMS) :: pset
    type(COMPSPOUT), allocatable :: results(:)
 
@@ -95,18 +95,18 @@ PROGRAM GENERATE_OPENSPS_FIXTURES
    ! ------------------------------------------------------------------
    ! 2. Context creation and setup (mirrors tests/test_runner.f90)
    ! ------------------------------------------------------------------
-   call fsps_create(ctx)
+   call opensps_create(ctx)
    ctx%pset%zmet = 10
    call apply_overrides()
 
-   call fsps_setup(ctx, ctx%pset%zmet, isoc_type_in=trim(isoc_arg), &
+   call opensps_setup(ctx, ctx%pset%zmet, isoc_type_in=trim(isoc_arg), &
                    spec_type_in=trim(spec_arg), dust_type_in=trim(dust_arg))
-   call fsps_context_move_to_device(ctx)
+   call opensps_context_move_to_device(ctx)
 
    ! Re-apply after setup so that values reset during setup are restored
    call apply_overrides()
-   call fsps_context_prepare_pset(ctx)
-   call fsps_context_get_pset(ctx, pset)
+   call opensps_context_prepare_pset(ctx)
+   call opensps_context_get_pset(ctx, pset)
 
    nspec  = ctx%state%nspec
    ntfull = ctx%state%ntfull
@@ -144,7 +144,7 @@ PROGRAM GENERATE_OPENSPS_FIXTURES
    ! 4. SSP grid
    ! ------------------------------------------------------------------
    allocate(spec_ssp(nspec, ntfull), mass_ssp(ntfull), lbol_ssp(ntfull))
-   call fsps_context_set_pset(ctx, pset)
+   call opensps_context_set_pset(ctx, pset)
    call generate_ssp_grid(ctx, pset, mass_ssp, lbol_ssp, spec_ssp)
 
    call put('ssp/mass', real(mass_ssp, real64), [ntfull])
@@ -160,7 +160,7 @@ PROGRAM GENERATE_OPENSPS_FIXTURES
    spec_ssp3(:, :, 1) = spec_ssp
    mass_ssp2(:, 1) = mass_ssp
    lbol_ssp2(:, 1) = lbol_ssp
-   call fsps_context_update_ssp_basis(ctx, spec_ssp3, mass_ssp2, lbol_ssp2, 1)
+   call opensps_context_update_ssp_basis(ctx, spec_ssp3, mass_ssp2, lbol_ssp2, 1)
    call compute_csp_scenario(ctx, pset, 1, results, status)
    if (status /= 0) then
       write(*,*) 'ERROR: compute_csp_scenario returned status ', status
@@ -235,7 +235,7 @@ PROGRAM GENERATE_OPENSPS_FIXTURES
    end if
 
    close(unit_out)
-   call fsps_destroy(ctx)
+   call opensps_destroy(ctx)
    write(*,*) 'Wrote ', trim(out_arg)
 
 contains
@@ -265,7 +265,7 @@ contains
          ! Only treat the value as an integer when it contains no decimal point or exponent
          if (scan(valstr, '.eE') == 0) then
             read(valstr, *, iostat=ios) ival
-            if (ios == 0) call fsps_context_set_param_int(ctx, trim(key), ival, st)
+            if (ios == 0) call opensps_context_set_param_int(ctx, trim(key), ival, st)
          end if
          if (st /= 0) then
             read(valstr, *, iostat=ios) rval
@@ -273,7 +273,7 @@ contains
                write(*,*) 'ERROR: cannot parse value for ', trim(key)
                stop EXIT_FAILURE
             end if
-            call fsps_context_set_param_float(ctx, trim(key), rval, st)
+            call opensps_context_set_param_float(ctx, trim(key), rval, st)
          end if
          if (st /= 0) then
             write(*,*) 'ERROR: unknown parameter ', trim(key)

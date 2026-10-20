@@ -4,18 +4,18 @@ program benchmark_phases
     !> since legacy COMPSP only computes them when writing .indx files.
     !> Usage: benchmark_phases [n_ssp [n_csp]]. Prints one line per metric: name, seconds.
 
-    use fsps_precision, only: WP
-    use fsps_types, only: PARAMS, COMPSPOUT
-    use fsps_api, only: fsps_create, fsps_setup, fsps_destroy
-    use fsps_csp, only: compute_csp_scenario
-    use fsps_ssp, only: generate_ssp_grid
-    use fsps_context, only: fsps_context_update_ssp_basis, fsps_context_move_to_device, &
-                            fsps_context_set_pset, fsps_context_get_pset, fsps_context_prepare_pset, &
-                            fsps_context_set_param_int, fsps_context_set_param_float
-    use fsps_context_types, only: fsps_context_t
+    use opensps_precision, only: WP
+    use opensps_types, only: PARAMS, COMPSPOUT
+    use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
+    use opensps_csp, only: compute_csp_scenario
+    use opensps_ssp, only: generate_ssp_grid
+    use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
+                            opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
+                            opensps_context_set_param_int, opensps_context_set_param_float
+    use opensps_context_types, only: opensps_context_t
     implicit none
 
-    type(fsps_context_t), allocatable :: ctx
+    type(opensps_context_t), allocatable :: ctx
     type(PARAMS) :: pset
     type(COMPSPOUT), allocatable :: results(:)
     real(WP), allocatable :: spec_ssp(:, :), mass_ssp(:), lbol_ssp(:)
@@ -32,10 +32,10 @@ program benchmark_phases
 
     ! Common parameters: Chabrier, solar MIST, tau model observed at 10 Gyr, dust + dust emission
     allocate(ctx)
-    call fsps_create(ctx)
+    call opensps_create(ctx)
     ctx%pset%zmet = 10
-    call fsps_setup(ctx, 10, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
-    call fsps_context_move_to_device(ctx)
+    call opensps_setup(ctx, 10, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
+    call opensps_context_move_to_device(ctx)
     call set_int('imf_type', 1)
     call set_int('zmet', 10)
     call set_int('sfh', 1)
@@ -43,8 +43,8 @@ program benchmark_phases
     call set_float('tage', 10.0_wp)
     call set_float('dust2', 0.3_wp)
     call set_int('compute_indices', 0)
-    call fsps_context_prepare_pset(ctx)
-    call fsps_context_get_pset(ctx, pset)
+    call opensps_context_prepare_pset(ctx)
+    call opensps_context_get_pset(ctx, pset)
     call system_clock(t1)
     t_setup = real(t1 - t0, WP) / rate
 
@@ -83,7 +83,7 @@ program benchmark_phases
 
     ! 4. Nebular emission: per SSP call and per CSP call (gas parameters vary)
     call set_int('add_neb_emission', 1)
-    call fsps_context_prepare_pset(ctx)
+    call opensps_context_prepare_pset(ctx)
     call system_clock(t0)
     do i = 1, n_ssp
         call ssp()
@@ -102,18 +102,18 @@ program benchmark_phases
     write(*, '(A,F12.6)') 'csp_call_nebular_s ', real(t1 - t0, WP) / rate / n_csp
     if (total < 0.0_wp) write(*, *) total   ! keep the results live
 
-    call fsps_destroy(ctx)
+    call opensps_destroy(ctx)
     deallocate(ctx)
 
 contains
 
     subroutine ssp()
-        call fsps_context_set_pset(ctx, pset)
+        call opensps_context_set_pset(ctx, pset)
         call generate_ssp_grid(ctx, pset, mass_ssp, lbol_ssp, spec_ssp)
     end subroutine ssp
 
     subroutine basis()
-        call fsps_context_update_ssp_basis(ctx, reshape(spec_ssp, [nspec, ntfull, 1]), &
+        call opensps_context_update_ssp_basis(ctx, reshape(spec_ssp, [nspec, ntfull, 1]), &
                                            reshape(mass_ssp, [ntfull, 1]), reshape(lbol_ssp, [ntfull, 1]), 1)
     end subroutine basis
 
@@ -125,14 +125,14 @@ contains
     subroutine set_int(key, value)
         character(len=*), intent(in) :: key
         integer, intent(in) :: value
-        call fsps_context_set_param_int(ctx, key, value, status)
+        call opensps_context_set_param_int(ctx, key, value, status)
         if (status /= 0) stop 1
     end subroutine set_int
 
     subroutine set_float(key, value)
         character(len=*), intent(in) :: key
         real(WP), intent(in) :: value
-        call fsps_context_set_param_float(ctx, key, value, status)
+        call opensps_context_set_param_float(ctx, key, value, status)
         if (status /= 0) stop 1
     end subroutine set_float
 

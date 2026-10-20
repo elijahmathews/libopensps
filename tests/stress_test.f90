@@ -1,8 +1,9 @@
 program stress_test
-    use fsps_precision, only: WP
-    use fsps_types, only: PARAMS, COMPSPOUT
-    use fsps_api, only: fsps_create, fsps_setup, fsps_destroy, fsps_prepare_pset, fsps_compute_ssp, fsps_compute_csp
-    use fsps_context_types, only: fsps_context_t
+    use opensps_precision, only: WP
+    use opensps_types, only: PARAMS, COMPSPOUT
+    use opensps_api, only: opensps_create, opensps_setup, opensps_destroy, opensps_prepare_pset, opensps_compute_ssp, &
+        opensps_compute_csp
+    use opensps_context_types, only: opensps_context_t
 #ifdef _OPENMP
     use omp_lib, only: omp_set_num_threads
 #endif
@@ -56,21 +57,21 @@ contains
     subroutine phase_a_leak_check(iter_count)
         integer, intent(in) :: iter_count
 
-        type(fsps_context_t) :: ctx
+        type(opensps_context_t) :: ctx
         integer :: iter_idx
 
         write (*, *) '[Phase A] Leak check: create -> compute CSP -> destroy'
         do iter_idx = 1, iter_count
-            call fsps_create(ctx)
+            call opensps_create(ctx)
             call run_lightweight_csp(ctx, iter_idx)
-            call fsps_destroy(ctx)
+            call opensps_destroy(ctx)
         end do
     end subroutine phase_a_leak_check
 
     subroutine phase_b_concurrency_check(thread_count)
         integer, intent(in) :: thread_count
 
-        type(fsps_context_t), allocatable :: contexts(:)
+        type(opensps_context_t), allocatable :: contexts(:)
         integer :: thread_idx
 
         write (*, *) '[Phase B] Concurrency check: per-thread context SSP+CSP'
@@ -79,9 +80,9 @@ contains
 
         !$omp parallel do default(shared) private(thread_idx) schedule(static)
         do thread_idx = 1, thread_count
-            call fsps_create(contexts(thread_idx))
+            call opensps_create(contexts(thread_idx))
             call run_heavy_workload(contexts(thread_idx), thread_idx)
-            call fsps_destroy(contexts(thread_idx))
+            call opensps_destroy(contexts(thread_idx))
         end do
         !$omp end parallel do
 
@@ -91,21 +92,21 @@ contains
     subroutine phase_c_reallocation_thrash(iter_count)
         integer, intent(in) :: iter_count
 
-        type(fsps_context_t) :: ctx
+        type(opensps_context_t) :: ctx
         integer :: iter_idx
 
         write (*, *) '[Phase C] Reallocation thrash via parameter mutations'
 
-        call fsps_create(ctx)
-        call fsps_setup(ctx, 1, 'mist', 'miles', 'DL07')
-        call fsps_prepare_pset(ctx)
+        call opensps_create(ctx)
+        call opensps_setup(ctx, 1, 'mist', 'miles', 'DL07')
+        call opensps_prepare_pset(ctx)
 
         do iter_idx = 1, iter_count
             call mutate_parameters(ctx, iter_idx)
             call execute_ssp_and_csp(ctx)
         end do
 
-        call fsps_destroy(ctx)
+        call opensps_destroy(ctx)
     end subroutine phase_c_reallocation_thrash
 
     !> Every thread repeatedly creates, sets up and destroys a context with the same library
@@ -115,7 +116,7 @@ contains
     subroutine phase_d_setup_release_churn(thread_count, iter_count)
         integer, intent(in) :: thread_count, iter_count
 
-        type(fsps_context_t), allocatable :: contexts(:)
+        type(opensps_context_t), allocatable :: contexts(:)
         integer :: thread_idx, iter_idx
 
         write (*, *) '[Phase D] Shared setup-cache churn: concurrent setup/destroy'
@@ -125,9 +126,9 @@ contains
         !$omp parallel do default(shared) private(thread_idx, iter_idx) schedule(static)
         do thread_idx = 1, thread_count
             do iter_idx = 1, iter_count
-                call fsps_create(contexts(thread_idx))
-                call fsps_setup(contexts(thread_idx), 1, 'mist', 'miles', 'DL07')
-                call fsps_destroy(contexts(thread_idx))
+                call opensps_create(contexts(thread_idx))
+                call opensps_setup(contexts(thread_idx), 1, 'mist', 'miles', 'DL07')
+                call opensps_destroy(contexts(thread_idx))
             end do
         end do
         !$omp end parallel do
@@ -136,12 +137,12 @@ contains
     end subroutine phase_d_setup_release_churn
 
     subroutine run_lightweight_csp(ctx, iter_idx)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in) :: iter_idx
         type(PARAMS) :: pset
 
-        call fsps_setup(ctx, 1, 'mist', 'miles', 'DL07')
-        call fsps_prepare_pset(ctx)
+        call opensps_setup(ctx, 1, 'mist', 'miles', 'DL07')
+        call opensps_prepare_pset(ctx)
 
         pset = ctx%pset
         pset%zmet = 1
@@ -167,12 +168,12 @@ contains
     end subroutine run_lightweight_csp
 
     subroutine run_heavy_workload(ctx, thread_idx)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in) :: thread_idx
         type(PARAMS) :: pset
 
-        call fsps_setup(ctx, 1, 'mist', 'miles', 'DL07')
-        call fsps_prepare_pset(ctx)
+        call opensps_setup(ctx, 1, 'mist', 'miles', 'DL07')
+        call opensps_prepare_pset(ctx)
 
         pset = ctx%pset
         pset%zmet = 1
@@ -197,7 +198,7 @@ contains
     end subroutine run_heavy_workload
 
     subroutine mutate_parameters(ctx, iter_idx)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in) :: iter_idx
         type(PARAMS) :: pset
 
@@ -269,7 +270,7 @@ contains
     end subroutine mutate_parameters
 
     subroutine execute_ssp_and_csp(ctx)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
 
         integer :: ntfull
         integer :: nspec
@@ -285,7 +286,7 @@ contains
         nspec = ctx%state%nspec
 
         allocate (mass_ssp(ntfull), lbol_ssp(ntfull), spec_ssp(nspec, ntfull))
-        call fsps_compute_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp)
+        call opensps_compute_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp)
 
         allocate (mass_ssp_2d(ntfull, 1), lbol_ssp_2d(ntfull, 1), spec_ssp_3d(nspec, ntfull, 1))
         mass_ssp_2d(:, 1) = mass_ssp
@@ -293,7 +294,7 @@ contains
         spec_ssp_3d(:, :, 1) = spec_ssp
 
         allocate (csp_results(ntfull))
-        call fsps_compute_csp(ctx, 0, 1, '', mass_ssp_2d, lbol_ssp_2d, spec_ssp_3d, csp_results)
+        call opensps_compute_csp(ctx, 0, 1, '', mass_ssp_2d, lbol_ssp_2d, spec_ssp_3d, csp_results)
         call release_csp_results(csp_results)
 
         deallocate (mass_ssp, lbol_ssp, spec_ssp)

@@ -12,15 +12,15 @@ program test_context_isolation
     !>      compute_vega_mags) select a separate entry.
     !> Requires the FSPS data tree (OPENSPS_DATA_HOME / FSPS_DATA_HOME), like the regression tests.
 
-    use fsps_precision, only: WP, KP
-    use fsps_types, only: PARAMS, COMPSPOUT
-    use fsps_api, only: fsps_create, fsps_setup, fsps_destroy, fsps_set_param_int, fsps_set_param_float
-    use fsps_context, only: fsps_context_update_ssp_basis, fsps_context_move_to_device, &
-                            fsps_context_set_pset, fsps_context_get_pset, fsps_context_prepare_pset
-    use fsps_context_types, only: fsps_context_t
-    use fsps_initialization, only: fsps_shared_load_count
-    use fsps_ssp, only: generate_ssp_grid
-    use fsps_csp, only: compute_csp_scenario
+    use opensps_precision, only: WP, KP
+    use opensps_types, only: PARAMS, COMPSPOUT
+    use opensps_api, only: opensps_create, opensps_setup, opensps_destroy, opensps_set_param_int, opensps_set_param_float
+    use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
+                            opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset
+    use opensps_context_types, only: opensps_context_t
+    use opensps_initialization, only: opensps_shared_load_count
+    use opensps_ssp, only: generate_ssp_grid
+    use opensps_csp, only: compute_csp_scenario
     use test_utils_mod, only: tap_finish, skip_without_data, print_major_header, print_group, print_summary_line, assert_true, &
                               assert_int_equals
     implicit none
@@ -47,23 +47,23 @@ contains
 
     !> Configures a context for nebular line emission and runs setup.
     subroutine setup_nebular_context(ctx, setup_gaussians, smooth_init)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in) :: setup_gaussians
         real(WP), intent(in) :: smooth_init
         integer :: status
 
-        call fsps_create(ctx)
-        call fsps_set_param_int(ctx, 'add_neb_emission', 1, status)
-        call fsps_set_param_int(ctx, 'setup_nebular_gaussians', setup_gaussians, status)
-        call fsps_set_param_float(ctx, 'nebular_smooth_init', smooth_init, status)
-        call fsps_setup(ctx, ZMET, 'mist', 'miles', 'DL07')
+        call opensps_create(ctx)
+        call opensps_set_param_int(ctx, 'add_neb_emission', 1, status)
+        call opensps_set_param_int(ctx, 'setup_nebular_gaussians', setup_gaussians, status)
+        call opensps_set_param_float(ctx, 'nebular_smooth_init', smooth_init, status)
+        call opensps_setup(ctx, ZMET, 'mist', 'miles', 'DL07')
     end subroutine setup_nebular_context
 
     !> With setup_nebular_gaussians = 1 the line kernels are built once at setup from
     !> nebular_smooth_init. A second context with a different nebular_smooth_init must neither
     !> overwrite the first context's kernels nor inherit them.
     subroutine test_setup_kernels_follow_own_smoothing()
-        type(fsps_context_t) :: ctx_a, ctx_b
+        type(opensps_context_t) :: ctx_a, ctx_b
         real(WP), allocatable :: kernels_a(:, :)
 
         call print_group("Setup-time line kernels follow each context's nebular_smooth_init")
@@ -78,15 +78,15 @@ contains
         call assert_true(any(ctx_b%state%gaussnebarr /= kernels_a), &
                          "context B kernels built from its own nebular_smooth_init", total_tests, total_failures)
 
-        call fsps_destroy(ctx_b)
-        call fsps_destroy(ctx_a)
+        call opensps_destroy(ctx_b)
+        call opensps_destroy(ctx_a)
     end subroutine test_setup_kernels_follow_own_smoothing
 
     !> With setup_nebular_gaussians = 0 (the default) every nebular call rebuilds the line kernels
     !> from that context's sigma_smooth, so the kernel array must be owned by the context; the
     !> read-only spectral library must still be shared.
     subroutine test_per_call_kernels_are_private()
-        type(fsps_context_t) :: ctx_c, ctx_d
+        type(opensps_context_t) :: ctx_c, ctx_d
 
         call print_group("Per-call line kernels are private to each context")
 
@@ -98,16 +98,16 @@ contains
         call assert_true(associated(ctx_c%state%speclib, ctx_d%state%speclib), &
                          "read-only spectral library is still shared", total_tests, total_failures)
 
-        call fsps_destroy(ctx_d)
+        call opensps_destroy(ctx_d)
         call assert_true(associated(ctx_c%state%gaussnebarr), &
                          "kernels survive destruction of the other context", total_tests, total_failures)
-        call fsps_destroy(ctx_c)
+        call opensps_destroy(ctx_c)
     end subroutine test_per_call_kernels_are_private
 
     !> Contexts with the same key share one cache entry whose reference count tracks the number of
     !> live contexts; destroying one must leave the shared data intact for the others.
     subroutine test_cache_refcount_bookkeeping()
-        type(fsps_context_t) :: ctx_e, ctx_f, ctx_g
+        type(opensps_context_t) :: ctx_e, ctx_f, ctx_g
 
         call print_group("Setup cache reference counting")
 
@@ -120,16 +120,16 @@ contains
         call assert_int_equals(3, ctx_e%setup_cache%refcount, "refcount = 3 live contexts", &
                                total_tests, total_failures)
 
-        call fsps_destroy(ctx_g)
+        call opensps_destroy(ctx_g)
         call assert_int_equals(2, ctx_e%setup_cache%refcount, "refcount = 2 after one destroy", &
                                total_tests, total_failures)
-        call fsps_destroy(ctx_f)
+        call opensps_destroy(ctx_f)
         call assert_int_equals(1, ctx_e%setup_cache%refcount, "refcount = 1 after two destroys", &
                                total_tests, total_failures)
         call assert_true(associated(ctx_e%state%speclib), "surviving context keeps shared data", &
                          total_tests, total_failures)
 
-        call fsps_destroy(ctx_e)
+        call opensps_destroy(ctx_e)
     end subroutine test_cache_refcount_bookkeeping
 
     !> A second context with the same library selection must reuse the cached data without reading
@@ -139,7 +139,7 @@ contains
     !> OpenACC multicore reductions sum in a run-dependent order). Settings the shared data depend on must select a
     !> separate cache entry rather than silently reusing (or overwriting) another context's data.
     subroutine test_cache_hit_reuses_shared_data()
-        type(fsps_context_t) :: ctx_miss, ctx_hit, ctx_other
+        type(opensps_context_t) :: ctx_miss, ctx_hit, ctx_other
         integer :: loads_before
         integer(8) :: t0, t1, t2, rate
         real(WP) :: t_miss, t_hit
@@ -148,7 +148,7 @@ contains
 
         call print_group("Cache hit reuses shared data without reloading")
 
-        loads_before = fsps_shared_load_count()
+        loads_before = opensps_shared_load_count()
         call system_clock(t0, rate)
         call setup_csp_context(ctx_miss, cloudy_dust=0, vega_mags=0)
         call system_clock(t1)
@@ -160,7 +160,7 @@ contains
 
         call assert_true(associated(ctx_miss%setup_cache, ctx_hit%setup_cache), &
                          "second context hits the first context's cache entry", total_tests, total_failures)
-        call assert_int_equals(loads_before + 1, fsps_shared_load_count(), &
+        call assert_int_equals(loads_before + 1, opensps_shared_load_count(), &
                                "shared data loaded from disk once for two contexts", total_tests, total_failures)
         call assert_true(t_hit < 0.25_wp*t_miss, "cache-hit setup takes < 25% of a cold setup", &
                          total_tests, total_failures)
@@ -198,16 +198,16 @@ contains
         call assert_true(.not. associated(ctx_other%setup_cache, ctx_miss%setup_cache), &
                          "cloudy_dust / compute_vega_mags select a separate cache entry", &
                          total_tests, total_failures)
-        call assert_int_equals(loads_before + 2, fsps_shared_load_count(), &
+        call assert_int_equals(loads_before + 2, opensps_shared_load_count(), &
                                "the separate entry is loaded from disk", total_tests, total_failures)
         call assert_true(any(ctx_other%state%nebem_cont /= ctx_miss%state%nebem_cont) .and. &
                          any(ctx_other%state%magsun /= ctx_miss%state%magsun), &
                          "its nebular grid and solar magnitudes follow its own settings", &
                          total_tests, total_failures)
 
-        call fsps_destroy(ctx_other)
-        call fsps_destroy(ctx_hit)
-        call fsps_destroy(ctx_miss)
+        call opensps_destroy(ctx_other)
+        call opensps_destroy(ctx_hit)
+        call opensps_destroy(ctx_miss)
     end subroutine test_cache_hit_reuses_shared_data
 
     !> Element-wise equality to 1e-10 relative (a cache error gives order-unity differences).
@@ -230,48 +230,48 @@ contains
 
     !> Configures a context for a nebular CSP and runs setup.
     subroutine setup_csp_context(ctx, cloudy_dust, vega_mags)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in) :: cloudy_dust, vega_mags
         integer :: status
 
-        call fsps_create(ctx)
-        call fsps_set_param_int(ctx, 'add_neb_emission', 1, status)
-        call fsps_set_param_int(ctx, 'cloudy_dust', cloudy_dust, status)
-        call fsps_set_param_int(ctx, 'compute_vega_mags', vega_mags, status)
-        call fsps_setup(ctx, ZMET, 'mist', 'miles', 'DL07')
-        call fsps_context_move_to_device(ctx)
-        call fsps_set_param_int(ctx, 'zmet', ZMET, status)
-        call fsps_set_param_int(ctx, 'sfh', 1, status)
-        call fsps_set_param_int(ctx, 'dust_type', 0, status)
-        call fsps_set_param_float(ctx, 'tau', 1.0_wp, status)
-        call fsps_set_param_float(ctx, 'tage', 3.0_wp, status)
-        call fsps_set_param_float(ctx, 'dust2', 0.3_wp, status)
+        call opensps_create(ctx)
+        call opensps_set_param_int(ctx, 'add_neb_emission', 1, status)
+        call opensps_set_param_int(ctx, 'cloudy_dust', cloudy_dust, status)
+        call opensps_set_param_int(ctx, 'compute_vega_mags', vega_mags, status)
+        call opensps_setup(ctx, ZMET, 'mist', 'miles', 'DL07')
+        call opensps_context_move_to_device(ctx)
+        call opensps_set_param_int(ctx, 'zmet', ZMET, status)
+        call opensps_set_param_int(ctx, 'sfh', 1, status)
+        call opensps_set_param_int(ctx, 'dust_type', 0, status)
+        call opensps_set_param_float(ctx, 'tau', 1.0_wp, status)
+        call opensps_set_param_float(ctx, 'tage', 3.0_wp, status)
+        call opensps_set_param_float(ctx, 'dust2', 0.3_wp, status)
     end subroutine setup_csp_context
 
     subroutine run_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         real(WP), allocatable, intent(out) :: mass_ssp(:), lbol_ssp(:), spec_ssp(:, :)
         type(PARAMS) :: pset
 
-        call fsps_context_prepare_pset(ctx)
-        call fsps_context_get_pset(ctx, pset)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
         allocate (mass_ssp(ctx%state%ntfull), lbol_ssp(ctx%state%ntfull), &
                   spec_ssp(ctx%state%nspec, ctx%state%ntfull))
-        call fsps_context_set_pset(ctx, pset)
+        call opensps_context_set_pset(ctx, pset)
         call generate_ssp_grid(ctx, pset, mass_ssp, lbol_ssp, spec_ssp)
     end subroutine run_ssp
 
     !> CSP on the context's SSP grid (mirrors test_physics_oracles).
     subroutine run_csp(ctx, mass_ssp, lbol_ssp, spec_ssp, results)
-        type(fsps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(inout) :: ctx
         real(WP), allocatable, intent(inout) :: mass_ssp(:), lbol_ssp(:), spec_ssp(:, :)
         type(COMPSPOUT), allocatable, intent(inout) :: results(:)
         type(PARAMS) :: pset
         integer :: status
 
         call run_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp)
-        call fsps_context_get_pset(ctx, pset)
-        call fsps_context_update_ssp_basis(ctx, reshape(spec_ssp, [size(spec_ssp, 1), size(spec_ssp, 2), 1]), &
+        call opensps_context_get_pset(ctx, pset)
+        call opensps_context_update_ssp_basis(ctx, reshape(spec_ssp, [size(spec_ssp, 1), size(spec_ssp, 2), 1]), &
                                            reshape(mass_ssp, [size(mass_ssp), 1]), &
                                            reshape(lbol_ssp, [size(lbol_ssp), 1]), 1)
         if (allocated(results)) deallocate (results)

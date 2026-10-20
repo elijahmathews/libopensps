@@ -1,11 +1,11 @@
-/* The C batch entry point (fsps_context_compute_csp_batch) with the fitting parameters of a
+/* The C batch entry point (opensps_context_compute_csp_batch) with the fitting parameters of a
  * real pipeline: logzsol, dust2, dust1 (= dust_ratio * dust2, formed by the caller), dust_index,
  * fagn, agn_tau, gas_logz, gas_logu, duste_umin, duste_gamma, duste_qpah, zred, and a
  * non-parametric SFH as an SSP-weight matrix (logmass is a caller-side scaling). The arrays
  * (one per parameter, length n) are checked against the same models set one at a time on the
  * context, and the error statuses for a parameter that changes the SSPs and an unknown one.
  * Requires a data root (OPENSPS_DATA_HOME), like the regression tests; skipped without one. */
-#include "fsps.h"
+#include "opensps.h"
 #include "test_c_data.h"
 
 #include <math.h>
@@ -38,16 +38,16 @@ int main(void) {
                                    umin, gamma_, qpah, zred};
     for (int m = 0; m < N_MOD; m++) dust1[m] = dust_ratio[m] * dust2[m];
 
-    fsps_context_create(&h, &status);
-    fsps_context_setup(-1, "mist", "miles", "DL07", h, &status);
+    opensps_context_create(&h, &status);
+    opensps_context_setup(-1, "mist", "miles", "DL07", h, &status);
     if (status != 0) { printf("setup failed\n"); return 1; }
-    fsps_context_set_int(h, "add_neb_emission", 1, &status);
-    fsps_context_set_int(h, "add_dust_emission", 1, &status);
-    fsps_context_set_int(h, "add_igm_absorption", 1, &status);
-    fsps_context_set_int(h, "add_agn_dust", 1, &status);
-    fsps_context_get_nspec(h, &nspec, &status);
-    fsps_context_get_ntfull(h, &ntfull, &status);
-    fsps_context_get_nbands(h, &nbands, &status);
+    opensps_context_set_int(h, "add_neb_emission", 1, &status);
+    opensps_context_set_int(h, "add_dust_emission", 1, &status);
+    opensps_context_set_int(h, "add_igm_absorption", 1, &status);
+    opensps_context_set_int(h, "add_agn_dust", 1, &status);
+    opensps_context_get_nspec(h, &nspec, &status);
+    opensps_context_get_ntfull(h, &ntfull, &status);
+    opensps_context_get_nbands(h, &nbands, &status);
 
     /* Non-parametric SFHs: per model a smooth bump over the SSP ages, normalized to one solar
      * mass formed (column-major, ntfull x n) */
@@ -66,13 +66,13 @@ int main(void) {
     double *mags1 = malloc(sizeof(double) * nbands), *spec1 = malloc(sizeof(double) * nspec);
     double mass[N_MOD], lbol[N_MOD], mass1, lbol1;
 
-    fsps_context_compute_csp_batch(h, N_MOD, N_PAR, names, values, w, mags, spec, mass, lbol,
+    opensps_context_compute_csp_batch(h, N_MOD, N_PAR, names, values, w, mags, spec, mass, lbol,
                                    NULL, NULL, NULL, NULL, &status);
     printf("batch of %d models: status %d\n", N_MOD, status);
     if (status != 0) {
         char msg[256];
         int st2 = 0;
-        fsps_get_last_error(&st2, msg, 256);
+        opensps_get_last_error(&st2, msg, 256);
         printf("error: %s\n", msg);
         return 1;
     }
@@ -81,28 +81,28 @@ int main(void) {
     {
         void *dptr = NULL;
         int dn = 0, dnspec = 0, dbytes = 0, dst = 0;
-        fsps_context_batch_spec_device(h, &dptr, &dnspec, &dn, &dbytes, &dst);
+        opensps_context_batch_spec_device(h, &dptr, &dnspec, &dn, &dbytes, &dst);
         printf("batch spectra: %d x %d, %d bytes per value, status %d\n", dnspec, dn, dbytes, dst);
         if (dst != 0 || dptr == NULL || dnspec != nspec || dn != N_MOD || (dbytes != 4 && dbytes != 8)) {
-            printf("FAIL: fsps_context_batch_spec_device\n");
+            printf("FAIL: opensps_context_batch_spec_device\n");
             failures++;
         }
-        fsps_context_batch_spec_device(-7, &dptr, &dnspec, &dn, &dbytes, &dst);
+        opensps_context_batch_spec_device(-7, &dptr, &dnspec, &dn, &dbytes, &dst);
         if (dst != 1) {
-            printf("FAIL: fsps_context_batch_spec_device, bad handle gave status %d (expected 1)\n", dst);
+            printf("FAIL: opensps_context_batch_spec_device, bad handle gave status %d (expected 1)\n", dst);
             failures++;
         }
 
         /* The same spectra on the host at kernel precision: equal to the double ones */
         void *hptr = NULL;
-        fsps_context_batch_spec_host(h, &hptr, &dnspec, &dn, &dbytes, &dst);
+        opensps_context_batch_spec_host(h, &hptr, &dnspec, &dn, &dbytes, &dst);
         int same = dst == 0 && hptr != NULL && dnspec == nspec && dn == N_MOD;
         for (size_t i = 0; same && i < (size_t)nspec * N_MOD; i++) {
             double v = dbytes == 4 ? (double)((const float *)hptr)[i] : ((const double *)hptr)[i];
             same = v == spec[i];
         }
         if (!same) {
-            printf("FAIL: fsps_context_batch_spec_host\n");
+            printf("FAIL: opensps_context_batch_spec_host\n");
             failures++;
         }
     }
@@ -111,10 +111,10 @@ int main(void) {
     for (int m = 0; m < N_MOD; m++) {
         /* The same model, its parameters set on the context (logzsol through the arrays, so the
          * basis is the per-metallicity one in both cases; the SFH as that model's weights) */
-        for (int i = 1; i < N_PAR; i++) fsps_context_set_float(h, names[i], values[i][m], &status);
+        for (int i = 1; i < N_PAR; i++) opensps_context_set_float(h, names[i], values[i][m], &status);
         const char *zname[1] = {"logzsol"};
         const double *zval[1] = {&logz[m]};
-        fsps_context_compute_csp_batch(h, 1, 1, zname, zval, w + (size_t)m * ntfull, mags1, spec1, &mass1,
+        opensps_context_compute_csp_batch(h, 1, 1, zname, zval, w + (size_t)m * ntfull, mags1, spec1, &mass1,
                                        &lbol1, NULL, NULL, NULL, NULL, &status);
         if (status != 0) { printf("single model %d: status %d\n", m, status); return 1; }
         double peak = 0.0;
@@ -138,14 +138,14 @@ int main(void) {
     const char *bad1[1] = {"imf1"};
     const char *bad2[1] = {"not_a_parameter"};
     const double *bv[1] = {dust2};
-    fsps_context_compute_csp_batch(h, N_MOD, 1, bad1, bv, NULL, mags, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+    opensps_context_compute_csp_batch(h, N_MOD, 1, bad1, bv, NULL, mags, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                                    &status);
     if (status != 2) { printf("FAIL: imf1 per model gave status %d (expected 2)\n", status); failures++; }
-    fsps_context_compute_csp_batch(h, N_MOD, 1, bad2, bv, NULL, mags, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+    opensps_context_compute_csp_batch(h, N_MOD, 1, bad2, bv, NULL, mags, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                                    &status);
     if (status != 3) { printf("FAIL: unknown parameter gave status %d (expected 3)\n", status); failures++; }
 
-    fsps_context_destroy(h, &status);
+    opensps_context_destroy(h, &status);
     free(w); free(mags); free(spec); free(mags1); free(spec1);
     printf(failures ? "FAILED\n" : "PASSED\n");
     return failures ? 1 : 0;

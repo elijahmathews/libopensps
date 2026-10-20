@@ -36,7 +36,7 @@ SETUP INSTRUCTIONS
         installs, set FSPS_DATA_HOME=/usr/share/fsps to locate the data directory.
 
     C driver note: the C API is context-only.
-    See doc/FSPS_C_API.md and doc/DEGLOBALIFY_MIGRATION.md for usage.
+    See doc/C_API.md and doc/DEGLOBALIFY_MIGRATION.md for usage.
 
 3.  email cconroy@cfa.harvard.edu so that I can keep you posted on updates.  
       -> this step is actually important!  Every code has bugs.  If I
