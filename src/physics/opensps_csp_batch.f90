@@ -31,7 +31,8 @@ module opensps_csp_batch
     !>    emission (fagn, agn_tau per model), attenuated by the model's diffuse dust, as
     !>    apply_agn_dust_emission.
     !> 7. Velocity smoothing (sigma_smooth, shared by the batch; smooth_velocity = 1 with the
-    !>    default smoothspec_fast = 1), the sparse operator of apply_smoothing applied on the device.
+    !>    default smoothspec_fast = 1), the sparse operator of apply_smoothing applied on the device;
+    !>    the other smoothing modes on the host (apply_smoothing per model).
     !> 8. Magnitudes: per (band, model) filter integrals over each band's support, compensated
     !>    at FP32 kernel precision (each model resampled to the observed frame at its redshift);
     !>    optionally spectral indices.
@@ -54,11 +55,10 @@ module opensps_csp_batch
     !> Redshifted colours (redshift_colors = 1) need zred_mags, each model's magnitude redshift
     !> (compute_csp_scenario's all-ages mode gives the redshift of each output's age).
     !>
-    !> Not supported (status 2): smoothing other than in velocity with smoothspec_fast = 1,
-    !> redshifted colours without zred_mags, light-weighted ages, and models with tage <= 0
-    !> without a weight matrix (the all-ages output of compute_csp_scenario is a batch with a
-    !> weight matrix). Models must share the smoothing parameters (sigma_smooth,
-    !> min/max_wave_smooth).
+    !> Not supported (status 2): redshifted colours without zred_mags, light-weighted ages, and
+    !> models with tage <= 0 without a weight matrix (the all-ages output of compute_csp_scenario
+    !> is a batch with a weight matrix). Models must share the smoothing parameters
+    !> (sigma_smooth, min/max_wave_smooth).
     !>
     !> Mass, L_bol and SFR follow `compute_csp_scenario` in FP64; spectra, magnitudes, indices,
     !> line luminosities and dust masses agree with it to the rounding of the kernel precision
@@ -81,6 +81,7 @@ module opensps_csp_batch
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
     use opensps_gas, only: get_grid_indices_weights, prepare_line_gaussians
     use opensps_spectral_indices, only: compute_spectral_indices_columns
+    use opensps_smoothing, only: apply_smoothing
     use opensps_batch_photometry, only: compute_magnitudes_columns, prepare_batch_grid, smoothing_on_device, &
                                      prepare_smoothing_kernel, smooth_columns
 #ifdef FSPS_CUBLAS
@@ -333,11 +334,9 @@ contains
             end do
         end if
 
-        ! Smoothing as apply_smoothing (which does nothing for sigma <= SAFE_FLOOR)
+        ! Smoothing as apply_smoothing (which does nothing for sigma <= SAFE_FLOOR): the fast
+        ! velocity kernel on the device, the other modes on the host (smooth_columns_host)
         smooth = psets(1)%sigma_smooth > SAFE_FLOOR
-        if (smooth .and. .not. smoothing_on_device(ctx)) then
-            status = 2; return
-        end if
 
         ! Per-model metallicity: a basis per metallicity of the context
         nzb = size(ctx%state%ssp_basis_spec, 3)
@@ -401,8 +400,9 @@ contains
             call prepare_batch_grid(ctx, zred, psets(1)%igm_factor)
             igm = ctx%state%batch%igm
         end if
-        if (smooth) call prepare_smoothing_kernel(ctx, psets(1)%sigma_smooth, psets(1)%min_wave_smooth, &
-                                                  psets(1)%max_wave_smooth)
+        if (smooth .and. smoothing_on_device(ctx)) call prepare_smoothing_kernel(ctx, psets(1)%sigma_smooth, &
+                                                                             psets(1)%min_wave_smooth, &
+                                                                             psets(1)%max_wave_smooth)
 
         ! ------------------------------------------------------------------
         ! 2-7. Device: age sums, nebular emission, attenuation, dust emission, IGM, AGN, smoothing
@@ -538,7 +538,11 @@ contains
             call apply_igm(n_mod, nspec, ctx%state%batch%igm_t, total)
         end if
         if (agn) call add_agn_batch(ctx, psets, n_mod, nspec, agn_on, ita, wta, lsum, tdiff, total)
-        if (smooth) call smooth_columns(ctx, total, n_mod)
+        if (smooth .and. smoothing_on_device(ctx)) then
+            call smooth_columns(ctx, total, n_mod)
+        else if (smooth) then
+            call smooth_columns_host(ctx, psets(1), total(:, 1:n_mod))
+        end if
 
         ! ------------------------------------------------------------------
         ! 8. Magnitudes and indices
@@ -606,6 +610,35 @@ contains
             end if
         end do
     end subroutine compute_csp_batch
+
+    !> Smoothing other than the fast velocity kernel (smooth_velocity = 0: constant width in
+    !> wavelength; smoothspec_fast = 0: the exact log-linear velocity convolution), on the host
+    !> with compute_csp_scenario's routine (apply_smoothing), one column at a time in FP64: sp
+    !> (pixels x models, on the device in device builds) is copied to the host and back.
+    subroutine smooth_columns_host(ctx, pset, sp)
+        type(opensps_context_t), intent(in) :: ctx
+        type(params), intent(in)         :: pset
+        real(KP), intent(inout), contiguous :: sp(:,:)
+        real(WP), allocatable :: col(:)
+        integer :: m, nspec
+
+        nspec = size(sp, 1)
+        allocate(col(nspec))
+        !$acc update self(sp)
+#ifdef OMP_TARGET
+        !$omp target update from(sp)
+#endif
+        do m = 1, size(sp, 2)
+            col = real(sp(:, m), WP)
+            call apply_smoothing(ctx, ctx%state%spec_lambda(1:nspec), col, pset%sigma_smooth, pset%min_wave_smooth, &
+                                 pset%max_wave_smooth)
+            sp(:, m) = real(col, KP)
+        end do
+        !$acc update device(sp)
+#ifdef OMP_TARGET
+        !$omp target update to(sp)
+#endif
+    end subroutine smooth_columns_host
 
     !> Copies the batch's spectra (sp = the batch output, columns 1:n_mod, on the device) to spec
     !> at WP.
