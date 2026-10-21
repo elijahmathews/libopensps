@@ -1738,6 +1738,30 @@ contains
 #endif
         !$acc end host_data
         if (istat /= 0) error stop 'compute_csp_batch: cuBLAS GEMM failed'
+#elif !defined(_OPENACC) && !defined(OMP_TARGET)
+        ! CPU builds: per model, one pass over the pixels (stride 1, vectorized) for each age with
+        ! a weight, as compute_csp_scenario; the register tile below would pad a batch of fewer
+        ! than MT models with copies (8x the work at N = 1). The same sums in the same order:
+        ! ages in order, the young ones (<= it_tesc) into column m, the old into N + m, so the
+        ! results equal the tiled kernel's bit for bit.
+        integer  :: m, k, i, col
+        real(KP) :: wk
+
+        do m = 1, 2 * n_mod
+            do i = 1, nspec
+                yo(i, m) = 0.0_KP
+            end do
+        end do
+        do m = 1, n_mod
+            do k = 1, nt
+                wk = w2(k, m) + w2(k, n_mod + m)   ! one of the two is zero
+                if (wk == 0.0_KP) cycle
+                col = merge(m, n_mod + m, k <= it_tesc(m))
+                do i = 1, nspec
+                    yo(i, col) = yo(i, col) + wk * basis(i, k)
+                end do
+            end do
+        end do
 #else
         ! Register tile: each thread does PT pixels (strided by npt, so each load is coalesced
         ! across the threads) x MT models, PT + 2 MT loads per PT * MT multiply-adds.
