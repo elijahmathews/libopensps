@@ -81,7 +81,7 @@ jobs:
             install: setup-fortran
             toolchain: nvidia-hpc
             version: '26.1'
-            setup_args: -Daccel=multicore
+            setup_args: -Daccel=multicore -Dcpu_baseline=x86-64-v3
             fflags: -Minfo=accel
 
           # FP32 kernels (-Dkernel_precision=single), the configuration a consumer GPU would run;
@@ -96,7 +96,7 @@ jobs:
             install: setup-fortran
             toolchain: nvidia-hpc
             version: '26.1'
-            setup_args: -Daccel=multicore -Dkernel_precision=single
+            setup_args: -Daccel=multicore -Dkernel_precision=single -Dcpu_baseline=x86-64-v3
             fflags: -Minfo=accel
 
     env:
@@ -162,13 +162,15 @@ jobs:
           meson --version
           lscpu | grep -E 'Model name|Vendor ID' || true
 
-      # nvfortran's math runtime (libpgmath) picks a table of math kernels from CPUID at program
-      # start: avx512 when the CPU reports AVX-512VL, else avx2, ... On the hosted runners whose
-      # virtual CPU reports AVX-512 (AMD EPYC 9V74) programs aborted there ("Error during math
-      # dispatch processing... Math dispatch table is either misconfigured or corrupted"), while
-      # the AVX2-only runners (EPYC 7763) were fine. MTH_I_ARCH overrides the detection: pin the
-      # avx2 table, which every x86-64-v3 runner supports, so the outcome no longer depends on
-      # the runner's CPU. The step logs what the detection would have chosen.
+      # nvfortran programs aborted at startup on some hosted runners ("Error during math
+      # dispatch processing... Math dispatch table is either misconfigured or corrupted"). In
+      # every logged failure (AMD EPYC 9V74) the compiler targeted the runner's CPU (-tp=znver4,
+      # which links libnvcpumath-avx512) while the math runtime's own CPUID check chose the
+      # avx2 table; on runners where the two agreed (EPYC 7763: avx2/avx2, EPYC 9V45:
+      # avx512/avx512) programs ran. The nvfortran jobs therefore build for a fixed baseline
+      # (-Dcpu_baseline=x86-64-v3, i.e. -tp=haswell, linking libnvcpumath-avx2) and pin the
+      # runtime table to avx2 (MTH_I_ARCH), so both sides agree on every runner. The step logs
+      # what the runtime detection would have chosen.
       - name: nvfortran runtime libraries
         if: matrix.toolchain == 'nvidia-hpc'
         run: |
