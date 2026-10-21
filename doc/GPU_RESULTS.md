@@ -39,7 +39,9 @@ Session 2 (2026-10-19), new questions (conservative choice taken, work continued
 
 Session 3 (2026-10-21), new questions:
 
-10. Light-weighted ages (`compute_light_ages = 1`) are the last mode on the old path, and the
+10. *Answered 2026-10-21: dropped for now (status 104 for a value other than 0, C API 2.0);
+    perhaps revisited later.* Light-weighted ages (`compute_light_ages = 1`) are the last mode
+    on the old path, and the
     old path does not compute them: it only switches the magnitudes to raw filter integrals of
     the ordinary spectrum. Legacy `csp_gen` returns, without dust, spec = sum(w t S) / sum(w S)
     per pixel, mass- and L_bol-weighted ages, and "magnitudes" that are filter integrals of that
@@ -47,7 +49,9 @@ Session 3 (2026-10-21), new questions:
     definitions in the batch (one more age-weighted sum); (b) band light-weighted ages,
     int(sum(w t S) T / lambda) / int(sum(w S) T / lambda), with or without dust (differs from
     legacy); (c) drop the option (status error). Nothing done yet; the old path stays for it.
-11. Likelihood on the device (roadmap priority 2): the definition is yours. Proposed: chi^2 per
+11. *Answered 2026-10-21: not now; moved to the roadmap's further items (it involves
+    assumptions about the observables).* Likelihood on the device (roadmap priority 2): the
+    definition is yours. Proposed: chi^2 per
     model of photometry (maggies from the device magnitudes, per-model amplitude = mass) and of
     a spectrum given on the library's rest-frame pixels (the caller resamples the data), with
     inverse variances (0 = masked) and the amplitude given per model (logmass a free

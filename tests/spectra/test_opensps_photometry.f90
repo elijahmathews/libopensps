@@ -28,7 +28,6 @@ contains
 
         call test_top_hat_filter()
         call test_ab_zero_point()
-        call test_light_ages_switch()
 
         call test_vega_offset_application()
         call test_vega_missing_vband()
@@ -226,44 +225,6 @@ contains
         deallocate(ctx)
     end subroutine test_ab_zero_point
 
-    subroutine test_light_ages_switch()
-        type(opensps_context_t), allocatable :: ctx
-        real(WP), allocatable :: spec(:), mags(:)
-        integer :: n_spec, n_bands
-        real(WP) :: grid_step
-
-        call print_group("Light Age Switch")
-
-        allocate(ctx)
-
-        n_spec = 501
-        n_bands = 2
-        ! Grid step is 10.0
-        call setup_context(ctx, n_spec, n_bands, 3000.0_wp, 10.0_wp)
-        call setup_cosmospl_linear(ctx, 2.0_wp, 0.0_wp)
-
-        ctx%compute_light_ages_val = 1
-        allocate(spec(n_spec), mags(n_bands))
-        spec = ctx%state%spec_lambda
-
-        call apply_top_hat_band(ctx%state%spec_lambda, ctx%state%bands(:, 1), 4000.0_wp, 4500.0_wp, 1.0_wp)
-        call apply_top_hat_band(ctx%state%spec_lambda, ctx%state%bands(:, 2), 4000.0_wp, 5000.0_wp, 1.0_wp)
-
-        call compute_magnitudes(ctx, 0.0_wp, spec, mags)
-
-        ! Note: Expected value is Width + Grid_Step because linear interpolation of the Top Hat
-        ! on the coarse grid creates "wings" that add exactly one bin of area.
-        grid_step = 10.0_wp
-        call assert_float_equals(500.0_wp + grid_step, mags(1), 1.0e-10_wp, &
-                                 "Light ages return raw weights (band 1)", total_tests, total_failures)
-        call assert_float_equals(1000.0_wp + grid_step, mags(2), 1.0e-10_wp, &
-                                 "Light ages return raw weights (band 2)", total_tests, total_failures)
-
-        deallocate(spec, mags)
-        call teardown_context(ctx)
-        deallocate(ctx)
-    end subroutine test_light_ages_switch
-
     ! ------------------------------------------------------------------------
     ! Group 3: Vega System Logic
     ! ------------------------------------------------------------------------
@@ -456,7 +417,6 @@ contains
         ctx%state%nspec = n_spec
 
         ctx%compute_vega_mags_val = 0
-        ctx%compute_light_ages_val = 0
 
         call opensps_context_move_to_device(ctx)
     end subroutine setup_context

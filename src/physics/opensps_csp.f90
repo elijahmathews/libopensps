@@ -250,12 +250,12 @@ contains
         ! -----------------------
         ! On the GPU the magnitudes of all outputs are computed at once from the device spectra
         ! (opensps_batch_photometry), when no step between here and compute_magnitudes changes them
-        ! (smoothing) or the redshift per output (redshift_colors), and without light-weighted ages
+        ! (smoothing) or the redshift per output (redshift_colors)
         dev_mags = .false.
 #ifdef _OPENACC
         dev_mags = (.not. ctx%fast_mode) .and. pset%compute_mags == 1 .and. &
                    (pset%sigma_smooth <= 0.0_wp .or. smoothing_on_device(ctx)) .and. &
-                   ctx%redshift_colors_val == 0 .and. ctx%compute_light_ages_val == 0
+                   ctx%redshift_colors_val == 0
 #endif
         if (dev_mags) then
             ! Velocity smoothing of all outputs on the device (the operator of apply_smoothing)
