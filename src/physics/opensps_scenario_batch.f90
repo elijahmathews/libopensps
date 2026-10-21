@@ -21,7 +21,7 @@ contains
     !> Several metallicities (nzin > 1: tabular SFHs with a metallicity column, the bases of all
     !> metallicities resident) are summed with weights over ages and metallicities.
     !> Returns .false. (results untouched) for the options the batch does not cover yet: several
-    !> metallicities without all bases resident, light-weighted ages, OpenACC multicore builds, and
+    !> metallicities without all bases resident, OpenACC multicore builds, and
     !> anything the batch rejects (invalid dust settings: status /= 0).
     !> Design note: doc/GPU_RESULTS.md, "compute_csp_scenario as a batch of one".
     module function opensps_scenario_as_batch(ctx, pset, nzin, results) result(done)
@@ -54,7 +54,6 @@ contains
         ! and metallicities
         if (size(ctx%state%ssp_basis_spec, 3) /= nzin) return
         if (nzin > 1 .and. nzin /= ctx%state%nz) return
-        if (ctx%compute_light_ages_val /= 0) return
         nt = ctx%state%ntfull
         nspec = ctx%state%nspec
         nbands = ctx%state%nbands

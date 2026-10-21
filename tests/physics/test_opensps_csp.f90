@@ -129,7 +129,6 @@ contains
         end if
 
         ctx%compute_vega_mags_val = 0
-        ctx%compute_light_ages_val = 0
         ctx%redshift_colors_val = 0
         ctx%add_dust_emission_val = 0
         ctx%dust_type_val = 0

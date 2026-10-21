@@ -61,7 +61,7 @@ contains
         
         real(WP) :: dist_mod_term, integrated_flux
         real(KP) :: s_band, c_band, t_band, u_band   ! filter integral at kernel precision, compensated
-        logical :: do_vega, do_light_ages
+        logical :: do_vega
 
         ! 1. Setup and Validation
         n_spec = size(spec)
@@ -77,7 +77,6 @@ contains
 
         ! Parse Context Flags
         do_vega = (ctx%compute_vega_mags_val == 1)
-        do_light_ages = (ctx%compute_light_ages_val == 1)
 
         ! 2. Determine which bands to compute
         ! NOTE: Allocation on host is fine if we copy it, but Rule 3 says NO heap alloc in kernels.
@@ -135,20 +134,14 @@ contains
             end do
             integrated_flux = real(s_band, WP)
 
-            if (.not. do_light_ages) then
-                mags(i) = mag_from_flux(integrated_flux) - &
-                            AB_ZEROPOINT - &
-                            (LOG10_FACTOR * ABS_MAG_ZEROPOINT_LOG) + &
-                            dist_mod_term
-            else
-                if (integrated_flux > SAFE_FLOOR) then
-                    mags(i) = integrated_flux
-                end if
-            end if
+            mags(i) = mag_from_flux(integrated_flux) - &
+                        AB_ZEROPOINT - &
+                        (LOG10_FACTOR * ABS_MAG_ZEROPOINT_LOG) + &
+                        dist_mod_term
         end do
 
         ! 6. Vega System Correction
-        if (do_vega .and. .not. do_light_ages) then
+        if (do_vega) then
             do i = 2, n_bands
                 if (mags(IDX_V_BAND) == mags(IDX_V_BAND)) then
                     mags(i) = mags(i) - ctx%state%magvega(i) + ctx%state%magvega(IDX_V_BAND)

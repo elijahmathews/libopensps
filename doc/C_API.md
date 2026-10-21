@@ -72,7 +72,9 @@ void opensps_context_set_str(int handle, const char *key, const char *value, int
 `OPENSPS_API_VERSION_MAJOR`, `_MINOR` and `_PATCH` in `opensps.h` equal what
 `opensps_get_driver_version` returns at run time, so a binding can check that the header it was
 built against matches the library it loads. The minor number grows when entry points are added
-(1.1: the grid getters, the tabular SFH and the single CSP below).
+(1.1: the grid getters, the tabular SFH and the single CSP below), the major number for
+incompatible changes (2.0: light-weighted ages dropped; `compute_light_ages` other than 0 returns
+104, `OPENSPS_ERR_UNSUPPORTED_PARAM`).
 
 ### Grids and filter data
 
@@ -266,7 +268,7 @@ void opensps_clear_error(void);
 | Range | Type | Description |
 | --- | --- | --- |
 | **0** | OK | Success |
-| **100-199** | Error | Unknown parameter key |
+| **100-199** | Error | Unknown parameter key (101-103), or a value that is not supported (104) |
 | **200-299** | Warning | Parameter out of physical range (clamped or ignored) |
 | **300-399** | Error | Initialization error or computation failure |
 | **400-499** | Error | Lock/Threading error |

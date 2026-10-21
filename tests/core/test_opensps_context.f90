@@ -93,6 +93,13 @@ contains
         call assert_int_equals(101, status, "Unknown int param returns OPENSPS_ERR_UNKNOWN_INT_PARAM (101)", &
                                total_tests, total_failures)
 
+        ! Light-weighted ages were dropped (API 2.0): 0 is accepted, anything else is not supported
+        call opensps_context_set_param_int(ctx, 'compute_light_ages', 0, status)
+        call assert_int_equals(0, status, "compute_light_ages = 0 accepted", total_tests, total_failures)
+        call opensps_context_set_param_int(ctx, 'compute_light_ages', 1, status)
+        call assert_int_equals(104, status, "compute_light_ages = 1 returns OPENSPS_ERR_UNSUPPORTED_PARAM (104)", &
+                               total_tests, total_failures)
+
         call opensps_context_destroy(ctx)
     end subroutine test_context_set_params_int
 

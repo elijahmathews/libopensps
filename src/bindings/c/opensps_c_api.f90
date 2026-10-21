@@ -38,8 +38,8 @@ module opensps_c_api
     ! Module constants
     ! ---------------------------------------------------------------------
 
-    integer, parameter :: opensps_driver_version_major = 1
-    integer, parameter :: opensps_driver_version_minor = 2   ! = OPENSPS_API_VERSION_MINOR in opensps.h
+    integer, parameter :: opensps_driver_version_major = 2   ! = OPENSPS_API_VERSION_MAJOR in opensps.h
+    integer, parameter :: opensps_driver_version_minor = 0   ! = OPENSPS_API_VERSION_MINOR in opensps.h
     integer, parameter :: opensps_driver_version_patch = 0
 
     ! ---------------------------------------------------------------------
@@ -1589,8 +1589,6 @@ contains
             opensps_default_ctx%smooth_velocity_val = val
         case ('redshift_colors')
             opensps_default_ctx%redshift_colors_val = val
-        case ('compute_light_ages')
-            opensps_default_ctx%compute_light_ages_val = val
         case ('compute_vega_mags')
             opensps_default_ctx%compute_vega_mags_val = val
         case ('vactoair_flag')

@@ -61,10 +61,10 @@ module opensps_csp_batch
     !> Redshifted colours (redshift_colors = 1) need zred_mags, each model's magnitude redshift
     !> (compute_csp_scenario's all-ages mode gives the redshift of each output's age).
     !>
-    !> Not supported (status 2): redshifted colours without zred_mags, light-weighted ages, and
-    !> models with tage <= 0 without a weight matrix (the all-ages output of compute_csp_scenario
-    !> is a batch with a weight matrix). Models must share the smoothing parameters
-    !> (sigma_smooth, min/max_wave_smooth).
+    !> Not supported (status 2): redshifted colours without zred_mags, and models with tage <= 0
+    !> without a weight matrix (the all-ages output of compute_csp_scenario is a batch with a
+    !> weight matrix). Models must share the smoothing parameters (sigma_smooth,
+    !> min/max_wave_smooth).
     !>
     !> Mass, L_bol and SFR follow `compute_csp_scenario` in FP64; spectra, magnitudes, indices,
     !> line luminosities and dust masses agree with it to the rounding of the kernel precision
@@ -260,7 +260,7 @@ contains
                 status = 3; return
             end if
         end if
-        if ((ctx%redshift_colors_val /= 0 .and. .not. present(zred_mags)) .or. ctx%compute_light_ages_val /= 0) then
+        if (ctx%redshift_colors_val /= 0 .and. .not. present(zred_mags)) then
             status = 2; return
         end if
         if (present(zred_mags)) then
