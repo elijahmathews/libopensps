@@ -49,8 +49,8 @@ module opensps_csp
     !> Public API
     public :: compute_csp_scenario, set_scenario_batch
 
-    !> One code path (doc/ROADMAP.md, priority 2): FSPS_SCENARIO_BATCH=1 runs eligible single
-    !> calls as a batch (opensps_scenario_as_batch); read once (-1: not yet read)
+    !> One code path (doc/ROADMAP.md, priority 2): single calls run as a batch
+    !> (opensps_scenario_as_batch) unless FSPS_SCENARIO_BATCH=0; read once (-1: not yet read)
     integer, save :: scenario_batch_mode = -1
 
     ! The batch path is in the submodule opensps_scenario_batch (src/physics/opensps_scenario_batch.f90):
@@ -392,15 +392,15 @@ contains
         scenario_batch_mode = merge(1, 0, on)
     end subroutine set_scenario_batch
 
-    !> True if FSPS_SCENARIO_BATCH is set to a value other than 0 (read once).
+    !> True unless FSPS_SCENARIO_BATCH is set to 0 (read once).
     logical function scenario_batch_enabled()
         character(len=8) :: v
         integer :: st
 
         if (scenario_batch_mode < 0) then
             call get_environment_variable('FSPS_SCENARIO_BATCH', v, status=st)
-            scenario_batch_mode = 0
-            if (st == 0 .and. len_trim(v) > 0 .and. v /= '0') scenario_batch_mode = 1
+            scenario_batch_mode = 1
+            if (st == 0 .and. trim(v) == '0') scenario_batch_mode = 0
         end if
         scenario_batch_enabled = scenario_batch_mode == 1
     end function scenario_batch_enabled
