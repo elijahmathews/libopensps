@@ -168,6 +168,9 @@ contains
             ! fraction
             if (all_ages .and. frac(i) <= SAFE_FLOOR) results(i)%lbol_csp = lbol(i) + log10(SAFE_FLOOR)
             results(i)%mdust = mdust(i)
+            ! Without dust emission the dust mass is the SAFE_FLOOR marker, which the scenario path
+            ! scales like the other outputs in all-ages mode
+            if (all_ages .and. mdust(i) <= SAFE_FLOOR) results(i)%mdust = mdust(i) * frac(i)
             results(i)%sfr = sfr(i)
             results(i)%mformed = mformed(i)
             results(i)%age = log10(tage(i) * 1.0e9_wp)
