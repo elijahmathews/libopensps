@@ -476,6 +476,8 @@ contains
             !$acc parallel loop collapse(2) present(weights, wext)
 #ifdef OMP_TARGET
             !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+            !$omp parallel do collapse(2)
 #endif
             do m = 1, n_mod
                 do k = 1, nt
@@ -489,6 +491,8 @@ contains
             !$acc parallel loop gang vector present(ctx, psets, weights, tmp1, tmp2)
 #ifdef OMP_TARGET
             !$omp target teams distribute parallel do
+#elif defined(_OPENMP) && !defined(_OPENACC)
+            !$omp parallel do
 #endif
             do m = 1, n_mod
                 call sfh_weights_core(ctx, psets(m), psets(m)%tage, 1, weights(:, :, m), tmp1(:, m), tmp2(:, m))
@@ -501,6 +505,8 @@ contains
             !$acc private(k, z, w, mk, lk)
 #ifdef OMP_TARGET
             !$omp target teams distribute parallel do private(k, z, w, mk, lk)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+            !$omp parallel do private(k, z, w, mk, lk)
 #endif
             do m = 1, n_mod
                 msum(m) = 0.0_wp
@@ -533,6 +539,8 @@ contains
             !$acc msy, mso, lsy, lso, zlo, zhi, dz) private(k, w, mk, lk)
 #ifdef OMP_TARGET
             !$omp target teams distribute parallel do private(k, w, mk, lk)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+            !$omp parallel do private(k, w, mk, lk)
 #endif
             do m = 1, n_mod
                 msum(m) = 0.0_wp
@@ -604,6 +612,8 @@ contains
                 !$acc parallel loop present(s_abs, s_line)
 #ifdef OMP_TARGET
                 !$omp target teams distribute parallel do
+#elif defined(_OPENMP) && !defined(_OPENACC)
+                !$omp parallel do
 #endif
                 do m = 1, n_mod
                     s_abs(m) = s_abs(m) + s_line(m)
@@ -1143,6 +1153,8 @@ contains
             !$acc parallel loop collapse(2) present(eml)
 #ifdef OMP_TARGET
             !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+            !$omp parallel do collapse(2)
 #endif
             do m = 1, n_mod
                 do i = 1, NEMLINE
@@ -1195,6 +1207,8 @@ contains
             !$acc private(y, o, bk, k, dzk)
 #ifdef OMP_TARGET
             !$omp target teams distribute parallel do collapse(2) private(y, o, bk, k, dzk)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+            !$omp parallel do collapse(2) private(y, o, bk, k, dzk)
 #endif
             do m = 1, n_mod
                 do i = 1, whlylim
@@ -1232,9 +1246,12 @@ contains
         !    consumer cards) these exponentials weigh much more, and the next step there would be
         !    the progression's ratio in FP32 with the argument reduced in FP64.
         if (nb_cont) then
-            !$acc parallel loop gang vector collapse(2) present(w2, it_tesc, nb_q0, nb_fabs, nb_cy, nb_co, zlo, zhi, dz)
+            !$acc parallel loop gang vector collapse(2) present(w2, it_tesc, nb_q0, nb_fabs, nb_cy, nb_co, zlo, zhi, dz) &
+            !$acc private(q, wk)
 #ifdef OMP_TARGET
-            !$omp target teams distribute parallel do collapse(2)
+            !$omp target teams distribute parallel do collapse(2) private(q, wk)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+            !$omp parallel do collapse(2) private(q, wk)
 #endif
             do m = 1, n_mod
                 do t = 1, nt_neb
@@ -1261,6 +1278,9 @@ contains
             !$acc private(y, o, sy, so, ra, rb, dl, f, r, a, a_prev, t, iz, iu, c00, c01, c10, c11)
 #ifdef OMP_TARGET
             !$omp target teams distribute parallel do collapse(2) private(y, o, sy, so, ra, rb, dl, f, r, &
+            !$omp& a, a_prev, t, iz, iu, c00, c01, c10, c11)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+            !$omp parallel do collapse(2) private(y, o, sy, so, ra, rb, dl, f, r, &
             !$omp& a, a_prev, t, iz, iu, c00, c01, c10, c11)
 #endif
             do m = 1, n_mod
@@ -1341,6 +1361,8 @@ contains
         !$acc nb_iu, nb_wu, nb_fabs, nb_lum, eml, zlo, zhi, dz) private(y, o, wk, q, lg, ra, rb, a, t)
 #ifdef OMP_TARGET
         !$omp target teams distribute parallel do collapse(2) private(y, o, wk, q, lg, ra, rb, a, t)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+        !$omp parallel do collapse(2) private(y, o, wk, q, lg, ra, rb, a, t)
 #endif
         do m = 1, n_mod
             do i = 1, NEMLINE
@@ -1382,6 +1404,8 @@ contains
             !$acc parallel loop gang vector collapse(2) present(ctx, nb_lptr, nb_lid, nb_lum, yo) private(s, p, i)
 #ifdef OMP_TARGET
             !$omp target teams distribute parallel do collapse(2) private(s, p, i)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+            !$omp parallel do collapse(2) private(s, p, i)
 #endif
             do m = 1, 2 * n_mod
                 do j = 1, nspec
@@ -1499,6 +1523,8 @@ contains
         !$acc private(lagn, tmpl, lb)
 #ifdef OMP_TARGET
         !$omp target teams distribute parallel do collapse(2) private(lagn, tmpl, lb)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+        !$omp parallel do collapse(2) private(lagn, tmpl, lb)
 #endif
         do m = 1, n_mod
             do i = 1, nspec
@@ -1554,6 +1580,8 @@ contains
                 yo(i, m) = 0.0_KP
             end do
         end do
+        ! (each model writes only its own two columns)
+        !$omp parallel do private(z, k, i, wk, col)
         do m = 1, n_mod
             do z = 1, nz
                 do k = 1, nt
@@ -1571,6 +1599,8 @@ contains
         !$acc parallel loop gang vector collapse(2) present(basis, wz, it_tesc, yo) private(k, z, wk, y, o)
 #ifdef OMP_TARGET
         !$omp target teams distribute parallel do collapse(2) private(k, z, wk, y, o)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+        !$omp parallel do collapse(2) private(k, z, wk, y, o)
 #endif
         do m = 1, n_mod
             do i = 1, nspec
@@ -1611,6 +1641,8 @@ contains
         !$acc private(k, l, bk, mm, y, o, d)
 #ifdef OMP_TARGET
         !$omp target teams distribute parallel do collapse(2) private(k, l, bk, mm, y, o, d)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+        !$omp parallel do collapse(2) private(k, l, bk, mm, y, o, d)
 #endif
         do mq = 1, (n_mod + MT - 1) / MT
             do i = 1, nspec
@@ -1656,6 +1688,8 @@ contains
         !$acc parallel loop gang vector collapse(2) present(ctx, psets, tau)
 #ifdef OMP_TARGET
         !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+        !$omp parallel do collapse(2)
 #endif
         do m = 1, n_mod
             do j = 1, nspec
@@ -1666,6 +1700,8 @@ contains
         !$acc parallel loop gang vector present(psets, tau) private(tmax, jmax, j)
 #ifdef OMP_TARGET
         !$omp target teams distribute parallel do private(tmax, jmax, j)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+        !$omp parallel do private(tmax, jmax, j)
 #endif
         do m = 1, n_mod
             if (psets(m)%zred > SAFE_FLOOR) then
@@ -1689,6 +1725,8 @@ contains
         !$acc parallel loop gang vector collapse(2) present(psets, tau, total)
 #ifdef OMP_TARGET
         !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+        !$omp parallel do collapse(2)
 #endif
         do m = 1, n_mod
             do j = 1, nspec
@@ -1708,6 +1746,8 @@ contains
         !$acc parallel loop collapse(2) present(total, igm_t)
 #ifdef OMP_TARGET
         !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+        !$omp parallel do collapse(2)
 #endif
         do m = 1, n_mod
             do i = 1, nspec
@@ -1750,6 +1790,8 @@ contains
                 yo(i, m) = 0.0_KP
             end do
         end do
+        ! (each model writes only its own two columns)
+        !$omp parallel do private(k, i, wk, col)
         do m = 1, n_mod
             do k = 1, nt
                 wk = w2(k, m) + w2(k, n_mod + m)   ! one of the two is zero
@@ -1778,6 +1820,8 @@ contains
         !$acc private(mm, it, ii, bk, wk, acc, yy, k, l, p, i)
 #ifdef OMP_TARGET
         !$omp target teams distribute parallel do collapse(2) private(mm, it, ii, bk, wk, acc, yy, k, l, p, i)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+        !$omp parallel do collapse(2) private(mm, it, ii, bk, wk, acc, yy, k, l, p, i)
 #endif
         do mq = 1, (n_mod + MT - 1) / MT
             do ip = 1, npt
@@ -1855,6 +1899,10 @@ contains
         !$acc         frac_nodust, one_m_tb, one_m_to, one_m_td, a_young, spec_sum)
 #ifdef OMP_TARGET
         !$omp target teams distribute parallel do collapse(2) private(young, old, curve, tau_b, tau_o, &
+        !$omp& tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust, one_m_tb, one_m_to, &
+        !$omp& one_m_td, a_young, spec_sum)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+        !$omp parallel do collapse(2) private(young, old, curve, tau_b, tau_o, &
         !$omp& tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust, one_m_tb, one_m_to, &
         !$omp& one_m_td, a_young, spec_sum)
 #endif
@@ -1962,6 +2010,8 @@ contains
         !$acc parallel loop gang vector collapse(2) present(emis, yo, s_abs, s_esc, total)
 #ifdef OMP_TARGET
         !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+        !$omp parallel do collapse(2)
 #endif
         do m = 1, n_mod
             do i = 1, nspec
