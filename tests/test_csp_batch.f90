@@ -95,6 +95,10 @@ program test_csp_batch
     smooth_sigma = 150.0_wp
     call check_scenario_paths(4, 1.2_wp, 1, 0, 1, "Kriek & Conroy, z = 1.2, IGM, AGN, sigma_smooth = 150 km/s")
     smooth_sigma = 0.0_wp
+    ! Redshifted colours: the magnitudes of each output at the redshift of its age
+    call set_int('redshift_colors', 1)
+    call check_scenario_paths(2, 0.5_wp, 1, 1, 1, "Calzetti, z = 0.5, IGM, nebular, AGN, redshifted colours")
+    call set_int('redshift_colors', 0)
     call set_scenario_batch(.false.)
 
     call opensps_destroy(ctx)
