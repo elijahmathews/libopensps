@@ -1258,6 +1258,31 @@ contains
         if (ALLOCATED(st%have)) st%have = .false.
     end subroutine invalidate_ssps
 
+    !> Unmaps the context's spec/mass/lbol_ssp_zz from the device (mapped by
+    !> opensps_context_move_to_device), before they are freed on the host.
+    subroutine unmap_ssp_zz(ctx)
+        type(opensps_context_t), intent(INOUT) :: ctx
+
+        if (allocated(ctx%state%spec_ssp_zz)) then
+            !$acc exit data delete(ctx%state%spec_ssp_zz)
+#ifdef OMP_TARGET
+            !$omp target exit data map(delete: ctx%state%spec_ssp_zz)
+#endif
+        end if
+        if (allocated(ctx%state%mass_ssp_zz)) then
+            !$acc exit data delete(ctx%state%mass_ssp_zz)
+#ifdef OMP_TARGET
+            !$omp target exit data map(delete: ctx%state%mass_ssp_zz)
+#endif
+        end if
+        if (allocated(ctx%state%lbol_ssp_zz)) then
+            !$acc exit data delete(ctx%state%lbol_ssp_zz)
+#ifdef OMP_TARGET
+            !$omp target exit data map(delete: ctx%state%lbol_ssp_zz)
+#endif
+        end if
+    end subroutine unmap_ssp_zz
+
     !> The SSP grid of metallicity index z in the handle's store, computed if missing.
     subroutine ensure_ssp(ctx, st, z)
         type(opensps_context_t), intent(INOUT) :: ctx
@@ -1277,6 +1302,10 @@ contains
             st%have = .false.
         end if
         if (st%have(z)) return
+        ! (the SSP kernels of device builds read the context on the device)
+#if defined(_OPENACC) || defined(OMP_TARGET)
+        if (.not. ctx%on_device) call opensps_context_move_to_device(ctx)
+#endif
         pset = ctx%pset
         pset%zmet = z
         call generate_ssp_grid(ctx, pset, st%mass(:, z), st%lbol(:, z), st%spec(:, :, z))
@@ -1342,7 +1371,11 @@ contains
             allocate (spec(ctx%state%nspec, ctx%state%ntfull, 1), mass(ctx%state%ntfull, 1), &
                       lbol(ctx%state%ntfull, 1))
             ! compute_interpolated_ssp reads the context's spec/mass/lbol_ssp_zz: lend it the
-            ! stored grids (no copy; grids not yet needed are unused)
+            ! stored grids (no copy; grids not yet needed are unused). It reads them on the host;
+            ! the context's own grids, mapped by opensps_context_move_to_device, are unmapped
+            ! first, since MOVE_ALLOC frees them (a later allocation at that host address would
+            ! be found "partially present")
+            if (ctx%on_device) call unmap_ssp_zz(ctx)
             call MOVE_ALLOC(store%spec, ctx%state%spec_ssp_zz)
             call MOVE_ALLOC(store%mass, ctx%state%mass_ssp_zz)
             call MOVE_ALLOC(store%lbol, ctx%state%lbol_ssp_zz)

@@ -14,7 +14,7 @@ program test_ssp_operator
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_evaluate, ssp_operator_free
     use opensps_imf, only: imf_pack_params, IMF_NPAR
     use opensps_context, only: opensps_context_get_pset, opensps_context_prepare_pset, &
-                            opensps_context_set_param_int, opensps_context_set_param_float
+                            opensps_context_set_param_int, opensps_context_set_param_float, opensps_context_move_to_device
     use opensps_context_types, only: opensps_context_t
     use test_utils_mod, only: tap_finish, skip_without_data, print_major_header, print_group, print_summary_line, assert_true
     implicit none
@@ -37,6 +37,8 @@ program test_ssp_operator
     call opensps_create(ctx)
     ctx%pset%zmet = 10
     call opensps_setup(ctx, 10, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
+    ! (generate_ssp_grid's kernels read the context on the device in device builds)
+    call opensps_context_move_to_device(ctx)
     call set_int('zmet', 10)
     call set_int('imf_type', 0)
     call build("MIST, default isochrone")
@@ -65,6 +67,8 @@ program test_ssp_operator
     call opensps_create(ctx)
     ctx%pset%zmet = 15
     call opensps_setup(ctx, 15, isoc_type_in='pdva', spec_type_in='basel', dust_type_in='DL07')
+    ! (generate_ssp_grid's kernels read the context on the device in device builds)
+    call opensps_context_move_to_device(ctx)
     call set_int('zmet', 15)
     call set_int('imf_type', 0)
     call set_float('fbhb', 0.3_wp)
