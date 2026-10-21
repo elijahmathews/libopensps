@@ -92,7 +92,7 @@ program test_csp_batch
     zred_per_model = .false.
     ! Per-model metallicity: all bases resident, logzsol varied
     call check_batch_z()
-    ! compute_csp_scenario through the batch (FSPS_SCENARIO_BATCH=1) against its old path, one
+    ! compute_csp_scenario through the batch (the default) against its old path, one
     ! age and all ages (tage = 0: every age of the grid), on the one-metallicity basis
     call build_basis()
     call set_int('add_igm_absorption', 0)
