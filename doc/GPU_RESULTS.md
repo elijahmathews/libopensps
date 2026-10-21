@@ -37,6 +37,122 @@ Session 2 (2026-10-19), new questions (conservative choice taken, work continued
 8. Item 5 (batched SSP generation with IMF parameters per model) was not started: see
    "Next" in `doc/GPU_PLAN.md` for the first step. Keep it next in line?
 
+Session 3 (2026-10-21), new questions:
+
+10. Light-weighted ages (`compute_light_ages = 1`) are the last mode on the old path, and the
+    old path does not compute them: it only switches the magnitudes to raw filter integrals of
+    the ordinary spectrum. Legacy `csp_gen` returns, without dust, spec = sum(w t S) / sum(w S)
+    per pixel, mass- and L_bol-weighted ages, and "magnitudes" that are filter integrals of that
+    age spectrum (a filter-weighted, not light-weighted, mean). Options: (a) legacy's
+    definitions in the batch (one more age-weighted sum); (b) band light-weighted ages,
+    int(sum(w t S) T / lambda) / int(sum(w S) T / lambda), with or without dust (differs from
+    legacy); (c) drop the option (status error). Nothing done yet; the old path stays for it.
+11. Likelihood on the device (roadmap priority 2): the definition is yours. Proposed: chi^2 per
+    model of photometry (maggies from the device magnitudes, per-model amplitude = mass) and of
+    a spectrum given on the library's rest-frame pixels (the caller resamples the data), with
+    inverse variances (0 = masked) and the amplitude given per model (logmass a free
+    parameter) or optionally fitted analytically. Grid, units and the amplitude treatment to be
+    agreed before the code.
+
+## One code path, steps 2-4 (2026-10-21)
+
+Roadmap priority 2. A100 node `p-gc-3018` (A100-PCIE-40GB, 12 host cores visible), nvhpc 25.1,
+gcc 13.4. Pull requests (stacked, merge in order): #12 (device mappings, independent), #13
+(AGN in all-ages mode), #14 (the remaining modes through the batch), then
+`perf/batch-host-age-sums`, `perf/batch-host-threads`, `perf/scenario-batch-default`.
+
+**What changed.** `compute_csp_scenario` now runs as one `compute_csp_batch` call by default
+(`FSPS_SCENARIO_BATCH=0` selects the old path) in every mode except light-weighted ages:
+- all ages (`tage <= 0`): one model per age of the grid, its SFH weights computed on the host
+  (as the old path does for one output), scaled by the fraction formed by that age, and given
+  as a weight matrix;
+  `tage = -99` with a tabular SFH: one model at the last table age;
+- redshifted colours: `zred_mags` (per-model magnitude redshift);
+- the other smoothing modes (exact velocity, wavelength): on the host, `apply_smoothing` per
+  column, between the device stages;
+- several metallicities (`nzin > 1`, tabular SFHs with a metallicity column):
+  `ssp_weights_z(ntfull, nz, N)` sums every resident basis with its own weights (kernel
+  `age_sums_w`; also the input of priority 3's age x metallicity matrices);
+- fast mode.
+Still on the old path: light-weighted ages (question 10), OpenACC multicore, invalid dust
+settings (`uvb < 0`, `wgp1/2 < 1`: the batch returns status 2, the old path ignores them).
+
+**Fixes found on the way.**
+- AGN in all-ages mode (#13): the torus used the L_bol per unit mass formed by each age while
+  the spectrum was scaled by the fraction formed; up to ~10 mag in the IR at young ages. Legacy
+  `compsp` scales L_bol first; both paths now do.
+- Device mappings (#12): OpenACC failed `ssp_operator`, `c_csp` (context not moved to the
+  device before SSP generation); OpenMP target failed `c_csp` (`ssp_temp_grid` regrown without
+  unmapping; `MOVE_ALLOC` of the mapped `*_ssp_zz` grids). Main had 36/38 and 37/38 there.
+- Old path, OpenACC: tabular SFHs in all-ages mode returned zeros (the device weights read a
+  stale `sfh_tab`).
+- A latent race in the OpenMP target nebular kernel (`q`, `wk` not private).
+
+**Numerics (not new).** At the youngest ages the SFH weights are differences of nearly equal
+indefinite moments, good to ~5e-14 / (fraction formed) relative: at 2e-8 of the mass formed,
+host (gfortran or nvfortran) and device math differ by 1.5e-6. Also seen: the vectorized
+power of an array expression for the output ages differs by an ulp, which truncated and Simha
+SFHs amplify to 1e-8 (the batch path forms the ages as the old path does). Outputs with more
+than 1e-3 of the final mass agree to 1e-10. A direct formulation of the bin integrals
+(e.g. `expm1` of the interval) would remove this; see the roadmap.
+
+**Correctness.**
+- Old path vs batch path, gfortran FP64, case matrix plus 18 cases (all-ages with dust,
+  nebular, AGN, IGM, smoothing, sf_start, truncation, Simha; redshift colours; exact and
+  wavelength smoothing), 53 cases: PASS at `--rtol 1e-10`; largest 5.5e-12 per pixel (velocity
+  smoothing, the sparse operator), otherwise <= 3e-14.
+- `test_csp_batch` 273 subtests (was 166): old vs batch for one age and all ages in every mode
+  above, asserting that the batch path was taken.
+- Unit + regression 38/38 in eight builds, with the batch path (default) and with
+  `FSPS_SCENARIO_BATCH=0`: gfortran FP64, FP32, FP64 with 4 OpenMP threads; nvfortran CPU;
+  OpenACC FP64, FP32; OpenMP target FP64, FP32 (`OMP_TARGET_OFFLOAD=MANDATORY`).
+- Host threads are bit-identical to the serial build (53 cases, 4 threads vs 1).
+- GPU vs nvfortran CPU, batch path, 53 cases: FP64 PASS at 1e-10 (OpenACC, OpenMP target).
+  FP32: indices exceed 1e-4 in two of the new all-ages cases with nebular emission
+  (1.1-1.3e-4); every FP32 configuration does there, the old path on the GPU (1.4e-4) and both
+  paths on the CPU (2.9-3.2e-4), so not a property of the batch path.
+
+**Single call** (`benchmark_csp_batch 0 400 <config>`, us per call, FP32):
+
+| | old path | batch path |
+|---|---|---|
+| A100 OpenACC, one age, basic | 570-600 | **495-530** |
+| A100 OpenACC, one age, full physics + smoothing | 1320-1330 | **1045-1095** |
+| A100 OpenACC, all ages, basic | 2660-2920 | 3320 |
+| A100 OpenACC, all ages, full physics + smoothing | 4150-4200 | **3900-3960** |
+| A100 OpenMP target, one age, basic | 6800 (host) | **676-681** |
+| A100 OpenMP target, one age, full physics + smoothing | 18300 (host) | **1215-1255** |
+| A100 OpenMP target, all ages, basic | 571000 (host) | **4080-4120** |
+| A100 OpenMP target, all ages, full physics + smoothing | 708000 (host) | **4990-5010** |
+
+CPU, one core (gfortran FP64; Xeon Gold 6248R node): one age basic 3.9 ms -> **1.9-2.0 ms**,
+full physics + smoothing 12.3 -> **6.3-6.6 ms**, all ages basic 293 -> **188 ms**. The batch's
+host loops had used the GPU register tile (8 models x 4 pixels per thread), which pads fewer
+than 8 models with copies (8x the work at N = 1); CPU builds now sum per model, ages in order,
+pixels innermost (bit-identical results). The OpenACC all-ages basic call is ~15-25% slower
+than the old path: the 107 outputs' SFH weights are computed on the host (~20 us each), where
+the old path computes them on the device. Tried: letting the batch compute them on the device
+(a per-model `weight_scale`) took it to 3.0 ms, but the device weights then differ from the
+CPU's at the youngest ages (Numerics above): FP64 indices by 1.2e-4 and lines by 7.6e-9 in
+`sm_exact_all`, FP32 masses and spectra by 6.6e-6 / 1.5e-5 in five all-ages cases, against
+FP64 1e-10 with host weights. Reverted; worth revisiting after the weights are made accurate.
+Everything else is faster.
+
+**Host threads** (`-Denable_openmp=true`: each `omp target teams distribute parallel do` of the
+batch has a host `parallel do` twin, plus the CPU age sums), `benchmark_csp_batch 1000 0
+<config>`, gfortran FP64, us per model at N = 1000 (12 cores visible on the node,
+`OMP_PROC_BIND=close`):
+
+| | serial build | 1 thread | 4 threads | 12 threads |
+|---|---|---|---|---|
+| basic | 1799 (tiled loops before: 2186) | 2006 | 819 (2.4x) | 479 (4.2x) |
+| full physics | | 6117 | 2006 (3.0x) | 842 (7.3x) |
+
+The OpenMP build is ~11% slower on one thread than the serial build (basic); the basic case's
+remaining serial parts (per-model setup on the host, the WP copy of the spectra) limit it at 12
+threads. ThreadSanitizer (nightly configuration) reports the same as on main with this node's
+gcc 13.4 (libgfortran I/O lock order and its known races; none in the batch's code).
+
 ## One code path, step 1 (2026-10-19, branch `refactor/scenario-as-batch`)
 
 Roadmap priority 2 (`doc/ROADMAP.md`): `compute_csp_scenario` as a batch of one, following
