@@ -83,6 +83,19 @@ program test_csp_batch
     zred_per_model = .false.
     ! Per-model metallicity: all bases resident, logzsol varied
     call check_batch_z()
+    ! compute_csp_scenario through the batch (FSPS_SCENARIO_BATCH=1) against its old path, one
+    ! age and all ages (tage = 0: every age of the grid), on the one-metallicity basis
+    call build_basis()
+    call set_int('add_igm_absorption', 0)
+    call set_int('add_neb_emission', 0)
+    call set_int('add_agn_dust', 0)
+    call check_scenario_paths(2, 0.0_wp, 0, 0, 0, "Calzetti")
+    call check_scenario_paths(0, 0.5_wp, 1, 1, 1, "power law, z = 0.5, IGM, nebular, AGN")
+    call set_int('smooth_velocity', 1)
+    smooth_sigma = 150.0_wp
+    call check_scenario_paths(4, 1.2_wp, 1, 0, 1, "Kriek & Conroy, z = 1.2, IGM, AGN, sigma_smooth = 150 km/s")
+    smooth_sigma = 0.0_wp
+    call set_scenario_batch(.false.)
 
     call opensps_destroy(ctx)
     deallocate(ctx)
@@ -253,6 +266,89 @@ contains
         call assert_true(d_spec <= SPEC_RTOL, "spectra (24 models)", total_tests, total_failures)
         call assert_true(d_mag <= MAG_TOL, "magnitudes (24 models)", total_tests, total_failures)
     end subroutine check_batch
+
+    !> compute_csp_scenario through the batch against the old single-call path, for models 1, 2,
+    !> 3 and 6 (sfh 1, 4, 5 and 4 with sf_start = 0.5 Gyr) at their tage and at tage = 0 (all
+    !> ages: every output, including those before sf_start, where nothing has formed yet).
+    subroutine check_scenario_paths(dust_type, zred, igm, neb, agn, label)
+        integer, intent(in) :: dust_type, igm, neb, agn
+        real(WP), intent(in) :: zred
+        character(len=*), intent(in) :: label
+        integer, parameter :: models(4) = [1, 2, 3, 6]
+        type(PARAMS) :: pset
+        type(COMPSPOUT), allocatable :: old(:), new(:)
+        real(WP), allocatable :: s_old(:, :), s_new(:, :), m_old(:, :), m_new(:, :)
+        real(WP) :: d_spec, d_mag, d_scal, d_line, d, d_spec_max, d_mag_max
+        integer :: im, m, i, k, nspec, nbands, st_old, st_new, n
+        logical :: same_n
+        character(len=16) :: mode
+
+        call print_group("compute_csp_scenario through the batch vs the old path: " // label)
+        nspec = ctx%state%nspec
+        nbands = ctx%state%nbands
+        call set_int('dust_type', dust_type)
+        call set_int('add_igm_absorption', igm)
+        call set_int('add_neb_emission', neb)
+        call set_int('add_agn_dust', agn)
+        do k = 1, 2
+            mode = merge('one age  ', 'all ages ', k == 1)
+            d_spec_max = 0.0_wp; d_mag_max = 0.0_wp; d_scal = 0.0_wp; d_line = 0.0_wp
+            same_n = .true.
+            do im = 1, size(models)
+                m = models(im)
+                call set_model(m, zred)
+                if (k == 2) call set_float('tage', 0.0_wp)
+                call opensps_context_prepare_pset(ctx)
+                call opensps_context_get_pset(ctx, pset)
+                call set_scenario_batch(.false.)
+                call compute_csp_scenario(ctx, pset, 1, old, st_old)
+                call set_scenario_batch(.true.)
+                ctx%state%batch_out%n = 0
+                call compute_csp_scenario(ctx, pset, 1, new, st_new)
+                ! (batch_out%n: the outputs of the last batch call, so the batch path was taken)
+                if (st_old /= 0 .or. st_new /= 0 .or. size(old) /= size(new) .or. &
+                    ctx%state%batch_out%n /= size(new)) then
+                    same_n = .false.
+                    cycle
+                end if
+                n = size(old)
+                allocate(s_old(nspec, n), s_new(nspec, n), m_old(nbands, n), m_new(nbands, n))
+                do i = 1, n
+                    s_old(:, i) = old(i)%spec(1:nspec)
+                    s_new(:, i) = new(i)%spec(1:nspec)
+                    m_old(:, i) = old(i)%mags(1:nbands)
+                    m_new(:, i) = new(i)%mags(1:nbands)
+                    ! Ages with stars only (none formed before sf_start: zero spectrum)
+                    if (maxval(s_old(:, i)) <= 0.0_wp) then
+                        if (any(s_new(:, i) /= 0.0_wp)) d_spec_max = huge(1.0_wp)
+                        s_old(:, i) = 1.0_wp; s_new(:, i) = 1.0_wp
+                        m_old(:, i) = 0.0_wp; m_new(:, i) = 0.0_wp
+                    end if
+                    d = max(abs(new(i)%mass_csp - old(i)%mass_csp) / max(abs(old(i)%mass_csp), tiny(1.0_wp)), &
+                            abs(new(i)%lbol_csp - old(i)%lbol_csp), &
+                            abs(new(i)%sfr - old(i)%sfr) / max(abs(old(i)%sfr), tiny(1.0_wp)), &
+                            abs(new(i)%mformed - old(i)%mformed), abs(new(i)%age - old(i)%age))
+                    d_scal = max(d_scal, d)
+                    if (maxval(old(i)%emlines) > 0.0_wp) d_line = max(d_line, &
+                        maxval(abs(new(i)%emlines / old(i)%emlines - 1.0_wp), &
+                               mask=old(i)%emlines > 1.0e-3_wp * maxval(old(i)%emlines)))
+                end do
+                call max_differences(s_new, m_new, s_old, m_old, d_spec, d_mag)
+                d_spec_max = max(d_spec_max, d_spec)
+                d_mag_max = max(d_mag_max, d_mag)
+                deallocate(s_old, s_new, m_old, m_new)
+            end do
+            write(*, '(A,4ES10.2)') "# " // trim(mode) // ": max difference (spectrum, mag, scalars, lines): ", &
+                d_spec_max, d_mag_max, d_scal, d_line
+            call assert_true(same_n, trim(mode) // ": status 0, same outputs, through the batch", total_tests, &
+                             total_failures)
+            call assert_true(d_spec_max <= SPEC_RTOL, trim(mode) // ": spectra", total_tests, total_failures)
+            call assert_true(d_mag_max <= MAG_TOL, trim(mode) // ": magnitudes", total_tests, total_failures)
+            call assert_true(d_scal <= 1.0e-12_wp, trim(mode) // ": mass, L_bol, SFR, mass formed, age", &
+                             total_tests, total_failures)
+            call assert_true(d_line <= SPEC_RTOL, trim(mode) // ": emission lines", total_tests, total_failures)
+        end do
+    end subroutine check_scenario_paths
 
     !> Largest relative spectrum difference (pixels above 1e-6 of each peak) and magnitude
     !> difference (bands within 30 mag of the brightest) over the columns.
