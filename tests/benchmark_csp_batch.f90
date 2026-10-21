@@ -7,7 +7,8 @@ program benchmark_csp_batch
     !> IGM at zred = 0.5, AGN with fagn = 0.1, spectral indices; tau, age, U_min and gas_logu vary);
     !> "full_smooth": the same with velocity smoothing, sigma_smooth = 150 km/s; "full_z" and
     !> "full_smooth_z": with the bases of all metallicities resident and logzsol varying per model.
-    !> Prints one line per metric: name, value. Per batch size: magnitudes only; with spectra
+    !> Prints one line per metric: name, value: one compute_csp_scenario call per model, one
+    !> all-ages call (tage = 0, every age of the grid) and, per batch size: magnitudes only; with spectra
     !> copied back to a host array (reused, as in a fitting loop); with spectra left on the device.
 
     use opensps_precision, only: WP
@@ -112,6 +113,21 @@ program benchmark_csp_batch
     end do
     call system_clock(t1)
     write(*, '(A,F14.3)') 'single_call_us_per_model ', 1.0e6_wp * real(t1 - t0, WP) / rate / n_single
+
+    ! One all-ages call (tage = 0: every age of the grid), n_single / 20 times
+    if (n_single >= 20) then
+        pset%tage = 0.0_wp
+        call compute_csp_scenario(ctx, pset, 1, results, status)
+        call system_clock(t0)
+        do i = 1, n_single / 20
+            call compute_csp_scenario(ctx, pset, 1, results, status)
+            if (status /= 0) stop 1
+            total = total + results(size(results))%mags(1)
+        end do
+        call system_clock(t1)
+        write(*, '(A,F14.3)') 'all_ages_call_us ', 1.0e6_wp * real(t1 - t0, WP) / rate / (n_single / 20)
+        call vary(pset, 1)
+    end if
 
     ! Batched, magnitudes only and with spectra
     if (zvar) then
