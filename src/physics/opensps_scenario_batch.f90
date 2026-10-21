@@ -20,7 +20,7 @@ contains
     !> the cosmology table, clamped to 0-20, as the scenario path), the spectrum at zred.
     !> Returns .false. (results untouched) for the options the batch does not cover yet: several
     !> metallicities, light-weighted ages, OpenACC multicore builds, and
-    !> anything the batch rejects (non-device smoothing, invalid dust settings: status /= 0).
+    !> anything the batch rejects (invalid dust settings: status /= 0).
     !> Design note: doc/GPU_RESULTS.md, "compute_csp_scenario as a batch of one".
     module function opensps_scenario_as_batch(ctx, pset, nzin, results) result(done)
         use opensps_constants, only: NEMLINE

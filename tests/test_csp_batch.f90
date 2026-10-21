@@ -94,6 +94,17 @@ program test_csp_batch
     call set_int('smooth_velocity', 1)
     smooth_sigma = 150.0_wp
     call check_scenario_paths(4, 1.2_wp, 1, 0, 1, "Kriek & Conroy, z = 1.2, IGM, AGN, sigma_smooth = 150 km/s")
+    ! The smoothing modes the batch runs on the host: the exact velocity convolution
+    ! (smoothspec_fast = 0) and a constant width in wavelength (smooth_velocity = 0, 5 A)
+    call set_int('smoothspec_fast', 0)
+    call check_batch(2, 0.5_wp, 1, 1, 1, "Calzetti, z = 0.5, IGM, nebular, AGN, exact sigma_smooth = 150 km/s")
+    call check_scenario_paths(2, 0.5_wp, 1, 1, 1, "Calzetti, z = 0.5, IGM, nebular, AGN, exact sigma_smooth = 150 km/s")
+    call set_int('smoothspec_fast', 1)
+    call set_int('smooth_velocity', 0)
+    smooth_sigma = 5.0_wp
+    call check_batch(2, 0.0_wp, 0, 0, 1, "Calzetti, AGN, sigma_smooth = 5 A")
+    call check_scenario_paths(2, 0.0_wp, 0, 0, 1, "Calzetti, AGN, sigma_smooth = 5 A")
+    call set_int('smooth_velocity', 1)
     smooth_sigma = 0.0_wp
     ! Redshifted colours: the magnitudes of each output at the redshift of its age
     call set_int('redshift_colors', 1)
