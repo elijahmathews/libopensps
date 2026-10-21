@@ -287,22 +287,31 @@ contains
 
     !> A tau model observed at a grid age reproduces the tage = 0 output at that grid node. The
     !> all-ages output is normalized to 1 Msun formed by the last age and reports the mass formed
-    !> so far (mformed); a single age is normalized to 1 Msun formed by tage.
+    !> so far (mformed); a single age is normalized to 1 Msun formed by tage. With AGN dust
+    !> emission the identity holds too: the torus emits fagn x L_bol of the population, so it
+    !> scales with the mass formed (legacy FSPS compsp scales L_bol by mformed before agn_dust).
     subroutine check_single_vs_all_ages(ctx)
         type(opensps_context_t), intent(inout) :: ctx
         type(COMPSPOUT), allocatable :: all_ages(:), single(:)
         real(WP), allocatable :: spec_all(:)
         real(WP) :: mass_all, lbol_all, t_node, mformed
-        integer :: i_node, sfh_type
+        integer :: i_node, sfh_type, i_case
         character(len=96) :: msg
 
         call print_group("Single-age CSP equals the all-ages output at a grid node")
 
-        do sfh_type = 1, 4, 3
+        ! Cases: tau, delayed tau, tau with AGN dust emission
+        do i_case = 1, 3
+            sfh_type = merge(4, 1, i_case == 2)
             call reset_csp_params(ctx)
             call set_int(ctx, 'sfh', sfh_type)
             call set_float(ctx, 'tau', 2.0_wp)
             call set_float(ctx, 'dust2', 0.3_wp)
+            if (i_case == 3) then
+                call set_int(ctx, 'add_agn_dust', 1)
+                call set_float(ctx, 'fagn', 0.1_wp)
+                call set_float(ctx, 'agn_tau', 20.0_wp)
+            end if
             call set_float(ctx, 'tage', 0.0_wp)
             call run_csp(ctx, all_ages)
 
@@ -317,6 +326,7 @@ contains
             call run_csp(ctx, single)
 
             write(msg, '(A,I0,A,F7.4,A)') "sfh = ", sfh_type, ", tage = ", t_node, " Gyr: "
+            if (i_case == 3) msg = trim(msg) // " AGN:"
             call assert_relative_error(mass_all, single(1)%mass_csp, 1.0e-6_wp, trim(msg) // " mass", &
                                        total_tests, total_failures)
             call assert_relative_error(10.0_wp**lbol_all, 10.0_wp**single(1)%lbol_csp, 1.0e-6_wp, &
@@ -425,6 +435,8 @@ contains
         call set_float(ctx, 'dust2', 0.0_wp)
         call set_int(ctx, 'dust_type', 0)
         call set_int(ctx, 'add_neb_emission', 0)
+        call set_int(ctx, 'add_agn_dust', 0)
+        call set_float(ctx, 'fagn', 0.0_wp)
     end subroutine reset_csp_params
 
     subroutine run_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp)

@@ -726,6 +726,7 @@ contains
         integer  :: i_out, i_spec, i_em
         integer  :: nspec, nem
         real(WP) :: tage, mass_frac, sfr_norm, frac_linear
+        real(WP) :: lbol_agn(n_outputs)
 
         nspec = ctx%state%nspec
         nem   = NEMLINE
@@ -752,8 +753,22 @@ contains
         end do
 
         if (ctx%add_agn_dust_val == 1 .and. pset%fagn > SAFE_FLOOR) then
+            ! The torus emits fagn x L_bol of the population the spectrum describes: in all-ages
+            ! mode the spectrum was just scaled by the fraction formed by each age, so L_bol is
+            ! too (as legacy FSPS compsp scales lbol_csp by mass_frac before agn_dust)
+            !$acc data create(lbol_agn)
+            !$acc parallel loop present(ctx) private(tage, mass_frac, sfr_norm, frac_linear) async(1)
+            do i_out = 1, n_outputs
+                lbol_agn(i_out) = ctx%state%out_lbol_csp(i_out)
+                if (pset%tage <= 0.0_wp) then
+                    tage = ctx%state%sfh_t_calc(i_out)
+                    call get_sfh_properties_at_age(ctx, pset, tage, mass_frac, sfr_norm, frac_linear)
+                    lbol_agn(i_out) = lbol_agn(i_out) + log10(max(mass_frac, SAFE_FLOOR))
+                end if
+            end do
             call apply_agn_dust_emission(ctx, pset, n_outputs, ctx%state%spec_lambda, &
-                                         ctx%state%out_lbol_csp, ctx%state%out_csp_spec)
+                                         lbol_agn, ctx%state%out_csp_spec)
+            !$acc end data
         end if
 
         ! 2. Post-process Emission Lines (Combination & Mass Renormalization)
