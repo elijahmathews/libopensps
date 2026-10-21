@@ -144,6 +144,11 @@ contains
         ! The parameter set is read by most kernels below (and by the dust and nebular routines it
         ! is passed to): map it once instead of an implicit copy at every launch
         !$acc enter data copyin(pset)
+        ! A tabular SFH is set on the host (opensps_context_set_sfh_tab); the device computes the
+        ! weights of several outputs from its copy
+        if (pset%sfh == 2 .or. pset%sfh == 3) then
+            !$acc update device(ctx%state%sfh_tab, ctx%state%ntabsfh)
+        end if
 
         ! Initialize working grids from SSP inputs natively on the device (Explicit loops to bypass NVHPC kernels bug)
         nt = ctx%state%ntfull
