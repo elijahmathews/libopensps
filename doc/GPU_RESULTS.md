@@ -97,17 +97,17 @@ than 1e-3 of the final mass agree to 1e-10. A direct formulation of the bin inte
 (e.g. `expm1` of the interval) would remove this; see the roadmap.
 
 **Correctness.**
-- Old path vs batch path, gfortran FP64, case matrix plus 18 cases (all-ages with dust,
-  nebular, AGN, IGM, smoothing, sf_start, truncation, Simha; redshift colours; exact and
-  wavelength smoothing), 53 cases: PASS at `--rtol 1e-10`; largest 5.5e-12 per pixel (velocity
-  smoothing, the sparse operator), otherwise <= 3e-14.
+- Old path vs batch path, gfortran FP64, 52 cases: the case matrix (34; C3K's data is not in
+  the fetched release) plus 18 (all-ages with dust, nebular, AGN, IGM, smoothing, sf_start,
+  truncation, Simha; redshift colours; exact and wavelength smoothing): PASS at `--rtol 1e-10`;
+  largest 5.5e-12 per pixel (velocity smoothing, the sparse operator), otherwise <= 3e-14.
 - `test_csp_batch` 273 subtests (was 166): old vs batch for one age and all ages in every mode
   above, asserting that the batch path was taken.
 - Unit + regression 38/38 in eight builds, with the batch path (default) and with
   `FSPS_SCENARIO_BATCH=0`: gfortran FP64, FP32, FP64 with 4 OpenMP threads; nvfortran CPU;
   OpenACC FP64, FP32; OpenMP target FP64, FP32 (`OMP_TARGET_OFFLOAD=MANDATORY`).
-- Host threads are bit-identical to the serial build (53 cases, 4 threads vs 1).
-- GPU vs nvfortran CPU, batch path, 53 cases: FP64 PASS at 1e-10 (OpenACC, OpenMP target).
+- Host threads are bit-identical to the serial build (52 cases, 4 threads vs 1).
+- GPU vs nvfortran CPU, batch path, 52 cases: FP64 PASS at 1e-10 (OpenACC, OpenMP target).
   FP32: indices exceed 1e-4 in two of the new all-ages cases with nebular emission
   (1.1-1.3e-4); every FP32 configuration does there, the old path on the GPU (1.4e-4) and both
   paths on the CPU (2.9-3.2e-4), so not a property of the batch path.

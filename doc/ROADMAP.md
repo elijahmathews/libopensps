@@ -131,7 +131,7 @@ path, steps 2-4"):
   selects the old path): one age, all ages (one model per age, weights scaled by the fraction
   formed), `tage = -99` tabular, redshifted colours (`zred_mags`), every smoothing mode (the
   non-fast ones on the host), several metallicities (`ssp_weights_z`), fast mode. Agrees with
-  the old path to 1e-10 or better over a 53-case matrix; faster everywhere except the
+  the old path to 1e-10 or better over a 52-case matrix; faster everywhere except the
   OpenACC all-ages basic call (~15-25% slower: its SFH weights are computed on the host, which
   keeps the GPU equal to the CPU; see the next item under Further items).
 - The CPU path runs the batch's kernels: plain per-model loops in CPU builds, and OpenMP host
