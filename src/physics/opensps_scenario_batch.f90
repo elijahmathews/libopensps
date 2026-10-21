@@ -16,13 +16,16 @@ contains
     !> output is per unit mass formed over the full history, as legacy FSPS's compsp does: all
     !> outputs are linear in the weights, and the AGN torus emission (fagn x L_bol) follows the
     !> scaled L_bol, as in legacy.
+    !> With redshift_colors = 1 the magnitudes of each output are at the redshift of its age (from
+    !> the cosmology table, clamped to 0-20, as the scenario path), the spectrum at zred.
     !> Returns .false. (results untouched) for the options the batch does not cover yet: several
-    !> metallicities, redshift colours, light-weighted ages, OpenACC multicore builds, and
+    !> metallicities, light-weighted ages, OpenACC multicore builds, and
     !> anything the batch rejects (non-device smoothing, invalid dust settings: status /= 0).
     !> Design note: doc/GPU_RESULTS.md, "compute_csp_scenario as a batch of one".
     module function opensps_scenario_as_batch(ctx, pset, nzin, results) result(done)
         use opensps_constants, only: NEMLINE
         use opensps_csp_batch, only: compute_csp_batch
+        use opensps_interpolation, only: interpolate_linear
         type(opensps_context_t), intent(inout)       :: ctx
         type(params), intent(in)                  :: pset
         integer, intent(in)                       :: nzin
@@ -31,7 +34,7 @@ contains
 
         type(params), allocatable :: psets(:)
         real(WP), allocatable :: mags(:,:), spec(:,:), eml(:,:), indx(:,:), w(:,:), wh(:,:), t1(:), t2(:)
-        real(WP), allocatable :: mass(:), lbol(:), mdust(:), tage(:), mformed(:), sfr(:), frac(:)
+        real(WP), allocatable :: mass(:), lbol(:), mdust(:), tage(:), mformed(:), sfr(:), frac(:), zmag(:)
         real(WP) :: mass_frac, sfr_norm, frac_linear, scale
         integer :: st, nspec, nbands, nindx, nt, n, i
         logical :: all_ages, tabular, grid_ages
@@ -45,7 +48,7 @@ contains
         return
 #endif
         if (nzin /= 1 .or. size(ctx%state%ssp_basis_spec, 3) /= 1) return
-        if (ctx%redshift_colors_val /= 0 .or. ctx%compute_light_ages_val /= 0) return
+        if (ctx%compute_light_ages_val /= 0) return
         nt = ctx%state%ntfull
         nspec = ctx%state%nspec
         nbands = ctx%state%nbands
@@ -109,8 +112,21 @@ contains
         end do
 
         allocate(mags(nbands, n), spec(nspec, n), eml(NEMLINE, n), indx(max(nindx, 1), n), mass(n), lbol(n), &
-                 mdust(n))
-        if (pset%compute_indices == 1 .and. .not. ctx%fast_mode) then
+                 mdust(n), zmag(n))
+        if (ctx%redshift_colors_val == 1) then
+            do i = 1, n
+                zmag(i) = interpolate_linear(ctx%state%cosmospl(:, 2), ctx%state%cosmospl(:, 1), tage(i))
+                zmag(i) = min(max(zmag(i), 0.0_wp), 20.0_wp)
+            end do
+        end if
+        ! (indices of the spectrum, and of no output in fast mode)
+        if (ctx%redshift_colors_val == 1 .and. pset%compute_indices == 1 .and. .not. ctx%fast_mode) then
+            call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass, lbol=lbol, mdust=mdust, &
+                                   emlines=eml, indx=indx, ssp_weights=w, zred_mags=zmag)
+        else if (ctx%redshift_colors_val == 1) then
+            call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass, lbol=lbol, mdust=mdust, &
+                                   emlines=eml, ssp_weights=w, zred_mags=zmag)
+        else if (pset%compute_indices == 1 .and. .not. ctx%fast_mode) then
             call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass, lbol=lbol, mdust=mdust, &
                                    emlines=eml, indx=indx, ssp_weights=w)
         else

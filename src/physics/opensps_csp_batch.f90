@@ -51,9 +51,14 @@ module opensps_csp_batch
     !> compute_csp_scenario's csp_weights; spectra, mass and L_bol are per that mass), used as
     !> they are; tage is then not used, and SFR is not defined (NaN).
     !>
+    !> Redshifted colours (redshift_colors = 1) need zred_mags, each model's magnitude redshift
+    !> (compute_csp_scenario's all-ages mode gives the redshift of each output's age).
+    !>
     !> Not supported (status 2): smoothing other than in velocity with smoothspec_fast = 1,
-    !> redshifted colors, light-weighted ages, and models with tage <= 0 (all-ages output). Models
-    !> must share the smoothing parameters (sigma_smooth, min/max_wave_smooth).
+    !> redshifted colours without zred_mags, light-weighted ages, and models with tage <= 0
+    !> without a weight matrix (the all-ages output of compute_csp_scenario is a batch with a
+    !> weight matrix). Models must share the smoothing parameters (sigma_smooth,
+    !> min/max_wave_smooth).
     !>
     !> Mass, L_bol and SFR follow `compute_csp_scenario` in FP64; spectra, magnitudes, indices,
     !> line luminosities and dust masses agree with it to the rounding of the kernel precision
@@ -154,8 +159,11 @@ contains
     !> @param[out]   mass_young, mass_old  Surviving stellar mass of the young and old ages.
     !> @param[out]   lbol_young, lbol_old  log10 L_bol [L_sun] of the young and old stellar ages
     !>                       (as lbol: stars only).
+    !> @param[in]    zred_mags Optional redshift of each model's magnitudes (N), in place of its
+    !>                       zred for the magnitudes only: the spectrum, its IGM absorption and
+    !>                       the SFH stay at zred (compute_csp_scenario's redshift_colors = 1).
     subroutine compute_csp_batch(ctx, psets, mags, status, spec, mass, lbol, mdust, sfr, emlines, indx, ssp_weights, &
-                                 spec_young, spec_old, mass_young, mass_old, lbol_young, lbol_old)
+                                 spec_young, spec_old, mass_young, mass_old, lbol_young, lbol_old, zred_mags)
         type(opensps_context_t), intent(inout) :: ctx
         type(params), intent(in)            :: psets(:)
         real(WP), intent(out)               :: mags(:,:)
@@ -166,6 +174,7 @@ contains
         real(WP), intent(in), optional      :: ssp_weights(:,:)
         real(WP), intent(out), optional     :: spec_young(:,:), spec_old(:,:)
         real(WP), intent(out), optional     :: mass_young(:), mass_old(:), lbol_young(:), lbol_old(:)
+        real(WP), intent(in), optional      :: zred_mags(:)
 
         integer :: n_mod, nt, nspec, nbands, m, k
         real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk
@@ -238,8 +247,13 @@ contains
                 status = 3; return
             end if
         end if
-        if (ctx%redshift_colors_val /= 0 .or. ctx%compute_light_ages_val /= 0) then
+        if ((ctx%redshift_colors_val /= 0 .and. .not. present(zred_mags)) .or. ctx%compute_light_ages_val /= 0) then
             status = 2; return
+        end if
+        if (present(zred_mags)) then
+            if (size(zred_mags) < n_mod) then
+                status = 3; return
+            end if
         end if
         parts = present(spec_young) .and. present(spec_old) .and. present(mass_young) .and. &
                 present(mass_old) .and. present(lbol_young) .and. present(lbol_old)
@@ -529,7 +543,13 @@ contains
         ! ------------------------------------------------------------------
         ! 8. Magnitudes and indices
         ! ------------------------------------------------------------------
-        if (zvar .and. allocated(psets(1)%mag_compute)) then
+        if (present(zred_mags) .and. allocated(psets(1)%mag_compute)) then
+            call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, psets(1)%mag_compute, &
+                                            zred_col=zred_mags(1:n_mod))
+        else if (present(zred_mags)) then
+            call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, &
+                                            zred_col=zred_mags(1:n_mod))
+        else if (zvar .and. allocated(psets(1)%mag_compute)) then
             call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, psets(1)%mag_compute, &
                                             zred_col=zcol)
         else if (zvar) then
