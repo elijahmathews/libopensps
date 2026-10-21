@@ -237,6 +237,8 @@ contains
         !$acc parallel loop collapse(2) present(spec, specw)
 #ifdef OMP_TARGET
         !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+        !$omp parallel do collapse(2)
 #endif
         do m = 1, n_col
             do i = 1, nspec
@@ -246,6 +248,8 @@ contains
         !$acc parallel loop gang vector collapse(2) present(ctx, lp, specw, ind)
 #ifdef OMP_TARGET
         !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP) && !defined(_OPENACC)
+        !$omp parallel do collapse(2)
 #endif
         do m = 1, n_col
             do j = 1, n_idx
