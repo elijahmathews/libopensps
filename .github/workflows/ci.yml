@@ -84,6 +84,13 @@ jobs:
             setup_args: -Daccel=multicore -Dcpu_baseline=x86-64-v3
             fflags: -Minfo=accel
 
+          # The batch on host threads (-Denable_openmp=true): the OpenMP loops of the device kernels
+          # run on the CPU cores, the replacement for OpenACC multicore (doc/ROADMAP.md, priority 2)
+          - name: gfortran / OpenMP host threads / Linux x86-64
+            os: ubuntu-24.04
+            install: apt-gfortran
+            setup_args: -Denable_openmp=true
+
           # FP32 kernels (-Dkernel_precision=single), the configuration a consumer GPU would run;
           # the regression suite checks them against the FP64 references
           - name: gfortran / FP32 kernels / Linux x86-64
