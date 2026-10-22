@@ -208,7 +208,9 @@ int main(void) {
         opensps_context_get_csp(h2, NULL, &m_reused, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &status);
         opensps_context_compute_csp(h3, 0, &n1, &status);
         opensps_context_get_csp(h3, NULL, &m_new, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &status);
-        check(h2 == h1 && m_reused == m_new, "reused handle starts from the default parameters");
+        /* (equal up to rounding: OpenACC multicore sums the SSP masses in a parallel reduction,
+         * whose order differs from run to run) */
+        check(h2 == h1 && fabs(m_reused / m_new - 1.0) < 1e-12, "reused handle starts from the default parameters");
         opensps_context_destroy(h2, &status);
         opensps_context_destroy(h3, &status);
     }
