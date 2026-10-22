@@ -690,14 +690,17 @@ contains
             return
         end if
 #endif
-        ! OpenMP: one teams loop over the three loops (perfectly nested), consecutive threads on
-        ! consecutive models of one band as with OpenACC. nvfortran 25.1 on the A100, N = 1e4:
-        ! teams loop 6.7 ms (OpenACC 6.75); teams distribute parallel do (collapse 3) 12.6, also
-        ! with thread_limit or schedule(static, 1); teams distribute over (band, block) with an
-        ! inner parallel do 56
+        ! OpenMP: one construct over the three loops (perfectly nested), consecutive threads on
+        ! consecutive models of one band as with OpenACC. nvfortran 25.1 on the A100, N = 1e4, per
+        ! kernel precision: FP32 teams loop 6.7 ms (OpenACC 6.75), teams distribute parallel do 12.6
+        ! (also with thread_limit or schedule(static, 1)); FP64 teams loop 65 ms, teams distribute
+        ! parallel do 17 (OpenACC 12.6). Teams distribute over (band, block) with an inner parallel
+        ! do: 56 ms (FP32)
         !$acc parallel loop gang collapse(2) vector_length(MBLK) present(bands_t, j_lo, j_hi, do_band, wt, fobs_t, fband)
-#ifdef OMP_TARGET
+#if defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
         !$omp target teams loop collapse(3) private(m, s, c, term, tsum, j)
+#elif defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(3) private(m, s, c, term, tsum, j)
 #elif defined(_OPENMP) && !defined(_OPENACC)
         !$omp parallel do collapse(3) private(m, s, c, term, tsum, j)
 #endif
