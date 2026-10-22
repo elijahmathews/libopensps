@@ -1622,6 +1622,11 @@ contains
             opensps_default_ctx%smooth_velocity_val = val
         case ('redshift_colors')
             opensps_default_ctx%redshift_colors_val = val
+        case ('compute_light_ages')
+            ! As opensps_context_set_param_int: 0 (the FSPS default) accepted, light-weighted ages
+            ! not supported (104, OPENSPS_ERR_UNSUPPORTED_PARAM)
+            if (val /= 0) call opensps_set_error(104, &
+                                                 "[OPENSPS-C] Error: compute_light_ages is not supported (only 0)")
         case ('compute_vega_mags')
             opensps_default_ctx%compute_vega_mags_val = val
         case ('vactoair_flag')
