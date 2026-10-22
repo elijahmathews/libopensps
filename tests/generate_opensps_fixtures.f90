@@ -21,7 +21,7 @@ PROGRAM GENERATE_OPENSPS_FIXTURES
    use opensps_constants, only: NEMLINE
    use opensps_types, only: PARAMS, COMPSPOUT
    use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
-   use opensps_csp, only: compute_csp_scenario
+   use opensps_csp, only: compute_csp_scenario, sfh_weights_core
    use opensps_csp_batch, only: compute_csp_batch
    use opensps_ssp, only: generate_ssp_grid, configure_imf_parameters
    use opensps_imf, only: compute_imf_weights
@@ -224,15 +224,17 @@ PROGRAM GENERATE_OPENSPS_FIXTURES
    call put('csp/emlines', real(reshape(tmp2, [NEMLINE * n_out]), real64), [NEMLINE, n_out])
    deallocate(tmp2)
 
-   ! SFH weights over SSP ages (first metallicity slot) for each output age
-   if (allocated(ctx%state%csp_weights)) then
+   ! SFH weights over SSP ages for each output age (normalized at that age)
+   block
+      real(WP) :: wsfh(ntfull, 1), t1(ntfull), t2(ntfull)
       allocate(tmp2(ntfull, n_out))
       do k = 1, n_out
-         tmp2(:, k) = ctx%state%csp_weights(1:ntfull, 1, k)
+         call sfh_weights_core(ctx, pset, 10.0_wp**(results(k)%age - 9.0_wp), 1, wsfh, t1, t2)
+         tmp2(:, k) = wsfh(:, 1)
       end do
       call put('csp/sfh_weights', real(reshape(tmp2, [ntfull * n_out]), real64), [ntfull, n_out])
       deallocate(tmp2)
-   end if
+   end block
 
    close(unit_out)
    call opensps_destroy(ctx)

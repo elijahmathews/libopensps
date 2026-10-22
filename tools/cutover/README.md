@@ -138,7 +138,7 @@ FSPS or the past; the data inside `tests/data` is not edited (its manifests reco
 **Kept, on purpose** (what `fsps` remains after the rename, and why):
 
 - **Environment variables** `SPS_HOME`, `FSPS_DATA_HOME`, `FSPS_DATA_FORMAT`, `FSPS_TEST_*`,
-  `FSPS_STRESS_*`, `FSPS_SCENARIO_BATCH`, `FSPS_NO_PIN`, ... and the CI variable
+  `FSPS_STRESS_*`, `FSPS_NO_PIN`, ... and the CI variable
   `FSPS_DATA_RELEASE`: existing setups and CI keep working; `OPENSPS_DATA_HOME`, the preferred
   data root, is read first (PR #29).
 - **Data directory names** (`share/fsps`, `~/.local/share/fsps`, `$XDG_DATA_HOME/fsps`) and the

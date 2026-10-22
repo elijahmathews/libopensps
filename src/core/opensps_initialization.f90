@@ -1101,7 +1101,6 @@ contains
     !> - `spec_ssp_zz`: The computed SSP grid [nspec, ntfull, nz].
     !> - `mass_ssp_zz`, `lbol_ssp_zz`: Stellar mass and luminosity grids.
     !> - `weight_ssp`: Weights for interpolation.
-    !> - `spec_young`, `spec_old`: Buffers for separating young/old stellar populations.
     !> - `lsfinfo%lsf`: Buffer for the Line Spread Function.
     !>
     !> @param[inout] ctx The FSPS context to allocate.
@@ -1113,8 +1112,6 @@ contains
         if (allocated(ctx%state%mass_ssp_zz)) deallocate (ctx%state%mass_ssp_zz)
         if (allocated(ctx%state%lbol_ssp_zz)) deallocate (ctx%state%lbol_ssp_zz)
         if (allocated(ctx%state%weight_ssp)) deallocate (ctx%state%weight_ssp)
-        if (allocated(ctx%state%spec_young)) deallocate (ctx%state%spec_young)
-        if (allocated(ctx%state%spec_old)) deallocate (ctx%state%spec_old)
         if (allocated(ctx%state%lsfinfo%lsf)) deallocate (ctx%state%lsfinfo%lsf)
 
         ! Allocate SSP Grids
@@ -1126,10 +1123,6 @@ contains
         ! Allocate Weighting Buffer
         allocate (ctx%state%weight_ssp(ctx%state%ntfull, ctx%state%nz))
 
-        ! Allocate Component Spectral Buffers
-        allocate (ctx%state%spec_young(ctx%state%nspec, ctx%state%ntfull))
-        allocate (ctx%state%spec_old(ctx%state%nspec, ctx%state%ntfull))
-
         ! Allocate Line Spread Function Buffer
         allocate (ctx%state%lsfinfo%lsf(ctx%state%nspec))
 
@@ -1138,8 +1131,6 @@ contains
         ctx%state%mass_ssp_zz = 0.0_wp
         ctx%state%lbol_ssp_zz = 0.0_wp
         ctx%state%weight_ssp = 0.0_wp
-        ctx%state%spec_young = 0.0_wp
-        ctx%state%spec_old = 0.0_wp
         ctx%state%lsfinfo%lsf = 0.0_wp
 
     end subroutine allocate_local_workspace

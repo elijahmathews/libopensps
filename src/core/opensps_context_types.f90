@@ -199,8 +199,6 @@ module opensps_context_types
         real(WP), allocatable :: lbol_ssp_zz(:, :)
         real(WP), pointer, contiguous :: time_full(:) => null()
         real(WP), allocatable :: weight_ssp(:, :)
-        real(KP), allocatable :: spec_young(:,:)
-        real(KP), allocatable :: spec_old(:,:)
         real(KP), allocatable :: ssp_temp_grid(:, :)
         integer, allocatable :: ssp_active_idx(:)
         real(WP), allocatable :: ssp_active_w(:)
@@ -221,40 +219,19 @@ module opensps_context_types
         real(WP), allocatable :: ssp_basis_mass(:, :)
         real(WP), allocatable :: ssp_basis_lbol(:, :)
         logical :: ssp_basis_is_dirty = .true.
-        real(KP), allocatable :: csp_ssp_grid(:,:,:)
-        real(KP), allocatable :: csp_emlin_grid(:,:,:)
-        real(WP), allocatable :: csp_ssp_lum_linear(:,:)
-        real(KP), allocatable :: csp_igm_transmission(:)
-        real(WP), allocatable :: csp_spec_final(:)
-        real(WP), allocatable :: csp_emlin_final(:)
 
         ! --- Replacements for csp_buffer_t ---
-        real(WP), allocatable :: csp_weights(:,:,:)
-        real(KP), allocatable :: csp_emlin_young(:,:)
-        real(KP), allocatable :: csp_emlin_old(:,:)
 
         ! --- Persistent Physics Workspaces (Dust & Gas) ---
-        real(KP), allocatable :: dust_transmission_diffuse(:)
-        real(WP), allocatable :: dust_frequencies(:)
-        real(KP), allocatable :: dust_spec_total_work(:,:)
-        real(KP), allocatable :: dust_emission_shape(:)
-        real(KP), allocatable :: dust_emission_final(:,:)
         real(WP), allocatable :: gas_neb_cont_reduced(:,:)   ! log10 values: kept in WP (an FP32 log loses ln(10)*|x|*eps ~ 5e-6 in 10**x)
         real(WP), allocatable :: gas_neb_line_reduced(:,:)
         real(WP), allocatable :: gas_current_step_cont(:)   ! log10 values: kept in WP (an FP32 log loses ln(10)*|x|*eps ~ 5e-6 in 10**x)
         real(WP), allocatable :: gas_current_step_lines(:)
-        real(WP), allocatable :: scalar_reductions(:)
         real(WP), allocatable :: sfh_t_calc(:)
         real(WP), allocatable :: sfh_sfr_calc(:)
         real(WP), allocatable :: sfh_age_integrand(:)
-        real(WP), allocatable :: sfh_w_tmp1(:,:)
-        real(WP), allocatable :: sfh_w_tmp2(:,:)
 
         ! --- Fused Loop Output Buffers ---
-        real(KP), allocatable :: out_csp_spec(:,:)     ! (nspec, n_outputs)
-        real(WP), allocatable :: out_csp_emlin(:,:)    ! (nemline, n_outputs)
-        real(WP), allocatable :: out_mass_csp(:)       ! (n_outputs)
-        real(WP), allocatable :: out_lbol_csp(:)       ! (n_outputs)
         type(batch_grid_t) :: batch
         type(batch_out_t) :: batch_out
     end type opensps_context_state_t
@@ -501,8 +478,6 @@ contains
         if (allocated(state%lbol_ssp_zz)) deallocate (state%lbol_ssp_zz)
         if (associated(state%time_full)) nullify (state%time_full)
         if (allocated(state%weight_ssp)) deallocate (state%weight_ssp)
-        if (allocated(state%spec_young)) deallocate (state%spec_young)
-        if (allocated(state%spec_old)) deallocate (state%spec_old)
         if (allocated(state%ssp_temp_grid)) deallocate (state%ssp_temp_grid)
         if (allocated(state%ssp_active_idx)) deallocate (state%ssp_active_idx)
         if (allocated(state%ssp_active_w)) deallocate (state%ssp_active_w)
@@ -526,40 +501,19 @@ contains
         if (allocated(state%ssp_basis_spec)) deallocate (state%ssp_basis_spec)
         if (allocated(state%ssp_basis_mass)) deallocate (state%ssp_basis_mass)
         if (allocated(state%ssp_basis_lbol)) deallocate (state%ssp_basis_lbol)
-        if (allocated(state%csp_ssp_grid)) deallocate (state%csp_ssp_grid)
-        if (allocated(state%csp_emlin_grid)) deallocate (state%csp_emlin_grid)
-        if (allocated(state%csp_ssp_lum_linear)) deallocate (state%csp_ssp_lum_linear)
-        if (allocated(state%csp_igm_transmission)) deallocate (state%csp_igm_transmission)
-        if (allocated(state%csp_spec_final)) deallocate (state%csp_spec_final)
-        if (allocated(state%csp_emlin_final)) deallocate (state%csp_emlin_final)
 
         ! --- Replacements for csp_buffer_t ---
-        if (allocated(state%csp_weights)) deallocate (state%csp_weights)
-        if (allocated(state%csp_emlin_young)) deallocate (state%csp_emlin_young)
-        if (allocated(state%csp_emlin_old)) deallocate (state%csp_emlin_old)
 
         ! --- Persistent Physics Workspaces (Dust & Gas) ---
-        if (allocated(state%dust_transmission_diffuse)) deallocate(state%dust_transmission_diffuse)
-        if (allocated(state%dust_frequencies)) deallocate(state%dust_frequencies)
-        if (allocated(state%dust_spec_total_work)) deallocate(state%dust_spec_total_work)
-        if (allocated(state%dust_emission_shape)) deallocate(state%dust_emission_shape)
-        if (allocated(state%dust_emission_final)) deallocate(state%dust_emission_final)
         if (allocated(state%gas_neb_cont_reduced)) deallocate(state%gas_neb_cont_reduced)
         if (allocated(state%gas_neb_line_reduced)) deallocate(state%gas_neb_line_reduced)
         if (allocated(state%gas_current_step_cont)) deallocate(state%gas_current_step_cont)
         if (allocated(state%gas_current_step_lines)) deallocate(state%gas_current_step_lines)
-        if (allocated(state%scalar_reductions)) deallocate(state%scalar_reductions)
         if (allocated(state%sfh_t_calc)) deallocate(state%sfh_t_calc)
         if (allocated(state%sfh_sfr_calc)) deallocate(state%sfh_sfr_calc)
         if (allocated(state%sfh_age_integrand)) deallocate(state%sfh_age_integrand)
-        if (allocated(state%sfh_w_tmp1)) deallocate(state%sfh_w_tmp1)
-        if (allocated(state%sfh_w_tmp2)) deallocate(state%sfh_w_tmp2)
 
         ! --- Fused Loop Output Buffers ---
-        if (allocated(state%out_csp_spec)) deallocate(state%out_csp_spec)
-        if (allocated(state%out_csp_emlin)) deallocate(state%out_csp_emlin)
-        if (allocated(state%out_mass_csp)) deallocate(state%out_mass_csp)
-        if (allocated(state%out_lbol_csp)) deallocate(state%out_lbol_csp)
 
         state%nt = 0
         state%nz = 0

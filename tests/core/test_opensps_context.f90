@@ -223,9 +223,11 @@ contains
 
         ! Prepare CSP Workspace
         call opensps_context_prepare_csp_workspace(ctx)
-        call assert_true(allocated(ctx%state%csp_emlin_old), "csp_emlin_old allocated", total_tests, total_failures)
-        call assert_true(allocated(ctx%state%csp_spec_final), "csp_spec_final allocated", total_tests, total_failures)
-        call assert_true(allocated(ctx%state%csp_ssp_grid), "csp_ssp_grid allocated for nspec>0", total_tests, total_failures)
+        call assert_true(allocated(ctx%state%sfh_t_calc), "sfh_t_calc allocated", total_tests, total_failures)
+        call assert_true(allocated(ctx%state%gas_current_step_lines), "gas_current_step_lines allocated", &
+                         total_tests, total_failures)
+        call assert_true(allocated(ctx%state%gas_neb_cont_reduced), "gas_neb_cont_reduced allocated for nspec>0", &
+                         total_tests, total_failures)
 
         call opensps_context_destroy(ctx)
     end subroutine test_context_workspace_allocation
