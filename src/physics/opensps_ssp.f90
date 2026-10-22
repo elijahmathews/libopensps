@@ -767,7 +767,7 @@ contains
                 linear_lbol = exp(buf%log_lum(j) * LN10)
 
                 ! Generate Spectrum into temp_grid column
-                ! get_stellar_spectrum must be '!$acc routine seq'
+                ! (get_stellar_spectrum must be a device routine: !$omp declare target)
                 call get_stellar_spectrum( &
                     ctx, &
                     pset, &

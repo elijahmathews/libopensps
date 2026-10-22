@@ -23,8 +23,9 @@ delete it here.
 - **Accuracy:** FP64 GPU = CPU to 1.6e-11 per pixel; FP32 kernels reproduce FP64 to ~4e-7
   per pixel and 5e-7 mag. Legacy FSPS parity is checked case by case
   (`tools/legacy_parity`).
-- **Portability:** OpenMP target on NVIDIA (nvfortran) and AMD (LLVM flang, gfx1103); all
-  suites pass on both (see priority 5 for the rest).
+- **Portability:** OpenMP target on NVIDIA (nvfortran; all suites pass). AMD (LLVM flang,
+  gfx1103): builds; the suites on the device are the open condition for removing OpenACC
+  (see priority 5).
 
 ## Cutover to libopensps
 
@@ -118,7 +119,8 @@ depend on a pinned version of the C library, each with its own release cycle and
 ### 2. One code path (done)
 
 Finished with the removal of OpenACC (2026-10; details in `doc/GPU_RESULTS.md`, "One code
-path, steps 1-6"). The CSP physics has one implementation, `compute_csp_batch`;
+path, steps 1-7"), on the condition that OpenMP target passes the suites on AMD (LLVM flang,
+gfx1103), which had not been run when OpenACC was removed. The CSP physics has one implementation, `compute_csp_batch`;
 `compute_csp_scenario` runs as a batch (one model per output age). SSP generation has one
 template kernel for every build. OpenMP target is the only GPU programming model and OpenMP
 host threads the only CPU parallelism. Light-weighted ages were dropped (status 104; could

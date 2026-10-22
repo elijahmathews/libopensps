@@ -1264,19 +1264,16 @@ contains
         type(opensps_context_t), intent(INOUT) :: ctx
 
         if (allocated(ctx%state%spec_ssp_zz)) then
-            !$acc exit data delete(ctx%state%spec_ssp_zz)
 #ifdef OMP_TARGET
             !$omp target exit data map(delete: ctx%state%spec_ssp_zz)
 #endif
         end if
         if (allocated(ctx%state%mass_ssp_zz)) then
-            !$acc exit data delete(ctx%state%mass_ssp_zz)
 #ifdef OMP_TARGET
             !$omp target exit data map(delete: ctx%state%mass_ssp_zz)
 #endif
         end if
         if (allocated(ctx%state%lbol_ssp_zz)) then
-            !$acc exit data delete(ctx%state%lbol_ssp_zz)
 #ifdef OMP_TARGET
             !$omp target exit data map(delete: ctx%state%lbol_ssp_zz)
 #endif
@@ -1303,7 +1300,7 @@ contains
         end if
         if (st%have(z)) return
         ! (the SSP kernels of device builds read the context on the device)
-#if defined(_OPENACC) || defined(OMP_TARGET)
+#ifdef OMP_TARGET
         if (.not. ctx%on_device) call opensps_context_move_to_device(ctx)
 #endif
         pset = ctx%pset

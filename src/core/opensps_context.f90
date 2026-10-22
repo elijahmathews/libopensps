@@ -561,7 +561,7 @@ contains
         call opensps_context_ensure_setup(ctx)
         call opensps_context_prepare_pset(ctx)
         ! (the SSP kernels of device builds read the context on the device)
-#if defined(_OPENACC) || defined(OMP_TARGET)
+#ifdef OMP_TARGET
         if (.not. ctx%on_device) call opensps_context_move_to_device(ctx)
 #endif
         call generate_ssp_grid(ctx, ctx%pset, mass_ssp, lbol_ssp, spec_ssp)

@@ -42,13 +42,8 @@ program test_physics_oracles
     ! fagn L_bol times that integral (to rounding); the integral itself must be 1 to 1e-2
     real(WP), parameter :: AGN_NORM_TOL = 1.0e-2_wp
     real(WP), parameter :: AGN_TOL = max(1.0e-10_wp, KP_RTOL)
-    ! Single age vs all ages, element-wise (relative to the peak): 1e-6. OpenACC multicore's FP32
-    ! reductions are plain per-core sums (~2e-6 there, 4e-8 on the CPU and the GPU)
-#ifdef ACC_MULTICORE
-    real(WP), parameter :: SINGLE_ALL_TOL = max(1.0e-6_wp, KP_RTOL)
-#else
+    ! Single age vs all ages, element-wise (relative to the peak)
     real(WP), parameter :: SINGLE_ALL_TOL = 1.0e-6_wp
-#endif
 
     call skip_without_data()
     call print_major_header("Physics Oracles (independent identities and published values)")
