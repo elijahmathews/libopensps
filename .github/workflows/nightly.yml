@@ -163,3 +163,29 @@ jobs:
           name: nightly-gpu
           path: build/meson-logs/
           retention-days: 14
+
+  gpu-openmp:
+    name: GPU / nvfortran OpenMP target
+    if: vars.GPU_RUNNER == 'true'
+    runs-on: [self-hosted, linux, gpu-nvidia]
+    timeout-minutes: 60
+    env:
+      OMP_TARGET_OFFLOAD: MANDATORY   # a silent host fallback fails
+    steps:
+      - uses: actions/checkout@v7
+      - name: Toolchain and device
+        run: |
+          nvfortran --version
+          nvidia-smi
+      - run: meson setup build --buildtype=release -Daccel=omp_gpu
+        env:
+          FC: nvfortran
+          CC: nvc
+      - run: meson compile -C build
+      - run: meson test -C build --suite unit --suite regression --print-errorlogs
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-gpu-openmp
+          path: build/meson-logs/
+          retention-days: 14
