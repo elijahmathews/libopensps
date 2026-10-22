@@ -53,8 +53,9 @@ module opensps_ssp_operator
     !> **Per model** (ssp_op_model_weights; plain arrays, no allocation, no derived types, so it
     !> can become a batched device kernel): ~n_pts IMF bin integrals (imf_integral_p, the
     !> closed forms of opensps_imf, unchanged), one sparse product over nnz entries, and the
-    !> remnant integrals per age. The template product (spectra = templates . W) is shared with
-    !> generate_ssp_grid (add_main_library_templates, sum_small_templates, sum_dusty_slots).
+    !> remnant integrals per age. The template product (spectra = templates . W, with the other
+    !> libraries' rows and the dust-shell AGB corners) is generate_ssp_grid's
+    !> (add_main_library_templates).
     !>
     !> **Agreement with generate_ssp_grid**: the aggregation order differs (w_IMF x (f x coef)
     !> instead of (w_IMF x f) x coef, entries merged per point, dust corners ordered by first use
@@ -86,8 +87,9 @@ module opensps_ssp_operator
     use opensps_imf, only: imf_integral_p, IMF_NPAR, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT, IMF_P_LOWER_BOUND
     use opensps_stellar_modifications, only: add_remnant_mass_p
     use opensps_ssp, only: isochrone_buffer_t, init_isochrone_buffer, free_isochrone_buffer, load_timestep_data, &
-                        apply_isochrone_modifications, sum_small_templates, sum_dusty_slots, &
-                        add_main_library_templates, finish_ssp_grid, add_column
+                        apply_isochrone_modifications, add_main_library_templates, finish_ssp_grid, &
+                        add_column, dusty_defer_t, dusty_push_slot, dusty_push_entry, L_MAIN, L_CAR, &
+                        L_AGBO, L_AGBC
     use opensps_spectral_library, only: get_stellar_spectrum, get_stellar_terms, SRC_MAIN_LIB, SRC_WMBASIC, &
                                      SRC_AGB_O, SRC_AGB_C, SRC_PAGB, SRC_WRN, SRC_WRC, SRC_AGB_CAR
     use opensps_dust, only: get_agb_dust_terms
@@ -673,11 +675,10 @@ contains
         real(WP), intent(out), contiguous :: mass_grid(:), lbol_grid(:), spec_grid(:,:)
         real(WP), intent(out), optional   :: wrow_out(:)
 
-        real(WP), allocatable :: w(:), wrow(:), w_main_all(:,:), w_small(:), dw_main(:,:,:), dw_o(:,:), &
-                                 dw_c(:,:), dw_car(:,:)
+        real(WP), allocatable :: w(:), wrow(:), w_main_all(:,:), dw_main(:,:,:), dw_o(:,:), dw_c(:,:), dw_car(:,:)
         real(KP), allocatable :: acc(:), comp(:)
-        integer, allocatable :: dkey(:,:)
-        integer :: t, r, out_idx, nspec, nslot, s0, idx, sl, q, o1, o2, o3, o4, o5, o6
+        type(dusty_defer_t) :: dusty
+        integer :: t, r, out_idx, nspec, nslot, s0, idx, sl, q, a, b
         real(WP) :: tot_mass, lin_l
 
         nspec = op%nspec
@@ -687,11 +688,10 @@ contains
                                   op%n_rows, op%nnz, op%row_ptr, op%col, op%val, w, wrow)
         if (present(wrow_out)) wrow_out(1:op%n_rows) = wrow
 
-        allocate(w_main_all(op%n_main, op%n_ages), w_small(op%n_small), acc(nspec), comp(nspec))
+        ! The template weights of all ages: the main library's rows, then the other libraries'
+        ! (generate_ssp_grid's order, small_template_index)
+        allocate(w_main_all(op%n_main + op%n_small, op%n_ages), acc(nspec), comp(nspec))
         w_main_all = 0.0_wp
-        ! Offsets of the small libraries in w_small
-        o1 = product(op%n_wmb); o2 = o1 + product(op%n_pagb); o3 = o2 + op%n_wrn; o4 = o3 + op%n_wrc
-        o5 = o4 + op%n_car; o6 = o5 + op%n_agbo
         do t = 1, op%n_ages
             if (.not. op%age_on(t)) cycle
             out_idx = 1 + (t - 1) * TIME_RES_INCR
@@ -711,20 +711,15 @@ contains
                 lbol_grid(out_idx) = log10(max(lin_l, SAFE_FLOOR))
             end if
 
-            ! Spectrum of everything but the main library (accumulate_by_templates order:
-            ! direct stars, small libraries, dust-shell corners)
+            ! The direct stars here; the template rows and the dust-shell corners (accumulate_by_templates
+            ! order) for add_main_library_templates
             acc = 0.0_KP; comp = 0.0_KP
-            w_small = 0.0_wp
             nslot = op%age_slot_ptr(t + 1) - op%age_slot_ptr(t)
             s0 = op%age_slot_ptr(t) - 1
             if (nslot > 0) then
-                allocate(dkey(3, nslot), dw_main(op%nt_lib, op%ng_lib, nslot), dw_o(op%n_agbo, nslot), &
-                         dw_c(op%n_agbc, nslot), dw_car(op%n_car, nslot))
+                allocate(dw_main(op%nt_lib, op%ng_lib, nslot), dw_o(op%n_agbo, nslot), dw_c(op%n_agbc, nslot), &
+                         dw_car(op%n_car, nslot))
                 dw_main = 0.0_wp; dw_o = 0.0_wp; dw_c = 0.0_wp; dw_car = 0.0_wp
-                do sl = 1, nslot
-                    dkey(:, sl) = op%slot_key(:, s0 + sl)
-                    dkey(1, sl) = dkey(1, sl) - 1    ! C-rich flag (sum_dusty_slots adds 1)
-                end do
             end if
             do r = op%age_row_ptr(t), op%age_row_ptr(t + 1) - 1
                 idx = op%row_idx(r)
@@ -732,7 +727,7 @@ contains
                 case (ROW_MAIN)
                     w_main_all(idx, t) = wrow(r)
                 case (ROW_SMALL)
-                    w_small(idx) = wrow(r)
+                    w_main_all(op%n_main + idx, t) = wrow(r)
                 case (ROW_DIRECT)
                     call add_column(acc, comp, real(wrow(r), KP), op%direct_spec(:, idx))
                 case (ROW_DUSTY)
@@ -749,18 +744,31 @@ contains
                     end if
                 end select
             end do
-            call sum_small_templates(ctx, op%zmet, reshape(w_small(1:o1), op%n_wmb), &
-                                     reshape(w_small(o1+1:o2), op%n_pagb), w_small(o2+1:o3), w_small(o3+1:o4), &
-                                     w_small(o4+1:o5), w_small(o5+1:o6), w_small(o6+1:op%n_small), acc, comp)
-            if (nslot > 0) then
-                call sum_dusty_slots(ctx, op%zmet, nslot, dkey, dw_main, dw_o, dw_c, dw_car, acc, comp)
-                deallocate(dkey, dw_main, dw_o, dw_c, dw_car)
-            end if
+            ! The age's dust corners (key: flux_dagb indices), entries in the order of
+            ! accumulate_by_templates (main library, carbon stars, O-rich, C-rich)
+            do sl = 1, nslot
+                call dusty_push_slot(dusty, t, op%slot_key(:, s0 + sl))
+                do b = 1, op%ng_lib
+                    do a = 1, op%nt_lib
+                        if (dw_main(a, b, sl) /= 0.0_wp) call dusty_push_entry(dusty, L_MAIN, a, b, dw_main(a, b, sl))
+                    end do
+                end do
+                do a = 1, op%n_car
+                    if (dw_car(a, sl) /= 0.0_wp) call dusty_push_entry(dusty, L_CAR, a, 1, dw_car(a, sl))
+                end do
+                do a = 1, op%n_agbo
+                    if (dw_o(a, sl) /= 0.0_wp) call dusty_push_entry(dusty, L_AGBO, a, 1, dw_o(a, sl))
+                end do
+                do a = 1, op%n_agbc
+                    if (dw_c(a, sl) /= 0.0_wp) call dusty_push_entry(dusty, L_AGBC, a, 1, dw_c(a, sl))
+                end do
+            end do
+            if (nslot > 0) deallocate(dw_main, dw_o, dw_c, dw_car)
             spec_grid(:, out_idx) = real(acc, WP)
         end do
 
-        ! Main library of all ages (floors computed ages), then the post-processing
-        call add_main_library_templates(ctx, pset, w_main_all, spec_grid)
+        ! The templates and dust corners of all ages (floors computed ages), then the post-processing
+        call add_main_library_templates(ctx, pset, w_main_all, spec_grid, dusty)
         call finish_ssp_grid(ctx, pset, mass_grid, lbol_grid, spec_grid)
     end subroutine ssp_operator_evaluate
 
