@@ -179,7 +179,7 @@ contains
         ! (Vega magnitudes from the context's resident copy: no upload per call)
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(v, vv) &
-        !$omp map(present, alloc: ctx%state%magvega)
+        !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%magvega)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(v, vv)
 #endif
@@ -461,7 +461,7 @@ contains
 
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(il, v, target, t, f) &
-        !$omp map(present, alloc: ctx%state%spec_lambda)
+        !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(il, v, target, t, f)
 #endif

@@ -504,7 +504,7 @@ contains
         else
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do &
-            !$omp map(present, alloc: ctx%state%time_full, ctx%state%zlegend, ctx%state%ntfull, ctx%state%nz, &
+            !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%time_full, ctx%state%zlegend, ctx%state%ntfull, ctx%state%nz, &
             !$omp     ctx%state%ntabsfh, ctx%state%sfh_tab, ctx%interpolation_type_val, ctx%tiny_logt_val)
 #elif defined(_OPENMP)
             !$omp parallel do
@@ -519,7 +519,7 @@ contains
             ! outer, as compute_csp_scenario with nzin > 1), the weights cast once to KP
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do private(k, z, w, mk, lk) if(target: .not. host_m) &
-            !$omp& map(present, alloc: bas_lbol, bas_mass)
+            !$omp& map(OMP_MAP_PRESENT_ALLOC: bas_lbol, bas_mass)
 #elif defined(_OPENMP)
             !$omp parallel do private(k, z, w, mk, lk)
 #endif
@@ -550,7 +550,7 @@ contains
         else
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do private(k, w, mk, lk) if(target: .not. host_m) &
-            !$omp& map(present, alloc: bas_lbol, bas_mass)
+            !$omp& map(OMP_MAP_PRESENT_ALLOC: bas_lbol, bas_mass)
 #elif defined(_OPENMP)
             !$omp parallel do private(k, w, mk, lk)
 #endif
@@ -1190,7 +1190,7 @@ contains
         associate (a_spec_nu => ctx%state%spec_nu)
 #ifdef OMP_TARGET
         !$omp target teams distribute parallel do collapse(2) private(s, c, wt, v, i, y, wk) &
-        !$omp map(present, alloc: a_spec_nu)
+        !$omp map(OMP_MAP_PRESENT_ALLOC: a_spec_nu)
 #endif
         do iz = 1, nzb
         do t = 1, nt_neb
@@ -1298,7 +1298,7 @@ contains
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do collapse(2) private(y, o, sy, so, ra, rb, dl, f, r, &
             !$omp& a, a_prev, t, iz, iu, c00, c01, c10, c11) &
-            !$omp& map(present, alloc: a_nebem_cont, a_xnebem_cont)
+            !$omp& map(OMP_MAP_PRESENT_ALLOC: a_nebem_cont, a_xnebem_cont)
 #elif defined(_OPENMP)
             !$omp parallel do collapse(2) private(y, o, sy, so, ra, rb, dl, f, r, &
             !$omp& a, a_prev, t, iz, iu, c00, c01, c10, c11)
@@ -1380,7 +1380,7 @@ contains
         associate (a_nebem_line => ctx%state%nebem_line, a_xnebem_line => ctx%state%xnebem_line)
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(y, o, wk, q, lg, ra, rb, a, t) &
-        !$omp map(present, alloc: a_nebem_line, a_xnebem_line)
+        !$omp map(OMP_MAP_PRESENT_ALLOC: a_nebem_line, a_xnebem_line)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(y, o, wk, q, lg, ra, rb, a, t)
 #endif
@@ -1424,7 +1424,7 @@ contains
             associate (a_gaussnebarr => ctx%state%gaussnebarr)
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do collapse(2) private(s, p, i) &
-            !$omp map(present, alloc: a_gaussnebarr)
+            !$omp map(OMP_MAP_PRESENT_ALLOC: a_gaussnebarr)
 #elif defined(_OPENMP)
             !$omp parallel do collapse(2) private(s, p, i)
 #endif
@@ -1461,7 +1461,7 @@ contains
 
 #ifdef OMP_TARGET
         !$omp target teams distribute private(si, sa, fob, fnd) &
-        !$omp map(present, alloc: ctx%state%spec_lambda, ctx%state%nebem_line_pos)
+        !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%nebem_line_pos)
 #endif
         do m = 1, n_mod
             si = 0.0_wp
@@ -1540,7 +1540,7 @@ contains
         associate (a_agndust_spec => ctx%state%agndust_spec)
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(lagn, tmpl, lb) &
-        !$omp map(present, alloc: a_agndust_spec)
+        !$omp map(OMP_MAP_PRESENT_ALLOC: a_agndust_spec)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(lagn, tmpl, lb)
 #endif
@@ -1697,7 +1697,7 @@ contains
 
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) &
-        !$omp map(present, alloc: ctx%state%spec_lambda)
+        !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2)
 #endif
@@ -1895,7 +1895,7 @@ contains
         !$omp target teams distribute parallel do collapse(2) private(young, old, curve, tau_b, tau_o, &
         !$omp& tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust, one_m_tb, one_m_to, &
         !$omp& one_m_td, a_young, spec_sum) &
-        !$omp& map(present, alloc: ctx%state%spec_lambda, ctx%state%dustem2_dustem)
+        !$omp& map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%dustem2_dustem)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(young, old, curve, tau_b, tau_o, &
         !$omp& tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust, one_m_tb, one_m_to, &

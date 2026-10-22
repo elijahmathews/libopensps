@@ -1281,7 +1281,7 @@ contains
         !$omp private(acc1, comp1, lacc, lcomp, x, lib, wk, term, tsum, k, ta, tc, la, lc, tmpv, sl, e, j, wv, low) &
         !$omp map(to: w_used, a_used, b_used, lib_used, has_stars, age_first, age_last, sl_key, sl_ptr, e_lib, e_a, &
         !$omp     e_b, e_w) map(from: t_sum) &
-        !$omp map(present, alloc: a_speclib, a_spec_lambda) &
+        !$omp map(OMP_MAP_PRESENT_ALLOC: a_speclib, a_spec_lambda) &
         !$omp map(alloc: a_wmb_spec, a_pagb_spec, a_wrn_spec, a_wrc_spec, &
         !$omp     a_agb_spec_car, a_agb_spec_o, a_agb_spec_c, &
         !$omp     a_speclib_agb_smooth, a_agb_spec_car_smooth, a_agb_spec_o_smooth, &
