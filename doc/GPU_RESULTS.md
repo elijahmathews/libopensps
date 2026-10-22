@@ -58,6 +58,41 @@ Session 3 (2026-10-21), new questions:
     parameter) or optionally fitted analytically. Grid, units and the amplitude treatment to be
     agreed before the code.
 
+## One code path, step 5: the old path removed (2026-10-21)
+
+Decided 2026-10-21 (questions 10, 11): light-weighted ages dropped, the device likelihood
+deferred. Branches `refactor/drop-light-ages`, `refactor/remove-old-csp-path` (on the stack
+below).
+
+- `compute_csp_scenario` is the checks plus one batch call; removed: `integrate_csp_step`,
+  `apply_dust_physics`, `apply_post_processing`, `compute_sfh_weights` (the scenario's wrapper of
+  `sfh_weights_core`), `apply_dust_attenuation_and_emission`, `apply_agn_dust_emission`,
+  `interpolate_draine_li_dust_model`, the 23 context workspace arrays only they used (with
+  their device maps), `set_scenario_batch` / `FSPS_SCENARIO_BATCH`. OpenACC multicore runs the
+  batch (FP32: the single-age vs all-ages oracle compares element-wise to 100 eps(KP)).
+- Semantics: invalid dust settings (`uvb < 0`, `wgp1/2 < 1`) return status 2 (the old path
+  skipped the attenuation); a resident basis whose metallicity count is not nzin returns 3
+  (the old path used the first nzin).
+- Tests that compared the old path with the batch became identities: the CSP without dust,
+  nebular, IGM and AGN is the SFH-weighted sum of its SSP basis; all-ages output / mass formed =
+  the single-age call at that age, in every mode; `ssp_weights_z` additive and indexing the
+  right basis; the AGN torus adds fagn L_bol (0.9934 of it: the templates' integral over the
+  MILES grid). The unit tests of the removed internals went with them (their physics is in
+  these identities, the dust energy-balance oracle, the regression references and legacy
+  parity).
+- Found: the C test's reused-handle check compared two contexts' masses exactly; under OpenACC
+  multicore the SSP mass is a parallel reduction, so it failed 1 in 6 on main (4 in 6 here):
+  now to 1e-12. And with nvc, ninja records no header dependencies for C objects, so a header
+  change (the API version) does not rebuild the C tests in an existing nvfortran build; clean
+  builds (CI) are unaffected.
+
+Validation (stack tip with #12): unit + regression 38/38 in ten builds: gfortran FP64, FP32,
+FP64 + OpenMP threads; nvfortran CPU; OpenACC multicore FP64, FP32; OpenACC FP64, FP32;
+OpenMP target FP64, FP32. Case matrix vs nvfortran CPU, 52 cases: FP64 OpenACC and OpenMP
+target PASS at 1e-10; OpenACC multicore FP32 PASS; OpenACC / OpenMP target FP32 the two index
+cases above (1.1, 1.3e-4). Single call unchanged (A100 OpenACC FP32 basic / full + smoothing:
+524 / 1036 us; CPU core: 1.9 / 5.9 ms).
+
 ## One code path, steps 2-4 (2026-10-21)
 
 Roadmap priority 2. A100 node `p-gc-3018` (A100-PCIE-40GB, 12 host cores visible), nvhpc 25.1,
