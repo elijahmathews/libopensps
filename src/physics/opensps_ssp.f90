@@ -749,11 +749,19 @@ contains
             (ctx%state%ssp_temp_nstars < nstars)) then
             if (allocated(ctx%state%ssp_temp_grid)) then
                 !$acc exit data delete(ctx%state%ssp_temp_grid)
+#ifdef OMP_TARGET
+                ! Mapped by opensps_context_move_to_device: unmapped before its host memory is
+                ! freed, or a later allocation there is found "partially present"
+                !$omp target exit data if(ctx%on_device) map(delete: ctx%state%ssp_temp_grid)
+#endif
                 deallocate(ctx%state%ssp_temp_grid)
             end if
             allocate(ctx%state%ssp_temp_grid(nspec, nstars))
             !$acc enter data create(ctx%state%ssp_temp_grid)
             !$acc enter data attach(ctx%state%ssp_temp_grid)
+#ifdef OMP_TARGET
+            !$omp target enter data if(ctx%on_device) map(alloc: ctx%state%ssp_temp_grid)
+#endif
             ctx%state%ssp_temp_nspec = nspec
             ctx%state%ssp_temp_nstars = nstars
         end if
