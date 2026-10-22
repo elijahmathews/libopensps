@@ -679,9 +679,12 @@ contains
 #endif
 #ifdef OMP_TARGET
         !$omp end target data
+#endif
+#if defined(OMP_TARGET) && defined(__flang__)
         ! LLVM flang leaves the allocatable components of psets mapped (reference count 1) when
         ! the region ends; a later call whose psets lands at the same host address would find
-        ! them present, skip the copy and read stale parameters
+        ! them present, skip the copy and read stale parameters. (Not for nvfortran: main passed
+        ! its suites without it, and a single call on the A100 was a few percent slower with it.)
         !$omp target exit data map(delete: psets)
 #endif
 
