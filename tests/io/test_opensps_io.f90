@@ -1,6 +1,6 @@
 module test_opensps_io_mod
     use opensps_precision, only: WP
-    use opensps_constants, only: SAFE_FLOOR, C_LIGHT, NM, NDIM_LOGT, NDIM_LOGG, NLAM_NEBCONT, NEBNZ, NEBNAGE, NEBNIP
+    use opensps_constants, only: SAFE_FLOOR, C_LIGHT, NM, NDIM_LOGT, NDIM_LOGG, NLAM_NEBCONT, NEBNZ, NEBNAGE, NEBNIP, NEMLINE
     use opensps_context_types, only: opensps_context_t
     use opensps_types, only: params, compspout
     use opensps_io, only: read_isochrone_database, write_binary_spectral_lib, read_spectral_binary, read_bpass_data, &
@@ -535,6 +535,7 @@ contains
         ! Explicitly initialize fixed-size nebular arrays to prevent ifx
         ! from crashing on uninitialized memory if the file hits EOF early.
         ctx%state%nebem_line_pos = 0.0_wp
+        allocate(ctx%state%nebem_line(NEMLINE, NEBNZ, NEBNAGE, NEBNIP))
         ctx%state%nebem_line = 0.0_wp
         ctx%state%nebem_age = 0.0_wp
         ctx%state%nebem_logz = 0.0_wp
