@@ -164,8 +164,10 @@ module opensps_context_types
         real(WP), dimension(2, NTAU_DAGB) :: tau1_dagb = 0.0_wp
         real(WP), dimension(2, NTEFF_DAGB) :: teff_dagb = 0.0_wp
         real(WP), dimension(NEMLINE) :: nebem_line_pos = 0.0_wp
-        real(WP), dimension(NEMLINE, NEBNZ, NEBNAGE, NEBNIP) :: nebem_line = 0.0_wp
-        real(WP), dimension(NEMLINE, NEBNZ, NEBNAGE, NEBNIP) :: xnebem_line = 0.0_wp
+        ! (NEMLINE, NEBNZ, NEBNAGE, NEBNIP), 1 MB each: allocatable, allocated by the setup, so a
+        ! context declared as a local variable stays small (~0.5 MB) on the stack
+        real(WP), allocatable :: nebem_line(:, :, :, :)
+        real(WP), allocatable :: xnebem_line(:, :, :, :)
         real(WP), pointer, contiguous :: nebem_cont(:, :, :, :) => null()
         real(WP), pointer, contiguous :: xnebem_cont(:, :, :, :) => null()
         real(WP), dimension(NEBNZ) :: nebem_logz = 0.0_wp

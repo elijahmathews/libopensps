@@ -846,6 +846,12 @@ contains
 #ifdef OMP_TARGET
         !$omp target enter data map(to: ctx%state)
 #endif
+        ! The nebular line tables (allocatable components, attached to the device copy of state)
+        if (allocated(ctx%state%nebem_line)) then
+#ifdef OMP_TARGET
+            !$omp target enter data map(to: ctx%state%nebem_line, ctx%state%xnebem_line)
+#endif
+        end if
         ! The SSP basis of a context that had one before moving (update_ssp_basis maps it only for
         ! contexts on the device)
         if (allocated(ctx%state%ssp_basis_spec)) then
@@ -1717,6 +1723,11 @@ contains
 
         call batch_grid_release(ctx%state%batch)
         call batch_out_release(ctx%state%batch_out, .true.)
+        if (allocated(ctx%state%nebem_line)) then
+#ifdef OMP_TARGET
+            !$omp target exit data map(delete: ctx%state%nebem_line, ctx%state%xnebem_line)
+#endif
+        end if
 #ifdef OMP_TARGET
         !$omp target exit data map(delete: ctx%state)
 #endif

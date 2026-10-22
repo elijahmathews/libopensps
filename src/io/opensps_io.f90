@@ -779,6 +779,9 @@ contains
         ! 2. Continuum: log10(f + 1e-95), interpolated linearly onto the spectral grid
         ! -----------------------------------------------------------------------------
         allocate(raw_spec_log(size(raw_lam)))
+        ! The line tables (allocatable components; the setup allocates them, direct callers may not)
+        if (.not. allocated(ctx%state%nebem_line)) allocate(ctx%state%nebem_line(NEMLINE, NEBNZ, NEBNAGE, NEBNIP))
+        if (.not. allocated(ctx%state%xnebem_line)) allocate(ctx%state%xnebem_line(NEMLINE, NEBNZ, NEBNAGE, NEBNIP))
         do i = 1, NEBNZ
             do j = 1, NEBNAGE
                 do k = 1, NEBNIP

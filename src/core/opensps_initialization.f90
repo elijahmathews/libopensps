@@ -915,6 +915,7 @@ contains
     subroutine reset_setup_tables(ctx)
         type(opensps_context_t), intent(inout) :: ctx
 
+        call allocate_line_tables(ctx)
         ! Assigned field by field: a temporary opensps_setup_tables_t (~2 MB) could overflow a
         ! thread stack
         ctx%state%speclib_logt = 0.0_wp
@@ -935,6 +936,15 @@ contains
         ctx%state%nebem_logu = 0.0_wp
         ctx%state%agndust_tau = 0.0_wp
     end subroutine reset_setup_tables
+
+    !> @brief Allocates the context's nebular line tables (NEMLINE, NEBNZ, NEBNAGE, NEBNIP), which
+    !> the setup fills or restores from the cache.
+    subroutine allocate_line_tables(ctx)
+        type(opensps_context_t), intent(inout) :: ctx
+
+        if (.not. allocated(ctx%state%nebem_line)) allocate(ctx%state%nebem_line(NEMLINE, NEBNZ, NEBNAGE, NEBNIP))
+        if (.not. allocated(ctx%state%xnebem_line)) allocate(ctx%state%xnebem_line(NEMLINE, NEBNZ, NEBNAGE, NEBNIP))
+    end subroutine allocate_line_tables
 
     !> @brief Copies a nebular line table (2 MB with xnebem_line).
     !>
@@ -986,6 +996,7 @@ contains
         end if
         tables => cache%tables
 
+        call allocate_line_tables(ctx)
         ctx%state%speclib_logt = tables%speclib_logt
         ctx%state%speclib_logg = tables%speclib_logg
         ctx%state%wmb_logt = tables%wmb_logt

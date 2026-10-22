@@ -108,6 +108,8 @@ contains
         ctx%state%neb_res_min = 1.0_wp
         ctx%state%gaussnebarr = 0.0_wp
         ctx%state%nebem_line_pos = 1500.0_wp
+        if (.not. allocated(ctx%state%nebem_line)) allocate(ctx%state%nebem_line(NEMLINE, NEBNZ, NEBNAGE, NEBNIP))
+        if (.not. allocated(ctx%state%xnebem_line)) allocate(ctx%state%xnebem_line(NEMLINE, NEBNZ, NEBNAGE, NEBNIP))
         ctx%state%nebem_line = 0.0_wp
         ctx%state%xnebem_line = 0.0_wp
 
