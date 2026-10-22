@@ -204,7 +204,7 @@ contains
 
         integer :: n_mod, nt, nspec, nbands, m, k
         real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk
-        logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw
+        logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw, host_m
         !> Below this batch size the SFH weights are computed on the host: on the device each
         !> model's SFH integral is one serial thread (~0.3 ms on the A100, the same on the P100),
         !> on the host ~20 us per model. (Hardware note: the crossover depends on the host core
@@ -485,11 +485,17 @@ contains
         ! SFH weights (FP64), mass and L_bol per model, one thread per model; the weights are split
         ! into young and old ages at the model's dust_tesc and cast once to kernel precision
         ! (Two kernels: the device call's array sections cost six descriptor transfers per launch,
-        ! paid only when the device computes the weights.)
+        ! paid only when the device computes the weights.) Fewer than HOST_SFH_MAX models with
+        ! weights from the host: these loops run on the host (host_m), then w2 / wz and the
+        ! results go up in one update each (one device thread per model took ~90 us at N = 1)
+        host_m = .false.
+#if (defined(_OPENACC) && !defined(ACC_MULTICORE)) || defined(OMP_TARGET)
+        host_m = (given_w .or. host_w) .and. n_mod < HOST_SFH_MAX
+#endif
         if (given_w .or. host_w) then
-            !$acc parallel loop collapse(2) present(weights, wext)
+            !$acc parallel loop collapse(2) present(weights, wext) if(.not. host_m)
 #ifdef OMP_TARGET
-            !$omp target teams distribute parallel do collapse(2)
+            !$omp target teams distribute parallel do collapse(2) if(target: .not. host_m)
 #elif defined(_OPENMP) && !defined(_OPENACC)
             !$omp parallel do collapse(2)
 #endif
@@ -516,9 +522,9 @@ contains
             ! Weights over ages and metallicities: mass and L_bol summed over both (metallicities
             ! outer, as compute_csp_scenario with nzin > 1), the weights cast once to KP
             !$acc parallel loop gang vector present(ctx, weights, wz, it_tesc, msum, lsum, msy, mso, lsy, lso) &
-            !$acc private(k, z, w, mk, lk)
+            !$acc private(k, z, w, mk, lk) if(.not. host_m)
 #ifdef OMP_TARGET
-            !$omp target teams distribute parallel do private(k, z, w, mk, lk)
+            !$omp target teams distribute parallel do private(k, z, w, mk, lk) if(target: .not. host_m)
 #elif defined(_OPENMP) && !defined(_OPENACC)
             !$omp parallel do private(k, z, w, mk, lk)
 #endif
@@ -550,9 +556,9 @@ contains
             end do
         else
             !$acc parallel loop gang vector present(ctx, weights, w2, it_tesc, lum_linear, msum, lsum, &
-            !$acc msy, mso, lsy, lso, zlo, zhi, dz) private(k, w, mk, lk)
+            !$acc msy, mso, lsy, lso, zlo, zhi, dz) private(k, w, mk, lk) if(.not. host_m)
 #ifdef OMP_TARGET
-            !$omp target teams distribute parallel do private(k, w, mk, lk)
+            !$omp target teams distribute parallel do private(k, w, mk, lk) if(target: .not. host_m)
 #elif defined(_OPENMP) && !defined(_OPENACC)
             !$omp parallel do private(k, w, mk, lk)
 #endif
@@ -593,6 +599,13 @@ contains
                 end do
             end do
 
+        end if
+
+        if (host_m) then
+            !$acc update device(w2, wz, rout)
+#ifdef OMP_TARGET
+            !$omp target update to(w2, wz, rout)
+#endif
         end if
 
         if (zw) then
