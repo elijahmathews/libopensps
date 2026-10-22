@@ -20,6 +20,7 @@ Pull requests that supersede a running build cancel it. Every job has a timeout.
 | LLVM flang / Linux x86-64 | flang 20 | x86-64 | LLVM front end |
 | Intel ifx / Linux x86-64 | ifx 2026.1 | x86-64 | Intel LLVM-based compiler |
 | nvfortran / OpenACC multicore | nvfortran 26.1, `-Daccel=multicore` | x86-64 | OpenACC directive paths on host cores |
+| gfortran / OpenMP host threads | gfortran, `-Denable_openmp=true` | x86-64 | The batch's OpenMP loops on host threads (to replace OpenACC multicore) |
 | AddressSanitizer + UBSan | gfortran | x86-64 | Unit tests; stress phases A (leaks) and C (reallocation) |
 | ThreadSanitizer | gfortran + OpenMP threads | x86-64 | Unit tests; stress phases B (concurrent compute) and D (concurrent setup/release) |
 
