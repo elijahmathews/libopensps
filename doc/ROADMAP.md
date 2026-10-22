@@ -8,17 +8,17 @@ delete it here.
 
 ## Where things stand
 
-- **SSP generation:** template-sum form with exact IMF integrals for every IMF type; one SSP
-  grid (one metallicity, MIST + MILES) takes 0.11 s on one laptop core and 0.07 s with the
-  template product on an A100.
+- **SSP generation:** template-sum form with exact IMF integrals for every IMF type, one
+  template kernel for CPU and GPU builds; one SSP grid (one metallicity, MIST + MILES) takes
+  0.11 s on one laptop core and 0.065-0.07 s on an A100.
 - **Batched CSP** (`compute_csp_batch`, C entry point `opensps_context_compute_csp_batch`): full
   physics per model (SFH parameters or an SSP-weight matrix, dust, dust emission, nebular gas
   parameters, AGN, metallicity, redshift and IGM), with smoothing, indices and line
   luminosities. A100, FP32, N = 10^4, magnitudes only: 7.1 us per model with full physics and
-  smoothing (6.5 with cuBLAS, 7.8 with OpenMP target), 2.9 us basic. Spectra back on the host
+  smoothing (6.5 with cuBLAS; OpenMP target the same), 2.9 us basic. Spectra back on the host
   add ~1.7 us per model at kernel precision.
 - **Single calls:** `compute_csp_scenario` runs as a batch by default (priority 2): one
-  full-physics call with smoothing takes 1.05-1.1 ms on the A100 (OpenACC FP32; 1.2 ms with
+  full-physics call with smoothing takes 1.05-1.1 ms on the A100 (OpenACC FP32; 1.17 ms with
   OpenMP target, which did not offload the single call before: 18 ms), all 107 ages 3.9 ms; on
   one CPU core 6.4 ms (12.3 ms before).
 - **Accuracy:** FP64 GPU = CPU to 1.6e-11 per pixel; FP32 kernels reproduce FP64 to ~4e-7
@@ -120,12 +120,12 @@ depend on a pinned version of the C library, each with its own release cycle and
 ### 2. One code path
 
 The single call (`compute_csp_scenario`) and the batch (`compute_csp_batch`) were separate
-implementations of the same physics, and the SSP generation has its own host and device
+implementations of the same physics, and the SSP generation had its own host and device
 variants. Every feature is written twice, and gradients would have to be written twice. Goal:
 one hot path.
 
 Done (2026-10-21, PRs #13-#17 and the stack on them; details in `doc/GPU_RESULTS.md`, "One code
-path, steps 2-5"):
+path, steps 2-6"):
 
 - `compute_csp_scenario` runs as one `compute_csp_batch` call: one age, all ages (one model per
   age, weights scaled by the fraction formed), `tage = -99` tabular, redshifted colours
@@ -144,10 +144,14 @@ path, steps 2-5"):
   feature (an age-weighted age sum) if wanted.
 - The CPU path runs the batch's kernels: plain per-model loops in CPU builds, and OpenMP host
   threads (`-Denable_openmp=true`, the device kernels' OpenMP loops; bit-identical to serial).
+- SSP generation: one template kernel (`add_main_library_templates`) for CPU and GPU builds;
+  every build defers the small libraries and dusty AGB slots to the operator. GPU = CPU to
+  4.4e-16 (FP64); OpenMP target SSP grid 0.065 s (was 0.115).
+- OpenMP target at OpenACC's speed at large N in FP32 (cuBLAS through `use_device_addr`,
+  chunked asynchronous copy-back, `teams loop` kernels).
 
 Remaining:
 
-- SSP generation keeps its separate host and device variants (not addressed yet).
 - **Retire OpenACC** once OpenMP target meets the criteria below; until then OpenACC is
   frozen: no new OpenACC-only features, new kernels get OpenMP directives first.
 - **During this work, prepare for gradients (priority 4):** keep the intermediates the
@@ -159,12 +163,14 @@ Criteria to remove OpenACC:
 - [ ] OpenMP passes the unit + regression suites and the case matrix on NVIDIA (nvfortran) and
       AMD (LLVM flang / AOMP); ideally Intel (ifx).
 - [ ] OpenMP within ~10% of OpenACC on the A100 at large N and in per-call overhead at N = 1
-      (today 7.8 vs 7.1 us per model with full physics, 3.6 vs 2.9 basic; one
-      `compute_csp_scenario` call 1.2 vs 1.05-1.1 ms full physics, 0.68 vs 0.50-0.53 ms
-      basic).
-- [ ] Feature parity: the single call (done: through the batch) and the SSP stages offloaded;
-      cuBLAS through `use_device_addr`; asynchronous copies through `nowait` / `depend`;
-      device-resident and kernel-precision outputs.
+      (met for FP32 at large N: 7.18 vs 7.12 us per model full physics, 2.93 vs 2.98 basic;
+      FP64 basic 4.56 vs 4.09, +11%. N = 1: one `compute_csp_scenario` call 1.17 vs 1.07 ms
+      full physics, 0.51 vs 0.43 ms basic, +10-18%, host time inside the OpenMP runtime, not
+      in CUDA calls; a persistently mapped batch workspace is the untested lever.)
+- [x] Feature parity: the single call (through the batch) and the SSP template sum offloaded;
+      cuBLAS through `use_device_addr`;
+      asynchronous chunked copy-back on own CUDA streams; device-resident and
+      kernel-precision outputs.
 - [ ] `-Daccel=multicore` replaced by OpenMP host threading, CI updated (the threads and a CI job
       exist; the multicore option and jobs can go with the OpenACC directives).
 
