@@ -152,8 +152,10 @@ path, steps 2-6"):
 
 Remaining:
 
-- **Retire OpenACC** once OpenMP target meets the criteria below; until then OpenACC is
-  frozen: no new OpenACC-only features, new kernels get OpenMP directives first.
+- **Retire OpenACC:** the removal is ready as a draft pull request
+  (`refactor/remove-openacc`: every `!$acc` directive, `-Daccel=gpu` / `multicore`, the
+  OpenACC CI jobs; NVIDIA and CPU builds pass every suite and the case matrix without it). It
+  waits for the AMD run below; until it is merged OpenACC stays frozen.
 - **During this work, prepare for gradients (priority 4):** keep the intermediates the
   adjoints need (per-stage spectra, transmissions) addressable rather than overwritten, and
   avoid hidden non-differentiable branches.
@@ -171,11 +173,13 @@ Criteria to remove OpenACC:
       cuBLAS through `use_device_addr`;
       asynchronous chunked copy-back on own CUDA streams; device-resident and
       kernel-precision outputs.
-- [ ] `-Daccel=multicore` replaced by OpenMP host threading, CI updated (the threads and a CI job
-      exist; the multicore option and jobs can go with the OpenACC directives).
+- [x] `-Daccel=multicore` replaced by OpenMP host threading, CI updated (gfortran and nvfortran
+      host-thread jobs, FP64 and FP32; a nightly OpenMP target GPU job).
 
-Then, in one pull request: remove every `!$acc` directive and the `-Daccel=gpu` / `multicore`
-options, and update `AGENTS.md`, `doc/GPU_PLAN.md`, `doc/CI.md` and the CI workflows.
+Open before merging the removal: the AMD run of the first criterion (LLVM flang on the
+Radeon 780M, which needs the owner's go-ahead: a GPU fault there resets the desktop). And a
+decision on the second, met at large N in FP32 but not in FP64 (+11%) or at N = 1 (+10-18%):
+accept the gap, or first try a persistently mapped batch workspace.
 
 ### 3. Batched SSP: SSP-level parameters free per model
 
