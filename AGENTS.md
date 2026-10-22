@@ -73,7 +73,8 @@ format, conversion, packing; format and workflows in `doc/DATA_FORMAT.md`).
 - Agents must follow the same rules as humans for contributions to the codebase. Refer to
   `CONTRIBUTING.md` for contribution rules.
 - Never `-ffast-math`, nvfortran `-fast`, or any flag that reassociates floating point: it
-  deletes the compensated sums.
+  deletes the compensated sums. Intel ifx/icx do so by default; `meson.build` sets
+  `-fp-model=precise` for them.
 - FP32 kernels follow `doc/MIXED_PRECISION.md` ("Rules for FP32 kernels"): compensated or
   pairwise long sums; no differences of nearly equal integrals; no FP32 logarithms that are
   exponentiated later; grid-only factors formed in FP64; physical units; floors of

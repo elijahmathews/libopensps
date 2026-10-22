@@ -73,7 +73,8 @@ GitHub workflow files are checked with `actionlint`.
 - **Documentation:** `!>` comments (Doxygen style) on modules and public procedures. A physics
   choice gets a comment that says why, with a reference.
 - **Floating point:** never `-ffast-math`, nvfortran `-fast`, or any flag that reassociates
-  floating point (it deletes the compensated sums). FP32 kernels follow the rules in
+  floating point (it deletes the compensated sums; Intel compilers do so by default, so
+  `meson.build` sets `-fp-model=precise` for them). FP32 kernels follow the rules in
   `doc/MIXED_PRECISION.md`; device code follows `doc/GPU_PLAN.md` ("Rules learned so far").
 - **C API:** public functions carry the library prefix, report errors through a status
   argument, and are versioned: an addition raises the minor API version, a change or removal
