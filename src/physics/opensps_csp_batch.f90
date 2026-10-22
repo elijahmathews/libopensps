@@ -1893,7 +1893,8 @@ contains
         !$acc parallel loop gang vector collapse(2) present(basis, w2, it_tesc, yo) &
         !$acc private(mm, it, ii, bk, wk, acc, yy, k, l, p, i)
 #ifdef OMP_TARGET
-        !$omp target teams distribute parallel do collapse(2) private(mm, it, ii, bk, wk, acc, yy, k, l, p, i)
+        ! (teams loop: 15% faster than teams distribute parallel do with nvfortran 25.1 on the A100)
+        !$omp target teams loop collapse(2) private(mm, it, ii, bk, wk, acc, yy, k, l, p, i)
 #elif defined(_OPENMP) && !defined(_OPENACC)
         !$omp parallel do collapse(2) private(mm, it, ii, bk, wk, acc, yy, k, l, p, i)
 #endif
@@ -2043,7 +2044,9 @@ contains
 
         !$acc parallel loop gang present(emis, wt, yo, absorbed, s_abs, s_norm, s_esc) private(sa, sn, se, ca, cn, ce)
 #ifdef OMP_TARGET
-        !$omp target teams distribute private(sa, sn, se, ca, cn, ce)
+        ! (teams loop + loop reduction: as fast as the OpenACC gang / vector reduction with
+        ! nvfortran 25.1 on the A100; teams distribute + parallel do reduction took 2.5x as long)
+        !$omp target teams loop private(sa, sn, se, ca, cn, ce)
 #endif
         do m = 1, n_mod
             sa = 0.0_KP; sn = 0.0_KP; se = 0.0_KP
@@ -2051,7 +2054,7 @@ contains
             if (emis(m)) then
                 !$acc loop vector reduction(+:sa, sn, se)
 #ifdef OMP_TARGET
-                !$omp parallel do reduction(+:sa, sn, se)
+                !$omp loop reduction(+:sa, sn, se)
 #endif
                 do i = 1, nspec - 1
 #if defined(_OPENACC) || defined(OMP_TARGET)

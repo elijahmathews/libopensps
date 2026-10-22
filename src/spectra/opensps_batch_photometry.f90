@@ -690,9 +690,11 @@ contains
             return
         end if
 #endif
-        ! OpenMP: one combined construct over the three loops (perfectly nested), consecutive threads
-        ! on consecutive models of one band as with OpenACC; teams distribute over (band, block) with
-        ! an inner parallel do ran 8x slower with nvfortran 25.1 on the A100 (56 vs 6.7 ms at N = 1e4)
+        ! OpenMP: one teams loop over the three loops (perfectly nested), consecutive threads on
+        ! consecutive models of one band as with OpenACC. nvfortran 25.1 on the A100, N = 1e4:
+        ! teams loop 6.7 ms (OpenACC 6.75); teams distribute parallel do (collapse 3) 12.6, also
+        ! with thread_limit or schedule(static, 1); teams distribute over (band, block) with an
+        ! inner parallel do 56
         !$acc parallel loop gang collapse(2) vector_length(MBLK) present(bands_t, j_lo, j_hi, do_band, wt, fobs_t, fband)
 #ifdef OMP_TARGET
         !$omp target teams loop collapse(3) private(m, s, c, term, tsum, j)
