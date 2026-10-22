@@ -58,6 +58,61 @@ Session 3 (2026-10-21), new questions:
     parameter) or optionally fitted analytically. Grid, units and the amplitude treatment to be
     agreed before the code.
 
+## One code path, step 6: one SSP template kernel; OpenMP target at OpenACC's speed (2026-10-21)
+
+Branches `refactor/ssp-one-template-kernel`, `perf/omp-parity` (on the stack below).
+
+SSP generation:
+
+- Every build defers the small libraries' templates and the dusty AGB slots to the operator
+  (before, only GPU builds did; CPU builds summed them in place). The main-library template sum
+  is one routine, `add_main_library_templates`, with OpenACC and OpenMP target directives and a
+  runtime `if (dev)` choice; on the CPU it is a blocked loop with the same per-pixel arithmetic
+  (same order of the terms), so GPU = CPU to 4.4e-16 in FP64 over the SSP cases.
+  `main_templates_omp`, `sum_small_templates`, `sum_dusty_slots`, `add_column_sp` and the unit
+  test of the old cache-blocked sum are gone; `compute_integrated_properties` runs on the host
+  in every build.
+- One SSP grid (one metallicity, MIST + MILES): OpenMP target 0.065 s (was 0.115), OpenACC
+  0.070 s (unchanged); one CPU core +10% (gfortran 0.247 -> 0.27 s; nvfortran 0.19 s): the
+  deferred small-library rows are summed by the operator's general loop instead of in place.
+
+OpenMP target (nvfortran 25.1, A100):
+
+- cuBLAS products through `use_device_addr` and the CUDA stream of the OpenMP runtime
+  (`ompx_get_cuda_stream`); `-Dcublas=true` now applies to `omp_gpu`.
+- Spectra copied back in chunks into the page-locked buffer on own CUDA streams
+  (`opensps_stream_create` / `opensps_stream_sync`), as the OpenACC `async` queues did.
+- Band fluxes, dust reductions and age sums as `teams loop` where nvfortran generates a better
+  kernel for it; band fluxes keep `teams distribute parallel do` in FP64 builds (faster there
+  than the `teams loop` variants tried). Tried and reverted: `teams loop` everywhere (wrong
+  results in kernels with inner reductions), a reduction over the small-N band loop (wrong in
+  FP32).
+- Batches below the host threshold split masses and SFH weights on the host and update the
+  device copies (as OpenACC's `if` clauses did).
+
+| A100, us per model (N = 10^4) | OpenMP target | OpenACC |
+|---|---|---|
+| FP32, magnitudes, basic | 2.93 | 2.98 |
+| FP32, magnitudes, full physics + smoothing | 7.18 | 7.12 |
+| FP32, spectra back, full physics + smoothing | 9.60 | 9.61 |
+| FP64, magnitudes, basic | 4.56 | 4.09 |
+
+FP32 before: 3.6 vs 2.9 basic, 7.8 vs 7.1 full. FP64 is 11% behind, most of it in the band-flux
+kernel (17 vs 12.6 ms per 10^4 models). At N = 1 (median, us): basic batch of one 409 vs
+367 (OpenACC), `compute_csp_scenario` 512 vs 434; full physics batch of one 946 vs 807, single
+call 1170 vs 1065. Kernel launch latency is the same (~10 us), and the CUDA driver time is lower
+under OpenMP (nsys, 200 single calls plus batches of one: 0.53 s in copies, synchronizations
+and launches against 0.72 s under OpenACC, which makes 40% more host-to-device copies). The
+10-18% left is host time inside the OpenMP runtime (mapping-table and argument handling per
+construct) that the CUDA trace does not show; a context-owned, persistently mapped batch
+workspace would cut the number of mapped arrays per call, but whether that closes the gap is
+untested.
+
+Validation (stack tip with #12): unit + regression 38/38 in 13 builds (step 5's ten plus
+OpenACC + cuBLAS FP32, OpenMP target + cuBLAS FP64 and FP32). Case matrix vs nvfortran CPU, 52
+cases: OpenACC, OpenMP target and OpenMP target + cuBLAS FP64 PASS at 1e-10; the FP32 GPU
+builds only the two index cases of step 5 (1.1, 1.2-1.3e-4).
+
 ## One code path, step 5: the old path removed (2026-10-21)
 
 Decided 2026-10-21 (questions 10, 11): light-weighted ages dropped, the device likelihood

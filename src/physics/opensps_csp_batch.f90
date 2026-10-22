@@ -100,7 +100,7 @@ module opensps_csp_batch
 
     public :: compute_csp_batch, batch_spectra_device, batch_spectra_host
 
-#if defined(FSPS_PINNED) && defined(_OPENACC) && !defined(ACC_MULTICORE)
+#if defined(FSPS_PINNED) && ((defined(_OPENACC) && !defined(ACC_MULTICORE)) || defined(OMP_TARGET))
     !> Device-to-host DMA into a page-locked buffer on a given CUDA stream (src/core/opensps_pinned.c)
     interface
         integer(c_int) function opensps_memcpy_d2h_async(dst, src, bytes, stream) bind(C, name="opensps_memcpy_d2h_async")
@@ -109,7 +109,21 @@ module opensps_csp_batch
             integer(c_size_t), value :: bytes
             integer(c_intptr_t), value :: stream
         end function opensps_memcpy_d2h_async
+#ifdef OMP_TARGET
+        !> A CUDA stream for the copy-back, and the wait for it (OpenMP target: its own streams)
+        type(c_ptr) function opensps_stream_create() bind(C, name="opensps_stream_create")
+            import :: c_ptr
+        end function opensps_stream_create
+        integer(c_int) function opensps_stream_sync(stream) bind(C, name="opensps_stream_sync")
+            import :: c_int, c_intptr_t
+            integer(c_intptr_t), value :: stream
+        end function opensps_stream_sync
+#endif
     end interface
+#endif
+#if defined(FSPS_PINNED) && defined(OMP_TARGET)
+    !> The two copy-back streams of the OpenMP target build (created on first use; 0: none)
+    integer(c_intptr_t), save :: copy_stream(2) = 0
 #endif
 
 
@@ -190,7 +204,7 @@ contains
 
         integer :: n_mod, nt, nspec, nbands, m, k
         real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk
-        logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw
+        logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw, host_m
         !> Below this batch size the SFH weights are computed on the host: on the device each
         !> model's SFH integral is one serial thread (~0.3 ms on the A100, the same on the P100),
         !> on the host ~20 us per model. (Hardware note: the crossover depends on the host core
@@ -473,11 +487,17 @@ contains
         ! SFH weights (FP64), mass and L_bol per model, one thread per model; the weights are split
         ! into young and old ages at the model's dust_tesc and cast once to kernel precision
         ! (Two kernels: the device call's array sections cost six descriptor transfers per launch,
-        ! paid only when the device computes the weights.)
+        ! paid only when the device computes the weights.) Fewer than HOST_SFH_MAX models with
+        ! weights from the host: these loops run on the host (host_m), then w2 / wz and the
+        ! results go up in one update each (one device thread per model took ~90 us at N = 1)
+        host_m = .false.
+#if (defined(_OPENACC) && !defined(ACC_MULTICORE)) || defined(OMP_TARGET)
+        host_m = (given_w .or. host_w) .and. n_mod < HOST_SFH_MAX
+#endif
         if (given_w .or. host_w) then
-            !$acc parallel loop collapse(2) present(weights, wext)
+            !$acc parallel loop collapse(2) present(weights, wext) if(.not. host_m)
 #ifdef OMP_TARGET
-            !$omp target teams distribute parallel do collapse(2)
+            !$omp target teams distribute parallel do collapse(2) if(target: .not. host_m)
 #elif defined(_OPENMP) && !defined(_OPENACC)
             !$omp parallel do collapse(2)
 #endif
@@ -504,9 +524,9 @@ contains
             ! Weights over ages and metallicities: mass and L_bol summed over both (metallicities
             ! outer, as compute_csp_scenario with nzin > 1), the weights cast once to KP
             !$acc parallel loop gang vector present(ctx, weights, wz, it_tesc, msum, lsum, msy, mso, lsy, lso) &
-            !$acc private(k, z, w, mk, lk)
+            !$acc private(k, z, w, mk, lk) if(.not. host_m)
 #ifdef OMP_TARGET
-            !$omp target teams distribute parallel do private(k, z, w, mk, lk)
+            !$omp target teams distribute parallel do private(k, z, w, mk, lk) if(target: .not. host_m)
 #elif defined(_OPENMP) && !defined(_OPENACC)
             !$omp parallel do private(k, z, w, mk, lk)
 #endif
@@ -538,9 +558,9 @@ contains
             end do
         else
             !$acc parallel loop gang vector present(ctx, weights, w2, it_tesc, lum_linear, msum, lsum, &
-            !$acc msy, mso, lsy, lso, zlo, zhi, dz) private(k, w, mk, lk)
+            !$acc msy, mso, lsy, lso, zlo, zhi, dz) private(k, w, mk, lk) if(.not. host_m)
 #ifdef OMP_TARGET
-            !$omp target teams distribute parallel do private(k, w, mk, lk)
+            !$omp target teams distribute parallel do private(k, w, mk, lk) if(target: .not. host_m)
 #elif defined(_OPENMP) && !defined(_OPENACC)
             !$omp parallel do private(k, w, mk, lk)
 #endif
@@ -581,6 +601,13 @@ contains
                 end do
             end do
 
+        end if
+
+        if (host_m) then
+            !$acc update device(w2, wz, rout)
+#ifdef OMP_TARGET
+            !$omp target update to(w2, wz, rout)
+#endif
         end if
 
         if (zw) then
@@ -762,12 +789,63 @@ contains
             end do
         end do
 #else
+#if defined(FSPS_PINNED) && defined(OMP_TARGET)
+        !> As the OpenACC build: chunks of columns on two streams, each converted while the next
+        !> is in flight (the kernels are synchronous, so the data is ready when the copy starts)
+        integer, parameter :: CHUNK_BYTES = 16 * 1024 * 1024
+        integer :: cw, nch, c, q, kb, st
+        type(c_ptr) :: dbase
+
+        if (pinned .and. copy_stream(1) == 0) then
+            do q = 1, 2
+                copy_stream(q) = transfer(opensps_stream_create(), 0_c_intptr_t)
+            end do
+        end if
+        if (pinned .and. all(copy_stream /= 0)) then
+            !$omp target data use_device_addr(sp)
+            dbase = c_loc(sp)
+            !$omp end target data
+            kb = storage_size(sp) / 8
+            cw = max(1, CHUNK_BYTES / (nspec * kb))
+            nch = (n_mod + cw - 1) / cw
+            if (issue(1, min(cw, n_mod), 1)) then
+                do c = 1, nch
+                    if (c < nch) then
+                        if (.not. issue(c * cw + 1, min((c + 1) * cw, n_mod), 1 + mod(c, 2))) exit
+                    end if
+                    q = 1 + mod(c - 1, 2)
+                    if (opensps_stream_sync(copy_stream(q)) /= 0) exit
+                    do m = (c - 1) * cw + 1, min(c * cw, n_mod)
+                        spec(1:nspec, m) = real(sp(:, m), WP)
+                    end do
+                    if (c == nch) return
+                end do
+            end if
+            ! (a failed copy: the whole update below)
+            do q = 1, 2
+                st = opensps_stream_sync(copy_stream(q))
+            end do
+        end if
+#endif
 #ifdef OMP_TARGET
         !$omp target update from(sp(:, 1:n_mod))
 #endif
         do m = 1, n_mod
             spec(1:nspec, m) = real(sp(:, m), WP)
         end do
+#endif
+#if defined(FSPS_PINNED) && defined(OMP_TARGET)
+    contains
+
+        !> Starts the DMA of columns c1:c2 of sp to its page-locked host copy on stream q.
+        logical function issue(c1, c2, q)
+            integer, intent(in) :: c1, c2, q
+            integer(c_intptr_t) :: dsrc
+            dsrc = transfer(dbase, 0_c_intptr_t) + int(c1 - 1, c_intptr_t) * int(nspec, c_intptr_t) * int(kb, c_intptr_t)
+            issue = opensps_memcpy_d2h_async(c_loc(sp(1, c1)), transfer(dsrc, dbase), &
+                                             int(nspec, c_size_t) * int(c2 - c1 + 1, c_size_t) * int(kb, c_size_t), &
+                                             copy_stream(q)) == 0
+        end function issue
 #endif
     end subroutine spectra_to_host
 
@@ -1770,12 +1848,18 @@ contains
 
         call blas_init()
         !$acc host_data use_device(basis, w2, yo)
+#ifdef OMP_TARGET
+        !$omp target data use_device_addr(basis, w2, yo)
+#endif
 #ifdef KERNEL_SINGLE_PRECISION
         istat = cublasSgemm_v2(blas, CUBLAS_OP_N, CUBLAS_OP_N, nspec, 2 * n_mod, nt, 1.0_KP, basis, nspec, &
                                w2, nt, 0.0_KP, yo, nspec)
 #else
         istat = cublasDgemm_v2(blas, CUBLAS_OP_N, CUBLAS_OP_N, nspec, 2 * n_mod, nt, 1.0_KP, basis, nspec, &
                                w2, nt, 0.0_KP, yo, nspec)
+#endif
+#ifdef OMP_TARGET
+        !$omp end target data
 #endif
         !$acc end host_data
         if (istat /= 0) error stop 'compute_csp_batch: cuBLAS GEMM failed'
@@ -1822,7 +1906,8 @@ contains
         !$acc parallel loop gang vector collapse(2) present(basis, w2, it_tesc, yo) &
         !$acc private(mm, it, ii, bk, wk, acc, yy, k, l, p, i)
 #ifdef OMP_TARGET
-        !$omp target teams distribute parallel do collapse(2) private(mm, it, ii, bk, wk, acc, yy, k, l, p, i)
+        ! (teams loop: 15% faster than teams distribute parallel do with nvfortran 25.1 on the A100)
+        !$omp target teams loop collapse(2) private(mm, it, ii, bk, wk, acc, yy, k, l, p, i)
 #elif defined(_OPENMP) && !defined(_OPENACC)
         !$omp parallel do collapse(2) private(mm, it, ii, bk, wk, acc, yy, k, l, p, i)
 #endif
@@ -1972,7 +2057,9 @@ contains
 
         !$acc parallel loop gang present(emis, wt, yo, absorbed, s_abs, s_norm, s_esc) private(sa, sn, se, ca, cn, ce)
 #ifdef OMP_TARGET
-        !$omp target teams distribute private(sa, sn, se, ca, cn, ce)
+        ! (teams loop + loop reduction: as fast as the OpenACC gang / vector reduction with
+        ! nvfortran 25.1 on the A100; teams distribute + parallel do reduction took 2.5x as long)
+        !$omp target teams loop private(sa, sn, se, ca, cn, ce)
 #endif
         do m = 1, n_mod
             sa = 0.0_KP; sn = 0.0_KP; se = 0.0_KP
@@ -1980,7 +2067,7 @@ contains
             if (emis(m)) then
                 !$acc loop vector reduction(+:sa, sn, se)
 #ifdef OMP_TARGET
-                !$omp parallel do reduction(+:sa, sn, se)
+                !$omp loop reduction(+:sa, sn, se)
 #endif
                 do i = 1, nspec - 1
 #if defined(_OPENACC) || defined(OMP_TARGET)

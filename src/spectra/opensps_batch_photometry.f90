@@ -20,7 +20,12 @@ module opensps_batch_photometry
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
 #ifdef FSPS_CUBLAS
     use cublas
+#ifdef OMP_TARGET
+    use omp_lib, only: omp_get_default_device
+    use, intrinsic :: iso_c_binding, only: c_ptr, c_int, c_intptr_t
+#else
     use openacc, only: acc_get_cuda_stream, acc_async_sync
+#endif
 #endif
 
     implicit none
@@ -40,6 +45,15 @@ module opensps_batch_photometry
 #ifdef FSPS_CUBLAS
     type(cublasHandle), save :: blas
     logical, save :: blas_ready = .false.
+#ifdef OMP_TARGET
+    interface
+        !> The CUDA stream of the NVIDIA OpenMP runtime's target regions (synchronous: nowait = 0)
+        type(c_ptr) function ompx_get_cuda_stream(device, nowait) bind(C, name="ompx_get_cuda_stream")
+            import :: c_ptr, c_int
+            integer(c_int), value :: device, nowait
+        end function ompx_get_cuda_stream
+    end interface
+#endif
 #endif
 
 contains
@@ -111,6 +125,9 @@ contains
             npad = BAND_BLOCK * ((nspec + BAND_BLOCK - 1) / BAND_BLOCK)
             allocate(fobs(npad, n_col))
             !$acc data present(spec) copyin(do_band, zd) create(fobs, fband) copyout(mags_l)
+#ifdef OMP_TARGET
+            !$omp target data map(to: do_band, zd) map(alloc: fobs, fband) map(from: mags_l)
+#endif
             if (zvar) then
                 call observed_frame_z(ctx, n_col, nspec, npad, .false., zc, g%wl, spec, fobs)
             else
@@ -118,6 +135,9 @@ contains
             end if
             call band_fluxes_gemm(n_col, npad, nbands, g%cmat, fobs, fband)
             call magnitudes_from_fluxes(ctx, n_col, nbands, do_band, dist, fband, mags_l)
+#ifdef OMP_TARGET
+            !$omp end target data
+#endif
             !$acc end data
             done = .true.
         end if
@@ -557,6 +577,10 @@ contains
         call blas_init()
         !$acc data create(partial) present(cmat, fobs, fband)
         !$acc host_data use_device(cmat, fobs, partial)
+#ifdef OMP_TARGET
+        !$omp target data map(alloc: partial)
+        !$omp target data use_device_addr(cmat, fobs, partial)
+#endif
         do q = 1, nkb
 #ifdef KERNEL_SINGLE_PRECISION
             istat = cublasSgemm_v2(blas, CUBLAS_OP_T, CUBLAS_OP_N, nbands, n_mod, BAND_BLOCK, 1.0_KP, &
@@ -569,6 +593,9 @@ contains
 #endif
             if (istat /= 0) exit
         end do
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
         !$acc end host_data
         if (istat /= 0) error stop 'compute_csp_batch: cuBLAS GEMM failed'
         !$acc parallel loop gang vector collapse(2) present(partial, fband) private(sw, q)
@@ -587,6 +614,9 @@ contains
                 fband(b, m) = sw
             end do
         end do
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
         !$acc end data
     end subroutine band_fluxes_gemm
 
@@ -600,7 +630,13 @@ contains
         character(len=16) :: mode
         if (blas_ready) return
         istat = cublasCreate(blas)
+        ! The products run on the stream of the kernels around them, so they are ordered with them
+#ifdef OMP_TARGET
+        istat = cublasSetStream(blas, int(transfer(ompx_get_cuda_stream(int(omp_get_default_device(), c_int), 0_c_int), &
+                                                   0_c_intptr_t), 8))
+#else
         istat = cublasSetStream(blas, acc_get_cuda_stream(acc_async_sync))
+#endif
         call get_environment_variable('FSPS_CUBLAS_MATH', mode)
         select case (trim(mode))
         case ('tf32')
@@ -654,11 +690,16 @@ contains
             return
         end if
 #endif
-        ! OpenMP: one combined construct over the three loops (perfectly nested), consecutive threads
-        ! on consecutive models of one band as with OpenACC; teams distribute over (band, block) with
-        ! an inner parallel do ran 8x slower with nvfortran 25.1 on the A100 (56 vs 6.7 ms at N = 1e4)
+        ! OpenMP: one construct over the three loops (perfectly nested), consecutive threads on
+        ! consecutive models of one band as with OpenACC. nvfortran 25.1 on the A100, N = 1e4, per
+        ! kernel precision: FP32 teams loop 6.7 ms (OpenACC 6.75), teams distribute parallel do 12.6
+        ! (also with thread_limit or schedule(static, 1)); FP64 teams loop 65 ms, teams distribute
+        ! parallel do 17 (OpenACC 12.6). Teams distribute over (band, block) with an inner parallel
+        ! do: 56 ms (FP32)
         !$acc parallel loop gang collapse(2) vector_length(MBLK) present(bands_t, j_lo, j_hi, do_band, wt, fobs_t, fband)
-#ifdef OMP_TARGET
+#if defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+        !$omp target teams loop collapse(3) private(m, s, c, term, tsum, j)
+#elif defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(3) private(m, s, c, term, tsum, j)
 #elif defined(_OPENMP) && !defined(_OPENACC)
         !$omp parallel do collapse(3) private(m, s, c, term, tsum, j)

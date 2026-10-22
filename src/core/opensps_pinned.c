@@ -17,10 +17,14 @@
 typedef int (*register_fn)(void *, size_t, unsigned int);
 typedef int (*unregister_fn)(void *);
 typedef int (*d2h_async_fn)(void *, unsigned long long, size_t, void *);
+typedef int (*stream_create_fn)(void **, unsigned int);
+typedef int (*stream_sync_fn)(void *);
 
 static register_fn opensps_cu_register;
 static unregister_fn opensps_cu_unregister;
 static d2h_async_fn opensps_cu_d2h_async;
+static stream_create_fn opensps_cu_stream_create;
+static stream_sync_fn opensps_cu_stream_sync;
 static pthread_once_t opensps_pinned_once = PTHREAD_ONCE_INIT;
 
 static void opensps_pinned_init(void)
@@ -34,6 +38,8 @@ static void opensps_pinned_init(void)
     opensps_cu_register = (register_fn)dlsym(lib, "cuMemHostRegister_v2");
     opensps_cu_unregister = (unregister_fn)dlsym(lib, "cuMemHostUnregister");
     opensps_cu_d2h_async = (d2h_async_fn)dlsym(lib, "cuMemcpyDtoHAsync_v2");
+    opensps_cu_stream_create = (stream_create_fn)dlsym(lib, "cuStreamCreate");
+    opensps_cu_stream_sync = (stream_sync_fn)dlsym(lib, "cuStreamSynchronize");
     if (!opensps_cu_register || !opensps_cu_unregister || !opensps_cu_d2h_async) {
         opensps_cu_register = NULL;
         opensps_cu_unregister = NULL;
@@ -67,4 +73,22 @@ int opensps_memcpy_d2h_async(void *dst, const void *src, size_t bytes, void *str
     pthread_once(&opensps_pinned_once, opensps_pinned_init);
     if (!opensps_cu_d2h_async || !dst || !src) return -1;
     return opensps_cu_d2h_async(dst, (unsigned long long)(size_t)src, bytes, stream) == 0 ? 0 : -1;
+}
+
+/* A CUDA stream of the current context (CU_STREAM_NON_BLOCKING), for copies that are not ordered
+ * with a runtime's own queues: the OpenMP target build's copy-back, which starts after its
+ * (synchronous) kernels have finished. NULL if the driver is not available. */
+void *opensps_stream_create(void)
+{
+    void *s = NULL;
+    pthread_once(&opensps_pinned_once, opensps_pinned_init);
+    if (!opensps_cu_stream_create || !opensps_cu_d2h_async) return NULL;
+    return opensps_cu_stream_create(&s, 0x1) == 0 ? s : NULL;
+}
+
+/* Waits for the work on stream s (from opensps_stream_create). Returns 0 on success. */
+int opensps_stream_sync(void *s)
+{
+    if (!opensps_cu_stream_sync || !s) return -1;
+    return opensps_cu_stream_sync(s) == 0 ? 0 : -1;
 }
