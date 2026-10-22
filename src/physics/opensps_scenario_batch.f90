@@ -1,7 +1,7 @@
 !> One code path (doc/ROADMAP.md, priority 2): compute_csp_scenario as a batch, as a submodule of
 !> opensps_csp so that opensps_csp (used by opensps_context) need not use opensps_csp_batch (which
-!> uses opensps_context): the submodule is compiled after both. Called by compute_csp_scenario when
-!> FSPS_SCENARIO_BATCH=1.
+!> uses opensps_context): the submodule is compiled after both. Called by compute_csp_scenario
+!> (unless FSPS_SCENARIO_BATCH=0).
 submodule (opensps_csp) opensps_scenario_batch
     implicit none
 contains

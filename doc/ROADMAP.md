@@ -1,6 +1,6 @@
 # Roadmap
 
-The single source of truth for what comes next (updated 2026-10-19). Related documents keep
+The single source of truth for what comes next (updated 2026-10-21). Related documents keep
 their own scope: `doc/GPU_PLAN.md` is the runbook for GPU sessions (builds, validation, rules
 learned), `doc/GPU_RESULTS.md` records measurements, and `doc/MIXED_PRECISION.md` the FP32
 evidence. When a priority below is finished, move its outcome to the relevant document and
@@ -17,8 +17,10 @@ delete it here.
   luminosities. A100, FP32, N = 10^4, magnitudes only: 7.1 us per model with full physics and
   smoothing (6.5 with cuBLAS, 7.8 with OpenMP target), 2.9 us basic. Spectra back on the host
   add ~1.7 us per model at kernel precision.
-- **Single calls:** one full-physics `compute_csp_scenario` call takes 1.4 ms on the A100; a
-  batch of one 0.83 ms.
+- **Single calls:** `compute_csp_scenario` runs as a batch by default (priority 2): one
+  full-physics call with smoothing takes 1.05-1.1 ms on the A100 (OpenACC FP32; 1.2 ms with
+  OpenMP target, which did not offload the single call before: 18 ms), all 107 ages 3.9 ms; on
+  one CPU core 6.4 ms (12.3 ms before).
 - **Accuracy:** FP64 GPU = CPU to 1.6e-11 per pixel; FP32 kernels reproduce FP64 to ~4e-7
   per pixel and 5e-7 mag. Legacy FSPS parity is checked case by case
   (`tools/legacy_parity`).
@@ -117,22 +119,42 @@ depend on a pinned version of the C library, each with its own release cycle and
 
 ### 2. One code path
 
-Today the single call (`compute_csp_scenario`) and the batch (`compute_csp_batch`) are separate
-implementations of the same physics (agreeing to 6.7e-16 and tested against each other), and
-the SSP generation has its own host and device variants. Every feature is written twice, and
-gradients would have to be written twice. Goal: one hot path.
+The single call (`compute_csp_scenario`) and the batch (`compute_csp_batch`) were separate
+implementations of the same physics, and the SSP generation has its own host and device
+variants. Every feature is written twice, and gradients would have to be written twice. Goal:
+one hot path.
 
-- `compute_csp_scenario` becomes a batch of one (`tage > 0`) or a batch of `ntfull` columns
-  sharing one parameter set (`tage <= 0`). The mapping and the blockers (`redshift_colors`,
-  light-weighted ages, MDF sums over several metallicities, invalid-dust semantics, non-fast
-  smoothing) are listed in the design note in `doc/GPU_RESULTS.md` ("compute_csp_scenario as
-  a batch of one"). Start with `tage > 0` and the common options.
-- The CPU path runs the same kernels (OpenMP host threads instead of `-Daccel=multicore`).
+Done (2026-10-21, PRs #13, #14 and the stack on it; details in `doc/GPU_RESULTS.md`, "One code
+path, steps 2-4"):
+
+- `compute_csp_scenario` runs as one `compute_csp_batch` call by default (`FSPS_SCENARIO_BATCH=0`
+  selects the old path): one age, all ages (one model per age, weights scaled by the fraction
+  formed), `tage = -99` tabular, redshifted colours (`zred_mags`), every smoothing mode (the
+  non-fast ones on the host), several metallicities (`ssp_weights_z`), fast mode. Agrees with
+  the old path to 1e-10 or better over a 52-case matrix; faster everywhere except the
+  OpenACC all-ages basic call (~15-25% slower: its SFH weights are computed on the host, which
+  keeps the GPU equal to the CPU; see the next item under Further items).
+- The CPU path runs the batch's kernels: plain per-model loops in CPU builds, and OpenMP host
+  threads (`-Denable_openmp=true`, the device kernels' OpenMP loops; bit-identical to serial).
+
+Remaining:
+
+- **Light-weighted ages** (`compute_light_ages = 1`): the last mode on the old path, which does
+  not actually compute them (definition is a decision; question 10 in `doc/GPU_RESULTS.md`).
+- **Remove the old path** once light ages are settled: `integrate_csp_step`,
+  `apply_dust_physics`, `apply_post_processing`, the old dust / nebular / AGN single-call
+  routines and the context workspace only they use; keep the invalid-dust semantics
+  (`uvb < 0`, `wgp1/2 < 1`: the batch reports status 2, the old path ignored them; decide which).
+  Then `AGENTS.md`'s rule "keep compute_csp_scenario and compute_csp_batch physically identical"
+  goes away.
+- OpenACC multicore still takes the old path (its FP32 per-core sums; question 9).
 - **Retire OpenACC** once OpenMP target meets the criteria below; until then OpenACC is
   frozen: no new OpenACC-only features, new kernels get OpenMP directives first.
 - **Likelihood on the device:** given observed fluxes, uncertainties and a mask, return chi^2
   (or log-likelihood) per model without copying spectra back. A sampler needs one number per
-  model, and the copy-back is now the largest per-model cost when spectra are needed.
+  model, and the copy-back is now the largest per-model cost when spectra are needed. Not
+  started: grid, units and amplitude treatment to be agreed first (question 11 in
+  `doc/GPU_RESULTS.md` has a proposal).
 - **During this work, prepare for gradients (priority 4):** keep the intermediates the
   adjoints need (per-stage spectra, transmissions) addressable rather than overwritten, and
   avoid hidden non-differentiable branches.
@@ -142,11 +164,14 @@ Criteria to remove OpenACC:
 - [ ] OpenMP passes the unit + regression suites and the case matrix on NVIDIA (nvfortran) and
       AMD (LLVM flang / AOMP); ideally Intel (ifx).
 - [ ] OpenMP within ~10% of OpenACC on the A100 at large N and in per-call overhead at N = 1
-      (today 7.8 vs 7.1 us per model with full physics, 3.6 vs 2.9 basic).
-- [ ] Feature parity: the single call and the SSP stages offloaded; cuBLAS through
-      `use_device_addr`; asynchronous copies through `nowait` / `depend`; device-resident and
-      kernel-precision outputs.
-- [ ] `-Daccel=multicore` replaced by OpenMP host threading, CI updated.
+      (today 7.8 vs 7.1 us per model with full physics, 3.6 vs 2.9 basic; one
+      `compute_csp_scenario` call 1.2 vs 1.05-1.1 ms full physics, 0.68 vs 0.50-0.53 ms
+      basic).
+- [ ] Feature parity: the single call (done: through the batch) and the SSP stages offloaded;
+      cuBLAS through `use_device_addr`; asynchronous copies through `nowait` / `depend`;
+      device-resident and kernel-precision outputs.
+- [ ] `-Daccel=multicore` replaced by OpenMP host threading, CI updated (the threads and a CI job
+      exist; the multicore jobs and option remain until the old path is removed).
 
 Then, in one pull request: remove every `!$acc` directive and the `-Daccel=gpu` / `multicore`
 options, and update `AGENTS.md`, `doc/GPU_PLAN.md`, `doc/CI.md` and the CI workflows.
@@ -251,6 +276,15 @@ implicit `tofrom` of the context. The rules are in `doc/GPU_PLAN.md`. Remaining:
 
 ### Further items
 
+- **SFH weights at early ages:** the hat-kernel weights are differences of indefinite moments
+  (`compute_ssp_weights`), good to ~5e-14 / (fraction formed) relative: 1.5e-6 at 2e-8 of the
+  mass formed, so host and device math (or two compilers) differ there, and a 1-ulp change of
+  the age moves truncated / Simha weights by 1e-8. Computing each bin's integral directly (e.g.
+  `expm1` of the interval for the exponential terms) would make them accurate to rounding;
+  matters for gradients (priority 4) and for the youngest all-ages outputs, and would let the
+  all-ages SFH weights move to the device without breaking GPU = CPU (tried and reverted,
+  `doc/GPU_RESULTS.md`).
+
 - **Age-binned dust laws** (any number of age bins, each with its own attenuation curve) and
   **emission lines kept separate from the continuum until projection** (simpler smoothing and
   line-spread-function handling). Best done during priority 2.
@@ -283,7 +317,7 @@ priority 3 (not implemented).
 | NVIDIA P100 | ~0.5 s / ~3 ms | ~100 / ~140 us | ~1.5-2.5 ms | ~15-18 / ~25-30 us |
 | NVIDIA V100 | ~0.15 s / ~2-3 ms | ~70 / ~100 us | ~1-1.5 ms | ~11-13 / ~18-20 us |
 | NVIDIA A40 | ~0.15 s / ~2-3 ms | ~60 / ~500 us | ~1-1.5 ms | ~12-16 / ~100-150 us |
-| **NVIDIA A100** | ~0.14 s (2 x **0.07 s** + CSP) / ~2 ms | ~40 / ~50 us | **1.39 ms** (batch of one **0.83 ms**) | **7.1 / 8.5 us** (cuBLAS **6.5**, OpenMP **7.8**) |
+| **NVIDIA A100** | ~0.14 s (2 x **0.07 s** + CSP) / ~2 ms | ~40 / ~50 us | **1.05-1.1 ms** (batch path; batch of one **0.83 ms**) | **7.1 / 8.5 us** (cuBLAS **6.5**, OpenMP **7.8**) |
 | NVIDIA H100 | ~0.1 s / ~1.5 ms | ~20-25 / ~25-30 us | ~0.8-1.2 ms | ~3.5-4.5 / ~5 us |
 | GeForce RTX 4090 / 5090 class | ~0.1 s / ~2 ms | ~40 / ~1 ms | ~1 ms | ~6-9 / ~150 us |
 
