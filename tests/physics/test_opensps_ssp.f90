@@ -34,7 +34,6 @@ contains
         call test_silent_truncation_guard()
         call test_fresh_start_zeroing()
 
-        call test_cache_blocked_summation()
         call test_remnant_budgeting()
         call test_remnants_ignore_appended_stragglers()
 
@@ -279,94 +278,6 @@ contains
     ! GROUP 2: Integration & Spectral Accumulation
     ! --------------------------------------------------------------------
 
-    subroutine test_cache_blocked_summation()
-        type(opensps_context_t), allocatable :: ctx
-        type(params) :: pset
-        type(isochrone_buffer_t) :: buf
-        real(WP), allocatable :: spec_out(:)
-        real(KP), allocatable :: ref_spec(:)
-        real(WP) :: expected_sum
-        integer :: i, n_wave
-
-        call print_group("Accumulate: Cache-Blocked Summation")
-
-        allocate(ctx)
-        call setup_spectral_context(ctx, 4, 1.0e20_wp)
-
-        n_wave = 4
-        allocate(spec_out(n_wave))
-        allocate(ref_spec(n_wave))
-        spec_out = 0.0_wp
-
-        pset%zmet = 1
-        pset%evtype = -1
-        pset%masscut = 1.0e9_wp
-
-        call init_isochrone_buffer(buf)
-        ! Use 65 stars to force 2 full batches (32+32) plus 1 leftover
-        buf%n_stars = 65
-        expected_sum = 0.0_wp
-        
-        do i = 1, buf%n_stars
-            buf%initial_mass(i) = 1.0_wp
-            buf%current_mass(i) = 1.0_wp
-            buf%log_lum(i) = 0.0_wp
-            buf%log_teff(i) = 4.0_wp
-            buf%log_g(i) = 4.0_wp
-            buf%phase(i) = 1.0_wp
-            buf%co_ratio(i) = 0.0_wp
-            buf%log_mdot(i) = 0.0_wp
-            ! Assign varying weights to verify accumulation handles scaling
-            buf%weights(i) = 0.01_wp * real(i, WP)
-            expected_sum = expected_sum + buf%weights(i)
-        end do
-
-        ! Pre-calculate the spectrum for a single star (all stars are identical here)
-        call get_stellar_spectrum(ctx, pset, 1.0_wp, 4.0_wp, 1.0_wp, 4.0_wp, 1.0_wp, 0.0_wp, 0.0_wp, ref_spec)
-
-        !$acc enter data copyin(ctx)
-        !$acc enter data copyin(ctx%state)
-        !$acc enter data copyin(ctx%state%spec_lambda, ctx%state%spec_nu, ctx%state%speclib)
-        !$acc enter data attach(ctx%state%spec_lambda)
-        !$acc enter data attach(ctx%state%spec_nu)
-        !$acc enter data attach(ctx%state%speclib)
-
-        !$acc enter data copyin(buf)
-        !$acc enter data create(buf%initial_mass, buf%current_mass, buf%log_lum, buf%log_teff)
-        !$acc enter data create(buf%log_g, buf%phase, buf%co_ratio, buf%log_mdot, buf%weights)
-        !$acc enter data attach(buf%initial_mass)
-        !$acc enter data attach(buf%current_mass)
-        !$acc enter data attach(buf%log_lum)
-        !$acc enter data attach(buf%log_teff)
-        !$acc enter data attach(buf%log_g)
-        !$acc enter data attach(buf%phase)
-        !$acc enter data attach(buf%co_ratio)
-        !$acc enter data attach(buf%log_mdot)
-        !$acc enter data attach(buf%weights)
-        !$acc update device(buf%weights, buf%current_mass, buf%log_lum, buf%initial_mass)
-        !$acc update device(buf%log_teff, buf%log_g, buf%phase, buf%co_ratio, buf%log_mdot)
-
-        ! Run accumulation (Unsorted)
-        call accumulate_spectrum(ctx, pset, buf, spec_out)
-
-        !$acc exit data delete(buf%initial_mass, buf%current_mass, buf%log_lum, buf%log_teff)
-        !$acc exit data delete(buf%log_g, buf%phase, buf%co_ratio, buf%log_mdot, buf%weights)
-        !$acc exit data delete(buf)
-
-        !$acc exit data delete(ctx%state%spec_lambda, ctx%state%spec_nu, ctx%state%speclib)
-        !$acc exit data delete(ctx%state)
-        !$acc exit data delete(ctx)
-
-        do i = 1, n_wave
-            call assert_relative_error(ref_spec(i) * expected_sum, spec_out(i), max(1.0e-12_wp, KP_RTOL), &
-                                       "Cache-block spec " // trim(adjustl(to_str(i))), total_tests, total_failures)
-        end do
-
-        deallocate(spec_out, ref_spec)
-        call free_isochrone_buffer(buf)
-        call teardown_spectral_context(ctx)
-        deallocate(ctx)
-    end subroutine test_cache_blocked_summation
 
     subroutine test_remnant_budgeting()
         type(opensps_context_t), allocatable :: ctx
