@@ -58,6 +58,18 @@ Session 3 (2026-10-21), new questions:
     parameter) or optionally fitted analytically. Grid, units and the amplitude treatment to be
     agreed before the code.
 
+## One code path, step 7: OpenACC removed (2026-10-21, draft until the AMD run)
+
+Branch `refactor/remove-openacc`. Every `!$acc` directive and the `_OPENACC` / `ACC_MULTICORE`
+/ `ACC_GPU` blocks removed (resolved as undefined), `-Daccel` is `none` or `omp_gpu`,
+`chunk_to_host` and the OpenACC CI jobs gone; 131 lines added, 1027 removed in the code, build files and tests.
+
+Validation (with #12): unit + regression 38/38 in seven builds: gfortran FP64, FP32, FP64 +
+OpenMP threads; nvfortran + OpenMP threads; OpenMP target FP64, FP32, FP32 + cuBLAS. Case
+matrix vs nvfortran CPU, 52 cases: OpenMP target FP64 PASS at 1e-10; FP32 the two index
+cases of step 5 (1.1, 1.2e-4), as before the removal. Not yet run: AMD (LLVM flang on the
+780M), the condition for merging.
+
 ## One code path, step 6: one SSP template kernel; OpenMP target at OpenACC's speed (2026-10-21)
 
 Branches `refactor/ssp-one-template-kernel`, `perf/omp-parity` (on the stack below).
