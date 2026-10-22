@@ -91,6 +91,25 @@ jobs:
             install: apt-gfortran
             setup_args: -Denable_openmp=true
 
+          # The same with nvfortran, FP64 and FP32 kernels: what replaces the OpenACC multicore
+          # jobs when OpenACC is retired (those stay until then, as the only CI build of the
+          # OpenACC directives)
+          - name: nvfortran / OpenMP host threads / Linux x86-64
+            os: ubuntu-24.04
+            install: setup-fortran
+            toolchain: nvidia-hpc
+            version: '26.1'
+            setup_args: -Denable_openmp=true -Dcpu_baseline=x86-64-v3
+            fflags: -Minfo=mp
+
+          - name: nvfortran / OpenMP host threads / FP32 kernels / Linux x86-64
+            os: ubuntu-24.04
+            install: setup-fortran
+            toolchain: nvidia-hpc
+            version: '26.1'
+            setup_args: -Denable_openmp=true -Dkernel_precision=single -Dcpu_baseline=x86-64-v3
+            fflags: -Minfo=mp
+
           # FP32 kernels (-Dkernel_precision=single), the configuration a consumer GPU would run;
           # the regression suite checks them against the FP64 references
           - name: gfortran / FP32 kernels / Linux x86-64

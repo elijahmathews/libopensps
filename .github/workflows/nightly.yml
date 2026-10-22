@@ -38,6 +38,10 @@ jobs:
             install: nvidia-hpc
             setup_args: -Daccel=multicore -Dcpu_baseline=x86-64-v3
             stress_env: FSPS_STRESS_ITERS=20
+          - name: nvfortran OpenMP host threads
+            install: nvidia-hpc
+            setup_args: -Denable_openmp=true -Dcpu_baseline=x86-64-v3
+            stress_env: FSPS_STRESS_ITERS=20
     env:
       OMP_NUM_THREADS: 4
     steps:
