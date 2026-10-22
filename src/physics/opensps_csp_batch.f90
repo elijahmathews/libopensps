@@ -292,7 +292,9 @@ contains
                 size(ssp_weights_z, 3) < n_mod) then
                 status = 3; return
             end if
-            if (ctx%add_neb_emission_val == 1 .and. nzb > 1) then
+            ! Not with nebular emission: its kernels take the young/old weights of one basis (w2),
+            ! which these weights do not fill (with one resident basis either)
+            if (ctx%add_neb_emission_val == 1) then
                 status = 2; return
             end if
             given_w = .true.

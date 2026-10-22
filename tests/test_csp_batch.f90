@@ -47,6 +47,13 @@ program test_csp_batch
 #else
     real(WP), parameter :: ALL_AGES_TOL = 0.0_wp
 #endif
+    ! OpenACC multicore keeps compute_csp_scenario on the old path (opensps_scenario_batch): there
+    ! the comparisons below check that it does, and that both settings give the same outputs
+#ifdef ACC_MULTICORE
+    logical, parameter :: SCENARIO_ON_BATCH = .false.
+#else
+    logical, parameter :: SCENARIO_ON_BATCH = .true.
+#endif
     type(opensps_context_t), allocatable :: ctx
     real(WP) :: smooth_sigma = 0.0_wp   ! sigma_smooth of every model
     logical  :: zred_per_model = .false.  ! models at the redshifts ZLIST instead of one
@@ -119,6 +126,8 @@ program test_csp_batch
     call set_int('redshift_colors', 1)
     call check_scenario_paths(2, 0.5_wp, 1, 1, 1, "Calzetti, z = 0.5, IGM, nebular, AGN, redshifted colours")
     call set_int('redshift_colors', 0)
+    ! Weights over ages and metallicities do not fill the nebular kernels' weights: rejected
+    call check_weights_z_nebular()
     ! Several metallicities: a tabular SFH with a metallicity per bin
     call check_scenario_tabular_z()
     call set_scenario_batch(.false.)
@@ -329,6 +338,25 @@ contains
         end do
     end subroutine check_scenario_paths
 
+    !> ssp_weights_z with nebular emission returns status 2, also on the one-metallicity basis
+    !> (where nothing else would stop it and the nebular kernels would read unset weights).
+    subroutine check_weights_z_nebular()
+        type(PARAMS) :: pset
+        real(WP), allocatable :: wz(:, :, :), mags(:, :)
+        integer :: status
+
+        call print_group("ssp_weights_z with nebular emission")
+        call set_int('add_neb_emission', 1)
+        call set_model(1, 0.0_wp)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        allocate(wz(ctx%state%ntfull, 1, 1), mags(ctx%state%nbands, 1))
+        wz = 1.0e-3_wp
+        call compute_csp_batch(ctx, [pset], mags, status, ssp_weights_z=wz)
+        call assert_true(status == 2, "one resident basis: status 2", total_tests, total_failures)
+        call set_int('add_neb_emission', 0)
+    end subroutine check_weights_z_nebular
+
     !> Several metallicities (nzin = nz): a tabular SFH (sfh = 3) whose metallicity rises with
     !> time, on the bases of all metallicities, at one age, at the last age of the table
     !> (tage = -99) and at all ages; old path against the batch with weights over ages and
@@ -409,10 +437,11 @@ contains
         call set_scenario_batch(.true.)
         ctx%state%batch_out%n = 0
         call compute_csp_scenario(ctx, pset, nzin, new, st_new)
-        ! (batch_out%n: the outputs of the last batch call, so the batch path was taken)
+        ! (batch_out%n: the outputs of the last batch call, so the batch path was taken; 0 where
+        ! the build keeps the old path)
         ok = st_old == 0 .and. st_new == 0
         if (.not. ok) return
-        ok = size(old) == size(new) .and. ctx%state%batch_out%n == size(new)
+        ok = size(old) == size(new) .and. ctx%state%batch_out%n == merge(size(new), 0, SCENARIO_ON_BATCH)
         if (.not. ok) return
         n = size(old)
         allocate(s_old(nspec, n), s_new(nspec, n), m_old(nbands, n), m_new(nbands, n))
