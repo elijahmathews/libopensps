@@ -26,6 +26,15 @@ if fc_id == 'gcc'
     add_project_arguments('-ffree-line-length-132', language : 'fortran')
 endif
 
+# Intel ifx and icx default to -fp-model=fast, which reassociates floating point: it deletes the
+# compensated sums and lets one loop be vectorized with approximate math (SVML) while another
+# computing the same quantity is not (AGENTS.md, "Hard rules"). Value-safe arithmetic instead.
+foreach lang : ['fortran', 'c']
+    if meson.get_compiler(lang).get_id() in ['intel-llvm', 'intel']
+        add_project_arguments('-fp-model=precise', language : lang)
+    endif
+endforeach
+
 # Installation paths
 prefix = get_option('prefix')
 libdir = get_option('libdir')
