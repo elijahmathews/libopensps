@@ -4,8 +4,8 @@ Three workflows, split by how often a check needs to run:
 
 | Workflow | When | What |
 |---|---|---|
-| `ci.yml` | Every push to `develop`/`master`, every pull request (skipped for documentation-only changes) | Six compiler/hardware builds running the unit and regression suites; AddressSanitizer and ThreadSanitizer jobs running focused stress phases |
-| `nightly.yml` | Daily, and on demand | All stress phases at more iterations (ASan, TSan, nvfortran OpenACC); newest gfortran on Linux and macOS; optional GPU job on a self-hosted runner |
+| `ci.yml` | Every push to `main`, every pull request (skipped for documentation-only changes) | Eleven compiler/hardware builds running the unit and regression suites; AddressSanitizer and ThreadSanitizer jobs running focused stress phases |
+| `nightly.yml` | Daily, and on demand | All stress phases at more iterations (ASan, TSan, nvfortran OpenACC and OpenMP host threads); newest gfortran on Linux and macOS; optional GPU jobs (OpenACC, OpenMP target) on a self-hosted runner |
 | `packaging.yml` | Changes to packaging or build files, pushes to `master`, weekly, on demand | Fedora RPM and Ubuntu DEB, each running the test suite with the distribution's compiler |
 
 Pull requests that supersede a running build cancel it. Every job has a timeout.
@@ -21,6 +21,7 @@ Pull requests that supersede a running build cancel it. Every job has a timeout.
 | Intel ifx / Linux x86-64 | ifx 2026.1 | x86-64 | Intel LLVM-based compiler |
 | nvfortran / OpenACC multicore | nvfortran 26.1, `-Daccel=multicore` | x86-64 | OpenACC directive paths on host cores |
 | gfortran / OpenMP host threads | gfortran, `-Denable_openmp=true` | x86-64 | The batch's OpenMP loops on host threads (to replace OpenACC multicore) |
+| nvfortran / OpenMP host threads (FP64, FP32) | nvfortran 26.1, `-Denable_openmp=true` | x86-64 | The same with nvfortran; replaces the OpenACC multicore jobs when OpenACC is retired |
 | AddressSanitizer + UBSan | gfortran | x86-64 | Unit tests; stress phases A (leaks) and C (reallocation) |
 | ThreadSanitizer | gfortran + OpenMP threads | x86-64 | Unit tests; stress phases B (concurrent compute) and D (concurrent setup/release) |
 
@@ -68,9 +69,10 @@ diagnostic lines starting with `#` so that they are TAP comments.
 
 ## Hardware and compilers not covered by hosted runners
 
-GitHub's hosted runners have no GPUs. The nightly workflow has a `gpu-openacc` job that runs on a
+GitHub's hosted runners have no GPUs. The nightly workflow has `gpu-openacc` and `gpu-openmp` jobs (the
+latter with `OMP_TARGET_OFFLOAD=MANDATORY`) that run on a
 self-hosted runner with the labels `self-hosted`, `linux`, `gpu-nvidia` and the NVIDIA HPC SDK
-installed. It is skipped unless the repository variable `GPU_RUNNER` is `true`. To enable it:
+installed. Both are skipped unless the repository variable `GPU_RUNNER` is `true`. To enable it:
 
 1. Register the machine as a runner (repository Settings, Actions, Runners) with the extra label
    `gpu-nvidia`, and install the NVIDIA HPC SDK so that `nvfortran` and `nvc` are on its `PATH`.
