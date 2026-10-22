@@ -26,7 +26,8 @@ program test_csp_batch
     use opensps_ssp, only: generate_ssp_grid
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                             opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
-                            opensps_context_set_param_int, opensps_context_set_param_float
+                            opensps_context_set_param_int, opensps_context_set_param_float, &
+                            opensps_context_set_fast_mode
     use opensps_context_types, only: opensps_context_t
     use opensps_interpolation, only: find_interval
     use test_utils_mod, only: tap_finish, skip_without_data, print_major_header, print_group, print_summary_line, assert_true
@@ -112,6 +113,8 @@ program test_csp_batch
     call set_int('redshift_colors', 1)
     call check_all_ages(2, 0.5_wp, 1, 1, 1, "Calzetti, z = 0.5, IGM, nebular, AGN, redshifted colours")
     call set_int('redshift_colors', 0)
+    ! Fast mode: the same (smoothed) spectrum, without magnitudes and indices
+    call check_fast_mode()
     ! Weights over ages and metallicities do not fill the nebular kernels' weights: rejected
     call check_weights_z_nebular()
     ! Weights over ages and metallicities (several metallicities; tabular SFHs with Z per bin)
@@ -124,6 +127,52 @@ program test_csp_batch
     if (total_failures > 0) stop 1
 
 contains
+
+    !> Fast mode skips the magnitudes and indices only: with velocity smoothing (sigma_smooth =
+    !> 150 km/s) and dust, nebular emission and AGN, its spectrum equals the normal call's
+    !> (smoothed: it differs from the unsmoothed one), at one age and at all ages.
+    subroutine check_fast_mode()
+        type(PARAMS) :: pset
+        type(COMPSPOUT), allocatable :: normal(:), fast(:), raw(:)
+        integer :: k, i, st1, st2, st3
+        logical :: same, smoothed
+
+        call print_group("Fast mode: the normal call's spectrum, smoothing included")
+        call set_int('dust_type', 2)
+        call set_int('add_neb_emission', 1)
+        call set_int('add_agn_dust', 1)
+        call set_int('smooth_velocity', 1)
+        do k = 1, 2
+            call set_model(1, 0.0_wp)
+            if (k == 2) call set_float('tage', 0.0_wp)
+            call set_float('sigma_smooth', 0.0_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pset)
+            call compute_csp_scenario(ctx, pset, 1, raw, st1)
+            call set_float('sigma_smooth', 150.0_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pset)
+            call compute_csp_scenario(ctx, pset, 1, normal, st2)
+            call opensps_context_set_fast_mode(ctx, .true.)
+            call compute_csp_scenario(ctx, pset, 1, fast, st3)
+            call opensps_context_set_fast_mode(ctx, .false.)
+            same = st1 == 0 .and. st2 == 0 .and. st3 == 0 .and. size(fast) == size(normal)
+            smoothed = same
+            if (same) then
+                do i = 1, size(normal)
+                    same = same .and. all(fast(i)%spec == normal(i)%spec)
+                end do
+                smoothed = any(normal(size(normal))%spec /= raw(size(raw))%spec)
+            end if
+            call assert_true(same, merge("one age:  fast = normal spectrum", "all ages: fast = normal spectrum", &
+                                         k == 1), total_tests, total_failures)
+            call assert_true(smoothed, merge("one age:  smoothed", "all ages: smoothed", k == 1), &
+                             total_tests, total_failures)
+        end do
+        call set_float('sigma_smooth', 0.0_wp)
+        call set_int('add_neb_emission', 0)
+        call set_int('add_agn_dust', 0)
+    end subroutine check_fast_mode
 
     !> ssp_weights_z with nebular emission returns status 2, also on the one-metallicity basis
     !> (where nothing else would stop it and the nebular kernels would read unset weights).

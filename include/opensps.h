@@ -75,6 +75,8 @@ void opensps_context_setup(int zin, const char *isoc_type, const char *spec_type
 void opensps_context_set_int(int handle, const char *key, int value, int *status);
 void opensps_context_set_float(int handle, const char *key, double value, int *status);
 void opensps_context_set_str(int handle, const char *key, const char *value, int *status);
+// Fast mode (fast_mode != 0): CSP calls skip the magnitudes and spectral indices; the spectrum,
+// smoothing included, and the other outputs are those of a normal call.
 void opensps_context_set_fast_mode(int handle, int fast_mode, int *status);
 
 // Dimension Queries
