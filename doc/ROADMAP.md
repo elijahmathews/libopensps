@@ -124,31 +124,30 @@ implementations of the same physics, and the SSP generation has its own host and
 variants. Every feature is written twice, and gradients would have to be written twice. Goal:
 one hot path.
 
-Done (2026-10-21, PRs #13, #14 and the stack on it; details in `doc/GPU_RESULTS.md`, "One code
-path, steps 2-4"):
+Done (2026-10-21, PRs #13-#17 and the stack on them; details in `doc/GPU_RESULTS.md`, "One code
+path, steps 2-5"):
 
-- `compute_csp_scenario` runs as one `compute_csp_batch` call by default (`FSPS_SCENARIO_BATCH=0`
-  selects the old path): one age, all ages (one model per age, weights scaled by the fraction
-  formed), `tage = -99` tabular, redshifted colours (`zred_mags`), every smoothing mode (the
-  non-fast ones on the host), several metallicities (`ssp_weights_z`), fast mode. Agrees with
-  the old path to 1e-10 or better over a 52-case matrix; faster everywhere except the
-  OpenACC all-ages basic call (~15-25% slower: its SFH weights are computed on the host, which
-  keeps the GPU equal to the CPU; see the next item under Further items).
+- `compute_csp_scenario` runs as one `compute_csp_batch` call: one age, all ages (one model per
+  age, weights scaled by the fraction formed), `tage = -99` tabular, redshifted colours
+  (`zred_mags`), every smoothing mode (the non-fast ones on the host), several metallicities
+  (`ssp_weights_z`), fast mode. Agreed with the old path to 1e-10 or better over a 52-case
+  matrix before it was removed; faster everywhere except the OpenACC all-ages basic call
+  (~15-25% slower: its SFH weights are computed on the host, which keeps the GPU equal to the
+  CPU; see "SFH weights at early ages" under Further items).
+- The old single-call implementation is removed (`integrate_csp_step`, `apply_dust_physics`,
+  `apply_post_processing`, `apply_dust_attenuation_and_emission`, `apply_agn_dust_emission` and
+  23 context workspace arrays): the CSP physics is written once. OpenACC multicore runs the
+  batch too. Invalid dust settings (`uvb < 0`, `wgp1/2 < 1`) are reported (status 2), where the
+  old path ignored them.
+- Light-weighted ages dropped (decided 2026-10-21; the old path did not compute ages):
+  `compute_light_ages` other than 0 returns status 104, C API 2.0. Could return later as a batch
+  feature (an age-weighted age sum) if wanted.
 - The CPU path runs the batch's kernels: plain per-model loops in CPU builds, and OpenMP host
   threads (`-Denable_openmp=true`, the device kernels' OpenMP loops; bit-identical to serial).
 
 Remaining:
 
-- Light-weighted ages: dropped (decided 2026-10-21; the old path did not compute ages):
-  `compute_light_ages` other than 0 returns status 104, C API 2.0. Could return later as a batch
-  feature (an age-weighted age sum) if wanted.
-- **Remove the old path**: `integrate_csp_step`,
-  `apply_dust_physics`, `apply_post_processing`, the old dust / nebular / AGN single-call
-  routines and the context workspace only they use; keep the invalid-dust semantics
-  (`uvb < 0`, `wgp1/2 < 1`: the batch reports status 2, the old path ignored them; decide which).
-  Then `AGENTS.md`'s rule "keep compute_csp_scenario and compute_csp_batch physically identical"
-  goes away.
-- OpenACC multicore still takes the old path (its FP32 per-core sums; question 9).
+- SSP generation keeps its separate host and device variants (not addressed yet).
 - **Retire OpenACC** once OpenMP target meets the criteria below; until then OpenACC is
   frozen: no new OpenACC-only features, new kernels get OpenMP directives first.
 - **During this work, prepare for gradients (priority 4):** keep the intermediates the
@@ -167,7 +166,7 @@ Criteria to remove OpenACC:
       cuBLAS through `use_device_addr`; asynchronous copies through `nowait` / `depend`;
       device-resident and kernel-precision outputs.
 - [ ] `-Daccel=multicore` replaced by OpenMP host threading, CI updated (the threads and a CI job
-      exist; the multicore jobs and option remain until the old path is removed).
+      exist; the multicore option and jobs can go with the OpenACC directives).
 
 Then, in one pull request: remove every `!$acc` directive and the `-Daccel=gpu` / `multicore`
 options, and update `AGENTS.md`, `doc/GPU_PLAN.md`, `doc/CI.md` and the CI workflows.

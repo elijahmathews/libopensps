@@ -29,9 +29,9 @@ kernels that matter, with every step validated against the CPU build. Work on a 
   which the build used to hard-code; `-Dgpu_arch=cc80` is enough on an A100 (use `cc70` only
   with an SDK older than 26 on V100s).
 - `-Minfo=accel` reports, to look at on the device:
-  - the CSP age sum serializes when several output ages are computed (`tage = 0`): "loop carried
-    reuse of `spec_young` / `csp_emlin_young`" in `integrate_csp_step`; the single-age path
-    used in fitting is parallel; the batched GEMM form replaces both;
+  - the CSP age sum serialized when several output ages were computed (`tage = 0`): "loop carried
+    reuse of `spec_young` / `csp_emlin_young`" in `integrate_csp_step` (removed 2026-10-21:
+    `compute_csp_scenario` runs as a batch);
   - the Romberg integrator calls a function through a procedure argument, which device code
     cannot do; it runs on the host (IMF weights) today, but keeps IMF weights off the GPU
     (the exact Chabrier integrals on branch `perf/imf-analytic` would remove it);

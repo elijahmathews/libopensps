@@ -786,11 +786,7 @@ contains
         nz_max = ctx%state%nz
 
         ! Always allocate size-independent or constant-sized buffers
-        if (.not. allocated(ctx%state%csp_emlin_old)) allocate(ctx%state%csp_emlin_old(NEMLINE, nt))
-        if (.not. allocated(ctx%state%csp_emlin_young)) allocate(ctx%state%csp_emlin_young(NEMLINE, nt))
-        if (.not. allocated(ctx%state%csp_emlin_final)) allocate(ctx%state%csp_emlin_final(NEMLINE))
         if (.not. allocated(ctx%state%gas_current_step_lines)) allocate(ctx%state%gas_current_step_lines(NEMLINE))
-        if (.not. allocated(ctx%state%scalar_reductions)) allocate(ctx%state%scalar_reductions(2))
         if (.not. allocated(ctx%state%sfh_t_calc)) allocate(ctx%state%sfh_t_calc(NTABMAX))
         if (.not. allocated(ctx%state%sfh_sfr_calc)) allocate(ctx%state%sfh_sfr_calc(NTABMAX))
         if (.not. allocated(ctx%state%sfh_age_integrand)) allocate(ctx%state%sfh_age_integrand(NTABMAX))
@@ -798,11 +794,6 @@ contains
         ! Allocate spectrum-dependent arrays
         if (nspec > 0) then
             ! Dust Workspace
-            if (.not. allocated(ctx%state%dust_transmission_diffuse)) allocate(ctx%state%dust_transmission_diffuse(nspec))
-            if (.not. allocated(ctx%state%dust_frequencies)) allocate(ctx%state%dust_frequencies(nspec))
-            if (.not. allocated(ctx%state%dust_spec_total_work)) allocate(ctx%state%dust_spec_total_work(nspec, nt))
-            if (.not. allocated(ctx%state%dust_emission_shape)) allocate(ctx%state%dust_emission_shape(nspec))
-            if (.not. allocated(ctx%state%dust_emission_final)) allocate(ctx%state%dust_emission_final(nspec, nt))
 
             ! Gas Workspace
             if (.not. allocated(ctx%state%gas_neb_cont_reduced)) allocate(ctx%state%gas_neb_cont_reduced(nspec, NEBNAGE))
@@ -810,28 +801,14 @@ contains
             if (.not. allocated(ctx%state%gas_current_step_cont)) allocate(ctx%state%gas_current_step_cont(nspec))
 
             ! CSP Spectrum Workspace
-            if (.not. allocated(ctx%state%csp_igm_transmission)) allocate(ctx%state%csp_igm_transmission(nspec))
-            if (.not. allocated(ctx%state%csp_spec_final)) allocate(ctx%state%csp_spec_final(nspec))
-            if (.not. allocated(ctx%state%spec_young)) allocate(ctx%state%spec_young(nspec, nt))
-            if (.not. allocated(ctx%state%spec_old)) allocate(ctx%state%spec_old(nspec, nt))
 
             ! Fused Loop Output Buffers
-            if (.not. allocated(ctx%state%out_csp_spec)) allocate(ctx%state%out_csp_spec(nspec, nt))
-            if (.not. allocated(ctx%state%out_csp_emlin)) allocate(ctx%state%out_csp_emlin(NEMLINE, nt))
-            if (.not. allocated(ctx%state%out_mass_csp)) allocate(ctx%state%out_mass_csp(nt))
-            if (.not. allocated(ctx%state%out_lbol_csp)) allocate(ctx%state%out_lbol_csp(nt))
         end if
 
         ! Allocate age/metallicity dependent arrays
         if (nt > 0 .and. nz_max > 0) then
-            if (.not. allocated(ctx%state%csp_weights)) allocate(ctx%state%csp_weights(nt, nz_max, nt))
-            if (.not. allocated(ctx%state%sfh_w_tmp1)) allocate(ctx%state%sfh_w_tmp1(max(nt, 3), nt))
-            if (.not. allocated(ctx%state%sfh_w_tmp2)) allocate(ctx%state%sfh_w_tmp2(max(nt, 3), nt))
-            if (.not. allocated(ctx%state%csp_ssp_lum_linear)) allocate(ctx%state%csp_ssp_lum_linear(nt, nz_max))
-            if (.not. allocated(ctx%state%csp_emlin_grid)) allocate(ctx%state%csp_emlin_grid(NEMLINE, nt, nz_max))
 
             if (nspec > 0) then
-                if (.not. allocated(ctx%state%csp_ssp_grid)) allocate(ctx%state%csp_ssp_grid(nspec, nt, nz_max))
             end if
         end if
     end subroutine opensps_context_prepare_csp_workspace
@@ -1278,20 +1255,6 @@ contains
 #endif
             !$acc enter data attach(ctx%state%weight_ssp)
         end if
-        if (allocated(ctx%state%spec_young)) then
-            !$acc enter data copyin(ctx%state%spec_young)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%spec_young)
-#endif
-            !$acc enter data attach(ctx%state%spec_young)
-        end if
-        if (allocated(ctx%state%spec_old)) then
-            !$acc enter data copyin(ctx%state%spec_old)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%spec_old)
-#endif
-            !$acc enter data attach(ctx%state%spec_old)
-        end if
         if (allocated(ctx%state%ssp_temp_grid)) then
             !$acc enter data copyin(ctx%state%ssp_temp_grid)
 #ifdef OMP_TARGET
@@ -1422,106 +1385,8 @@ contains
         end if
 
         ! --- Permanent CSP Workspace ---
-        if (allocated(ctx%state%csp_ssp_grid)) then
-            !$acc enter data copyin(ctx%state%csp_ssp_grid)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%csp_ssp_grid)
-#endif
-            !$acc enter data attach(ctx%state%csp_ssp_grid)
-        end if
-        if (allocated(ctx%state%csp_emlin_grid)) then
-            !$acc enter data copyin(ctx%state%csp_emlin_grid)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%csp_emlin_grid)
-#endif
-            !$acc enter data attach(ctx%state%csp_emlin_grid)
-        end if
-        if (allocated(ctx%state%csp_ssp_lum_linear)) then
-            !$acc enter data copyin(ctx%state%csp_ssp_lum_linear)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%csp_ssp_lum_linear)
-#endif
-            !$acc enter data attach(ctx%state%csp_ssp_lum_linear)
-        end if
-        if (allocated(ctx%state%csp_igm_transmission)) then
-            !$acc enter data copyin(ctx%state%csp_igm_transmission)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%csp_igm_transmission)
-#endif
-            !$acc enter data attach(ctx%state%csp_igm_transmission)
-        end if
-        if (allocated(ctx%state%csp_spec_final)) then
-            !$acc enter data copyin(ctx%state%csp_spec_final)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%csp_spec_final)
-#endif
-            !$acc enter data attach(ctx%state%csp_spec_final)
-        end if
-        if (allocated(ctx%state%csp_emlin_final)) then
-            !$acc enter data copyin(ctx%state%csp_emlin_final)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%csp_emlin_final)
-#endif
-            !$acc enter data attach(ctx%state%csp_emlin_final)
-        end if
-        if (allocated(ctx%state%csp_weights)) then
-            !$acc enter data copyin(ctx%state%csp_weights)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%csp_weights)
-#endif
-            !$acc enter data attach(ctx%state%csp_weights)
-        end if
-        if (allocated(ctx%state%csp_emlin_young)) then
-            !$acc enter data copyin(ctx%state%csp_emlin_young)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%csp_emlin_young)
-#endif
-            !$acc enter data attach(ctx%state%csp_emlin_young)
-        end if
-        if (allocated(ctx%state%csp_emlin_old)) then
-            !$acc enter data copyin(ctx%state%csp_emlin_old)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%csp_emlin_old)
-#endif
-            !$acc enter data attach(ctx%state%csp_emlin_old)
-        end if
 
         ! --- Persistent Physics Workspaces ---
-        if (allocated(ctx%state%dust_transmission_diffuse)) then
-            !$acc enter data copyin(ctx%state%dust_transmission_diffuse)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%dust_transmission_diffuse)
-#endif
-            !$acc enter data attach(ctx%state%dust_transmission_diffuse)
-        end if
-        if (allocated(ctx%state%dust_frequencies)) then
-            !$acc enter data copyin(ctx%state%dust_frequencies)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%dust_frequencies)
-#endif
-            !$acc enter data attach(ctx%state%dust_frequencies)
-        end if
-        if (allocated(ctx%state%dust_spec_total_work)) then
-            !$acc enter data copyin(ctx%state%dust_spec_total_work)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%dust_spec_total_work)
-#endif
-            !$acc enter data attach(ctx%state%dust_spec_total_work)
-        end if
-        if (allocated(ctx%state%dust_emission_shape)) then
-            !$acc enter data copyin(ctx%state%dust_emission_shape)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%dust_emission_shape)
-#endif
-            !$acc enter data attach(ctx%state%dust_emission_shape)
-        end if
-        if (allocated(ctx%state%dust_emission_final)) then
-            !$acc enter data copyin(ctx%state%dust_emission_final)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%dust_emission_final)
-#endif
-            !$acc enter data attach(ctx%state%dust_emission_final)
-        end if
         if (allocated(ctx%state%gas_neb_cont_reduced)) then
             !$acc enter data copyin(ctx%state%gas_neb_cont_reduced)
 #ifdef OMP_TARGET
@@ -1550,13 +1415,6 @@ contains
 #endif
             !$acc enter data attach(ctx%state%gas_current_step_lines)
         end if
-        if (allocated(ctx%state%scalar_reductions)) then
-            !$acc enter data copyin(ctx%state%scalar_reductions)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%scalar_reductions)
-#endif
-            !$acc enter data attach(ctx%state%scalar_reductions)
-        end if
         if (allocated(ctx%state%sfh_t_calc)) then
             !$acc enter data copyin(ctx%state%sfh_t_calc)
 #ifdef OMP_TARGET
@@ -1578,50 +1436,8 @@ contains
 #endif
             !$acc enter data attach(ctx%state%sfh_age_integrand)
         end if
-        if (allocated(ctx%state%sfh_w_tmp1)) then
-            !$acc enter data copyin(ctx%state%sfh_w_tmp1)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%sfh_w_tmp1)
-#endif
-            !$acc enter data attach(ctx%state%sfh_w_tmp1)
-        end if
-        if (allocated(ctx%state%sfh_w_tmp2)) then
-            !$acc enter data copyin(ctx%state%sfh_w_tmp2)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%sfh_w_tmp2)
-#endif
-            !$acc enter data attach(ctx%state%sfh_w_tmp2)
-        end if
 
         ! --- Fused Loop Output Buffers ---
-        if (allocated(ctx%state%out_csp_spec)) then
-            !$acc enter data copyin(ctx%state%out_csp_spec)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%out_csp_spec)
-#endif
-            !$acc enter data attach(ctx%state%out_csp_spec)
-        end if
-        if (allocated(ctx%state%out_csp_emlin)) then
-            !$acc enter data copyin(ctx%state%out_csp_emlin)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%out_csp_emlin)
-#endif
-            !$acc enter data attach(ctx%state%out_csp_emlin)
-        end if
-        if (allocated(ctx%state%out_mass_csp)) then
-            !$acc enter data copyin(ctx%state%out_mass_csp)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%out_mass_csp)
-#endif
-            !$acc enter data attach(ctx%state%out_mass_csp)
-        end if
-        if (allocated(ctx%state%out_lbol_csp)) then
-            !$acc enter data copyin(ctx%state%out_lbol_csp)
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%out_lbol_csp)
-#endif
-            !$acc enter data attach(ctx%state%out_lbol_csp)
-        end if
     end subroutine opensps_context_move_to_device
 
     !> @brief Removes the context and its data from the device.
@@ -1729,12 +1545,6 @@ contains
                 !$omp target exit data map(delete: s%bpass_spec_ssp)
 #endif
             end if
-            if (allocated(s%spec_old)) then
-                !$acc exit data delete(s%spec_old)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%spec_old)
-#endif
-            end if
             if (allocated(s%ssp_temp_grid)) then
                 !$acc exit data delete(s%ssp_temp_grid)
 #ifdef OMP_TARGET
@@ -1751,12 +1561,6 @@ contains
                 !$acc exit data delete(s%ssp_active_w)
 #ifdef OMP_TARGET
                 !$omp target exit data map(delete: s%ssp_active_w)
-#endif
-            end if
-            if (allocated(s%spec_young)) then
-                !$acc exit data delete(s%spec_young)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%spec_young)
 #endif
             end if
             if (allocated(s%weight_ssp)) then
@@ -2103,92 +1907,8 @@ contains
                 !$omp target exit data map(delete: s%ssp_basis_lbol)
 #endif
             end if
-            if (allocated(s%csp_ssp_grid)) then
-                !$acc exit data delete(s%csp_ssp_grid)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%csp_ssp_grid)
-#endif
-            end if
-            if (allocated(s%csp_emlin_grid)) then
-                !$acc exit data delete(s%csp_emlin_grid)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%csp_emlin_grid)
-#endif
-            end if
-            if (allocated(s%csp_ssp_lum_linear)) then
-                !$acc exit data delete(s%csp_ssp_lum_linear)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%csp_ssp_lum_linear)
-#endif
-            end if
-            if (allocated(s%csp_igm_transmission)) then
-                !$acc exit data delete(s%csp_igm_transmission)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%csp_igm_transmission)
-#endif
-            end if
-            if (allocated(s%csp_spec_final)) then
-                !$acc exit data delete(s%csp_spec_final)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%csp_spec_final)
-#endif
-            end if
-            if (allocated(s%csp_emlin_final)) then
-                !$acc exit data delete(s%csp_emlin_final)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%csp_emlin_final)
-#endif
-            end if
-            if (allocated(s%csp_weights)) then
-                !$acc exit data delete(s%csp_weights)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%csp_weights)
-#endif
-            end if
-            if (allocated(s%csp_emlin_young)) then
-                !$acc exit data delete(s%csp_emlin_young)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%csp_emlin_young)
-#endif
-            end if
-            if (allocated(s%csp_emlin_old)) then
-                !$acc exit data delete(s%csp_emlin_old)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%csp_emlin_old)
-#endif
-            end if
 
             ! --- Persistent Physics Workspaces ---
-            if (allocated(s%dust_transmission_diffuse)) then
-                !$acc exit data delete(s%dust_transmission_diffuse)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%dust_transmission_diffuse)
-#endif
-            end if
-            if (allocated(s%dust_frequencies)) then
-                !$acc exit data delete(s%dust_frequencies)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%dust_frequencies)
-#endif
-            end if
-            if (allocated(s%dust_spec_total_work)) then
-                !$acc exit data delete(s%dust_spec_total_work)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%dust_spec_total_work)
-#endif
-            end if
-            if (allocated(s%dust_emission_shape)) then
-                !$acc exit data delete(s%dust_emission_shape)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%dust_emission_shape)
-#endif
-            end if
-            if (allocated(s%dust_emission_final)) then
-                !$acc exit data delete(s%dust_emission_final)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%dust_emission_final)
-#endif
-            end if
             if (allocated(s%gas_neb_cont_reduced)) then
                 !$acc exit data delete(s%gas_neb_cont_reduced)
 #ifdef OMP_TARGET
@@ -2213,12 +1933,6 @@ contains
                 !$omp target exit data map(delete: s%gas_current_step_lines)
 #endif
             end if
-            if (allocated(s%scalar_reductions)) then
-                !$acc exit data delete(s%scalar_reductions)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%scalar_reductions)
-#endif
-            end if
             if (allocated(s%sfh_t_calc)) then
                 !$acc exit data delete(s%sfh_t_calc)
 #ifdef OMP_TARGET
@@ -2237,44 +1951,8 @@ contains
                 !$omp target exit data map(delete: s%sfh_age_integrand)
 #endif
             end if
-            if (allocated(s%sfh_w_tmp1)) then
-                !$acc exit data delete(s%sfh_w_tmp1)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%sfh_w_tmp1)
-#endif
-            end if
-            if (allocated(s%sfh_w_tmp2)) then
-                !$acc exit data delete(s%sfh_w_tmp2)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%sfh_w_tmp2)
-#endif
-            end if
 
             ! --- Fused Loop Output Buffers ---
-            if (allocated(s%out_csp_spec)) then
-                !$acc exit data delete(s%out_csp_spec)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%out_csp_spec)
-#endif
-            end if
-            if (allocated(s%out_csp_emlin)) then
-                !$acc exit data delete(s%out_csp_emlin)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%out_csp_emlin)
-#endif
-            end if
-            if (allocated(s%out_mass_csp)) then
-                !$acc exit data delete(s%out_mass_csp)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%out_mass_csp)
-#endif
-            end if
-            if (allocated(s%out_lbol_csp)) then
-                !$acc exit data delete(s%out_lbol_csp)
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%out_lbol_csp)
-#endif
-            end if
         end associate
 
         if (allocated(ctx%pset%ssp_gen_age)) then

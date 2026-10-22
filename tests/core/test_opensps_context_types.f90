@@ -56,8 +56,8 @@ contains
 
         ! Allocate a representative sample of arrays
         allocate(state%spec_ssp_zz(10, 10, 10))
-        allocate(state%csp_weights(5, 5, 5))
-        allocate(state%out_csp_spec(100, 2))
+        allocate(state%mass_ssp_zz(5, 5))
+        allocate(state%ssp_basis_spec(100, 2, 1))
         allocate(state%gas_neb_line_reduced(10, 10))
         
         call assert_true(allocated(state%spec_ssp_zz), "spec_ssp_zz initially allocated", total_tests, total_failures)
@@ -67,8 +67,8 @@ contains
         
         ! Verify deallocation
         call assert_true(.not. allocated(state%spec_ssp_zz), "spec_ssp_zz safely deallocated", total_tests, total_failures)
-        call assert_true(.not. allocated(state%csp_weights), "csp_weights safely deallocated", total_tests, total_failures)
-        call assert_true(.not. allocated(state%out_csp_spec), "out_csp_spec safely deallocated", total_tests, total_failures)
+        call assert_true(.not. allocated(state%mass_ssp_zz), "mass_ssp_zz safely deallocated", total_tests, total_failures)
+        call assert_true(.not. allocated(state%ssp_basis_spec), "ssp_basis_spec safely deallocated", total_tests, total_failures)
         call assert_true(.not. allocated(state%gas_neb_line_reduced), "gas_neb_line_reduced safely deallocated", &
                          total_tests, total_failures)
 
