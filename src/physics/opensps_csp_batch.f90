@@ -31,7 +31,8 @@ module opensps_csp_batch
     !>    emission (fagn, agn_tau per model), attenuated by the model's diffuse dust, as
     !>    apply_agn_dust_emission.
     !> 7. Velocity smoothing (sigma_smooth, shared by the batch; smooth_velocity = 1 with the
-    !>    default smoothspec_fast = 1), the sparse operator of apply_smoothing applied on the device.
+    !>    default smoothspec_fast = 1), the sparse operator of apply_smoothing applied on the device;
+    !>    the other smoothing modes on the host (apply_smoothing per model).
     !> 8. Magnitudes: per (band, model) filter integrals over each band's support, compensated
     !>    at FP32 kernel precision (each model resampled to the observed frame at its redshift);
     !>    optionally spectral indices.
@@ -51,9 +52,19 @@ module opensps_csp_batch
     !> compute_csp_scenario's csp_weights; spectra, mass and L_bol are per that mass), used as
     !> they are; tage is then not used, and SFR is not defined (NaN).
     !>
-    !> Not supported (status 2): smoothing other than in velocity with smoothspec_fast = 1,
-    !> redshifted colors, light-weighted ages, and models with tage <= 0 (all-ages output). Models
-    !> must share the smoothing parameters (sigma_smooth, min/max_wave_smooth).
+    !> With the SSP bases of all metallicities resident, a weight matrix over ages and
+    !> metallicities (ssp_weights_z: ages x nz x N) sums every basis with its own weights instead
+    !> of interpolating at logzsol: metallicity varying with age within a model (chemical
+    !> enrichment, tabular SFHs with a metallicity column) and metallicity distributions. Not
+    !> with nebular emission (status 2; compute_csp_scenario rejects that case too).
+    !>
+    !> Redshifted colours (redshift_colors = 1) need zred_mags, each model's magnitude redshift
+    !> (compute_csp_scenario's all-ages mode gives the redshift of each output's age).
+    !>
+    !> Not supported (status 2): redshifted colours without zred_mags, light-weighted ages, and
+    !> models with tage <= 0 without a weight matrix (the all-ages output of compute_csp_scenario
+    !> is a batch with a weight matrix). Models must share the smoothing parameters
+    !> (sigma_smooth, min/max_wave_smooth).
     !>
     !> Mass, L_bol and SFR follow `compute_csp_scenario` in FP64; spectra, magnitudes, indices,
     !> line luminosities and dust masses agree with it to the rounding of the kernel precision
@@ -76,6 +87,7 @@ module opensps_csp_batch
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
     use opensps_gas, only: get_grid_indices_weights, prepare_line_gaussians
     use opensps_spectral_indices, only: compute_spectral_indices_columns
+    use opensps_smoothing, only: apply_smoothing
     use opensps_batch_photometry, only: compute_magnitudes_columns, prepare_batch_grid, smoothing_on_device, &
                                      prepare_smoothing_kernel, smooth_columns
 #ifdef FSPS_CUBLAS
@@ -154,8 +166,15 @@ contains
     !> @param[out]   mass_young, mass_old  Surviving stellar mass of the young and old ages.
     !> @param[out]   lbol_young, lbol_old  log10 L_bol [L_sun] of the young and old stellar ages
     !>                       (as lbol: stars only).
+    !> @param[in]    ssp_weights_z Optional SSP weights (ntfull, nz, N) over ages and metallicities,
+    !>                       instead of the SFH parameters (or ssp_weights), with the bases of all
+    !>                       nz metallicities resident.
+    !> @param[in]    zred_mags Optional redshift of each model's magnitudes (N), in place of its
+    !>                       zred for the magnitudes only: the spectrum, its IGM absorption and
+    !>                       the SFH stay at zred (compute_csp_scenario's redshift_colors = 1).
     subroutine compute_csp_batch(ctx, psets, mags, status, spec, mass, lbol, mdust, sfr, emlines, indx, ssp_weights, &
-                                 spec_young, spec_old, mass_young, mass_old, lbol_young, lbol_old)
+                                 spec_young, spec_old, mass_young, mass_old, lbol_young, lbol_old, zred_mags, &
+                                 ssp_weights_z)
         type(opensps_context_t), intent(inout) :: ctx
         type(params), intent(in)            :: psets(:)
         real(WP), intent(out)               :: mags(:,:)
@@ -166,17 +185,19 @@ contains
         real(WP), intent(in), optional      :: ssp_weights(:,:)
         real(WP), intent(out), optional     :: spec_young(:,:), spec_old(:,:)
         real(WP), intent(out), optional     :: mass_young(:), mass_old(:), lbol_young(:), lbol_old(:)
+        real(WP), intent(in), optional      :: zred_mags(:)
+        real(WP), intent(in), optional      :: ssp_weights_z(:,:,:)
 
         integer :: n_mod, nt, nspec, nbands, m, k
         real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk
-        logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts
+        logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw
         !> Below this batch size the SFH weights are computed on the host: on the device each
         !> model's SFH integral is one serial thread (~0.3 ms on the A100, the same on the P100),
         !> on the host ~20 us per model. (Hardware note: the crossover depends on the host core
         !> and on the GPU's single-thread FP64 speed; measured on the A100 node.)
         integer, parameter :: HOST_SFH_MAX = 16
         real(WP), allocatable :: wh(:,:), t1h(:), t2h(:)
-        integer  :: nzb, nw
+        integer  :: nzb, nw, nzw, z
 
         ! Per-model inputs and results: sections of one array per type (ipk, rpk, lpk in, rout
         ! out), so that each moves in one transfer. (At N = 1 the ~30 separate small pageable
@@ -193,6 +214,7 @@ contains
 
         ! Work arrays on the device
         real(KP), allocatable :: w2(:,:)   ! (ages, 2N): young weights, then old
+        real(KP), allocatable :: wz(:,:,:) ! (ages, nz, N): the weights over ages and metallicities
         real(WP), allocatable :: weights(:,:,:), tmp1(:,:), tmp2(:,:)
 
         ! Nebular emission and AGN (per age, per model, per pixel line lists)
@@ -238,8 +260,13 @@ contains
                 status = 3; return
             end if
         end if
-        if (ctx%redshift_colors_val /= 0 .or. ctx%compute_light_ages_val /= 0) then
+        if ((ctx%redshift_colors_val /= 0 .and. .not. present(zred_mags)) .or. ctx%compute_light_ages_val /= 0) then
             status = 2; return
+        end if
+        if (present(zred_mags)) then
+            if (size(zred_mags) < n_mod) then
+                status = 3; return
+            end if
         end if
         parts = present(spec_young) .and. present(spec_old) .and. present(mass_young) .and. &
                 present(mass_old) .and. present(lbol_young) .and. present(lbol_old)
@@ -255,6 +282,23 @@ contains
             if (size(ssp_weights, 1) < nt .or. size(ssp_weights, 2) < n_mod) then
                 status = 3; return
             end if
+        end if
+        ! Weights over ages and metallicities: every resident basis summed with its own weights
+        nzb = size(ctx%state%ssp_basis_spec, 3)
+        zw = present(ssp_weights_z)
+        nzw = 1
+        if (zw) then
+            if (given_w .or. size(ssp_weights_z, 1) < nt .or. size(ssp_weights_z, 2) < nzb .or. &
+                size(ssp_weights_z, 3) < n_mod) then
+                status = 3; return
+            end if
+            ! Not with nebular emission: its kernels take the young/old weights of one basis (w2),
+            ! which these weights do not fill (with one resident basis either)
+            if (ctx%add_neb_emission_val == 1) then
+                status = 2; return
+            end if
+            given_w = .true.
+            nzw = nzb
         end if
         zred = psets(1)%zred
         zvar = .false.
@@ -272,7 +316,7 @@ contains
         host_w = (.not. given_w) .and. n_mod < HOST_SFH_MAX
 #endif
         nw = 1
-        if (given_w .or. host_w) nw = nt * n_mod
+        if (given_w .or. host_w) nw = nt * nzw * n_mod
         allocate(ipk(6 * n_mod), rpk(6 * n_mod + nt + nw), lpk(2 * n_mod), rout(10 * n_mod))
         it_tesc => ipk(1:n_mod)
         iq => ipk(n_mod + 1:2 * n_mod)
@@ -288,7 +332,7 @@ contains
         zcol => rpk(5 * n_mod + 1:6 * n_mod)
         lum_linear => rpk(6 * n_mod + 1:6 * n_mod + nt)
         if (nw > 1) then
-            wext(1:nt, 1:n_mod) => rpk(6 * n_mod + nt + 1:6 * n_mod + nt + nw)
+            wext(1:nt * nzw, 1:n_mod) => rpk(6 * n_mod + nt + 1:6 * n_mod + nt + nw)
         else
             wext(1:1, 1:1) => rpk(6 * n_mod + nt + 1:6 * n_mod + nt + 1)
         end if
@@ -307,7 +351,13 @@ contains
         rpk = 0.0_wp
 
         zcol = psets(1:n_mod)%zred
-        if (given_w) then
+        if (zw) then
+            do m = 1, n_mod
+                do z = 1, nzw
+                    wext((z - 1) * nt + 1:z * nt, m) = ssp_weights_z(1:nt, z, m)
+                end do
+            end do
+        else if (given_w) then
             wext = ssp_weights(1:nt, 1:n_mod)
         else if (host_w) then
             ! Few models: the SFH weights on the host (as compute_csp_scenario does for one output),
@@ -319,16 +369,14 @@ contains
             end do
         end if
 
-        ! Smoothing as apply_smoothing (which does nothing for sigma <= SAFE_FLOOR)
+        ! Smoothing as apply_smoothing (which does nothing for sigma <= SAFE_FLOOR): the fast
+        ! velocity kernel on the device, the other modes on the host (smooth_columns_host)
         smooth = psets(1)%sigma_smooth > SAFE_FLOOR
-        if (smooth .and. .not. smoothing_on_device(ctx)) then
-            status = 2; return
-        end if
 
-        ! Per-model metallicity: a basis per metallicity of the context
-        nzb = size(ctx%state%ssp_basis_spec, 3)
-        zmode = nzb > 1
-        if (zmode .and. nzb /= ctx%state%nz) then
+        ! Per-model metallicity: a basis per metallicity of the context (interpolated at logzsol,
+        ! unless the weights cover the metallicities)
+        zmode = nzb > 1 .and. .not. zw
+        if ((zmode .or. (zw .and. nzb > 1)) .and. nzb /= ctx%state%nz) then
             status = 3; return
         end if
         zlo = 1; zhi = 1; dz = 0.0_wp
@@ -346,7 +394,12 @@ contains
         allocate(w2(nt, 2 * n_mod))
         ! SFH scratch: sfh_weights_core uses ntfull entries (sized from the ages, not from the
         ! context's CSP workspace, which a context used only through the batch may not have)
-        allocate(weights(nt, 1, n_mod), tmp1(nt, n_mod), tmp2(nt, n_mod))
+        allocate(weights(nt, nzw, n_mod), tmp1(nt, n_mod), tmp2(nt, n_mod))
+        if (zw) then
+            allocate(wz(nt, nzw, n_mod))
+        else
+            allocate(wz(1, 1, 1))
+        end if
         lum_linear = 10.0_wp**ctx%state%ssp_basis_lbol(1:nt, 1)
         do m = 1, n_mod
             if (psets(m)%dust_tesc > SAFE_FLOOR) then
@@ -387,8 +440,9 @@ contains
             call prepare_batch_grid(ctx, zred, psets(1)%igm_factor)
             igm = ctx%state%batch%igm
         end if
-        if (smooth) call prepare_smoothing_kernel(ctx, psets(1)%sigma_smooth, psets(1)%min_wave_smooth, &
-                                                  psets(1)%max_wave_smooth)
+        if (smooth .and. smoothing_on_device(ctx)) call prepare_smoothing_kernel(ctx, psets(1)%sigma_smooth, &
+                                                                             psets(1)%min_wave_smooth, &
+                                                                             psets(1)%max_wave_smooth)
 
         ! ------------------------------------------------------------------
         ! 2-7. Device: age sums, nebular emission, attenuation, dust emission, IGM, AGN, smoothing
@@ -403,13 +457,13 @@ contains
             allocate(tdiff(1, 1))
         end if
 
-        !$acc data present(ctx) copyin(psets, ipk, rpk, lpk) create(w2, weights, tmp1, tmp2, yo, absorbed, tdiff) &
+        !$acc data present(ctx) copyin(psets, ipk, rpk, lpk) create(w2, wz, weights, tmp1, tmp2, yo, absorbed, tdiff) &
         !$acc      copyout(rout, eml)
         ! Nebular data only with nebular emission (its kernels run only then)
         !$acc data copyin(nb%ipk, nb%rpk, nb%lpk) create(nb%q0, nb%lum, nb%cy, nb%co) if(neb)
 #ifdef OMP_TARGET
         !$omp target data map(to: psets, ipk, rpk, lpk) &
-        !$omp map(alloc: w2, weights, tmp1, tmp2, yo, absorbed, tdiff) &
+        !$omp map(alloc: w2, wz, weights, tmp1, tmp2, yo, absorbed, tdiff) &
         !$omp map(from: rout, eml)
 #endif
 #ifdef OMP_TARGET
@@ -427,7 +481,10 @@ contains
 #endif
             do m = 1, n_mod
                 do k = 1, nt
-                    weights(k, 1, m) = wext(k, m)
+                    !$acc loop seq
+                    do z = 1, nzw
+                        weights(k, z, m) = wext((z - 1) * nt + k, m)
+                    end do
                 end do
             end do
         else
@@ -439,49 +496,88 @@ contains
                 call sfh_weights_core(ctx, psets(m), psets(m)%tage, 1, weights(:, :, m), tmp1(:, m), tmp2(:, m))
             end do
         end if
-        !$acc parallel loop gang vector present(ctx, weights, w2, it_tesc, lum_linear, msum, lsum, &
-        !$acc msy, mso, lsy, lso, zlo, zhi, dz) private(k, w, mk, lk)
+        if (zw) then
+            ! Weights over ages and metallicities: mass and L_bol summed over both (metallicities
+            ! outer, as compute_csp_scenario with nzin > 1), the weights cast once to KP
+            !$acc parallel loop gang vector present(ctx, weights, wz, it_tesc, msum, lsum, msy, mso, lsy, lso) &
+            !$acc private(k, z, w, mk, lk)
 #ifdef OMP_TARGET
-        !$omp target teams distribute parallel do private(k, w, mk, lk)
+            !$omp target teams distribute parallel do private(k, z, w, mk, lk)
 #endif
-        do m = 1, n_mod
-            msum(m) = 0.0_wp
-            lsum(m) = 0.0_wp
-            msy(m) = 0.0_wp; mso(m) = 0.0_wp; lsy(m) = 0.0_wp; lso(m) = 0.0_wp
-            !$acc loop seq
-            do k = 1, nt
-                w = weights(k, 1, m)
-                if (w > SAFE_FLOOR) then
-                    if (zmode) then
-                        ! The interpolated SSP's mass and L_bol (compute_interpolated_ssp)
-                        mk = w * ((1.0_wp - dz(m)) * ctx%state%ssp_basis_mass(k, zlo(m)) + &
-                                  dz(m) * ctx%state%ssp_basis_mass(k, zhi(m)))
-                        lk = w * 10.0_wp**((1.0_wp - dz(m)) * ctx%state%ssp_basis_lbol(k, zlo(m)) + &
-                                           dz(m) * ctx%state%ssp_basis_lbol(k, zhi(m)))
-                    else
-                        mk = w * ctx%state%ssp_basis_mass(k, 1)
-                        lk = w * lum_linear(k)
-                    end if
-                    msum(m) = msum(m) + mk
-                    lsum(m) = lsum(m) + lk
-                    ! Young (ages <= dust_tesc) and old parts, summed separately (no differences)
-                    if (k <= it_tesc(m)) then
-                        msy(m) = msy(m) + mk; lsy(m) = lsy(m) + lk
-                    else
-                        mso(m) = mso(m) + mk; lso(m) = lso(m) + lk
-                    end if
-                else
-                    w = 0.0_wp
-                end if
-                if (k <= it_tesc(m)) then
-                    w2(k, m) = real(w, KP); w2(k, n_mod + m) = 0.0_KP
-                else
-                    w2(k, m) = 0.0_KP; w2(k, n_mod + m) = real(w, KP)
-                end if
+            do m = 1, n_mod
+                msum(m) = 0.0_wp
+                lsum(m) = 0.0_wp
+                msy(m) = 0.0_wp; mso(m) = 0.0_wp; lsy(m) = 0.0_wp; lso(m) = 0.0_wp
+                !$acc loop seq
+                do z = 1, nzw
+                    !$acc loop seq
+                    do k = 1, nt
+                        w = weights(k, z, m)
+                        if (w > SAFE_FLOOR) then
+                            mk = w * ctx%state%ssp_basis_mass(k, z)
+                            lk = w * 10.0_wp**ctx%state%ssp_basis_lbol(k, z)
+                            msum(m) = msum(m) + mk
+                            lsum(m) = lsum(m) + lk
+                            if (k <= it_tesc(m)) then
+                                msy(m) = msy(m) + mk; lsy(m) = lsy(m) + lk
+                            else
+                                mso(m) = mso(m) + mk; lso(m) = lso(m) + lk
+                            end if
+                        else
+                            w = 0.0_wp
+                        end if
+                        wz(k, z, m) = real(w, KP)
+                    end do
+                end do
             end do
-        end do
+        else
+            !$acc parallel loop gang vector present(ctx, weights, w2, it_tesc, lum_linear, msum, lsum, &
+            !$acc msy, mso, lsy, lso, zlo, zhi, dz) private(k, w, mk, lk)
+#ifdef OMP_TARGET
+            !$omp target teams distribute parallel do private(k, w, mk, lk)
+#endif
+            do m = 1, n_mod
+                msum(m) = 0.0_wp
+                lsum(m) = 0.0_wp
+                msy(m) = 0.0_wp; mso(m) = 0.0_wp; lsy(m) = 0.0_wp; lso(m) = 0.0_wp
+                !$acc loop seq
+                do k = 1, nt
+                    w = weights(k, 1, m)
+                    if (w > SAFE_FLOOR) then
+                        if (zmode) then
+                            ! The interpolated SSP's mass and L_bol (compute_interpolated_ssp)
+                            mk = w * ((1.0_wp - dz(m)) * ctx%state%ssp_basis_mass(k, zlo(m)) + &
+                                      dz(m) * ctx%state%ssp_basis_mass(k, zhi(m)))
+                            lk = w * 10.0_wp**((1.0_wp - dz(m)) * ctx%state%ssp_basis_lbol(k, zlo(m)) + &
+                                               dz(m) * ctx%state%ssp_basis_lbol(k, zhi(m)))
+                        else
+                            mk = w * ctx%state%ssp_basis_mass(k, 1)
+                            lk = w * lum_linear(k)
+                        end if
+                        msum(m) = msum(m) + mk
+                        lsum(m) = lsum(m) + lk
+                        ! Young (ages <= dust_tesc) and old parts, summed separately (no differences)
+                        if (k <= it_tesc(m)) then
+                            msy(m) = msy(m) + mk; lsy(m) = lsy(m) + lk
+                        else
+                            mso(m) = mso(m) + mk; lso(m) = lso(m) + lk
+                        end if
+                    else
+                        w = 0.0_wp
+                    end if
+                    if (k <= it_tesc(m)) then
+                        w2(k, m) = real(w, KP); w2(k, n_mod + m) = 0.0_KP
+                    else
+                        w2(k, m) = 0.0_KP; w2(k, n_mod + m) = real(w, KP)
+                    end if
+                end do
+            end do
 
-        if (zmode) then
+        end if
+
+        if (zw) then
+            call age_sums_w(nspec, nt, nzw, n_mod, ctx%state%ssp_basis_spec, wz, it_tesc, yo)
+        else if (zmode) then
             call age_sums_z(nspec, nt, n_mod, ctx%state%ssp_basis_spec, w2, it_tesc, zlo, zhi, dz, yo)
         else
             call age_sums(nspec, nt, n_mod, ctx%state%ssp_basis_spec(:, :, 1), w2, it_tesc, yo)
@@ -524,12 +620,22 @@ contains
             call apply_igm(n_mod, nspec, ctx%state%batch%igm_t, total)
         end if
         if (agn) call add_agn_batch(ctx, psets, n_mod, nspec, agn_on, ita, wta, lsum, tdiff, total)
-        if (smooth) call smooth_columns(ctx, total, n_mod)
+        if (smooth .and. smoothing_on_device(ctx)) then
+            call smooth_columns(ctx, total, n_mod)
+        else if (smooth) then
+            call smooth_columns_host(ctx, psets(1), total(:, 1:n_mod))
+        end if
 
         ! ------------------------------------------------------------------
         ! 8. Magnitudes and indices
         ! ------------------------------------------------------------------
-        if (zvar .and. allocated(psets(1)%mag_compute)) then
+        if (present(zred_mags) .and. allocated(psets(1)%mag_compute)) then
+            call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, psets(1)%mag_compute, &
+                                            zred_col=zred_mags(1:n_mod))
+        else if (present(zred_mags)) then
+            call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, &
+                                            zred_col=zred_mags(1:n_mod))
+        else if (zvar .and. allocated(psets(1)%mag_compute)) then
             call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, psets(1)%mag_compute, &
                                             zred_col=zcol)
         else if (zvar) then
@@ -586,6 +692,35 @@ contains
             end if
         end do
     end subroutine compute_csp_batch
+
+    !> Smoothing other than the fast velocity kernel (smooth_velocity = 0: constant width in
+    !> wavelength; smoothspec_fast = 0: the exact log-linear velocity convolution), on the host
+    !> with compute_csp_scenario's routine (apply_smoothing), one column at a time in FP64: sp
+    !> (pixels x models, on the device in device builds) is copied to the host and back.
+    subroutine smooth_columns_host(ctx, pset, sp)
+        type(opensps_context_t), intent(in) :: ctx
+        type(params), intent(in)         :: pset
+        real(KP), intent(inout), contiguous :: sp(:,:)
+        real(WP), allocatable :: col(:)
+        integer :: m, nspec
+
+        nspec = size(sp, 1)
+        allocate(col(nspec))
+        !$acc update self(sp)
+#ifdef OMP_TARGET
+        !$omp target update from(sp)
+#endif
+        do m = 1, size(sp, 2)
+            col = real(sp(:, m), WP)
+            call apply_smoothing(ctx, ctx%state%spec_lambda(1:nspec), col, pset%sigma_smooth, pset%min_wave_smooth, &
+                                 pset%max_wave_smooth)
+            sp(:, m) = real(col, KP)
+        end do
+        !$acc update device(sp)
+#ifdef OMP_TARGET
+        !$omp target update to(sp)
+#endif
+    end subroutine smooth_columns_host
 
     !> Copies the batch's spectra (sp = the batch output, columns 1:n_mod, on the device) to spec
     !> at WP.
@@ -1402,6 +1537,65 @@ contains
         dz = (logzsol - log10(ctx%state%zlegend(zlo) / ctx%state%zsol)) / &
              (log10(ctx%state%zlegend(zlo + 1) / ctx%state%zsol) - log10(ctx%state%zlegend(zlo) / ctx%state%zsol))
     end subroutine metallicity_interval
+
+    !> Age sums with weights over ages and metallicities: yo = sum over z of basis(:, :, z) .
+    !> wz(:, z, :), young ages (<= it_tesc) into column m and old ones into N + m, summed in
+    !> compute_csp_scenario's order (metallicities outer, ages inner) at kernel precision.
+    subroutine age_sums_w(nspec, nt, nz, n_mod, basis, wz, it_tesc, yo)
+        integer, intent(in)              :: nspec, nt, nz, n_mod, it_tesc(:)
+        real(KP), intent(in), contiguous :: basis(:,:,:), wz(:,:,:)
+        real(KP), intent(out)            :: yo(:,:)
+        integer  :: m, i, k, z
+        real(KP) :: wk, y, o
+#if !defined(_OPENACC) && !defined(OMP_TARGET)
+        integer  :: col
+
+        ! CPU builds: one pass over the pixels (stride 1) per weight, as compute_csp_scenario
+        do m = 1, 2 * n_mod
+            do i = 1, nspec
+                yo(i, m) = 0.0_KP
+            end do
+        end do
+        do m = 1, n_mod
+            do z = 1, nz
+                do k = 1, nt
+                    wk = wz(k, z, m)
+                    if (wk == 0.0_KP) cycle
+                    col = merge(m, n_mod + m, k <= it_tesc(m))
+                    do i = 1, nspec
+                        yo(i, col) = yo(i, col) + wk * basis(i, k, z)
+                    end do
+                end do
+            end do
+        end do
+#else
+        ! One thread per (pixel, model)
+        !$acc parallel loop gang vector collapse(2) present(basis, wz, it_tesc, yo) private(k, z, wk, y, o)
+#ifdef OMP_TARGET
+        !$omp target teams distribute parallel do collapse(2) private(k, z, wk, y, o)
+#endif
+        do m = 1, n_mod
+            do i = 1, nspec
+                y = 0.0_KP
+                o = 0.0_KP
+                !$acc loop seq
+                do z = 1, nz
+                    !$acc loop seq
+                    do k = 1, nt
+                        wk = wz(k, z, m)
+                        if (k <= it_tesc(m)) then
+                            y = y + wk * basis(i, k, z)
+                        else
+                            o = o + wk * basis(i, k, z)
+                        end if
+                    end do
+                end do
+                yo(i, m) = y
+                yo(i, n_mod + m) = o
+            end do
+        end do
+#endif
+    end subroutine age_sums_w
 
     !> Age sums with per-model metallicity: each model's basis is (1 - dz) basis(:, :, zlo) +
     !> dz basis(:, :, zhi), formed at kernel precision term by term (portable kernel; also used in

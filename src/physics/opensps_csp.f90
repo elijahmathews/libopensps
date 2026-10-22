@@ -50,19 +50,19 @@ module opensps_csp
     public :: compute_csp_scenario, set_scenario_batch
 
     !> One code path (doc/ROADMAP.md, priority 2): FSPS_SCENARIO_BATCH=1 runs eligible single
-    !> calls as a batch of one (scenario_batch_of_one); read once (-1: not yet read)
+    !> calls as a batch (opensps_scenario_as_batch); read once (-1: not yet read)
     integer, save :: scenario_batch_mode = -1
 
-    ! The batch of one is in the submodule opensps_scenario_batch (src/physics/opensps_scenario_batch.f90):
+    ! The batch path is in the submodule opensps_scenario_batch (src/physics/opensps_scenario_batch.f90):
     ! it uses opensps_csp_batch, which uses opensps_context, which uses this module
     interface
-        module function opensps_scenario_batch_of_one(ctx, pset, nzin, results) result(done)
+        module function opensps_scenario_as_batch(ctx, pset, nzin, results) result(done)
             type(opensps_context_t), intent(inout)         :: ctx
             type(params), intent(in)                    :: pset
             integer, intent(in)                         :: nzin
             type(compspout), allocatable, intent(inout) :: results(:)
             logical :: done
-        end function opensps_scenario_batch_of_one
+        end function opensps_scenario_as_batch
     end interface
     ! Expose internal kernels for unit testing
     public :: compute_sfh_weights, sfh_weights_core
@@ -135,15 +135,20 @@ contains
              return
         end if
 
-        ! One code path: a single age with the common options as a batch of one; any other case,
-        ! or a batch status other than 0, continues on this path
-        if (scenario_batch_enabled() .and. pset%tage > 0.0_wp) then
-            if (opensps_scenario_batch_of_one(ctx, pset, nzin, results)) return
+        ! One code path: the outputs (one age, or all ages) as one batch call with the common
+        ! options; any other case, or a batch status other than 0, continues on this path
+        if (scenario_batch_enabled()) then
+            if (opensps_scenario_as_batch(ctx, pset, nzin, results)) return
         end if
 
         ! The parameter set is read by most kernels below (and by the dust and nebular routines it
         ! is passed to): map it once instead of an implicit copy at every launch
         !$acc enter data copyin(pset)
+        ! A tabular SFH is set on the host (opensps_context_set_sfh_tab); the device computes the
+        ! weights of several outputs from its copy
+        if (pset%sfh == 2 .or. pset%sfh == 3) then
+            !$acc update device(ctx%state%sfh_tab, ctx%state%ntabsfh)
+        end if
 
         ! Initialize working grids from SSP inputs natively on the device (Explicit loops to bypass NVHPC kernels bug)
         nt = ctx%state%ntfull
