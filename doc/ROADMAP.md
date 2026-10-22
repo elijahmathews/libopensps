@@ -23,9 +23,9 @@ delete it here.
 - **Accuracy:** FP64 GPU = CPU to 1.6e-11 per pixel; FP32 kernels reproduce FP64 to ~4e-7
   per pixel and 5e-7 mag. Legacy FSPS parity is checked case by case
   (`tools/legacy_parity`).
-- **Portability:** OpenMP target on NVIDIA (nvfortran; all suites pass). AMD (LLVM flang,
-  gfx1103): builds; the suites on the device are the open condition for removing OpenACC
-  (see priority 5).
+- **Portability:** OpenMP target on NVIDIA (nvfortran; all suites pass on the A100). LLVM
+  flang builds the OpenMP target path for AMD (gfx1103) and passes the suites with offload
+  disabled; offload on AMD GPUs does not work yet (priority 5, future work).
 
 ## Cutover to libopensps
 
@@ -119,8 +119,8 @@ depend on a pinned version of the C library, each with its own release cycle and
 ### 2. One code path (done)
 
 Finished with the removal of OpenACC (2026-10; details in `doc/GPU_RESULTS.md`, "One code
-path, steps 1-7"), on the condition that OpenMP target passes the suites on AMD (LLVM flang,
-gfx1103), which had not been run when OpenACC was removed. The CSP physics has one implementation, `compute_csp_batch`;
+path, steps 1-7"). The criterion of passing on AMD GPUs was dropped (2026-10-22): development
+targets NVIDIA with nvfortran, and AMD offload is future work (priority 5). The CSP physics has one implementation, `compute_csp_batch`;
 `compute_csp_scenario` runs as a batch (one model per output age). SSP generation has one
 template kernel for every build. OpenMP target is the only GPU programming model and OpenMP
 host threads the only CPU parallelism. Light-weighted ages were dropped (status 104; could
@@ -128,9 +128,9 @@ return as a batch feature); the device likelihood is under Further items.
 
 Carried forward: keep the intermediates the adjoints of priority 4 need (per-stage spectra,
 transmissions) addressable rather than overwritten, and avoid hidden non-differentiable
-branches. Open: OpenMP target trails the former OpenACC build by 11% in FP64 at large N and
-10-18% at N = 1 (host time in the OpenMP runtime); a persistently mapped batch workspace is
-the untested remedy.
+branches. Accepted for now (2026-10-22): OpenMP target trails the former OpenACC build by 11%
+in FP64 at large N and 10-18% at N = 1 (host time in the OpenMP runtime); FP32 at large N is
+level. A persistently mapped batch workspace is the untested remedy.
 
 ### 3. Batched SSP: SSP-level parameters free per model
 
@@ -214,20 +214,27 @@ offload; Tapenade does not handle OpenACC / OpenMP) and a re-implementation in a
 
 Why after priorities 2 and 3: the adjoints are written once, on the final hot path.
 
-### 5. AMD and Intel GPUs
+### 5. AMD and Intel GPUs (future work)
 
-The OpenMP path builds for the Radeon 780M (gfx1103, LLVM flang 22 + ROCm 7.1; recipe in
-`doc/AMD_GPU.md` on branch `gpu/780m-omp`). Three LLVM flang mapping behaviours were found and
-fixed on branches `fix/omp-device-no-malloc` -> `fix/omp-maps-llvm` (PR #13) ->
-`fix/omp-flang-map-lifetimes` -> `fix/omp-flang-component-maps` (PR #16): structure members
-named in `exit data` delete their parent, data left mapped after `target data` regions, and
-implicit `tofrom` of the context. The rules are in `doc/GPU_PLAN.md`. Remaining:
+Deferred (2026-10-22). LLVM flang (22, with ROCm 7.1) builds `-Daccel=omp_gpu` for the Radeon
+780M (gfx1103) and passes the unit and regression suites with `OMP_TARGET_OFFLOAD=DISABLED`.
+On the device, `test_csp_batch` faults in the first kernel it launches (the SSP template sum,
+`add_main_library_templates`): the kernels reach `ctx%state` through an implicit map of the
+context, whose array descriptors flang does not attach on the device. NVIDIA tolerates this;
+AMD does not.
 
-- run the batch tests on the 780M from a text console (a GPU fault there resets the display
-  GPU) and fix what remains;
-- rebase the four AMD branches onto `develop` after the performance stack (PRs #10, #11, #14,
-  #17), switch the batch output buffer (`o%spec`) to the `opensps_omp_data` helpers, and open one
-  pull request;
+The fixes found for LLVM flang (structure members named in `exit data` delete their parent;
+data left mapped after `target data` regions; the implicit `tofrom` of the context, remedied by
+`map(alloc: ctx)` in every kernel that uses it; no array-constructor temporaries; no libm
+`log_gamma` on the device) are on branches of the FSPS fork (`fix/omp-device-no-malloc`,
+`fix/omp-maps-llvm`, `fix/omp-flang-map-lifetimes`, `fix/omp-flang-component-maps`,
+`fix/omp-flang-ctx-alloc`; build recipe on `gpu/780m-omp`) and were not ported here; even with
+them, `test_csp_batch` still failed on the 780M. Remaining:
+
+- port those fixes, with the context mapped whole or by component consistently, and every
+  kernel's data named in its map clauses;
+- run the suites on the 780M from a text console (a GPU fault there resets the display GPU)
+  and fix what remains;
 - a discrete AMD GPU (R9700) and Intel (ifx, Arc Pro B70) when available.
 
 ### Further items

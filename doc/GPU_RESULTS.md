@@ -58,7 +58,7 @@ Session 3 (2026-10-21), new questions:
     parameter) or optionally fitted analytically. Grid, units and the amplitude treatment to be
     agreed before the code.
 
-## One code path, step 7: OpenACC removed (2026-10-21, draft until the AMD run)
+## One code path, step 7: OpenACC removed (2026-10-21)
 
 Branch `refactor/remove-openacc`. Every `!$acc` directive and the `_OPENACC` / `ACC_MULTICORE`
 / `ACC_GPU` blocks removed (resolved as undefined), `-Daccel` is `none` or `omp_gpu`,
@@ -67,8 +67,15 @@ Branch `refactor/remove-openacc`. Every `!$acc` directive and the `_OPENACC` / `
 Validation (with #12): unit + regression 38/38 in seven builds: gfortran FP64, FP32, FP64 +
 OpenMP threads; nvfortran + OpenMP threads; OpenMP target FP64, FP32, FP32 + cuBLAS. Case
 matrix vs nvfortran CPU, 52 cases: OpenMP target FP64 PASS at 1e-10; FP32 the two index
-cases of step 5 (1.1, 1.2e-4), as before the removal. Not yet run: AMD (LLVM flang on the
-780M), the condition for merging.
+cases of step 5 (1.1, 1.2e-4), as before the removal.
+
+AMD (2026-10-22, the 780M, LLVM flang 22 + ROCm 7.1): builds, and passes the suites with
+offload disabled (38/39; `unit_standard_library` overflows the default 8 MB stack, also on
+`main`). With offload, `test_csp_batch` faults in its first kernel (the SSP template sum:
+`ctx` reached through an implicit map whose descriptors flang does not attach). The flang
+mapping fixes of the FSPS fork were never ported. Decided: AMD offload is future work
+(roadmap priority 5), not a condition for removing OpenACC; the OpenMP speed gap (FP64 +11%,
+N = 1 +10-18%) is accepted for now.
 
 ## One code path, step 6: one SSP template kernel; OpenMP target at OpenACC's speed (2026-10-21)
 
