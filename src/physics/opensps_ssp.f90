@@ -710,13 +710,19 @@ contains
 #ifdef OMP_TARGET
                 ! Mapped by opensps_context_move_to_device: unmapped before its host memory is
                 ! freed, or a later allocation there is found "partially present"
-                !$omp target exit data if(ctx%on_device) map(delete: ctx%state%ssp_temp_grid)
+                ! (An associate name, not ctx%state%ssp_temp_grid: on LLVM flang a delete of
+                ! parent%component also deletes the mapping of the parent, here the context)
+                associate (d_grid => ctx%state%ssp_temp_grid)
+                    !$omp target exit data if(ctx%on_device) map(delete: d_grid)
+                end associate
 #endif
                 deallocate(ctx%state%ssp_temp_grid)
             end if
             allocate(ctx%state%ssp_temp_grid(nspec, nstars))
 #ifdef OMP_TARGET
-            !$omp target enter data if(ctx%on_device) map(alloc: ctx%state%ssp_temp_grid)
+            associate (d_grid => ctx%state%ssp_temp_grid)
+                !$omp target enter data if(ctx%on_device) map(alloc: d_grid)
+            end associate
 #endif
             ctx%state%ssp_temp_nspec = nspec
             ctx%state%ssp_temp_nstars = nstars
@@ -1261,11 +1267,25 @@ contains
         dev = .false.
 #endif
         if (dev) then
+        associate (a_speclib => ctx%state%speclib, a_wmb_spec => ctx%state%wmb_spec, &
+                   a_pagb_spec => ctx%state%pagb_spec, a_wrn_spec => ctx%state%wrn_spec, &
+                   a_wrc_spec => ctx%state%wrc_spec, a_agb_spec_car => ctx%state%agb_spec_car, &
+                   a_agb_spec_o => ctx%state%agb_spec_o, a_agb_spec_c => ctx%state%agb_spec_c, &
+                   a_speclib_agb_smooth => ctx%state%speclib_agb_smooth, &
+                   a_agb_spec_car_smooth => ctx%state%agb_spec_car_smooth, &
+                   a_agb_spec_o_smooth => ctx%state%agb_spec_o_smooth, &
+                   a_agb_spec_c_smooth => ctx%state%agb_spec_c_smooth, a_flux_dagb => ctx%state%flux_dagb, &
+                   a_spec_lambda => ctx%state%spec_lambda)
 #ifdef OMP_TARGET
         !$omp target teams distribute parallel do collapse(2) &
         !$omp private(acc1, comp1, lacc, lcomp, x, lib, wk, term, tsum, k, ta, tc, la, lc, tmpv, sl, e, j, wv, low) &
         !$omp map(to: w_used, a_used, b_used, lib_used, has_stars, age_first, age_last, sl_key, sl_ptr, e_lib, e_a, &
-        !$omp     e_b, e_w) map(from: t_sum)
+        !$omp     e_b, e_w) map(from: t_sum) &
+        !$omp map(OMP_MAP_PRESENT_ALLOC: a_speclib, a_spec_lambda) &
+        !$omp map(alloc: a_wmb_spec, a_pagb_spec, a_wrn_spec, a_wrc_spec, &
+        !$omp     a_agb_spec_car, a_agb_spec_o, a_agb_spec_c, &
+        !$omp     a_speclib_agb_smooth, a_agb_spec_car_smooth, a_agb_spec_o_smooth, &
+        !$omp     a_agb_spec_c_smooth, a_flux_dagb)
 #endif
         do i_time = 1, n_ages
             do i = 1, nspec
@@ -1280,21 +1300,21 @@ contains
                         lib = lib_used(k)
                         select case (lib)
                         case (L_MAIN)
-                            x = ctx%state%speclib(i, zmet, a_used(k), b_used(k))
+                            x = a_speclib(i, zmet, a_used(k), b_used(k))
                         case (L_WMB)
-                            x = ctx%state%wmb_spec(i, zmet, a_used(k), b_used(k))
+                            x = a_wmb_spec(i, zmet, a_used(k), b_used(k))
                         case (L_PAGB)
-                            x = ctx%state%pagb_spec(i, a_used(k), b_used(k))
+                            x = a_pagb_spec(i, a_used(k), b_used(k))
                         case (L_WRN)
-                            x = ctx%state%wrn_spec(i, a_used(k), zmet)
+                            x = a_wrn_spec(i, a_used(k), zmet)
                         case (L_WRC)
-                            x = ctx%state%wrc_spec(i, a_used(k), zmet)
+                            x = a_wrc_spec(i, a_used(k), zmet)
                         case (L_CAR)
-                            x = ctx%state%agb_spec_car(i, a_used(k))
+                            x = a_agb_spec_car(i, a_used(k))
                         case (L_AGBO)
-                            x = ctx%state%agb_spec_o(i, a_used(k))
+                            x = a_agb_spec_o(i, a_used(k))
                         case default
-                            x = ctx%state%agb_spec_c(i, a_used(k))
+                            x = a_agb_spec_c(i, a_used(k))
                         end select
                         if (lib == L_AGBO .or. lib == L_AGBC) then
                             ! O/C-rich AGB: summed apart, times lambda^2 below
@@ -1312,7 +1332,7 @@ contains
                         end if
                     end do
                     if (any_agb) then
-                        term = inv_scale * (real(ctx%state%spec_lambda(i), KP)**2 * lacc) - comp1
+                        term = inv_scale * (real(a_spec_lambda(i), KP)**2 * lacc) - comp1
                         tsum = acc1 + term
                         comp1 = (tsum - acc1) - term
                         acc1 = tsum
@@ -1328,25 +1348,25 @@ contains
                             if (i < i0) then
                                 select case (e_lib(e))
                                 case (L_MAIN)
-                                    x = ctx%state%speclib(i, zmet, e_a(e), e_b(e)); wk = real(wv, KP)
+                                    x = a_speclib(i, zmet, e_a(e), e_b(e)); wk = real(wv, KP)
                                 case (L_CAR)
-                                    x = ctx%state%agb_spec_car(i, e_a(e)); wk = real(wv, KP)
+                                    x = a_agb_spec_car(i, e_a(e)); wk = real(wv, KP)
                                 case (L_AGBO)
-                                    x = ctx%state%agb_spec_o(i, e_a(e)); wk = real(wv * AGB_SCALE, KP); low = .true.
+                                    x = a_agb_spec_o(i, e_a(e)); wk = real(wv * AGB_SCALE, KP); low = .true.
                                 case default
-                                    x = ctx%state%agb_spec_c(i, e_a(e)); wk = real(wv * AGB_SCALE, KP); low = .true.
+                                    x = a_agb_spec_c(i, e_a(e)); wk = real(wv * AGB_SCALE, KP); low = .true.
                                 end select
                             else
                                 j = i - i0 + 1
                                 select case (e_lib(e))
                                 case (L_MAIN)
-                                    x = ctx%state%speclib_agb_smooth(j, zmet, e_a(e), e_b(e)); wk = real(wv, KP)
+                                    x = a_speclib_agb_smooth(j, zmet, e_a(e), e_b(e)); wk = real(wv, KP)
                                 case (L_CAR)
-                                    x = ctx%state%agb_spec_car_smooth(j, e_a(e)); wk = real(wv, KP)
+                                    x = a_agb_spec_car_smooth(j, e_a(e)); wk = real(wv, KP)
                                 case (L_AGBO)
-                                    x = ctx%state%agb_spec_o_smooth(j, e_a(e)); wk = real(wv * C_LIGHT, KP)
+                                    x = a_agb_spec_o_smooth(j, e_a(e)); wk = real(wv * C_LIGHT, KP)
                                 case default
-                                    x = ctx%state%agb_spec_c_smooth(j, e_a(e)); wk = real(wv * C_LIGHT, KP)
+                                    x = a_agb_spec_c_smooth(j, e_a(e)); wk = real(wv * C_LIGHT, KP)
                                 end select
                             end if
                             if (KP == WP) then
@@ -1368,14 +1388,14 @@ contains
                             end if
                         end do
                         if (i < i0) then
-                            tmpv = ta + real(ctx%state%spec_lambda(i), KP)**2 * la * inv_scale
+                            tmpv = ta + real(a_spec_lambda(i), KP)**2 * la * inv_scale
                         else
                             tmpv = ta
                         end if
                         if (KP == WP) then
-                            acc1 = acc1 + tmpv * ctx%state%flux_dagb(i, sl_key(1, sl), sl_key(2, sl), sl_key(3, sl))
+                            acc1 = acc1 + tmpv * a_flux_dagb(i, sl_key(1, sl), sl_key(2, sl), sl_key(3, sl))
                         else
-                            term = tmpv * ctx%state%flux_dagb(i, sl_key(1, sl), sl_key(2, sl), sl_key(3, sl)) - comp1
+                            term = tmpv * a_flux_dagb(i, sl_key(1, sl), sl_key(2, sl), sl_key(3, sl)) - comp1
                             tsum = acc1 + term
                             comp1 = (tsum - acc1) - term
                             acc1 = tsum
@@ -1387,6 +1407,7 @@ contains
                 end if
             end do
         end do
+        end associate
         else
         ! CPU: the same sums per (pixel, age), in the same order, with a block of pixels
         ! outer and the templates, then the ages, then the pixels inner, so that each template

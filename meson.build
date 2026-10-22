@@ -57,7 +57,9 @@ if accel_target == 'omp_gpu' and fc_id in ['llvm-flang', 'flang']
     # the link also -Xoffload-linker --library-path=/usr/lib64/amdgcn-amd-amdhsa (not -L, which
     # meson moves away from -Xoffload-linker)
     accel_args = ['-fopenmp', '-fopenmp-version=52', '--offload-arch=' + get_option('gpu_arch')]
-    accel_defs = ['-DOMP_TARGET']
+    # map-type modifier of the kernels' map clauses for data that is already on the device
+    # (OMP_MAP_PRESENT_ALLOC; OpenMP 5.1): flang checks presence, nvfortran 25.1 does not parse it
+    accel_defs = ['-DOMP_TARGET', '-DOMP_MAP_PRESENT_ALLOC=present,alloc']
 elif accel_target == 'omp_gpu'
     if fc_id != 'nvidia_hpc'
         error('-Daccel=omp_gpu needs nvfortran or LLVM flang')
@@ -66,7 +68,7 @@ elif accel_target == 'omp_gpu'
     # (compute_csp_batch, batch photometry and indices; compute_csp_scenario runs as a batch).
     # Run with OMP_TARGET_OFFLOAD=MANDATORY to catch a silent host fallback.
     accel_args = ['-mp=gpu', '-gpu=' + get_option('gpu_arch')]
-    accel_defs = ['-DOMP_TARGET', '-DFSPS_PINNED']
+    accel_defs = ['-DOMP_TARGET', '-DFSPS_PINNED', '-DOMP_MAP_PRESENT_ALLOC=alloc']
     if get_option('cublas')
         accel_args += ['-cudalib=cublas']
         accel_defs += ['-DFSPS_CUBLAS']

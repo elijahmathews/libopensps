@@ -40,7 +40,14 @@ program test_csp_batch
     ! filters over each band's support), so they agree to the rounding of the kernel precision
     ! FP32 kernels: 100 eps(KP), as elsewhere; OpenACC multicore runs the FP32 reductions as
     ! plain per-core sums (~4e-6), the GPU as trees (~3e-7)
+#if defined(OMP_TARGET) && defined(__flang__)
+    ! FP64 on LLVM flang offload (AMD): the device log10 / pow differ from the host libm by ~1 ulp,
+    ! and the SFH weights of 16 or more models (computed on the device) are differences of nearly
+    ! equal integrals: 2.6e-10 relative in a pixel against the host weights of fewer models
+    real(WP), parameter :: SPEC_RTOL = merge(1.0e-9_wp, 100.0_wp * real(epsilon(1.0_KP), WP), KP == WP)
+#else
     real(WP), parameter :: SPEC_RTOL = merge(1.0e-10_wp, 100.0_wp * real(epsilon(1.0_KP), WP), KP == WP)
+#endif
     real(WP), parameter :: MAG_TOL = merge(1.0e-9_wp, 1.0e-5_wp, KP == WP)
     ! Spectral indices (absolute, as tools/compare_builds)
     real(WP), parameter :: INDX_TOL = merge(1.0e-8_wp, 1.0e-4_wp, KP == WP)
