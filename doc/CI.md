@@ -5,7 +5,7 @@ Three workflows, split by how often a check needs to run:
 | Workflow | When | What |
 |---|---|---|
 | `ci.yml` | Every push to `develop`/`master`, every pull request (skipped for documentation-only changes) | Six compiler/hardware builds running the unit and regression suites; AddressSanitizer and ThreadSanitizer jobs running focused stress phases |
-| `nightly.yml` | Daily, and on demand | All stress phases at more iterations (ASan, TSan, nvfortran OpenACC); newest gfortran on Linux and macOS; optional GPU job on a self-hosted runner |
+| `nightly.yml` | Daily, and on demand | All stress phases at more iterations (ASan, TSan, nvfortran OpenACC and OpenMP host threads); newest gfortran on Linux and macOS; optional GPU jobs (OpenACC, OpenMP target) on a self-hosted runner |
 | `packaging.yml` | Changes to packaging or build files, pushes to `master`, weekly, on demand | Fedora RPM and Ubuntu DEB, each running the test suite with the distribution's compiler |
 
 Pull requests that supersede a running build cancel it. Every job has a timeout.
@@ -69,7 +69,8 @@ diagnostic lines starting with `#` so that they are TAP comments.
 
 ## Hardware and compilers not covered by hosted runners
 
-GitHub's hosted runners have no GPUs. The nightly workflow has a `gpu-openacc` job that runs on a
+GitHub's hosted runners have no GPUs. The nightly workflow has `gpu-openacc` and `gpu-openmp` jobs (the
+latter with `OMP_TARGET_OFFLOAD=MANDATORY`) that run on a
 self-hosted runner with the labels `self-hosted`, `linux`, `gpu-nvidia` and the NVIDIA HPC SDK
 installed. It is skipped unless the repository variable `GPU_RUNNER` is `true`. To enable it:
 
