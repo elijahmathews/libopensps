@@ -38,9 +38,17 @@ program test_physics_oracles
     ! KP-computed quantities use max(tol, KP_RTOL) so the FP64 build keeps its original tolerance
     real(WP), parameter :: KP_RTOL = 100.0_wp * real(epsilon(1.0_KP), WP)
     ! The AGN templates are normalized to unit luminosity on their own wavelength grid; resampled
-    ! onto MILES's, their frequency integral is 0.9934 (measured 2026-10-21), so fagn L_bol is
-    ! recovered to 6.6e-3
+    ! onto MILES's, their frequency integral is 0.9934 (measured 2026-10-21). The torus must add
+    ! fagn L_bol times that integral (to rounding); the integral itself must be 1 to 1e-2
     real(WP), parameter :: AGN_NORM_TOL = 1.0e-2_wp
+    real(WP), parameter :: AGN_TOL = max(1.0e-10_wp, KP_RTOL)
+    ! Single age vs all ages, element-wise (relative to the peak): 1e-6. OpenACC multicore's FP32
+    ! reductions are plain per-core sums (~2e-6 there, 4e-8 on the CPU and the GPU)
+#ifdef ACC_MULTICORE
+    real(WP), parameter :: SINGLE_ALL_TOL = max(1.0e-6_wp, KP_RTOL)
+#else
+    real(WP), parameter :: SINGLE_ALL_TOL = 1.0e-6_wp
+#endif
 
     call skip_without_data()
     call print_major_header("Physics Oracles (independent identities and published values)")
@@ -141,9 +149,9 @@ contains
     subroutine check_agn_luminosity(ctx)
         type(opensps_context_t), intent(inout) :: ctx
         type(COMPSPOUT), allocatable :: ref(:), agn(:)
-        real(WP), parameter :: FAGN = 0.1_wp
-        real(WP) :: ratio, worst
-        integer :: i
+        real(WP), parameter :: FAGN = 0.1_wp, AGN_TAU = 20.0_wp
+        real(WP) :: ratio, worst, tmpl_int, wt
+        integer :: i, j
 
         call print_group("AGN torus luminosity = fagn x L_bol (no dust)")
         call reset_csp_params(ctx)
@@ -153,12 +161,26 @@ contains
         call run_csp(ctx, ref)
         call set_int(ctx, 'add_agn_dust', 1)
         call set_float(ctx, 'fagn', FAGN)
-        call set_float(ctx, 'agn_tau', 20.0_wp)
+        call set_float(ctx, 'agn_tau', AGN_TAU)
         call run_csp(ctx, agn)
+        ! The template at agn_tau, interpolated linearly between the tabulated optical depths,
+        ! integrated over frequency on the spectral grid
+        j = 1
+        do while (j < size(ctx%state%agndust_tau) - 1)
+            if (ctx%state%agndust_tau(j + 1) > AGN_TAU) exit
+            j = j + 1
+        end do
+        wt = (AGN_TAU - ctx%state%agndust_tau(j)) / (ctx%state%agndust_tau(j + 1) - ctx%state%agndust_tau(j))
+        tmpl_int = spectral_lbol(ctx, (1.0_wp - wt) * ctx%state%agndust_spec(1:ctx%state%nspec, j) + &
+                                 wt * ctx%state%agndust_spec(1:ctx%state%nspec, j + 1))
+        write(*, '(A,ES12.4)') "# AGN template integral on the spectral grid - 1 = ", tmpl_int - 1.0_wp
+        call assert_relative_error(1.0_wp, tmpl_int, AGN_NORM_TOL, "template normalized to unit luminosity", &
+                                   total_tests, total_failures)
         ratio = (spectral_lbol(ctx, agn(1)%spec) - spectral_lbol(ctx, ref(1)%spec)) / &
                 (FAGN * 10.0_wp**ref(1)%lbol_csp)
-        write(*, '(A,ES12.4)') "# tage = 10 Gyr: L(AGN) / (fagn L_bol) - 1 = ", ratio - 1.0_wp
-        call assert_relative_error(1.0_wp, ratio, AGN_NORM_TOL, "one age", total_tests, total_failures)
+        write(*, '(A,ES12.4)') "# tage = 10 Gyr: L(AGN) / (fagn L_bol template integral) - 1 = ", &
+            ratio / tmpl_int - 1.0_wp
+        call assert_relative_error(tmpl_int, ratio, AGN_TOL, "one age", total_tests, total_failures)
 
         ! All ages, where the outputs have formed at least 1e-3 of the final mass
         call set_float(ctx, 'tage', 0.0_wp)
@@ -171,10 +193,10 @@ contains
             if (ref(i)%mformed < 1.0e-3_wp * maxval(ref(:)%mformed)) cycle
             ratio = (spectral_lbol(ctx, agn(i)%spec) - spectral_lbol(ctx, ref(i)%spec)) / &
                     (FAGN * 10.0_wp**ref(i)%lbol_csp)
-            worst = max(worst, abs(ratio - 1.0_wp))
+            worst = max(worst, abs(ratio / tmpl_int - 1.0_wp))
         end do
-        write(*, '(A,ES12.4)') "# all ages: max |L(AGN) / (fagn L_bol) - 1| = ", worst
-        call assert_true(worst <= AGN_NORM_TOL, "all ages", total_tests, total_failures)
+        write(*, '(A,ES12.4)') "# all ages: max |L(AGN) / (fagn L_bol template integral) - 1| = ", worst
+        call assert_true(worst <= AGN_TOL, "all ages", total_tests, total_failures)
         call reset_csp_params(ctx)
     end subroutine check_agn_luminosity
 
@@ -385,7 +407,7 @@ contains
             write(*, '(A,ES10.2)') "# max |single - all-ages| / max(spectrum): ", &
                 maxval(abs(single(1)%spec(1:ctx%state%nspec) - spec_all)) / maxval(spec_all)
             call assert_true(maxval(abs(single(1)%spec(1:ctx%state%nspec) - spec_all)) <= &
-                             max(1.0e-6_wp, KP_RTOL) * maxval(spec_all), trim(msg) // " spectrum element-wise", &
+                             SINGLE_ALL_TOL * maxval(spec_all), trim(msg) // " spectrum element-wise", &
                              total_tests, total_failures)
         end do
         call reset_csp_params(ctx)

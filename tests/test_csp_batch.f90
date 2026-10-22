@@ -89,6 +89,8 @@ program test_csp_batch
     ! one-metallicity basis
     call build_basis()
     call check_weighted_sums()
+    call check_birth_cloud_split()
+    call check_mass_formed()
     call check_all_ages(2, 0.0_wp, 0, 0, 0, "Calzetti")
     call check_all_ages(0, 0.5_wp, 1, 1, 1, "power law, z = 0.5, IGM, nebular, AGN")
     call set_int('smooth_velocity', 1)
@@ -466,6 +468,151 @@ contains
         call assert_true(d_spec <= SPEC_RTOL, "spectra", total_tests, total_failures)
         call assert_true(d_scal <= 1.0e-12_wp, "mass, L_bol", total_tests, total_failures)
     end subroutine check_weighted_sums
+
+    !> The two-component dust model built by hand from the SSP basis: power-law birth-cloud
+    !> (dust1, dust1_index) and diffuse (dust2, dust_index) attenuation, normalized at 5500 A,
+    !> spec = T_diffuse (sum_{t: log age <= dust_tesc} w_t T_birth S_t + sum_{t: older} w_t S_t)
+    !> (Charlot & Fall 2000; legacy FSPS's young/old split at dust_tesc), models 1-6 (dust_tesc
+    !> 7.0 and 7.5), no dust emission, nebular emission, IGM or AGN.
+    subroutine check_birth_cloud_split()
+        type(PARAMS) :: pset
+        type(COMPSPOUT), allocatable :: results(:)
+        real(WP), allocatable :: w(:, :), t1(:), t2(:), young(:), old(:), ref(:), lam(:)
+        real(WP) :: d_spec, peak
+        integer  :: m, t, i, nt, nspec, status, n_young, n_old
+
+        call print_group("compute_csp_scenario = birth-cloud and diffuse dust built from the SSP basis")
+        nt = ctx%state%ntfull
+        nspec = ctx%state%nspec
+        allocate(w(nt, 1), t1(nt), t2(nt), young(nspec), old(nspec), ref(nspec), lam(nspec))
+        lam = ctx%state%spec_lambda(1:nspec)
+        call set_int('dust_type', 0)
+        call set_int('add_dust_emission', 0)
+        call set_int('add_igm_absorption', 0)
+        call set_int('add_neb_emission', 0)
+        call set_int('add_agn_dust', 0)
+        d_spec = 0.0_wp
+        n_young = 0
+        n_old = 0
+        do m = 1, 6
+            call set_model(m, 0.0_wp)
+            call set_float('dust1', 1.0_wp)
+            call set_float('dust2', 0.3_wp)
+            call set_float('dust3', 0.0_wp)
+            call set_float('frac_obrun', 0.0_wp)
+            call set_float('frac_nodust', 0.0_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pset)
+            call compute_csp_scenario(ctx, pset, 1, results, status)
+            call assert_true(status == 0, "status 0", total_tests, total_failures)
+            if (status /= 0) return
+            call sfh_weights_core(ctx, pset, pset%tage, 1, w, t1, t2)
+            young = 0.0_wp
+            old = 0.0_wp
+            do t = 1, nt
+                if (.not. (w(t, 1) > 0.0_wp)) cycle
+                if (ctx%state%time_full(t) <= pset%dust_tesc) then
+                    young = young + w(t, 1) * real(ctx%state%ssp_basis_spec(1:nspec, t, 1), WP)
+                    n_young = n_young + 1
+                else
+                    old = old + w(t, 1) * real(ctx%state%ssp_basis_spec(1:nspec, t, 1), WP)
+                    n_old = n_old + 1
+                end if
+            end do
+            ref = exp(-pset%dust2 * (lam / 5500.0_wp)**pset%dust_index) * &
+                  (young * exp(-pset%dust1 * (lam / 5500.0_wp)**pset%dust1_index) + old)
+            peak = maxval(ref)
+            do i = 1, nspec
+                if (ref(i) > 1.0e-6_wp * peak) d_spec = max(d_spec, abs(results(1)%spec(i) / ref(i) - 1.0_wp))
+            end do
+        end do
+        call set_int('add_dust_emission', 1)
+        write(*, '(A,ES10.2)') "# max difference: ", d_spec
+        call assert_true(n_young > 0 .and. n_old > 0, "young and old ages both present", total_tests, total_failures)
+        call assert_true(d_spec <= max(1.0e-12_wp, SPEC_RTOL), "spectra", total_tests, total_failures)
+    end subroutine check_birth_cloud_split
+
+    !> Mass formed against closed forms. (1) All ages, tau model without burst or constant part:
+    !> output i is per unit mass formed over the full history (to the oldest isochrone age Tmax),
+    !> so mformed = (1 - exp(-t_i / tau)) / (1 - exp(-Tmax / tau)), and its spectrum (no dust,
+    !> nebular emission, IGM or AGN) is that fraction times the SFH-weighted sum of the basis at
+    !> t_i (outputs with at least 1e-3 of the final mass). (2) A constant 1 Msun/yr tabular SFH
+    !> from 0 to 6 Gyr: mformed = (t - 10**tiny_logt yr) Msun at tage = 5 Gyr and at the last
+    !> table age (tage = -99).
+    subroutine check_mass_formed()
+        type(PARAMS) :: pset
+        type(COMPSPOUT), allocatable :: results(:)
+        real(WP), allocatable :: w(:, :), t1(:), t2(:), ref(:)
+        real(WP), parameter :: TAU = 1.5_wp
+        real(WP) :: tmax, tg, frac, d_mf, d_spec, peak
+        integer  :: i, j, t, nt, nspec, status, k
+
+        call print_group("Mass formed against closed forms (tau model at all ages, constant tabular SFR)")
+        nt = ctx%state%ntfull
+        nspec = ctx%state%nspec
+        allocate(w(nt, 1), t1(nt), t2(nt), ref(nspec))
+        call set_int('dust_type', 0)
+        call set_int('add_igm_absorption', 0)
+        call set_int('add_neb_emission', 0)
+        call set_int('add_agn_dust', 0)
+        call set_model(1, 0.0_wp)
+        call set_float('dust1', 0.0_wp)
+        call set_float('dust2', 0.0_wp)
+        call set_float('tau', TAU)
+        call set_float('const', 0.0_wp)
+        call set_float('fburst', 0.0_wp)
+        call set_float('sf_start', 0.0_wp)
+        call set_float('sf_trunc', 0.0_wp)
+        call set_float('tage', 0.0_wp)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        call compute_csp_scenario(ctx, pset, 1, results, status)
+        call assert_true(status == 0 .and. size(results) == nt, "all ages: status 0, ntfull outputs", &
+                         total_tests, total_failures)
+        if (status /= 0) return
+        tmax = 10.0_wp**(ctx%state%time_full(nt) - 9.0_wp)
+        d_mf = 0.0_wp
+        d_spec = 0.0_wp
+        do i = 1, nt
+            tg = 10.0_wp**(ctx%state%time_full(i) - 9.0_wp)
+            frac = (1.0_wp - exp(-tg / TAU)) / (1.0_wp - exp(-tmax / TAU))
+            if (frac < 1.0e-3_wp) cycle
+            d_mf = max(d_mf, abs(results(i)%mformed / frac - 1.0_wp))
+            call sfh_weights_core(ctx, pset, tg, 1, w, t1, t2)
+            ref = 0.0_wp
+            do t = 1, nt
+                if (w(t, 1) > 0.0_wp) ref = ref + w(t, 1) * real(ctx%state%ssp_basis_spec(1:nspec, t, 1), WP)
+            end do
+            ref = frac * ref
+            peak = maxval(ref)
+            do j = 1, nspec
+                if (ref(j) > 1.0e-6_wp * peak) d_spec = max(d_spec, abs(results(i)%spec(j) / ref(j) - 1.0_wp))
+            end do
+        end do
+        write(*, '(A,2ES10.2)') "# all ages, max difference (mass formed, spectrum): ", d_mf, d_spec
+        call assert_true(d_mf <= 1.0e-10_wp, "all ages: mass formed", total_tests, total_failures)
+        call assert_true(d_spec <= max(1.0e-10_wp, SPEC_RTOL), "all ages: spectra", total_tests, total_failures)
+
+        ctx%state%sfh_tab = 0.0_wp
+        ctx%state%ntabsfh = 3
+        ctx%state%sfh_tab(1, 1:3) = [0.0_wp, 3.0e9_wp, 6.0e9_wp]
+        ctx%state%sfh_tab(2, 1:3) = 1.0_wp
+        call set_int('sfh', 3)
+        do k = 1, 2
+            call set_float('tage', merge(5.0_wp, -99.0_wp, k == 1))
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pset)
+            call compute_csp_scenario(ctx, pset, 1, results, status)
+            d_mf = huge(1.0_wp)
+            if (status == 0) d_mf = abs(results(1)%mformed / (merge(5.0e9_wp, 6.0e9_wp, k == 1) - &
+                                    10.0_wp**ctx%tiny_logt_val) - 1.0_wp)
+            write(*, '(A,ES10.2)') "# tabular, difference of the mass formed: ", d_mf
+            call assert_true(d_mf <= 1.0e-10_wp, merge("tabular, tage = 5:   mass formed", &
+                                                        "tabular, tage = -99: mass formed", k == 1), &
+                             total_tests, total_failures)
+        end do
+        call set_int('sfh', 1)
+    end subroutine check_mass_formed
 
     !> All-ages mode (tage = 0) against single-age calls: output i, per unit mass formed over the
     !> full history, divided by the fraction formed by then (mformed), equals the call at that age
