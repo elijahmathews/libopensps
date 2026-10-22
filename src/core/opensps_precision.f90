@@ -36,7 +36,6 @@ contains
     !> pixels) at FP32 rounding instead of losing ~N*eps. A plain sum when KP is WP. Needs a compiler that does not
     !> reassociate floating point (no -ffast-math); GPU reductions use pairwise trees instead.
     pure subroutine kahan_add(acc, comp, x)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif

@@ -90,7 +90,6 @@ contains
         ! NVHPC array descriptor reallocation bugs on the device.
         real(WP), dimension(:), intent(inout), contiguous :: weights
 
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -273,7 +272,6 @@ contains
         real(WP), intent(in) :: age_gyr
         real(WP), intent(out) :: mass_frac, sfr_norm, frac_linear
 
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -751,7 +749,6 @@ contains
         real(WP), dimension(2), intent(in) :: limits
         real(WP), intent(out) :: m0, m1
 
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -1030,7 +1027,6 @@ contains
     !> and passing it to find_interval (contiguous dummy) makes a copy, a heap allocation per call
     !> in device code. Same result as find_interval(ctx%state%sfh_tab(1, 1:n), value).
     pure function find_interval_tab_time(ctx, n, value) result(idx)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -1074,7 +1070,6 @@ contains
         real(WP), intent(inout), contiguous :: w(:,:)              ! (ages, nzin)
         real(WP), intent(inout), contiguous :: tmp1(:), tmp2(:)    ! scratch (ages)
 
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif

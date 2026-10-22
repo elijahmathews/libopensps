@@ -5,8 +5,8 @@
  * stages the copy through its own pinned buffers (~2.4 GB/s on the A100 node), into pinned memory
  * the DMA runs at the PCIe rate. The driver API is resolved at run time (dlopen of libcuda), so
  * the library does not link against CUDA and the calls quietly do nothing where the driver is
- * missing; the OpenACC runtime has already made its context current on the calling thread.
- * Built only for -Daccel=gpu (nvfortran OpenACC / OpenMP target on NVIDIA GPUs).
+ * missing; the OpenMP runtime has already made its context current on the calling thread.
+ * Built only for -Daccel=omp_gpu with nvfortran (NVIDIA GPUs).
  */
 
 #include <dlfcn.h>
@@ -64,10 +64,9 @@ int opensps_host_unregister(void *ptr)
 }
 
 /* Device-to-host copy of bytes bytes from device address src to host address dst (pinned by
- * opensps_host_register) on CUDA stream stream (an OpenACC queue's, acc_get_cuda_stream), so it
- * runs as one DMA into the buffer instead of through the OpenACC runtime's staging buffers
- * (which it uses even for registered memory: ~4.6 instead of ~11 GB/s on the A100 node).
- * Returns 0 on success; the caller falls back to an OpenACC update otherwise. */
+ * opensps_host_register) on CUDA stream stream (opensps_stream_create), as one DMA into the
+ * buffer (an OpenACC runtime staged even registered memory: ~4.6 instead of ~11 GB/s on the A100
+ * node). Returns 0 on success; the caller falls back to a target update otherwise. */
 int opensps_memcpy_d2h_async(void *dst, const void *src, size_t bytes, void *stream)
 {
     pthread_once(&opensps_pinned_once, opensps_pinned_init);

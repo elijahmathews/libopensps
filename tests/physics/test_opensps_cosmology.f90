@@ -212,10 +212,7 @@ contains
         call print_group("IGM: Transparent Universe")
 
         wavelengths = [900.0_wp, 1000.0_wp, 1500.0_wp]
-        !$acc data copyin(wavelengths) create(transmission)
         call compute_igm_transmission(wavelengths, 3.0_wp, 0.0_wp, transmission)
-        !$acc update host(transmission)
-        !$acc end data
 
         call assert_true(all(abs(transmission - 1.0_wp) <= 0.0_wp), "Optical depth factor zero => T=1", &
                          total_tests, total_failures)
@@ -229,10 +226,7 @@ contains
         call print_group("IGM: Lyman Limit Step")
 
         wavelengths = [910.0_wp, 915.0_wp]
-        !$acc data copyin(wavelengths) create(transmission)
         call compute_igm_transmission(wavelengths, 3.0_wp, 1.0_wp, transmission)
-        !$acc update host(transmission)
-        !$acc end data
 
         tau_blue = -log(transmission(1))
         tau_red = -log(transmission(2))
@@ -255,10 +249,7 @@ contains
 
         call compute_madau_tau_raw_grid(wavelengths, 5.0_wp, tau_raw)
 
-        !$acc data copyin(wavelengths) create(transmission)
         call compute_igm_transmission(wavelengths, 5.0_wp, 1.0_wp, transmission)
-        !$acc update host(transmission)
-        !$acc end data
 
         tau_out = -log(transmission)
 

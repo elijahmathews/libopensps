@@ -355,19 +355,12 @@ contains
         tmp_nebem_line_val = ctx%state%nebem_line(1,1,1,1)
         ctx%state%nebem_cont = tmp_nebem_cont_val
         ctx%state%nebem_line = tmp_nebem_line_val
-        !$acc update device(ctx%state%nebem_cont, ctx%state%nebem_line)
 
-        !$acc data copyin(sspi, pset) copy(sspo, nebemline)
-        !$acc update device(sspo, nebemline)
-        !$acc update device(pset)
         tmp_add_neb_cont = ctx%add_neb_continuum_val
         tmp_nebemlineinspec = ctx%nebemlineinspec_val
         ctx%add_neb_continuum_val = tmp_add_neb_cont
         ctx%nebemlineinspec_val = tmp_nebemlineinspec
-        !$acc update device(ctx%add_neb_continuum_val, ctx%nebemlineinspec_val)
         call apply_nebular_emission(ctx, pset, sspi, sspo, nebemline)
-        !$acc update self(sspo, nebemline)
-        !$acc end data
 
         call assert_true(all(abs(sspo - sspi) <= EPS), "No nebular emission when Q=0", total_tests, total_failures)
         call assert_true(all(abs(nebemline) <= EPS), "No nebular lines when Q=0", total_tests, total_failures)
@@ -486,21 +479,14 @@ contains
         ctx%state%nebem_line = -75.0_wp
         ctx%state%nebem_line(1,:,:,:) = -45.0_wp
         ctx%state%nebem_line_pos(1) = tmp_line_pos1
-        !$acc update device(ctx%state%nebem_line, ctx%state%nebem_line_pos)
 
-        !$acc data copyin(sspi, pset) copy(sspo, nebemline, line_wpec)
-        !$acc update device(sspo, nebemline, line_wpec)
-        !$acc update device(pset)
         tmp_add_neb_cont = ctx%add_neb_continuum_val
         tmp_nebemlineinspec = ctx%nebemlineinspec_val
         tmp_smooth_velocity = ctx%smooth_velocity_val
         ctx%add_neb_continuum_val = tmp_add_neb_cont
         ctx%nebemlineinspec_val = tmp_nebemlineinspec
         ctx%smooth_velocity_val = tmp_smooth_velocity
-        !$acc update device(ctx%add_neb_continuum_val, ctx%nebemlineinspec_val, ctx%smooth_velocity_val)
         call apply_nebular_emission(ctx, pset, sspi, sspo, nebemline)
-        !$acc update self(sspo, nebemline)
-        !$acc end data
 
         line_wpec = sspo(:,1) - sspi(:,1)
         line_wpec(1:3) = 0.0_wp   ! ionizing pixels (absorbed by the gas), not line flux
@@ -556,20 +542,14 @@ contains
         tmp_xnebem_cont_val = ctx%state%xnebem_cont(1,1,1,1)
         ctx%state%nebem_cont = tmp_nebem_cont_val
         ctx%state%xnebem_cont = tmp_xnebem_cont_val
-        !$acc update device(ctx%state%nebem_cont, ctx%state%xnebem_cont)
 
-        !$acc data copyin(sspi, pset) copy(sspo)
-        !$acc update device(pset)
         tmp_add_neb_cont = ctx%add_neb_continuum_val
         tmp_nebemlineinspec = ctx%nebemlineinspec_val
         tmp_add_xrb = ctx%add_xrb_emission_val
         ctx%add_neb_continuum_val = tmp_add_neb_cont
         ctx%nebemlineinspec_val = tmp_nebemlineinspec
         ctx%add_xrb_emission_val = tmp_add_xrb
-        !$acc update device(ctx%add_neb_continuum_val, ctx%nebemlineinspec_val, ctx%add_xrb_emission_val)
         call apply_nebular_emission(ctx, pset, sspi, sspo)
-        !$acc update self(sspo)
-        !$acc end data
 
         call assert_true(sspo(4,1) > 0.0_wp, "Uses XRB grid for continuum", total_tests, total_failures)
 
@@ -625,18 +605,12 @@ contains
         ctx%state%nebem_cont = 1.0_wp
         tmp_nebem_cont_val = ctx%state%nebem_cont(1,1,1,1)
         ctx%state%nebem_cont = tmp_nebem_cont_val
-        !$acc update device(ctx%state%nebem_cont)
 
-        !$acc data copyin(sspi, pset) copy(sspo)
-        !$acc update device(pset)
         tmp_add_neb_cont = ctx%add_neb_continuum_val
         tmp_nebemlineinspec = ctx%nebemlineinspec_val
         ctx%add_neb_continuum_val = tmp_add_neb_cont
         ctx%nebemlineinspec_val = tmp_nebemlineinspec
-        !$acc update device(ctx%add_neb_continuum_val, ctx%nebemlineinspec_val)
         call apply_nebular_emission(ctx, pset, sspi, sspo)
-        !$acc update self(sspo)
-        !$acc end data
 
         call assert_true(all(abs(sspo - sspi) <= EPS), "No processing beyond nebular grid", total_tests, total_failures)
 
@@ -675,17 +649,11 @@ contains
         ctx%state%nebem_cont = 1.0_wp
         tmp_nebem_cont_val = ctx%state%nebem_cont(1,1,1,1)
         ctx%state%nebem_cont = tmp_nebem_cont_val
-        !$acc update device(ctx%state%nebem_cont)
-        !$acc data copyin(sspi, pset) copy(sspo)
-        !$acc update device(pset)
         tmp_add_neb_cont = ctx%add_neb_continuum_val
         tmp_nebemlineinspec = ctx%nebemlineinspec_val
         ctx%add_neb_continuum_val = tmp_add_neb_cont
         ctx%nebemlineinspec_val = tmp_nebemlineinspec
-        !$acc update device(ctx%add_neb_continuum_val, ctx%nebemlineinspec_val)
         call apply_nebular_emission(ctx, pset, sspi, sspo)
-        !$acc update self(sspo)
-        !$acc end data
         call assert_true(all(abs(sspo(4:4,1) - sspi(4:4,1)) <= EPS), "Continuum toggle off", total_tests, total_failures)
 
         ! Lines disabled in spectrum, but nebemline should populate
@@ -695,18 +663,11 @@ contains
         ctx%state%nebem_line(1,:,:,:) = 0.0_wp
         ctx%state%nebem_line = -30.0_wp
         ctx%state%nebem_line(1,:,:,:) = 0.0_wp
-        !$acc update device(ctx%state%nebem_line)
-        !$acc data copyin(sspi, pset) copy(sspo, nebemline)
-        !$acc update device(sspo, nebemline)
-        !$acc update device(pset)
         tmp_add_neb_cont = ctx%add_neb_continuum_val
         tmp_nebemlineinspec = ctx%nebemlineinspec_val
         ctx%add_neb_continuum_val = tmp_add_neb_cont
         ctx%nebemlineinspec_val = tmp_nebemlineinspec
-        !$acc update device(ctx%add_neb_continuum_val, ctx%nebemlineinspec_val)
         call apply_nebular_emission(ctx, pset, sspi, sspo, nebemline)
-        !$acc update self(sspo, nebemline)
-        !$acc end data
         call assert_true(all(abs(sspo(4:4,1) - sspi(4:4,1)) <= EPS), "Lines disabled in spectrum", total_tests, total_failures)
         call assert_true(nebemline(1,1) > 0.0_wp, "Nebemline populated when requested", total_tests, total_failures)
 
@@ -752,22 +713,16 @@ contains
         ctx%state%nebem_line = -100.0_wp
         ctx%state%xnebem_line = -20.0_wp
 
-        !$acc update device(ctx%state%nebem_line, ctx%state%xnebem_line)
 
-        !$acc data copyin(sspi, pset) copy(sspo, nebemline)
-        !$acc update device(pset)
         tmp_add_neb_cont = ctx%add_neb_continuum_val
         tmp_nebemlineinspec = ctx%nebemlineinspec_val
         tmp_add_xrb = ctx%add_xrb_emission_val
         ctx%add_neb_continuum_val = tmp_add_neb_cont
         ctx%nebemlineinspec_val = tmp_nebemlineinspec
         ctx%add_xrb_emission_val = tmp_add_xrb
-        !$acc update device(ctx%add_neb_continuum_val, ctx%nebemlineinspec_val, ctx%add_xrb_emission_val)
 
         call apply_nebular_emission(ctx, pset, sspi, sspo, nebemline)
 
-        !$acc update self(sspo, nebemline)
-        !$acc end data
 
         ! If the xnebem_line grid was accessed, we should get emission based on -20.0
         call assert_true(nebemline(1,1) > 0.0_wp, "Uses XRB grid for lines successfully", total_tests, total_failures)
