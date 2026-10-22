@@ -28,8 +28,8 @@ module opensps_csp_batch
     !> 5. Dust emission (energy balance): per-model reductions over pixels, then the
     !>    Draine & Li template, interpolated per model from the resident grid, is added.
     !> 6. IGM transmission (per model when the redshifts or igm_factor differ), then AGN dust
-    !>    emission (fagn, agn_tau per model), attenuated by the model's diffuse dust, as
-    !>    apply_agn_dust_emission.
+    !>    emission (fagn, agn_tau per model), attenuated by the model's diffuse dust, as legacy
+    !>    FSPS agn_dust.
     !> 7. Velocity smoothing (sigma_smooth, shared by the batch; smooth_velocity = 1 with the
     !>    default smoothspec_fast = 1), the sparse operator of apply_smoothing applied on the device;
     !>    the other smoothing modes on the host (apply_smoothing per model).
@@ -49,7 +49,7 @@ module opensps_csp_batch
     !>
     !> Instead of SFH parameters, a precomputed SSP-weight matrix (ages x N, ssp_weights) can be
     !> given (non-parametric SFHs): the weights of each SSP age (mass formed in that bin, as
-    !> compute_csp_scenario's csp_weights; spectra, mass and L_bol are per that mass), used as
+    !> sfh_weights_core gives them; spectra, mass and L_bol are per that mass), used as
     !> they are; tage is then not used, and SFR is not defined (NaN).
     !>
     !> With the SSP bases of all metallicities resident, a weight matrix over ages and
@@ -606,8 +606,8 @@ contains
         call attenuate_batch(ctx, psets, n_mod, nspec, iq, iu, wq, wu, gam, emis, agn_on, yo, total, absorbed, tdiff)
         if (any_emis) then
             call dust_emission_reductions(n_mod, nspec, emis, ctx%state%batch%wt, yo, absorbed, s_abs, s_norm, s_esc)
-            ! Lines not in the spectrum: their absorbed part (intrinsic - attenuated) is added, as
-            ! in apply_dust_attenuation_and_emission
+            ! Lines not in the spectrum: their absorbed part (intrinsic - attenuated) is added to
+            ! the absorbed luminosity (legacy add_dust)
             if (neb .and. ctx%nebemlineinspec_val == 0) then
                 !$acc parallel loop present(s_abs, s_line)
 #ifdef OMP_TARGET
@@ -912,7 +912,7 @@ contains
         else
             allocate(nb%lum(1, 1))
         end if
-        ! Pixel interval of each line wavelength (the search of apply_dust_attenuation_and_emission)
+        ! Pixel interval of each line wavelength
         allocate(nb%llo(NEMLINE))
         do i = 1, NEMLINE
             jc = 1
@@ -1017,7 +1017,7 @@ contains
         end subroutine move_r
     end subroutine pack_nebular
 
-    !> AGN template interval for pset (apply_agn_dust_emission); on = AGN emission is added.
+    !> AGN template interval for pset (agn_tau, not extrapolated); on = AGN emission is added.
     subroutine agn_indices(ctx, pset, on, ita, wta)
         type(opensps_context_t), intent(in) :: ctx
         type(params), intent(in)         :: pset
@@ -1035,7 +1035,7 @@ contains
         wta = max(0.0_wp, min(wta, 1.0_wp))
     end subroutine agn_indices
 
-    !> Interpolation indices of the Draine & Li grid (interpolate_draine_li_dust_model).
+    !> Interpolation indices of the Draine & Li grid in q_PAH and U_min.
     subroutine dl07_indices(ctx, pset, iq, wq, iu, wu, gam)
         type(opensps_context_t), intent(in) :: ctx
         type(params), intent(in)         :: pset
@@ -1053,7 +1053,8 @@ contains
         gam = max(0.0_wp, min(pset%duste_gamma, 1.0_wp))
     end subroutine dl07_indices
 
-    !> Draine & Li emission template at one pixel (as interpolate_draine_li_dust_model).
+    !> Draine & Li emission template at one pixel, interpolated in q_PAH and U_min and mixed
+    !> with gamma (legacy add_dust).
     function dl07_shape(ctx, i, iq, wq, iu, wu, gam) result(shape)
         !$acc routine seq
 #ifdef OMP_TARGET
@@ -1421,7 +1422,7 @@ contains
         end if
     end subroutine nebular_kernels
 
-    !> Line luminosities after dust (apply_dust_attenuation_and_emission): young lines through
+    !> Line luminosities after dust (legacy add_dust): young lines through
     !> the birth cloud, all through the diffuse dust at the line wavelength (the transmission
     !> interpolated between pixels, at KP as there). eml = attenuated luminosities; s_line =
     !> intrinsic - attenuated, per model.
@@ -1505,7 +1506,7 @@ contains
               (         wz) * (         wu) * grid(i, iz + 1, a, iu + 1)
     end function zu_point
 
-    !> AGN dust emission (apply_agn_dust_emission): fagn L_bol times the agn_tau template,
+    !> AGN dust emission (legacy agn_dust): fagn L_bol times the agn_tau template,
     !> attenuated by the model's diffuse dust; after the IGM transmission, as there.
     subroutine add_agn_batch(ctx, psets, n_mod, nspec, agn_on, ita, wta, lsum, tdiff, total)
         type(opensps_context_t), intent(in) :: ctx

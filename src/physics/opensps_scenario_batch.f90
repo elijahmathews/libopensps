@@ -1,7 +1,6 @@
-!> One code path (doc/ROADMAP.md, priority 2): compute_csp_scenario as a batch, as a submodule of
-!> opensps_csp so that opensps_csp (used by opensps_context) need not use opensps_csp_batch (which
-!> uses opensps_context): the submodule is compiled after both. Called by compute_csp_scenario
-!> (unless FSPS_SCENARIO_BATCH=0).
+!> compute_csp_scenario as a batch, as a submodule of opensps_csp so that opensps_csp (used by
+!> opensps_context) need not use opensps_csp_batch (which uses opensps_context): the submodule is
+!> compiled after both.
 submodule (opensps_csp) opensps_scenario_batch
     implicit none
 contains
@@ -20,38 +19,32 @@ contains
     !> the cosmology table, clamped to 0-20, as the scenario path), the spectrum at zred.
     !> Several metallicities (nzin > 1: tabular SFHs with a metallicity column, the bases of all
     !> metallicities resident) are summed with weights over ages and metallicities.
-    !> Returns .false. (results untouched) for the options the batch does not cover yet: several
-    !> metallicities without all bases resident, OpenACC multicore builds, and
-    !> anything the batch rejects (invalid dust settings: status /= 0).
+    !> Returns the batch's status (results untouched unless 0), or 3 if the resident SSP basis
+    !> does not have nzin metallicities (nzin > 1: all ctx%state%nz of them).
     !> Design note: doc/GPU_RESULTS.md, "compute_csp_scenario as a batch of one".
-    module function opensps_scenario_as_batch(ctx, pset, nzin, results) result(done)
-        use opensps_constants, only: NEMLINE
+    module function opensps_scenario_as_batch(ctx, pset, nzin, results) result(st)
+        use opensps_precision, only: WP
+        use opensps_constants, only: NEMLINE, SAFE_FLOOR
+        use opensps_sfh, only: get_sfh_properties_at_age
         use opensps_csp_batch, only: compute_csp_batch
         use opensps_interpolation, only: interpolate_linear
         type(opensps_context_t), intent(inout)       :: ctx
         type(params), intent(in)                  :: pset
         integer, intent(in)                       :: nzin
         type(compspout), allocatable, intent(inout) :: results(:)
-        logical :: done
+        integer :: st
 
         type(params), allocatable :: psets(:)
         real(WP), allocatable :: mags(:,:), spec(:,:), eml(:,:), indx(:,:), w(:,:), wh(:,:), t1(:), t2(:), wz(:,:,:)
         real(WP), allocatable :: mass(:), lbol(:), mdust(:), tage(:), mformed(:), sfr(:), frac(:), zmag(:)
         real(WP) :: mass_frac, sfr_norm, frac_linear, scale
-        integer :: st, nspec, nbands, nindx, nt, n, i
+        integer :: nspec, nbands, nindx, nt, n, i
         logical :: all_ages, tabular, grid_ages
 
-        done = .false.
-#ifdef ACC_MULTICORE
-        ! OpenACC multicore keeps the old path: its FP32 reductions are plain per-core sums (~2e-6 of
-        ! the peak here, against 4e-8 on the GPU and the CPU), which fails the single-age vs all-ages
-        ! oracle (1e-6 of the peak, test_physics_oracles); multicore is to be replaced by OpenMP
-        ! host threads (doc/ROADMAP.md)
-        return
-#endif
         ! One metallicity, or several (tabular SFHs with a metallicity column) with the bases of all
         ! of the context's metallicities resident: the batch then sums them with weights over ages
         ! and metallicities
+        st = 3
         if (size(ctx%state%ssp_basis_spec, 3) /= nzin) return
         if (nzin > 1 .and. nzin /= ctx%state%nz) return
         nt = ctx%state%ntfull
@@ -115,11 +108,6 @@ contains
             else
                 wz(:, :, i) = wh * scale
             end if
-            ! The weights stay readable where the scenario path leaves them (host copy)
-            if (allocated(ctx%state%csp_weights)) then
-                if (size(ctx%state%csp_weights, 1) >= nt .and. size(ctx%state%csp_weights, 2) >= nzin .and. &
-                    size(ctx%state%csp_weights, 3) >= i) ctx%state%csp_weights(1:nt, 1:nzin, i) = wh
-            end if
         end do
 
         ! The optional outputs and inputs are allocated only when used: an unallocated actual argument
@@ -174,7 +162,7 @@ contains
             results(i)%mformed = mformed(i)
             results(i)%age = log10(tage(i) * 1.0e9_wp)
         end do
-        done = .true.
+
     end function opensps_scenario_as_batch
 
 end submodule opensps_scenario_batch

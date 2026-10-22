@@ -87,8 +87,10 @@ format, conversion, packing; format and workflows in `doc/DATA_FORMAT.md`).
   - map everything a kernel touches explicitly: NVIDIA GPUs may tolerate a missing map,
     AMD GPUs fault.
   More in `doc/GPU_PLAN.md` ("Rules learned so far").
-- Keep `compute_csp_scenario` and `compute_csp_batch` physically identical; a physics change
-  goes into both and the batch test (`test_csp_batch`) checks them against each other.
+- The CSP physics has one implementation, `compute_csp_batch`; `compute_csp_scenario` runs as a
+  batch (one model per output age). A physics change goes there, in the OpenACC and OpenMP
+  directive sets alike, and is checked by the oracles and identities of `test_csp_batch` and
+  `test_physics_oracles` and against legacy FSPS.
 
 ## Git workflow
 

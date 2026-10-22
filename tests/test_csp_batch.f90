@@ -1,18 +1,23 @@
 program test_csp_batch
-    !> The batched CSP (compute_csp_batch) against compute_csp_scenario, model by model: spectra,
-    !> magnitudes, spectral indices, mass, L_bol, dust mass and SFR, for SFH types 0/1/4/5,
-    !> birth-cloud and diffuse dust (dust types 0, 1, 2, 4), dust emission (Draine & Li parameters
-    !> varied per model), nebular emission (continuum and lines; gas_logu, gas_logz and the line
-    !> luminosities compared too), AGN dust emission, and redshifts 0, 0.5 (with IGM absorption)
-    !> and 1.2; and per-model metallicity (logzsol varied, against compute_csp_scenario on the
-    !> SSP interpolated in log Z the same way). Requires the FSPS data tree, like the regression
-    !> tests.
+    !> The batched CSP (compute_csp_batch), the one implementation of the CSP physics:
+    !> - a batch of N models against N single calls (compute_csp_scenario, a batch of one), model
+    !>   by model: spectra, magnitudes, spectral indices, mass, L_bol, dust mass and SFR, for SFH
+    !>   types 0/1/4/5, birth-cloud and diffuse dust (dust types 0, 1, 2, 4), dust emission (Draine &
+    !>   Li parameters varied per model), nebular emission (continuum and lines), AGN dust emission,
+    !>   redshifts 0, 0.5 (with IGM absorption) and 1.2, per-model redshift and metallicity, every
+    !>   smoothing mode; also the SFH weights given as a matrix, and 24 models (the many-spectra
+    !>   kernels and cuBLAS products);
+    !> - identities: without dust, nebular emission, IGM and AGN a CSP is the SFH-weighted sum of
+    !>   its SSP basis; the all-ages output divided by the mass formed equals the single-age call at
+    !>   that age (in every mode, redshifted colours included); weights over ages and metallicities
+    !>   are additive and index the right basis.
+    !> Requires the data tree, like the regression tests.
 
     use opensps_precision, only: WP, KP
     use opensps_constants, only: NEMLINE
     use opensps_types, only: PARAMS, COMPSPOUT
     use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
-    use opensps_csp, only: compute_csp_scenario, set_scenario_batch
+    use opensps_csp, only: compute_csp_scenario, sfh_weights_core
     use opensps_csp_batch, only: compute_csp_batch, batch_spectra_device, batch_spectra_host
     use, intrinsic :: iso_c_binding, only: c_ptr, c_associated, c_loc, c_size_t, c_f_pointer
 #if defined(OMP_TARGET)
@@ -38,15 +43,6 @@ program test_csp_batch
     real(WP), parameter :: MAG_TOL = merge(1.0e-9_wp, 1.0e-5_wp, KP == WP)
     ! Spectral indices (absolute, as tools/compare_builds)
     real(WP), parameter :: INDX_TOL = merge(1.0e-8_wp, 1.0e-4_wp, KP == WP)
-    ! compute_csp_scenario in all-ages mode, old path vs batch: in OpenACC GPU builds the old
-    ! path computes the SFH weights of the outputs on the device and the batch path on the host.
-    ! At early ages these weights are differences of nearly equal indefinite moments (~5e-14 /
-    ! fraction formed, relative), so the two math libraries differ by up to ~1e-9 there (FP64)
-#if defined(_OPENACC) && !defined(ACC_MULTICORE)
-    real(WP), parameter :: ALL_AGES_TOL = 1.0e-8_wp
-#else
-    real(WP), parameter :: ALL_AGES_TOL = 0.0_wp
-#endif
     type(opensps_context_t), allocatable :: ctx
     real(WP) :: smooth_sigma = 0.0_wp   ! sigma_smooth of every model
     logical  :: zred_per_model = .false.  ! models at the redshifts ZLIST instead of one
@@ -54,13 +50,10 @@ program test_csp_batch
                                            0.02_wp, 0.8_wp, 1.6_wp, 2.5_wp, 0.3_wp, 0.0_wp]
 
     call skip_without_data()
-    call print_major_header("Batched CSP vs compute_csp_scenario")
+    call print_major_header("Batched CSP")
 
     allocate(ctx)
     call opensps_create(ctx)
-    ! The reference is the old single-call path (an independent implementation) and its SFH
-    ! weights, whatever FSPS_SCENARIO_BATCH says
-    call set_scenario_batch(.false.)
     ctx%pset%zmet = 10
     call opensps_setup(ctx, 10, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
     call opensps_context_move_to_device(ctx)
@@ -92,36 +85,33 @@ program test_csp_batch
     zred_per_model = .false.
     ! Per-model metallicity: all bases resident, logzsol varied
     call check_batch_z()
-    ! compute_csp_scenario through the batch (the default) against its old path, one
-    ! age and all ages (tage = 0: every age of the grid), on the one-metallicity basis
+    ! compute_csp_scenario: all-ages outputs against single-age calls, in each mode, on the
+    ! one-metallicity basis
     call build_basis()
-    call set_int('add_igm_absorption', 0)
-    call set_int('add_neb_emission', 0)
-    call set_int('add_agn_dust', 0)
-    call check_scenario_paths(2, 0.0_wp, 0, 0, 0, "Calzetti")
-    call check_scenario_paths(0, 0.5_wp, 1, 1, 1, "power law, z = 0.5, IGM, nebular, AGN")
+    call check_weighted_sums()
+    call check_all_ages(2, 0.0_wp, 0, 0, 0, "Calzetti")
+    call check_all_ages(0, 0.5_wp, 1, 1, 1, "power law, z = 0.5, IGM, nebular, AGN")
     call set_int('smooth_velocity', 1)
     smooth_sigma = 150.0_wp
-    call check_scenario_paths(4, 1.2_wp, 1, 0, 1, "Kriek & Conroy, z = 1.2, IGM, AGN, sigma_smooth = 150 km/s")
+    call check_all_ages(4, 1.2_wp, 1, 0, 1, "Kriek & Conroy, z = 1.2, IGM, AGN, sigma_smooth = 150 km/s")
     ! The smoothing modes the batch runs on the host: the exact velocity convolution
     ! (smoothspec_fast = 0) and a constant width in wavelength (smooth_velocity = 0, 5 A)
     call set_int('smoothspec_fast', 0)
     call check_batch(2, 0.5_wp, 1, 1, 1, "Calzetti, z = 0.5, IGM, nebular, AGN, exact sigma_smooth = 150 km/s")
-    call check_scenario_paths(2, 0.5_wp, 1, 1, 1, "Calzetti, z = 0.5, IGM, nebular, AGN, exact sigma_smooth = 150 km/s")
+    call check_all_ages(2, 0.5_wp, 1, 1, 1, "Calzetti, z = 0.5, IGM, nebular, AGN, exact sigma_smooth = 150 km/s")
     call set_int('smoothspec_fast', 1)
     call set_int('smooth_velocity', 0)
     smooth_sigma = 5.0_wp
     call check_batch(2, 0.0_wp, 0, 0, 1, "Calzetti, AGN, sigma_smooth = 5 A")
-    call check_scenario_paths(2, 0.0_wp, 0, 0, 1, "Calzetti, AGN, sigma_smooth = 5 A")
+    call check_all_ages(2, 0.0_wp, 0, 0, 1, "Calzetti, AGN, sigma_smooth = 5 A")
     call set_int('smooth_velocity', 1)
     smooth_sigma = 0.0_wp
     ! Redshifted colours: the magnitudes of each output at the redshift of its age
     call set_int('redshift_colors', 1)
-    call check_scenario_paths(2, 0.5_wp, 1, 1, 1, "Calzetti, z = 0.5, IGM, nebular, AGN, redshifted colours")
+    call check_all_ages(2, 0.5_wp, 1, 1, 1, "Calzetti, z = 0.5, IGM, nebular, AGN, redshifted colours")
     call set_int('redshift_colors', 0)
-    ! Several metallicities: a tabular SFH with a metallicity per bin
-    call check_scenario_tabular_z()
-    call set_scenario_batch(.false.)
+    ! Weights over ages and metallicities (several metallicities; tabular SFHs with Z per bin)
+    call check_weights_z()
 
     call opensps_destroy(ctx)
     deallocate(ctx)
@@ -208,7 +198,7 @@ contains
         real(WP) :: mass(N_MOD), lbol(N_MOD), mdust(N_MOD), sfr(N_MOD)
         real(WP) :: ref_mass(N_MOD), ref_lbol(N_MOD), ref_mdust(N_MOD), ref_sfr(N_MOD)
         real(WP), allocatable :: spec2(:, :), mags2(:, :)
-        real(WP), allocatable :: eml(:, :), ref_eml(:, :), indx(:, :), ref_indx(:, :), ref_w(:, :)
+        real(WP), allocatable :: eml(:, :), ref_eml(:, :), indx(:, :), ref_indx(:, :), ref_w(:, :), t1(:), t2(:)
         real(WP) :: d_spec, d_mag, d_scal, d_line, d_indx
         integer :: m, status, nspec, nbands
 
@@ -217,7 +207,8 @@ contains
         nbands = ctx%state%nbands
         allocate(spec(nspec, N_MOD), mags(nbands, N_MOD), ref_spec(nspec, N_MOD), ref_mags(nbands, N_MOD))
         allocate(eml(NEMLINE, N_MOD), ref_eml(NEMLINE, N_MOD), indx(ctx%state%nindx, N_MOD), &
-                 ref_indx(ctx%state%nindx, N_MOD), ref_w(ctx%state%ntfull, N_MOD))
+                 ref_indx(ctx%state%nindx, N_MOD), ref_w(ctx%state%ntfull, N_MOD), t1(ctx%state%ntfull), &
+                 t2(ctx%state%ntfull))
         call set_int('dust_type', dust_type)
         call set_int('add_igm_absorption', igm)
         call set_int('add_neb_emission', neb)
@@ -240,7 +231,7 @@ contains
             ref_lbol(m) = results(1)%lbol_csp
             ref_mdust(m) = results(1)%mdust
             ref_sfr(m) = results(1)%sfr
-            ref_w(:, m) = ctx%state%csp_weights(1:ctx%state%ntfull, 1, 1)
+            call sfh_weights_core(ctx, psets(m), psets(m)%tage, 1, ref_w(:, m:m), t1, t2)
         end do
 
         call compute_csp_batch(ctx, psets, mags, status, spec=spec, mass=mass, lbol=lbol, mdust=mdust, sfr=sfr, &
@@ -293,175 +284,9 @@ contains
         call assert_true(d_mag <= MAG_TOL, "magnitudes (24 models)", total_tests, total_failures)
     end subroutine check_batch
 
-    !> compute_csp_scenario through the batch against the old single-call path, for models 1, 2,
-    !> 3 and 6 (sfh 1, 4, 5 and 4 with sf_start = 0.5 Gyr) at their tage and at tage = 0 (all
-    !> ages: every output, including those before sf_start, where nothing has formed yet).
-    subroutine check_scenario_paths(dust_type, zred, igm, neb, agn, label)
-        integer, intent(in) :: dust_type, igm, neb, agn
-        real(WP), intent(in) :: zred
-        character(len=*), intent(in) :: label
-        integer, parameter :: models(4) = [1, 2, 3, 6]
-        type(PARAMS) :: pset
-        real(WP) :: d(4), dmax(4)
-        integer :: im, k
-        logical :: ok, all_ok
-        character(len=16) :: mode
 
-        call print_group("compute_csp_scenario through the batch vs the old path: " // label)
-        call set_int('dust_type', dust_type)
-        call set_int('add_igm_absorption', igm)
-        call set_int('add_neb_emission', neb)
-        call set_int('add_agn_dust', agn)
-        do k = 1, 2
-            mode = merge('one age  ', 'all ages ', k == 1)
-            dmax = 0.0_wp
-            all_ok = .true.
-            do im = 1, size(models)
-                call set_model(models(im), zred)
-                if (k == 2) call set_float('tage', 0.0_wp)
-                call opensps_context_prepare_pset(ctx)
-                call opensps_context_get_pset(ctx, pset)
-                call compare_paths(pset, 1, ok, d)
-                all_ok = all_ok .and. ok
-                dmax = max(dmax, d)
-            end do
-            call assert_paths(trim(mode), all_ok, dmax, merge(0.0_wp, ALL_AGES_TOL, k == 1))
-        end do
-    end subroutine check_scenario_paths
 
-    !> Several metallicities (nzin = nz): a tabular SFH (sfh = 3) whose metallicity rises with
-    !> time, on the bases of all metallicities, at one age, at the last age of the table
-    !> (tage = -99) and at all ages; old path against the batch with weights over ages and
-    !> metallicities.
-    subroutine check_scenario_tabular_z()
-        type(PARAMS) :: pset
-        real(WP), allocatable :: spec_z(:, :, :), mass_z(:, :), lbol_z(:, :)
-        real(WP), parameter :: tab_age(5) = [0.0_wp, 2.0_wp, 6.0_wp, 10.0_wp, 13.0_wp]   ! Gyr
-        real(WP), parameter :: tab_sfr(5) = [0.5_wp, 3.0_wp, 2.0_wp, 1.0_wp, 0.4_wp]     ! Msun/yr
-        real(WP), parameter :: tab_met(5) = [0.0004_wp, 0.002_wp, 0.008_wp, 0.014_wp, 0.025_wp]
-        real(WP) :: d(4)
-        integer  :: nz, nt, nspec, z, k
-        logical  :: ok
 
-        call print_group("compute_csp_scenario through the batch vs the old path: tabular SFH, " // &
-                         "metallicity per bin (nzin = nz), dust, IGM, AGN")
-        nz = ctx%state%nz
-        nt = ctx%state%ntfull
-        nspec = ctx%state%nspec
-        allocate(spec_z(nspec, nt, nz), mass_z(nt, nz), lbol_z(nt, nz))
-        do z = 1, nz
-            call set_int('zmet', z)
-            call opensps_context_prepare_pset(ctx)
-            call opensps_context_get_pset(ctx, pset)
-            call opensps_context_set_pset(ctx, pset)
-            call generate_ssp_grid(ctx, pset, mass_z(:, z), lbol_z(:, z), spec_z(:, :, z))
-        end do
-        call set_int('zmet', 10)
-        call opensps_context_update_ssp_basis(ctx, spec_z, mass_z, lbol_z, nz)
-        ctx%state%sfh_tab = 0.0_wp
-        ctx%state%ntabsfh = size(tab_age)
-        ctx%state%sfh_tab(1, 1:size(tab_age)) = tab_age * 1.0e9_wp
-        ctx%state%sfh_tab(2, 1:size(tab_age)) = tab_sfr
-        ctx%state%sfh_tab(3, 1:size(tab_age)) = tab_met
-        call set_int('dust_type', 2)
-        call set_int('add_igm_absorption', 1)
-        call set_int('add_neb_emission', 0)
-        call set_int('add_agn_dust', 1)
-        do k = 1, 3
-            call set_model(1, 0.5_wp)
-            call set_int('sfh', 3)
-            call set_float('tage', merge(8.0_wp, merge(-99.0_wp, 0.0_wp, k == 2), k == 1))
-            call opensps_context_prepare_pset(ctx)
-            call opensps_context_get_pset(ctx, pset)
-            call compare_paths(pset, nz, ok, d)
-            select case (k)
-            case (1)
-                call assert_paths("tage = 8", ok, d, 0.0_wp)
-            case (2)
-                call assert_paths("tage = -99", ok, d, 0.0_wp)
-            case default
-                call assert_paths("all ages", ok, d, ALL_AGES_TOL)
-            end select
-        end do
-        call set_int('sfh', 1)
-        ! Back to the one-metallicity basis
-        call build_basis()
-    end subroutine check_scenario_tabular_z
-
-    !> One compute_csp_scenario call through each path (nzin metallicities): ok if both return
-    !> status 0 with the same outputs and the batch path was taken; d = largest differences
-    !> (spectrum, magnitudes, scalars: mass, L_bol, SFR, mass formed, age; emission lines).
-    subroutine compare_paths(pset, nzin, ok, d)
-        type(PARAMS), intent(in) :: pset
-        integer, intent(in)      :: nzin
-        logical, intent(out)     :: ok
-        real(WP), intent(out)    :: d(4)
-        type(COMPSPOUT), allocatable :: old(:), new(:)
-        real(WP), allocatable :: s_old(:, :), s_new(:, :), m_old(:, :), m_new(:, :)
-        real(WP) :: d_spec, d_mag, mf_max
-        integer :: i, nspec, nbands, st_old, st_new, n
-
-        nspec = ctx%state%nspec
-        nbands = ctx%state%nbands
-        d = 0.0_wp
-        call set_scenario_batch(.false.)
-        call compute_csp_scenario(ctx, pset, nzin, old, st_old)
-        call set_scenario_batch(.true.)
-        ctx%state%batch_out%n = 0
-        call compute_csp_scenario(ctx, pset, nzin, new, st_new)
-        ! (batch_out%n: the outputs of the last batch call, so the batch path was taken)
-        ok = st_old == 0 .and. st_new == 0
-        if (.not. ok) return
-        ok = size(old) == size(new) .and. ctx%state%batch_out%n == size(new)
-        if (.not. ok) return
-        n = size(old)
-        allocate(s_old(nspec, n), s_new(nspec, n), m_old(nbands, n), m_new(nbands, n))
-        mf_max = maxval(old(:)%mformed)
-        do i = 1, n
-            s_old(:, i) = old(i)%spec(1:nspec)
-            s_new(:, i) = new(i)%spec(1:nspec)
-            m_old(:, i) = old(i)%mags(1:nbands)
-            m_new(:, i) = new(i)%mags(1:nbands)
-            ! Ages with stars only (none formed before sf_start: zero spectrum), and in all-ages
-            ! mode ages that have formed at least 1e-3 of the final mass: below, the SFH weights
-            ! are differences of nearly equal indefinite moments, good to ~5e-14 / (fraction
-            ! formed) relative, and the two paths compute them with different math libraries in
-            ! device builds (the old one on the device, the batch's on the host)
-            if (maxval(s_old(:, i)) <= 0.0_wp .and. any(s_new(:, i) /= 0.0_wp)) d(1) = huge(1.0_wp)
-            if (maxval(s_old(:, i)) <= 0.0_wp .or. old(i)%mformed < 1.0e-3_wp * mf_max) then
-                s_old(:, i) = 1.0_wp; s_new(:, i) = 1.0_wp
-                m_old(:, i) = 0.0_wp; m_new(:, i) = 0.0_wp
-                cycle
-            end if
-            d(3) = max(d(3), abs(new(i)%mass_csp - old(i)%mass_csp) / max(abs(old(i)%mass_csp), tiny(1.0_wp)), &
-                       abs(new(i)%lbol_csp - old(i)%lbol_csp), &
-                       abs(new(i)%sfr - old(i)%sfr) / max(abs(old(i)%sfr), tiny(1.0_wp)), &
-                       abs(new(i)%mformed - old(i)%mformed) / max(abs(old(i)%mformed), tiny(1.0_wp)), &
-                       abs(new(i)%age - old(i)%age))
-            if (maxval(old(i)%emlines) > 0.0_wp) d(4) = max(d(4), &
-                maxval(abs(new(i)%emlines / old(i)%emlines - 1.0_wp), &
-                       mask=old(i)%emlines > 1.0e-3_wp * maxval(old(i)%emlines)))
-        end do
-        call max_differences(s_new, m_new, s_old, m_old, d_spec, d_mag)
-        d(1) = max(d(1), d_spec)
-        d(2) = d_mag
-    end subroutine compare_paths
-
-    !> The assertions of one compare_paths result (or the largest over several); tol, if larger,
-    !> replaces the tolerances (ALL_AGES_TOL).
-    subroutine assert_paths(mode, ok, d, tol)
-        character(len=*), intent(in) :: mode
-        logical, intent(in)          :: ok
-        real(WP), intent(in)         :: d(4), tol
-
-        write(*, '(A,4ES10.2)') "# " // mode // ": max difference (spectrum, mag, scalars, lines): ", d
-        call assert_true(ok, mode // ": status 0, same outputs, through the batch", total_tests, total_failures)
-        call assert_true(d(1) <= max(SPEC_RTOL, tol), mode // ": spectra", total_tests, total_failures)
-        call assert_true(d(2) <= max(MAG_TOL, tol), mode // ": magnitudes", total_tests, total_failures)
-        call assert_true(d(3) <= max(1.0e-12_wp, tol), mode // ": mass, L_bol, SFR, mass formed, age", &
-                         total_tests, total_failures)
-        call assert_true(d(4) <= max(SPEC_RTOL, tol), mode // ": emission lines", total_tests, total_failures)
-    end subroutine assert_paths
 
     !> Largest relative spectrum difference (pixels above 1e-6 of each peak) and magnitude
     !> difference (bands within 30 mag of the brightest) over the columns.
@@ -569,6 +394,224 @@ contains
         call assert_true(d_line <= SPEC_RTOL, "emission lines", total_tests, total_failures)
         call assert_true(d_indx <= INDX_TOL, "spectral indices", total_tests, total_failures)
     end subroutine check_batch_z
+
+    !> A single-age CSP without dust, nebular emission, IGM, AGN or smoothing is the SFH-weighted
+    !> sum of its SSP basis: spec = sum_t w_t spec_ssp(t), mass = sum_t w_t mass_ssp(t),
+    !> L_bol = sum_t w_t L_ssp(t), with the weights of sfh_weights_core (models 1-6: sfh 1, 4, 5,
+    !> 0 and the sf_start case).
+    subroutine check_weighted_sums()
+        type(PARAMS) :: pset
+        type(COMPSPOUT), allocatable :: results(:)
+        real(WP), allocatable :: w(:, :), t1(:), t2(:), ref(:)
+        real(WP) :: mass, lsum, d_spec, d_scal, peak
+        integer  :: m, t, i, nt, nspec, status
+
+        call print_group("compute_csp_scenario = SFH-weighted sum of the SSP basis (no dust, nebular, IGM, AGN)")
+        nt = ctx%state%ntfull
+        nspec = ctx%state%nspec
+        allocate(w(nt, 1), t1(nt), t2(nt), ref(nspec))
+        call set_int('dust_type', 0)
+        call set_int('add_igm_absorption', 0)
+        call set_int('add_neb_emission', 0)
+        call set_int('add_agn_dust', 0)
+        d_spec = 0.0_wp
+        d_scal = 0.0_wp
+        do m = 1, 6
+            call set_model(m, 0.0_wp)
+            call set_float('dust1', 0.0_wp)
+            call set_float('dust2', 0.0_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pset)
+            call compute_csp_scenario(ctx, pset, 1, results, status)
+            call assert_true(status == 0, "status 0", total_tests, total_failures)
+            if (status /= 0) return
+            call sfh_weights_core(ctx, pset, pset%tage, 1, w, t1, t2)
+            ref = 0.0_wp
+            mass = 0.0_wp
+            lsum = 0.0_wp
+            do t = 1, nt
+                if (.not. (w(t, 1) > 0.0_wp)) cycle
+                ref = ref + w(t, 1) * real(ctx%state%ssp_basis_spec(1:nspec, t, 1), WP)
+                mass = mass + w(t, 1) * ctx%state%ssp_basis_mass(t, 1)
+                lsum = lsum + w(t, 1) * 10.0_wp**ctx%state%ssp_basis_lbol(t, 1)
+            end do
+            peak = maxval(ref)
+            do i = 1, nspec
+                if (ref(i) > 1.0e-6_wp * peak) d_spec = max(d_spec, abs(results(1)%spec(i) / ref(i) - 1.0_wp))
+            end do
+            d_scal = max(d_scal, abs(results(1)%mass_csp / mass - 1.0_wp), abs(results(1)%lbol_csp - log10(lsum)))
+        end do
+        write(*, '(A,2ES10.2)') "# max difference (spectrum, mass/lbol): ", d_spec, d_scal
+        call assert_true(d_spec <= SPEC_RTOL, "spectra", total_tests, total_failures)
+        call assert_true(d_scal <= 1.0e-12_wp, "mass, L_bol", total_tests, total_failures)
+    end subroutine check_weighted_sums
+
+    !> All-ages mode (tage = 0) against single-age calls: output i, per unit mass formed over the
+    !> full history, divided by the fraction formed by then (mformed), equals the call at that age
+    !> (10**(time_full(i) - 9) Gyr, formed as compute_csp_scenario forms it), for models 1, 2, 3
+    !> and 6 (sfh 1, 4, 5, 4 with sf_start) at three ages with at least 1e-3 of the final mass
+    !> formed: every output is linear in the SFH weights (the AGN torus through L_bol too). The
+    !> magnitudes differ by 2.5 log10(mformed), SFR by the factor mformed; indices not at all.
+    subroutine check_all_ages(dust_type, zred, igm, neb, agn, label)
+        integer, intent(in) :: dust_type, igm, neb, agn
+        real(WP), intent(in) :: zred
+        character(len=*), intent(in) :: label
+        integer, parameter :: models(4) = [1, 2, 3, 6]
+        real(WP), parameter :: LOGT(3) = [8.5_wp, 9.3_wp, 9.9_wp]
+        type(PARAMS) :: pset
+        type(COMPSPOUT), allocatable :: ra(:), rs(:)
+        real(WP) :: d(5), f, peak, tg
+        integer  :: im, k, i, j, nspec, nbands, st
+        logical  :: ok
+
+        call print_group("compute_csp_scenario, all ages = single ages: " // label)
+        nspec = ctx%state%nspec
+        nbands = ctx%state%nbands
+        call set_int('dust_type', dust_type)
+        call set_int('add_igm_absorption', igm)
+        call set_int('add_neb_emission', neb)
+        call set_int('add_agn_dust', agn)
+        d = 0.0_wp
+        ok = .true.
+        do im = 1, size(models)
+            call set_model(models(im), zred)
+            call set_float('tage', 0.0_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pset)
+            call compute_csp_scenario(ctx, pset, 1, ra, st)
+            ok = ok .and. st == 0 .and. size(ra) == ctx%state%ntfull
+            if (.not. ok) exit
+            do k = 1, size(LOGT)
+                i = minloc(abs(ctx%state%time_full(1:ctx%state%ntfull) - LOGT(k)), dim=1)
+                f = ra(i)%mformed
+                if (f < 1.0e-3_wp * maxval(ra(:)%mformed)) cycle
+                tg = 10.0_wp**(ctx%state%time_full(i) - 9.0_wp)
+                pset%tage = tg
+                call compute_csp_scenario(ctx, pset, 1, rs, st)
+                ok = ok .and. st == 0
+                if (.not. ok) exit
+                peak = maxval(rs(1)%spec(1:nspec))
+                do j = 1, nspec
+                    if (rs(1)%spec(j) > 1.0e-6_wp * peak) &
+                        d(1) = max(d(1), abs(ra(i)%spec(j) / f / rs(1)%spec(j) - 1.0_wp))
+                end do
+                do j = 1, nbands
+                    if (rs(1)%mags(j) == rs(1)%mags(j) .and. rs(1)%mags(j) < minval(rs(1)%mags, &
+                        mask=rs(1)%mags == rs(1)%mags) + 30.0_wp) &
+                        d(2) = max(d(2), abs(ra(i)%mags(j) + 2.5_wp * log10(f) - rs(1)%mags(j)))
+                end do
+                d(3) = max(d(3), abs(ra(i)%mass_csp / f / rs(1)%mass_csp - 1.0_wp), &
+                           abs(ra(i)%lbol_csp - log10(f) - rs(1)%lbol_csp), &
+                           abs(ra(i)%sfr - rs(1)%sfr * f) / max(abs(ra(i)%sfr), tiny(1.0_wp)), &
+                           abs(ra(i)%age - rs(1)%age))
+                if (maxval(rs(1)%emlines) > 0.0_wp) d(4) = max(d(4), maxval(abs(ra(i)%emlines / f / &
+                    rs(1)%emlines - 1.0_wp), mask=rs(1)%emlines > 1.0e-3_wp * maxval(rs(1)%emlines)))
+                d(5) = max(d(5), maxval(abs(ra(i)%indx - rs(1)%indx)))
+            end do
+        end do
+        write(*, '(A,5ES10.2)') "# max difference (spectrum, mag, scalars, lines, indices): ", d
+        call assert_true(ok, "status 0, ntfull outputs", total_tests, total_failures)
+        call assert_true(d(1) <= SPEC_RTOL, "spectra", total_tests, total_failures)
+        call assert_true(d(2) <= MAG_TOL, "magnitudes", total_tests, total_failures)
+        call assert_true(d(3) <= max(1.0e-12_wp, SPEC_RTOL), "mass, L_bol, SFR, age", total_tests, total_failures)
+        call assert_true(d(4) <= SPEC_RTOL, "emission lines", total_tests, total_failures)
+        call assert_true(d(5) <= INDX_TOL, "spectral indices", total_tests, total_failures)
+    end subroutine check_all_ages
+
+    !> Weights over ages and metallicities (ssp_weights_z), the bases of all metallicities
+    !> resident: the same SFH weights in metallicities z1 alone, z2 alone and both, with dust,
+    !> dust emission, IGM and AGN (all linear in the weights): both = z1 + z2 (spectra, mass,
+    !> L_bol); z1 alone = the plain weight matrix on the basis of z1 alone. Then
+    !> compute_csp_scenario with nzin = nz: a tabular SFH with a metallicity per bin, at one age,
+    !> at the end of the table (tage = -99) and at all ages.
+    subroutine check_weights_z()
+        type(PARAMS) :: pset, psets(1)
+        type(COMPSPOUT), allocatable :: results(:)
+        real(WP), allocatable :: spec_z(:, :, :), mass_z(:, :), lbol_z(:, :), wz(:, :, :), w(:, :), t1(:), t2(:)
+        real(WP), allocatable :: s(:, :), mags(:, :)
+        real(WP) :: mass(3), lbol(3), m1(1), l1(1), d_add, d_one, peak
+        real(WP), parameter :: tab_age(5) = [0.0_wp, 2.0_wp, 6.0_wp, 10.0_wp, 13.0_wp]   ! Gyr
+        real(WP), parameter :: tab_sfr(5) = [0.5_wp, 3.0_wp, 2.0_wp, 1.0_wp, 0.4_wp]     ! Msun/yr
+        real(WP), parameter :: tab_met(5) = [0.0004_wp, 0.002_wp, 0.008_wp, 0.014_wp, 0.025_wp]
+        integer, parameter :: Z1 = 4, Z2 = 9
+        integer  :: nz, nt, nspec, z, k, i, st
+
+        call print_group("Weights over ages and metallicities (ssp_weights_z); tabular SFH with Z per bin")
+        nz = ctx%state%nz
+        nt = ctx%state%ntfull
+        nspec = ctx%state%nspec
+        allocate(spec_z(nspec, nt, nz), mass_z(nt, nz), lbol_z(nt, nz), wz(nt, nz, 3), w(nt, 1), t1(nt), t2(nt), &
+                 s(nspec, 3), mags(ctx%state%nbands, 3))
+        do z = 1, nz
+            call set_int('zmet', z)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pset)
+            call opensps_context_set_pset(ctx, pset)
+            call generate_ssp_grid(ctx, pset, mass_z(:, z), lbol_z(:, z), spec_z(:, :, z))
+        end do
+        call set_int('zmet', 10)
+        call opensps_context_update_ssp_basis(ctx, spec_z, mass_z, lbol_z, nz)
+        call set_int('dust_type', 2)
+        call set_int('add_igm_absorption', 1)
+        call set_int('add_neb_emission', 0)
+        call set_int('add_agn_dust', 1)
+        call set_model(1, 0.5_wp)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        call sfh_weights_core(ctx, pset, pset%tage, 1, w, t1, t2)
+        where (.not. (w > 0.0_wp)) w = 0.0_wp
+        wz = 0.0_wp
+        wz(:, Z1, 1) = w(:, 1)
+        wz(:, Z2, 2) = w(:, 1)
+        wz(:, Z1, 3) = w(:, 1)
+        wz(:, Z2, 3) = w(:, 1)
+        call compute_csp_batch(ctx, [pset, pset, pset], mags, st, spec=s, mass=mass, lbol=lbol, ssp_weights_z=wz)
+        call assert_true(st == 0, "status 0 (ssp_weights_z)", total_tests, total_failures)
+        if (st /= 0) return
+        peak = maxval(s(:, 3))
+        d_add = max(abs((mass(1) + mass(2)) / mass(3) - 1.0_wp), &
+                    abs(log10(10.0_wp**lbol(1) + 10.0_wp**lbol(2)) - lbol(3)))
+        do i = 1, nspec
+            if (s(i, 3) > 1.0e-6_wp * peak) d_add = max(d_add, abs((s(i, 1) + s(i, 2)) / s(i, 3) - 1.0_wp))
+        end do
+        ! z1 alone against the one-metallicity basis of z1 with the plain weight matrix
+        call opensps_context_update_ssp_basis(ctx, spec_z(:, :, Z1:Z1), mass_z(:, Z1:Z1), lbol_z(:, Z1:Z1), 1)
+        psets(1) = pset
+        call compute_csp_batch(ctx, psets, mags(:, 1:1), st, spec=s(:, 2:2), mass=m1, lbol=l1, ssp_weights=w)
+        call assert_true(st == 0, "status 0 (one-metallicity basis)", total_tests, total_failures)
+        d_one = max(abs(m1(1) / mass(1) - 1.0_wp), abs(l1(1) - lbol(1)))
+        peak = maxval(s(:, 1))
+        do i = 1, nspec
+            if (s(i, 1) > 1.0e-6_wp * peak) d_one = max(d_one, abs(s(i, 2) / s(i, 1) - 1.0_wp))
+        end do
+        write(*, '(A,2ES10.2)') "# max difference (z1 + z2 vs both, z1 vs one-metallicity basis): ", d_add, d_one
+        call assert_true(d_add <= max(1.0e-12_wp, SPEC_RTOL), "both metallicities = sum of each", &
+                         total_tests, total_failures)
+        call assert_true(d_one <= max(1.0e-12_wp, SPEC_RTOL), "one metallicity = the one-metallicity basis", &
+                         total_tests, total_failures)
+
+        ! A tabular SFH with a metallicity per bin through compute_csp_scenario (nzin = nz)
+        call opensps_context_update_ssp_basis(ctx, spec_z, mass_z, lbol_z, nz)
+        ctx%state%sfh_tab = 0.0_wp
+        ctx%state%ntabsfh = size(tab_age)
+        ctx%state%sfh_tab(1, 1:size(tab_age)) = tab_age * 1.0e9_wp
+        ctx%state%sfh_tab(2, 1:size(tab_age)) = tab_sfr
+        ctx%state%sfh_tab(3, 1:size(tab_age)) = tab_met
+        call set_int('sfh', 3)
+        do k = 1, 3
+            call set_float('tage', merge(8.0_wp, merge(-99.0_wp, 0.0_wp, k == 2), k == 1))
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pset)
+            call compute_csp_scenario(ctx, pset, nz, results, st)
+            call assert_true(st == 0 .and. size(results) == merge(nt, 1, k == 3) .and. &
+                             all(results(:)%mass_csp == results(:)%mass_csp) .and. results(1)%mformed > 0.0_wp, &
+                             trim(merge("tabular, Z per bin, tage = 8  ", "tabular, Z per bin, tage = -99", k == 1)) // &
+                             trim(merge("            ", ", all ages  ", k /= 3)) // ": status 0, finite", &
+                             total_tests, total_failures)
+        end do
+        call set_int('sfh', 1)
+        call build_basis()
+    end subroutine check_weights_z
 
     !> batch_spectra_device after a batch with spec: the spectra at the returned address (on the
     !> device in GPU builds) equal the ones copied back

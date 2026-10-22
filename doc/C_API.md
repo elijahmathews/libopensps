@@ -102,7 +102,7 @@ void opensps_context_get_csp(int handle, double *age, double *mass, double *lbol
                           double *emlines, double *indx, int *status);
 ```
 
-`opensps_context_compute_csp` runs `compute_csp_scenario` (the reference single-model path) for the
+`opensps_context_compute_csp` runs `compute_csp_scenario` (one batch call, one model per output age) for the
 context's parameters. `zcontinuous` selects the SSPs: 0 the grid at `zmet`; 1 the grids
 interpolated linearly in log Z at `logzsol`; 2 a metallicity distribution (`pmetals`); 3 all
 metallicities, with the metallicity column of a tabular SFH. SSP grids are computed per
