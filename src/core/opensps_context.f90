@@ -49,6 +49,7 @@ module opensps_context
     integer, parameter :: OPENSPS_ERR_UNKNOWN_INT_PARAM = 101
     integer, parameter :: OPENSPS_ERR_UNKNOWN_FLOAT_PARAM = 102
     integer, parameter :: OPENSPS_ERR_UNKNOWN_STRING_PARAM = 103
+    integer, parameter :: OPENSPS_ERR_UNSUPPORTED_PARAM = 104
 
 contains
 
@@ -73,7 +74,6 @@ contains
         ctx%pzcon_val = 0
         ctx%interpolation_type_val = 0
         ctx%tiny_logt_val = 0.0_wp
-        ctx%compute_light_ages_val = 0
         ctx%add_dust_emission_val = 1
         ctx%add_agn_dust_val = 1
         ctx%add_agb_dust_model_val = 1
@@ -322,7 +322,9 @@ contains
             ctx%redshift_colors_val = value
             ctx%settings_dirty = .true.
         case ('compute_light_ages')
-            ctx%compute_light_ages_val = value
+            ! Light-weighted ages are not supported (dropped in API 2.0: the outputs were not ages;
+            ! doc/ROADMAP.md); 0, the FSPS default, is accepted for compatibility
+            if (value /= 0) status = OPENSPS_ERR_UNSUPPORTED_PARAM
             ctx%settings_dirty = .true.
         case ('use_isoc_mdot')
             ctx%use_isoc_mdot_val = value

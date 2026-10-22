@@ -311,7 +311,6 @@ module opensps_context_types
         integer :: smooth_lsf_val = 0
         integer :: smoothspec_fast_val = 0
         integer :: redshift_colors_val = 0
-        integer :: compute_light_ages_val = 0
         integer :: use_isoc_mdot_val = 0
         integer :: setup_nebular_gaussians_val = 0
         type(PARAMS) :: pset
@@ -334,7 +333,7 @@ contains
         !$acc   ctx%add_neb_continuum_val, ctx%cloudy_dust_val, ctx%add_igm_absorption_val, &
         !$acc   ctx%nebemlineinspec_val, ctx%add_xrb_emission_val, ctx%add_stellar_remnants_val, &
         !$acc   ctx%smooth_velocity_val, ctx%smooth_lsf_val, ctx%smoothspec_fast_val, &
-        !$acc   ctx%redshift_colors_val, ctx%compute_light_ages_val, ctx%use_isoc_mdot_val, &
+        !$acc   ctx%redshift_colors_val, ctx%use_isoc_mdot_val, &
         !$acc   ctx%setup_nebular_gaussians_val)
 #ifdef OMP_TARGET
         !$omp target update to(ctx%fast_mode, ctx%om0_val, ctx%ol0_val, ctx%H0_val, ctx%tiny_logt_val, &
@@ -346,7 +345,7 @@ contains
         !$omp   ctx%add_neb_continuum_val, ctx%cloudy_dust_val, ctx%add_igm_absorption_val, &
         !$omp   ctx%nebemlineinspec_val, ctx%add_xrb_emission_val, ctx%add_stellar_remnants_val, &
         !$omp   ctx%smooth_velocity_val, ctx%smooth_lsf_val, ctx%smoothspec_fast_val, &
-        !$omp   ctx%redshift_colors_val, ctx%compute_light_ages_val, ctx%use_isoc_mdot_val, &
+        !$omp   ctx%redshift_colors_val, ctx%use_isoc_mdot_val, &
         !$omp   ctx%setup_nebular_gaussians_val)
 #endif
         ctx%settings_dirty = .false.

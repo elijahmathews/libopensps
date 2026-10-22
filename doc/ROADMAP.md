@@ -139,9 +139,10 @@ path, steps 2-4"):
 
 Remaining:
 
-- **Light-weighted ages** (`compute_light_ages = 1`): the last mode on the old path, which does
-  not actually compute them (definition is a decision; question 10 in `doc/GPU_RESULTS.md`).
-- **Remove the old path** once light ages are settled: `integrate_csp_step`,
+- Light-weighted ages: dropped (decided 2026-10-21; the old path did not compute ages):
+  `compute_light_ages` other than 0 returns status 104, C API 2.0. Could return later as a batch
+  feature (an age-weighted age sum) if wanted.
+- **Remove the old path**: `integrate_csp_step`,
   `apply_dust_physics`, `apply_post_processing`, the old dust / nebular / AGN single-call
   routines and the context workspace only they use; keep the invalid-dust semantics
   (`uvb < 0`, `wgp1/2 < 1`: the batch reports status 2, the old path ignored them; decide which).
@@ -150,11 +151,6 @@ Remaining:
 - OpenACC multicore still takes the old path (its FP32 per-core sums; question 9).
 - **Retire OpenACC** once OpenMP target meets the criteria below; until then OpenACC is
   frozen: no new OpenACC-only features, new kernels get OpenMP directives first.
-- **Likelihood on the device:** given observed fluxes, uncertainties and a mask, return chi^2
-  (or log-likelihood) per model without copying spectra back. A sampler needs one number per
-  model, and the copy-back is now the largest per-model cost when spectra are needed. Not
-  started: grid, units and amplitude treatment to be agreed first (question 11 in
-  `doc/GPU_RESULTS.md` has a proposal).
 - **During this work, prepare for gradients (priority 4):** keep the intermediates the
   adjoints need (per-stage spectra, transmissions) addressable rather than overwritten, and
   avoid hidden non-differentiable branches.
@@ -275,6 +271,12 @@ implicit `tofrom` of the context. The rules are in `doc/GPU_PLAN.md`. Remaining:
 - a discrete AMD GPU (R9700) and Intel (ifx, Arc Pro B70) when available.
 
 ### Further items
+
+- **Likelihood on the device** (moved out of priority 2 on 2026-10-21: it rests on assumptions
+  about the observables): given observed fluxes, uncertainties and a mask, return chi^2 (or
+  log-likelihood) per model without copying spectra back. A sampler needs one number per model,
+  and the copy-back is the largest per-model cost when spectra are needed. Grid, units and the
+  amplitude treatment to be agreed first (question 11 in `doc/GPU_RESULTS.md` has a proposal).
 
 - **SFH weights at early ages:** the hat-kernel weights are differences of indefinite moments
   (`compute_ssp_weights`), good to ~5e-14 / (fraction formed) relative: 1.5e-6 at 2e-8 of the

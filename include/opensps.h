@@ -10,10 +10,11 @@ extern "C" {
 // points are added; the major number changes only for incompatible changes. 1.1 added the
 // context grids (lambda, ages, zlegend, emlambda, filter data), the tabular SFH and the single
 // CSP (opensps_context_compute_csp / opensps_context_get_csp). 1.2 added the batch's young and old
-// components (opensps_context_compute_csp_batch_parts).
+// components (opensps_context_compute_csp_batch_parts). 2.0 dropped light-weighted ages:
+// setting compute_light_ages to a value other than 0 returns OPENSPS_ERR_UNSUPPORTED_PARAM.
 // ----------------------------------------------------------------------------
-#define OPENSPS_API_VERSION_MAJOR 1
-#define OPENSPS_API_VERSION_MINOR 2
+#define OPENSPS_API_VERSION_MAJOR 2
+#define OPENSPS_API_VERSION_MINOR 0
 #define OPENSPS_API_VERSION_PATCH 0
 
 // ----------------------------------------------------------------------------
@@ -23,6 +24,7 @@ extern "C" {
 #define OPENSPS_ERR_UNKNOWN_INT_PARAM 101
 #define OPENSPS_ERR_UNKNOWN_FLOAT_PARAM 102
 #define OPENSPS_ERR_UNKNOWN_STRING_PARAM 103
+#define OPENSPS_ERR_UNSUPPORTED_PARAM 104
 #define OPENSPS_WARN_ZMET_RANGE 201
 #define OPENSPS_WARN_DUST_RANGE 202
 #define OPENSPS_WARN_IMF_RANGE 203
