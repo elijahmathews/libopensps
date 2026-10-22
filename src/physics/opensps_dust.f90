@@ -226,7 +226,6 @@ contains
     !> We refactor the array function into an elemental/scalar one for the parallel loop.
     !> @return attenuation_val
     pure function compute_attenuation_curve_point(wavelength, idx, dust_type_id, settings, ctx) result(attenuation_val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -266,7 +265,6 @@ contains
     !> optical depth (no screen).
     subroutine get_agb_dust_terms(ctx, weight, mass_act, log_t, log_l, log_g, c_o_ratio, log_mdot, &
                                   c_rich_flag, idx_teff, idx_tau, c, active)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -335,7 +333,6 @@ contains
     !> @param[in]    log_mdot     Log10 Mass Loss Rate (M_sol/yr) from isochrone (optional).
     subroutine apply_agb_dust_screen(ctx, weight, spectrum, mass_act, log_t, log_l, &
                                      log_g, c_o_ratio, log_mdot)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -387,7 +384,6 @@ contains
     !> @return    tau_1um    Optical depth at 1 micron.
     function agb_circumstellar_tau(ctx, weight, mass_act, log_t, log_l, log_g, c_o_ratio, log_mdot) &
             result(tau_1um)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -417,7 +413,6 @@ contains
     !> Implementation of Cardelli, Clayton, & Mathis (1989) extinction curve.
     !> Includes the "hack" for smooth transitions used in the original FSPS.
     elemental function get_ccm89_curve_point(wavelength, r_v, uv_bump_strength) result(curve)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -561,7 +556,6 @@ contains
     !> The coefficients are those of eq. 4 (2.659, R_V = 4.05); legacy writes the curve as
     !> (1.17 poly + 1.78)/0.44, i.e. R_V = 4.0455, which raises A/A_V by 3.4e-4/4.05 everywhere.
     elemental function get_calzetti_curve_point(wavelength) result(curve)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -593,7 +587,6 @@ contains
 
     !> Implementation of Kriek & Conroy (2013): Calzetti + UV Bump + Tilt.
     elemental function get_kriek_conroy_curve_point(wavelength, tilt_index) result(curve)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -626,7 +619,6 @@ contains
 
 !> Implementation of Reddy et al. (2015) MOSDEF curve.
     elemental function get_reddy_curve_point(wavelength) result(curve)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -663,7 +655,6 @@ contains
     !> Converts wavelength (Angstroms) to wavenumber (inverse microns).
     !> Used frequently for dust curve parameterizations (CCM89, Calzetti, etc.).
     elemental function get_wavenumber_point(wavelength) result(wavenumber)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -677,7 +668,6 @@ contains
     !> Computes the circumstellar optical depth (tau_1um) from physical parameters.
     !> See Villaume et al. (2015).
     pure function compute_circumstellar_optical_depth(ctx, c_rich_flag, m_act, log_l, log_g, log_mdot_iso) result(tau)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -762,7 +752,6 @@ contains
 
     !> 1 - exp(-x) given t = exp(-x), without cancellation for small x (Fortran has no expm1).
     elemental function one_minus_trans(x, t) result(y)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif

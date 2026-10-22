@@ -74,29 +74,22 @@ contains
         ! Local copies for speed/readability
         n_idx = ctx%state%nindx
 
-        !$acc data pcopyin(lambda, spec) pcopy(indices)
-        !$acc update device(spec, lambda)
 
         ! Initialize with sentinel
-        !$acc kernels present(spec, lambda, indices)
         indices = IND_UNDEFINED
-        !$acc end kernels
 
         ! Iterate over all defined indices
         ! Parallelize over indices (gang vector)
-        !$acc parallel loop gang vector present(spec, lambda, indices, ctx)
         do j = 1, n_idx
             indices(j) = spectral_index_value(ctx, lambda, spec, j)
         end do
 
-        !$acc end data
 
     end subroutine compute_spectral_indices
 
 
     !> @brief Value of spectral index j of one spectrum (the body of compute_spectral_indices).
     function spectral_index_value(ctx, lambda, spec, j) result(val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -226,18 +219,15 @@ contains
         lam = lambda
         lp => lam
 #else
-        ! OpenACC: the wavelengths as given (the context's, already on the device: copyin finds
-        ! them there instead of uploading 48 kB per call)
+        ! CPU builds: the wavelengths as given
         lp => lambda
 #endif
-        !$acc data present(spec) copyin(lp) create(specw) copyout(ind)
 #ifdef OMP_TARGET
         !$omp target data map(to: lam) map(alloc: specw) map(from: ind)
 #endif
-        !$acc parallel loop collapse(2) present(spec, specw)
-#ifdef OMP_TARGET
+#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2)
-#elif defined(_OPENMP) && !defined(_OPENACC)
+#elif defined(_OPENMP)
         !$omp parallel do collapse(2)
 #endif
         do m = 1, n_col
@@ -245,10 +235,9 @@ contains
                 specw(i, m) = real(spec(i, m), WP)
             end do
         end do
-        !$acc parallel loop gang vector collapse(2) present(ctx, lp, specw, ind)
-#ifdef OMP_TARGET
+#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2)
-#elif defined(_OPENMP) && !defined(_OPENACC)
+#elif defined(_OPENMP)
         !$omp parallel do collapse(2)
 #endif
         do m = 1, n_col
@@ -259,7 +248,6 @@ contains
 #ifdef OMP_TARGET
         !$omp end target data
 #endif
-        !$acc end data
         indices(1:n_idx, 1:n_col) = ind
     end subroutine compute_spectral_indices_columns
 
@@ -275,7 +263,6 @@ contains
     !> linearly interpolates the flux at exact endpoints, and performs trapezoidal
     !> integration between them.
     pure function integrate_interval(lam, func, lo, hi) result(area)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -326,7 +313,6 @@ contains
     !> Used for EW and Mag indices where the spectrum is normalized by a pseudo-continuum
     !> defined by the blue and red sidebands.
     pure function integrate_ratio_interval(lam, func, lo, hi, slope, intercept, x_ref) result(area)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -393,7 +379,6 @@ contains
     !> @brief
     !> Helper: Linear interpolation for a single point.
     pure function interpolate_linear_point(x1, y1, x2, y2, x_target) result(y_target)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif

@@ -41,11 +41,10 @@ regression tests that need it are skipped with a message, not failed: say so whe
 GPU builds (details and per-machine notes: `doc/GPU_PLAN.md`, results: `doc/GPU_RESULTS.md`;
 what comes next: `doc/ROADMAP.md`):
 
-- OpenACC: `FC=nvfortran CC=nvc meson setup b -Daccel=gpu -Dgpu_arch=cc80` (add
-  `-Dcublas=true` for cuBLAS batch products); `-Daccel=multicore` runs the same code on CPU
-  cores. OpenACC is frozen: new kernels get OpenMP directives first.
-- OpenMP target: `-Daccel=omp_gpu` with nvfortran or LLVM flang. Run with
-  `OMP_TARGET_OFFLOAD=MANDATORY` so a silent host fallback fails.
+- OpenMP target offload: `FC=nvfortran CC=nvc meson setup b -Daccel=omp_gpu -Dgpu_arch=cc80`
+  (add `-Dcublas=true` for cuBLAS batch products), or LLVM flang (`-Dgpu_arch=gfx1103`, ...).
+  Run with `OMP_TARGET_OFFLOAD=MANDATORY` so a silent host fallback fails.
+- CPU threads: `-Denable_openmp=true` runs the same OpenMP loops on the host cores.
 
 Other tools: `tests/benchmark_phases`, `tests/benchmark_csp_batch` (timings);
 `tools/compare_builds/` (one build against another over the case matrix, e.g. GPU vs CPU);
@@ -79,19 +78,22 @@ format, conversion, packing; format and workflows in `doc/DATA_FORMAT.md`).
   pairwise long sums; no differences of nearly equal integrals; no FP32 logarithms that are
   exponentiated later; grid-only factors formed in FP64; physical units; floors of
   `tiny(1.0_KP)`. Test tolerances in FP32 builds use `KP` (e.g. 100 eps of `KP`).
-- Device code (OpenACC and OpenMP target):
-  - `!$acc routine seq` on every routine called from device code;
+- Device code (OpenMP target):
+  - `!$omp declare target` on every routine called from device code;
   - no libm calls (e.g. `log_gamma`) without a device-safe fallback;
   - `contiguous` dummies (no runtime copy-in/out);
   - no array constructors or other temporaries (LLVM flang mallocs them on the device);
   - map a derived type either whole or by component, never both;
   - map everything a kernel touches explicitly: NVIDIA GPUs may tolerate a missing map,
-    AMD GPUs fault.
+    AMD GPUs fault;
+  - `target teams loop` only where it is measured faster and the tests pass in FP32 and FP64:
+    with nvfortran 25.1 it is 2x faster than `teams distribute parallel do` on some kernels,
+    5x slower or wrong on others.
   More in `doc/GPU_PLAN.md` ("Rules learned so far").
 - The CSP physics has one implementation, `compute_csp_batch`; `compute_csp_scenario` runs as a
-  batch (one model per output age). A physics change goes there, in the OpenACC and OpenMP
-  directive sets alike, and is checked by the oracles and identities of `test_csp_batch` and
-  `test_physics_oracles` and against legacy FSPS.
+  batch (one model per output age). A physics change goes there, and is checked by the
+  oracles and identities of `test_csp_batch` and `test_physics_oracles` and against legacy
+  FSPS.
 
 ## Git workflow
 

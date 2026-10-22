@@ -301,17 +301,6 @@ contains
         type(opensps_context_t), intent(inout) :: ctx
 
         if (.not. (ctx%on_device .and. ctx%settings_dirty)) return
-        !$acc update device(ctx%fast_mode, ctx%om0_val, ctx%ol0_val, ctx%H0_val, ctx%tiny_logt_val, &
-        !$acc   ctx%imf_upper_limit_val, ctx%imf_lower_limit_val, ctx%logt_wmb_hot_val, &
-        !$acc   ctx%nebular_smooth_init_val, ctx%imf_type_val, ctx%tpagb_norm_type_val, ctx%pzcon_val, &
-        !$acc   ctx%interpolation_type_val, ctx%add_agb_dust_model_val, ctx%dust_type_val, &
-        !$acc   ctx%add_dust_emission_val, ctx%compute_vega_mags_val, ctx%vactoair_flag_val, &
-        !$acc   ctx%add_agn_dust_val, ctx%use_wr_spectra_val, ctx%add_neb_emission_val, &
-        !$acc   ctx%add_neb_continuum_val, ctx%cloudy_dust_val, ctx%add_igm_absorption_val, &
-        !$acc   ctx%nebemlineinspec_val, ctx%add_xrb_emission_val, ctx%add_stellar_remnants_val, &
-        !$acc   ctx%smooth_velocity_val, ctx%smooth_lsf_val, ctx%smoothspec_fast_val, &
-        !$acc   ctx%redshift_colors_val, ctx%use_isoc_mdot_val, &
-        !$acc   ctx%setup_nebular_gaussians_val)
 #ifdef OMP_TARGET
         !$omp target update to(ctx%fast_mode, ctx%om0_val, ctx%ol0_val, ctx%H0_val, ctx%tiny_logt_val, &
         !$omp   ctx%imf_upper_limit_val, ctx%imf_lower_limit_val, ctx%logt_wmb_hot_val, &
@@ -333,12 +322,10 @@ contains
         type(batch_grid_t), intent(inout) :: g
 
         if (g%ready) then
-            !$acc exit data delete(g%i_lo, g%j_lo, g%j_hi, g%t_obs, g%wt, g%wtl, g%wl, g%bands_t, g%igm_t)
 #ifdef OMP_TARGET
             !$omp target exit data map(delete: g%i_lo, g%j_lo, g%j_hi, g%t_obs, g%wt, g%wtl, g%wl, g%bands_t, g%igm_t)
 #endif
             if (allocated(g%cmat)) then
-                !$acc exit data delete(g%cmat)
 #ifdef OMP_TARGET
                 !$omp target exit data map(delete: g%cmat)
 #endif
@@ -348,7 +335,6 @@ contains
         if (allocated(g%cmat)) deallocate(g%cmat)
         g%ready = .false.
         if (g%sm_ready) then
-            !$acc exit data delete(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef)
 #ifdef OMP_TARGET
             !$omp target exit data map(delete: g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef)
 #endif
@@ -382,7 +368,6 @@ contains
                                       int(size(o%spec), c_size_t)) == 0
 #endif
         if (on_device) then
-            !$acc enter data create(o%spec)
 #ifdef OMP_TARGET
             !$omp target enter data map(alloc: o%spec)
 #endif
@@ -396,7 +381,6 @@ contains
 
         if (.not. allocated(o%spec)) return
         if (on_device) then
-            !$acc exit data delete(o%spec)
 #ifdef OMP_TARGET
             !$omp target exit data map(delete: o%spec)
 #endif

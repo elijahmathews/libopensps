@@ -715,7 +715,6 @@ contains
     !> add_remnant_mass with the IMF parameters packed in p(IMF_NPAR) (opensps_imf, imf_pack_params):
     !> no context, so usable for a batch of IMF parameter sets (opensps_ssp_operator).
     pure subroutine add_remnant_mass_p(imf_type, p, current_mass, max_living_mass)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif

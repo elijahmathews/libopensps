@@ -66,7 +66,6 @@ contains
     !>
     !> @return    area  The integrated area. Returns NaN on error.
     pure function integrate_trapezoid_array(x, y) result(area)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -104,7 +103,6 @@ contains
     !> @param[in] b     Upper integration limit.
     !> @return    res   The integral value. Returns NaN on non-convergence.
     pure function integrate_romberg_simple(func, a, b) result(res)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -160,7 +158,6 @@ contains
     !> Integrates a context-aware function f(ctx, x) using Romberg integration.
     !> See `integrate_romberg_simple` for algorithm details.
     pure function integrate_romberg_context(ctx, func, a, b) result(res)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -214,7 +211,6 @@ contains
     !> at the midpoints of the previous intervals.
     !> (Simple Function Version)
     pure subroutine refine_trapezoid_simple(func, a, b, s, n)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -246,7 +242,6 @@ contains
     !> Refines the trapezoidal approximation s_old to s_new.
     !> (Context Function Version)
     pure subroutine refine_trapezoid_context(ctx, func, a, b, s, n)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -279,7 +274,6 @@ contains
     !> Polynomial interpolation/extrapolation (Neville's Algorithm).
     !> Given arrays xa and ya, returns value y at point x, and error estimate dy.
     pure subroutine polynomial_extrapolation(xa, ya, x, y, dy)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -335,7 +329,6 @@ contains
 
     !> @brief Helper to generate a Quiet NaN
     pure function get_quiet_nan() result(res)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif

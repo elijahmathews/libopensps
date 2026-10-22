@@ -1,8 +1,8 @@
 # Nightly (and on demand): the long-running and opt-in checks kept out of per-change CI.
-#   - Stress tests: every phase, more iterations, under ASan/UBSan, TSan, nvfortran OpenACC
-#     multicore and nvfortran OpenMP host threads.
+#   - Stress tests: every phase, more iterations, under ASan/UBSan, TSan and nvfortran with
+#     OpenMP host threads.
 #   - Newest toolchains: catch compiler regressions before they reach the pinned ones in ci.yml.
-#   - GPU: OpenACC and OpenMP target on an NVIDIA GPU, on a self-hosted runner (enabled by the
+#   - GPU: OpenMP target offload on an NVIDIA GPU, on a self-hosted runner (enabled by the
 #     repository variable GPU_RUNNER = true; GitHub-hosted runners have no GPU).
 # Scheduled runs use the default branch. See doc/CI.md.
 
@@ -35,10 +35,6 @@ jobs:
             setup_args: -Db_sanitize=thread -Denable_openmp=true
             stress_env: FSPS_STRESS_ITERS=8
             tsan: true
-          - name: nvfortran OpenACC multicore
-            install: nvidia-hpc
-            setup_args: -Daccel=multicore -Dcpu_baseline=x86-64-v3
-            stress_env: FSPS_STRESS_ITERS=20
           - name: nvfortran OpenMP host threads
             install: nvidia-hpc
             setup_args: -Denable_openmp=true -Dcpu_baseline=x86-64-v3
@@ -141,29 +137,6 @@ jobs:
 
   # Self-hosted NVIDIA GPU runner with the NVIDIA HPC SDK installed (labels: self-hosted, linux,
   # gpu-nvidia). Set the repository variable GPU_RUNNER to 'true' once such a runner is registered.
-  gpu-openacc:
-    name: GPU / nvfortran OpenACC
-    if: vars.GPU_RUNNER == 'true'
-    runs-on: [self-hosted, linux, gpu-nvidia]
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v7
-      - name: Toolchain and device
-        run: |
-          nvfortran --version
-          nvidia-smi
-      - run: meson setup build --buildtype=release -Daccel=gpu
-        env:
-          FC: nvfortran
-          CC: nvc
-      - run: meson compile -C build
-      - run: meson test -C build --suite unit --suite regression --print-errorlogs
-      - if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: nightly-gpu
-          path: build/meson-logs/
-          retention-days: 14
 
   gpu-openmp:
     name: GPU / nvfortran OpenMP target

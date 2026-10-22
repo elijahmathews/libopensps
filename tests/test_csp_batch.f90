@@ -839,15 +839,7 @@ contains
         real(KP), allocatable, target :: buf(:, :)
         real(KP), pointer :: hp(:, :)
         logical :: ok
-#if defined(_OPENACC) && !defined(ACC_MULTICORE)
-        interface
-            subroutine acc_d2h(dst, src, bytes) bind(C, name='acc_memcpy_from_device')
-                import :: c_ptr, c_size_t
-                type(c_ptr), value :: dst, src
-                integer(c_size_t), value :: bytes
-            end subroutine acc_d2h
-        end interface
-#elif defined(OMP_TARGET)
+#if defined(OMP_TARGET)
         integer :: st
 #endif
 
@@ -856,9 +848,7 @@ contains
              nb == storage_size(1.0_KP) / 8
         if (ok) then
             allocate(buf(ns, n))
-#if defined(_OPENACC) && !defined(ACC_MULTICORE)
-            call acc_d2h(c_loc(buf), dptr, int(ns, c_size_t) * int(n, c_size_t) * int(nb, c_size_t))
-#elif defined(OMP_TARGET)
+#if defined(OMP_TARGET)
             st = omp_target_memcpy(c_loc(buf), dptr, int(ns, c_size_t) * int(n, c_size_t) * int(nb, c_size_t), &
                                    0_c_size_t, 0_c_size_t, omp_get_initial_device(), omp_get_default_device())
             ok = st == 0

@@ -80,7 +80,6 @@ contains
 
     !> imf_integral with the IMF parameters packed in p(IMF_NPAR) (imf_pack_params).
     pure function imf_integral_p(imf_type, p, m1, m2, mass_weighted) result(int_val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -180,7 +179,6 @@ contains
     !> 2 Kroupa, 3 van Dokkum, 4 Dave, 5 user-defined piecewise power law. The integrals are
     !> imf_integral (plain arguments, also used by the batched SSP operator, opensps_ssp_operator).
     pure function integrate_imf_interval_analytic(ctx, m1, m2, mass_weighted) result(int_val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -203,7 +201,6 @@ contains
     !> slope), as ctx%state%imf_user_alpha. Unsupported types integrate to zero.
     pure function imf_integral(imf_type, salp_ind, alpha, vdmc, mdave, n_user_imf, user_alpha, &
                                m1, m2, mass_weighted) result(int_val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -319,7 +316,6 @@ contains
     !>   number: k sigma sqrt(pi/2) [erf((x2 - a)/(sigma sqrt 2)) - erf((x1 - a)/(sigma sqrt 2))], a = log_mc
     !>   mass:   the same about b = a + k sigma^2, times exp(k a + k^2 sigma^2 / 2)
     pure function integrate_lognormal(m1, m2, log_mc, sigma2, mass_weighted) result(val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -342,7 +338,6 @@ contains
 
     !> @brief Integral of coeff * m^(-alpha) or coeff * m^(1-alpha) over [lo, hi].
     pure function integrate_powerlaw(lo, hi, alpha, mass_weighted, coeff) result(val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -398,7 +393,6 @@ contains
     !>                           - .true.:  Returns Mass Density (M * dN/dM approx dN/dlnM).
     !> @return    imf_val        The calculated IMF values.
     pure function get_imf_value(ctx, mass, mass_weighted) result(imf_val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -511,7 +505,6 @@ contains
     ! ------------------------------------------------------------------------
 
     pure subroutine imf_salpeter(ctx, m, val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -524,7 +517,6 @@ contains
     end subroutine imf_salpeter
 
     pure subroutine imf_chabrier(m, val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -547,7 +539,6 @@ contains
     end subroutine imf_chabrier
 
     pure subroutine imf_kroupa(ctx, m, val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -570,7 +561,6 @@ contains
     end subroutine imf_kroupa
 
     pure subroutine imf_vandokkum(ctx, m, val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -597,7 +587,6 @@ contains
     end subroutine imf_vandokkum
 
     pure subroutine imf_dave(ctx, m, val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -620,7 +609,6 @@ contains
     end subroutine imf_dave
 
     pure subroutine imf_user_defined(ctx, m, val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif

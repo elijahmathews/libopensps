@@ -1,8 +1,8 @@
 option('enable_openmp', type: 'boolean', value: false, 
   description: 'Enable OpenMP multi-threading for CPU execution')
 
-option('accel', type: 'combo', choices: ['none', 'multicore', 'gpu', 'omp_gpu'], value: 'none', 
-  description: 'Hardware acceleration target (requires nvfortran): OpenACC multicore or GPU, or (omp_gpu) OpenMP target offload of the template product and the whole batched CSP')
+option('accel', type: 'combo', choices: ['none', 'omp_gpu'], value: 'none',
+  description: 'GPU offload: omp_gpu = OpenMP target offload (nvfortran, LLVM flang) of the SSP template product and the batched CSP; CPU threads: -Denable_openmp=true')
 
 option('cpu_baseline', type: 'combo', choices: ['generic', 'native', 'x86-64-v3'], value: 'generic',
   description: 'CPU instruction set optimization level')
@@ -14,10 +14,10 @@ option('kernel_precision', type: 'combo', choices: ['double', 'single'], value: 
   description: 'Precision of the per-pixel kernels (spectral templates, SSP/CSP sums, dust, nebular, photometry); setup, isochrones and weights stay double')
 
 option('gpu_arch', type: 'string', value: 'cc80,cc90',
-  description: 'nvfortran -gpu= targets for -Daccel=gpu (cc80 = A100, cc90 = H100; add cc70 for V100 with HPC SDK < 26, which dropped Volta)')
+  description: 'Offload targets for -Daccel=omp_gpu: nvfortran -gpu= (cc80 = A100, cc90 = H100; cc70 for V100 with HPC SDK < 26) or an LLVM offload arch (gfx1103, gfx942)')
 
 option('cublas', type: 'boolean', value: false,
-  description: 'With -Daccel=gpu or omp_gpu (nvfortran): run the batched CSP matrix products through cuBLAS (NVIDIA only; the portable loops are the default)')
+  description: 'With -Daccel=omp_gpu and nvfortran: run the batched CSP matrix products through cuBLAS (NVIDIA only; the portable loops are the default)')
 
 option('tests', type: 'boolean', value: true,
   description: 'Build the test and benchmark programs (off when built as a subproject of a binding package)')

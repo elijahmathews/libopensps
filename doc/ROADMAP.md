@@ -10,23 +10,22 @@ delete it here.
 
 - **SSP generation:** template-sum form with exact IMF integrals for every IMF type, one
   template kernel for CPU and GPU builds; one SSP grid (one metallicity, MIST + MILES) takes
-  0.11 s on one laptop core and 0.065-0.07 s on an A100.
+  0.11 s on one laptop core and 0.065 s on an A100.
 - **Batched CSP** (`compute_csp_batch`, C entry point `opensps_context_compute_csp_batch`): full
   physics per model (SFH parameters or an SSP-weight matrix, dust, dust emission, nebular gas
   parameters, AGN, metallicity, redshift and IGM), with smoothing, indices and line
-  luminosities. A100, FP32, N = 10^4, magnitudes only: 7.1 us per model with full physics and
-  smoothing (6.5 with cuBLAS; OpenMP target the same), 2.9 us basic. Spectra back on the host
-  add ~1.7 us per model at kernel precision.
+  luminosities. A100 (OpenMP target), FP32, N = 10^4, magnitudes only: 7.2 us per model with
+  full physics and smoothing, 2.9 us basic. Spectra back on the host add ~1.7 us per model at
+  kernel precision.
 - **Single calls:** `compute_csp_scenario` runs as a batch by default (priority 2): one
-  full-physics call with smoothing takes 1.05-1.1 ms on the A100 (OpenACC FP32; 1.17 ms with
-  OpenMP target, which did not offload the single call before: 18 ms), all 107 ages 3.9 ms; on
-  one CPU core 6.4 ms (12.3 ms before).
+  full-physics call with smoothing takes 1.17 ms on the A100 (OpenMP target FP32; 18 ms before
+  the single call was a batch); on one CPU core 6.4 ms (12.3 ms before).
 - **Accuracy:** FP64 GPU = CPU to 1.6e-11 per pixel; FP32 kernels reproduce FP64 to ~4e-7
   per pixel and 5e-7 mag. Legacy FSPS parity is checked case by case
   (`tools/legacy_parity`).
-- **Portability:** OpenACC and OpenMP target on NVIDIA (all suites pass); the OpenMP path
-  builds for AMD (gfx1103) with LLVM flang, where the batch tests are being debugged
-  (flang mapping semantics; see priority 5).
+- **Portability:** OpenMP target on NVIDIA (nvfortran; all suites pass on the A100). LLVM
+  flang builds the OpenMP target path for AMD (gfx1103) and passes the suites with offload
+  disabled; offload on AMD GPUs does not work yet (priority 5, future work).
 
 ## Cutover to libopensps
 
@@ -117,69 +116,21 @@ depend on a pinned version of the C library, each with its own release cycle and
 - Anything a binding needs from the core (a getter, a version query) is added here, with C
   tests, in its own small pull request.
 
-### 2. One code path
+### 2. One code path (done)
 
-The single call (`compute_csp_scenario`) and the batch (`compute_csp_batch`) were separate
-implementations of the same physics, and the SSP generation had its own host and device
-variants. Every feature is written twice, and gradients would have to be written twice. Goal:
-one hot path.
+Finished with the removal of OpenACC (2026-10; details in `doc/GPU_RESULTS.md`, "One code
+path, steps 1-7"). The criterion of passing on AMD GPUs was dropped (2026-10-22): development
+targets NVIDIA with nvfortran, and AMD offload is future work (priority 5). The CSP physics has one implementation, `compute_csp_batch`;
+`compute_csp_scenario` runs as a batch (one model per output age). SSP generation has one
+template kernel for every build. OpenMP target is the only GPU programming model and OpenMP
+host threads the only CPU parallelism. Light-weighted ages were dropped (status 104; could
+return as a batch feature); the device likelihood is under Further items.
 
-Done (2026-10-21, PRs #13-#17 and the stack on them; details in `doc/GPU_RESULTS.md`, "One code
-path, steps 2-6"):
-
-- `compute_csp_scenario` runs as one `compute_csp_batch` call: one age, all ages (one model per
-  age, weights scaled by the fraction formed), `tage = -99` tabular, redshifted colours
-  (`zred_mags`), every smoothing mode (the non-fast ones on the host), several metallicities
-  (`ssp_weights_z`), fast mode. Agreed with the old path to 1e-10 or better over a 52-case
-  matrix before it was removed; faster everywhere except the OpenACC all-ages basic call
-  (~15-25% slower: its SFH weights are computed on the host, which keeps the GPU equal to the
-  CPU; see "SFH weights at early ages" under Further items).
-- The old single-call implementation is removed (`integrate_csp_step`, `apply_dust_physics`,
-  `apply_post_processing`, `apply_dust_attenuation_and_emission`, `apply_agn_dust_emission` and
-  23 context workspace arrays): the CSP physics is written once. OpenACC multicore runs the
-  batch too. Invalid dust settings (`uvb < 0`, `wgp1/2 < 1`) are reported (status 2), where the
-  old path ignored them.
-- Light-weighted ages dropped (decided 2026-10-21; the old path did not compute ages):
-  `compute_light_ages` other than 0 returns status 104, C API 2.0. Could return later as a batch
-  feature (an age-weighted age sum) if wanted.
-- The CPU path runs the batch's kernels: plain per-model loops in CPU builds, and OpenMP host
-  threads (`-Denable_openmp=true`, the device kernels' OpenMP loops; bit-identical to serial).
-- SSP generation: one template kernel (`add_main_library_templates`) for CPU and GPU builds;
-  every build defers the small libraries and dusty AGB slots to the operator. GPU = CPU to
-  4.4e-16 (FP64); OpenMP target SSP grid 0.065 s (was 0.115).
-- OpenMP target at OpenACC's speed at large N in FP32 (cuBLAS through `use_device_addr`,
-  chunked asynchronous copy-back, `teams loop` kernels).
-
-Remaining:
-
-- **Retire OpenACC:** the removal is ready as a draft pull request
-  (`refactor/remove-openacc`: every `!$acc` directive, `-Daccel=gpu` / `multicore`, the
-  OpenACC CI jobs; NVIDIA and CPU builds pass every suite and the case matrix without it). It
-  waits for the AMD run below; until it is merged OpenACC stays frozen.
-- **During this work, prepare for gradients (priority 4):** keep the intermediates the
-  adjoints need (per-stage spectra, transmissions) addressable rather than overwritten, and
-  avoid hidden non-differentiable branches.
-
-Criteria to remove OpenACC:
-
-- [ ] OpenMP passes the unit + regression suites and the case matrix on NVIDIA (nvfortran) and
-      AMD (LLVM flang / AOMP); ideally Intel (ifx).
-- [ ] OpenMP within ~10% of OpenACC on the A100 at large N and in per-call overhead at N = 1
-      (met for FP32 at large N: 7.18 vs 7.12 us per model full physics, 2.93 vs 2.98 basic;
-      FP64 basic 4.56 vs 4.09, +11%. N = 1: one `compute_csp_scenario` call 1.17 vs 1.07 ms
-      full physics, 0.51 vs 0.43 ms basic, +10-18%, host time inside the OpenMP runtime, not
-      in CUDA calls; a persistently mapped batch workspace is the untested lever.)
-- [x] Feature parity: the single call (through the batch) and the SSP template sum offloaded;
-      cuBLAS through `use_device_addr`;
-      asynchronous chunked copy-back on own CUDA streams; device-resident and
-      kernel-precision outputs.
-- [x] `-Daccel=multicore` replaced by OpenMP host threading, CI updated (gfortran and nvfortran
-      host-thread jobs, FP64 and FP32; a nightly OpenMP target GPU job).
-
-Open before merging the removal: the AMD run of the first criterion (LLVM flang on the
-Radeon 780M, which needs the owner's go-ahead: a GPU fault there resets the desktop). And a
-decision on the second, met at large N in FP32 but not in FP64 (+11%) or at N = 1 (+10-18%):
-accept the gap, or first try a persistently mapped batch workspace.
+Carried forward: keep the intermediates the adjoints of priority 4 need (per-stage spectra,
+transmissions) addressable rather than overwritten, and avoid hidden non-differentiable
+branches. Accepted for now (2026-10-22): OpenMP target trails the former OpenACC build by 11%
+in FP64 at large N and 10-18% at N = 1 (host time in the OpenMP runtime); FP32 at large N is
+level. A persistently mapped batch workspace is the untested remedy.
 
 ### 3. Batched SSP: SSP-level parameters free per model
 
@@ -263,20 +214,27 @@ offload; Tapenade does not handle OpenACC / OpenMP) and a re-implementation in a
 
 Why after priorities 2 and 3: the adjoints are written once, on the final hot path.
 
-### 5. AMD and Intel GPUs
+### 5. AMD and Intel GPUs (future work)
 
-The OpenMP path builds for the Radeon 780M (gfx1103, LLVM flang 22 + ROCm 7.1; recipe in
-`doc/AMD_GPU.md` on branch `gpu/780m-omp`). Three LLVM flang mapping behaviours were found and
-fixed on branches `fix/omp-device-no-malloc` -> `fix/omp-maps-llvm` (PR #13) ->
-`fix/omp-flang-map-lifetimes` -> `fix/omp-flang-component-maps` (PR #16): structure members
-named in `exit data` delete their parent, data left mapped after `target data` regions, and
-implicit `tofrom` of the context. The rules are in `doc/GPU_PLAN.md`. Remaining:
+Deferred (2026-10-22). LLVM flang (22, with ROCm 7.1) builds `-Daccel=omp_gpu` for the Radeon
+780M (gfx1103) and passes the unit and regression suites with `OMP_TARGET_OFFLOAD=DISABLED`.
+On the device, `test_csp_batch` faults in the first kernel it launches (the SSP template sum,
+`add_main_library_templates`): the kernels reach `ctx%state` through an implicit map of the
+context, whose array descriptors flang does not attach on the device. NVIDIA tolerates this;
+AMD does not.
 
-- run the batch tests on the 780M from a text console (a GPU fault there resets the display
-  GPU) and fix what remains;
-- rebase the four AMD branches onto `develop` after the performance stack (PRs #10, #11, #14,
-  #17), switch the batch output buffer (`o%spec`) to the `opensps_omp_data` helpers, and open one
-  pull request;
+The fixes found for LLVM flang (structure members named in `exit data` delete their parent;
+data left mapped after `target data` regions; the implicit `tofrom` of the context, remedied by
+`map(alloc: ctx)` in every kernel that uses it; no array-constructor temporaries; no libm
+`log_gamma` on the device) are on branches of the FSPS fork (`fix/omp-device-no-malloc`,
+`fix/omp-maps-llvm`, `fix/omp-flang-map-lifetimes`, `fix/omp-flang-component-maps`,
+`fix/omp-flang-ctx-alloc`; build recipe on `gpu/780m-omp`) and were not ported here; even with
+them, `test_csp_batch` still failed on the 780M. Remaining:
+
+- port those fixes, with the context mapped whole or by component consistently, and every
+  kernel's data named in its map clauses;
+- run the suites on the 780M from a text console (a GPU fault there resets the display GPU)
+  and fix what remains;
 - a discrete AMD GPU (R9700) and Intel (ifx, Arc Pro B70) when available.
 
 ### Further items

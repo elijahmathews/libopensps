@@ -32,7 +32,6 @@ contains
     !> @param[in] flux The input flux.
     !> @return    The magnitude, or NaN if undefined.
     elemental function mag_from_flux(flux) result(mag)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -61,7 +60,6 @@ contains
     !>                Returns -Infinity at x=0.
     !>                Returns NaN for x < 0.
     elemental function expi(x) result(res)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -142,7 +140,6 @@ contains
     !> @param[in] arg    The upper limit of integration 'x'. Must be >= 0.
     !> @return    res    The value of P(a, x). Returns 0.0 if arg < 0.
     elemental function gammainc(power, arg) result(res)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -220,7 +217,6 @@ contains
     !> @brief Portable implementation of exp(x) - 1
     !> Handles small x via Taylor series to avoid precision loss.
     elemental function opensps_expm1(x) result(val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -239,7 +235,6 @@ contains
 
     !> @brief Helper to generate a Quiet NaN
     pure function get_quiet_nan() result(val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -249,7 +244,6 @@ contains
 
     !> @brief Helper to generate Negative Infinity
     pure function get_neg_infinity() result(val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif

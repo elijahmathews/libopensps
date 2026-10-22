@@ -75,25 +75,14 @@ jobs:
             toolchain: intel
             version: '2026.1'
 
-          # OpenACC directive paths, executed on host cores (hosted runners have no GPU)
-          - name: nvfortran / OpenACC multicore / Linux x86-64
-            os: ubuntu-24.04
-            install: setup-fortran
-            toolchain: nvidia-hpc
-            version: '26.1'
-            setup_args: -Daccel=multicore -Dcpu_baseline=x86-64-v3
-            fflags: -Minfo=accel
-
-          # The batch on host threads (-Denable_openmp=true): the OpenMP loops of the device kernels
-          # run on the CPU cores, the replacement for OpenACC multicore (doc/ROADMAP.md, priority 2)
+          # Host threads (-Denable_openmp=true): the OpenMP loops of the device kernels on the CPU
+          # cores (hosted runners have no GPU)
           - name: gfortran / OpenMP host threads / Linux x86-64
             os: ubuntu-24.04
             install: apt-gfortran
             setup_args: -Denable_openmp=true
 
-          # The same with nvfortran, FP64 and FP32 kernels: what replaces the OpenACC multicore
-          # jobs when OpenACC is retired (those stay until then, as the only CI build of the
-          # OpenACC directives)
+          # The same with nvfortran (its front end and OpenMP runtime), FP64 and FP32 kernels
           - name: nvfortran / OpenMP host threads / Linux x86-64
             os: ubuntu-24.04
             install: setup-fortran
@@ -116,14 +105,6 @@ jobs:
             os: ubuntu-24.04
             install: apt-gfortran
             setup_args: -Dkernel_precision=single
-
-          - name: nvfortran / OpenACC multicore / FP32 kernels / Linux x86-64
-            os: ubuntu-24.04
-            install: setup-fortran
-            toolchain: nvidia-hpc
-            version: '26.1'
-            setup_args: -Daccel=multicore -Dkernel_precision=single -Dcpu_baseline=x86-64-v3
-            fflags: -Minfo=accel
 
     env:
       FFLAGS: ${{ matrix.fflags }}

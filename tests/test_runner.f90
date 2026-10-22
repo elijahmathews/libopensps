@@ -338,16 +338,8 @@ program test_runner
     ctx%add_neb_emission_val = 1
     call opensps_context_set_pset(ctx, pset)
     if (verbose_output) call dump_state('BEFORE generate_ssp_grid (SSP)', ctx, pset)
-    !$acc update device(ctx%state%mini_isoc, ctx%state%mact_isoc, ctx%state%logl_isoc, ctx%state%logt_isoc)
-    !$acc update device(ctx%state%logg_isoc, ctx%state%phase_isoc, ctx%state%ffco_isoc, ctx%state%lmdot_isoc)
-    !$acc update device(ctx%state%nmass_isoc, ctx%state%timestep_isoc)
-    !$acc data copyin(pset) copy(new_mass_ssp, new_lbol_ssp, new_spec_ssp_ctx)
-    !$acc update device(pset)
     ctx%add_neb_emission_val = 1
-    !$acc update device(ctx%add_neb_emission_val)
     call generate_ssp_grid(ctx, pset, new_mass_ssp, new_lbol_ssp, new_spec_ssp_ctx)
-    !$acc update self(new_mass_ssp, new_lbol_ssp, new_spec_ssp_ctx)
-    !$acc end data
     if (verbose_output) call dump_ssp_summary('AFTER generate_ssp_grid (SSP)', ctx, new_mass_ssp, new_lbol_ssp)
     new_spec_ssp_cmp = new_spec_ssp_ctx
 
@@ -358,16 +350,8 @@ program test_runner
     pset%dust2 = 0.3_wp
     call opensps_context_set_pset(ctx, pset)
     if (verbose_output) call dump_state('BEFORE generate_ssp_grid (CSP)', ctx, pset)
-    !$acc update device(ctx%state%mini_isoc, ctx%state%mact_isoc, ctx%state%logl_isoc, ctx%state%logt_isoc)
-    !$acc update device(ctx%state%logg_isoc, ctx%state%phase_isoc, ctx%state%ffco_isoc, ctx%state%lmdot_isoc)
-    !$acc update device(ctx%state%nmass_isoc, ctx%state%timestep_isoc)
-    !$acc data copyin(pset) copy(new_mass_ssp, new_lbol_ssp, new_spec_ssp_ctx)
-    !$acc update device(pset)
     ctx%add_neb_emission_val = 1
-    !$acc update device(ctx%add_neb_emission_val)
     call generate_ssp_grid(ctx, pset, new_mass_ssp, new_lbol_ssp, new_spec_ssp_ctx)
-    !$acc update self(new_mass_ssp, new_lbol_ssp, new_spec_ssp_ctx)
-    !$acc end data
     if (verbose_output) call dump_ssp_summary('AFTER generate_ssp_grid (CSP)', ctx, new_mass_ssp, new_lbol_ssp)
 
     new_mass_ssp2(:, 1) = new_mass_ssp
@@ -378,13 +362,8 @@ program test_runner
     if (verbose_output) call dump_state('BEFORE compute_csp_scenario', ctx, pset)
     call opensps_context_update_ssp_basis(ctx, new_spec_ssp3, new_mass_ssp2, new_lbol_ssp2, 1)
 
-    !$acc data copyin(pset) copy(new_spec_ssp_ctx)
-    !$acc update device(pset)
     ctx%add_neb_emission_val = 1
-    !$acc update device(ctx%add_neb_emission_val)
     call compute_csp_scenario(ctx, pset, 1, new_results)
-    !$acc update self(new_spec_ssp_ctx)
-    !$acc end data
     if (verbose_output) call dump_csp_summary('AFTER compute_csp_scenario', new_results)
 
     ! ------------------------------------------------------------------------
