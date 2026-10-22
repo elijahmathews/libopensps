@@ -63,11 +63,15 @@ elif accel_target != 'none'
             accel_defs = ['-DACC_MULTICORE']
         elif accel_target == 'omp_gpu'
             # OpenMP target offload of the SSP template product and the whole batched CSP
-            # (compute_csp_batch, batch photometry and indices); OpenACC is off, so the rest
-            # (single CSP calls, the other SSP stages) runs on the host. Run with
-            # OMP_TARGET_OFFLOAD=MANDATORY to catch a silent host fallback.
+            # (compute_csp_batch, batch photometry and indices; compute_csp_scenario runs as a
+            # batch); OpenACC is off. Run with OMP_TARGET_OFFLOAD=MANDATORY to catch a silent
+            # host fallback.
             accel_args = ['-mp=gpu', '-gpu=' + get_option('gpu_arch')]
             accel_defs = ['-DOMP_TARGET', '-DFSPS_PINNED']
+            if get_option('cublas')
+                accel_args += ['-cudalib=cublas']
+                accel_defs += ['-DFSPS_CUBLAS']
+            endif
         elif accel_target == 'gpu'
             # Fat binary targeting Volta, Ampere, Hopper, plus PTX fallback
             accel_args = ['-acc=gpu', '-gpu=' + get_option('gpu_arch')]

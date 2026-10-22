@@ -100,7 +100,7 @@ module opensps_csp_batch
 
     public :: compute_csp_batch, batch_spectra_device, batch_spectra_host
 
-#if defined(FSPS_PINNED) && defined(_OPENACC) && !defined(ACC_MULTICORE)
+#if defined(FSPS_PINNED) && ((defined(_OPENACC) && !defined(ACC_MULTICORE)) || defined(OMP_TARGET))
     !> Device-to-host DMA into a page-locked buffer on a given CUDA stream (src/core/opensps_pinned.c)
     interface
         integer(c_int) function opensps_memcpy_d2h_async(dst, src, bytes, stream) bind(C, name="opensps_memcpy_d2h_async")
@@ -109,7 +109,21 @@ module opensps_csp_batch
             integer(c_size_t), value :: bytes
             integer(c_intptr_t), value :: stream
         end function opensps_memcpy_d2h_async
+#ifdef OMP_TARGET
+        !> A CUDA stream for the copy-back, and the wait for it (OpenMP target: its own streams)
+        type(c_ptr) function opensps_stream_create() bind(C, name="opensps_stream_create")
+            import :: c_ptr
+        end function opensps_stream_create
+        integer(c_int) function opensps_stream_sync(stream) bind(C, name="opensps_stream_sync")
+            import :: c_int, c_intptr_t
+            integer(c_intptr_t), value :: stream
+        end function opensps_stream_sync
+#endif
     end interface
+#endif
+#if defined(FSPS_PINNED) && defined(OMP_TARGET)
+    !> The two copy-back streams of the OpenMP target build (created on first use; 0: none)
+    integer(c_intptr_t), save :: copy_stream(2) = 0
 #endif
 
 
@@ -762,12 +776,63 @@ contains
             end do
         end do
 #else
+#if defined(FSPS_PINNED) && defined(OMP_TARGET)
+        !> As the OpenACC build: chunks of columns on two streams, each converted while the next
+        !> is in flight (the kernels are synchronous, so the data is ready when the copy starts)
+        integer, parameter :: CHUNK_BYTES = 16 * 1024 * 1024
+        integer :: cw, nch, c, q, kb, st
+        type(c_ptr) :: dbase
+
+        if (pinned .and. copy_stream(1) == 0) then
+            do q = 1, 2
+                copy_stream(q) = transfer(opensps_stream_create(), 0_c_intptr_t)
+            end do
+        end if
+        if (pinned .and. all(copy_stream /= 0)) then
+            !$omp target data use_device_addr(sp)
+            dbase = c_loc(sp)
+            !$omp end target data
+            kb = storage_size(sp) / 8
+            cw = max(1, CHUNK_BYTES / (nspec * kb))
+            nch = (n_mod + cw - 1) / cw
+            if (issue(1, min(cw, n_mod), 1)) then
+                do c = 1, nch
+                    if (c < nch) then
+                        if (.not. issue(c * cw + 1, min((c + 1) * cw, n_mod), 1 + mod(c, 2))) exit
+                    end if
+                    q = 1 + mod(c - 1, 2)
+                    if (opensps_stream_sync(copy_stream(q)) /= 0) exit
+                    do m = (c - 1) * cw + 1, min(c * cw, n_mod)
+                        spec(1:nspec, m) = real(sp(:, m), WP)
+                    end do
+                    if (c == nch) return
+                end do
+            end if
+            ! (a failed copy: the whole update below)
+            do q = 1, 2
+                st = opensps_stream_sync(copy_stream(q))
+            end do
+        end if
+#endif
 #ifdef OMP_TARGET
         !$omp target update from(sp(:, 1:n_mod))
 #endif
         do m = 1, n_mod
             spec(1:nspec, m) = real(sp(:, m), WP)
         end do
+#endif
+#if defined(FSPS_PINNED) && defined(OMP_TARGET)
+    contains
+
+        !> Starts the DMA of columns c1:c2 of sp to its page-locked host copy on stream q.
+        logical function issue(c1, c2, q)
+            integer, intent(in) :: c1, c2, q
+            integer(c_intptr_t) :: dsrc
+            dsrc = transfer(dbase, 0_c_intptr_t) + int(c1 - 1, c_intptr_t) * int(nspec, c_intptr_t) * int(kb, c_intptr_t)
+            issue = opensps_memcpy_d2h_async(c_loc(sp(1, c1)), transfer(dsrc, dbase), &
+                                             int(nspec, c_size_t) * int(c2 - c1 + 1, c_size_t) * int(kb, c_size_t), &
+                                             copy_stream(q)) == 0
+        end function issue
 #endif
     end subroutine spectra_to_host
 
@@ -1770,12 +1835,18 @@ contains
 
         call blas_init()
         !$acc host_data use_device(basis, w2, yo)
+#ifdef OMP_TARGET
+        !$omp target data use_device_addr(basis, w2, yo)
+#endif
 #ifdef KERNEL_SINGLE_PRECISION
         istat = cublasSgemm_v2(blas, CUBLAS_OP_N, CUBLAS_OP_N, nspec, 2 * n_mod, nt, 1.0_KP, basis, nspec, &
                                w2, nt, 0.0_KP, yo, nspec)
 #else
         istat = cublasDgemm_v2(blas, CUBLAS_OP_N, CUBLAS_OP_N, nspec, 2 * n_mod, nt, 1.0_KP, basis, nspec, &
                                w2, nt, 0.0_KP, yo, nspec)
+#endif
+#ifdef OMP_TARGET
+        !$omp end target data
 #endif
         !$acc end host_data
         if (istat /= 0) error stop 'compute_csp_batch: cuBLAS GEMM failed'

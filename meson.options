@@ -17,7 +17,7 @@ option('gpu_arch', type: 'string', value: 'cc80,cc90',
   description: 'nvfortran -gpu= targets for -Daccel=gpu (cc80 = A100, cc90 = H100; add cc70 for V100 with HPC SDK < 26, which dropped Volta)')
 
 option('cublas', type: 'boolean', value: false,
-  description: 'With -Daccel=gpu: run the batched CSP matrix products through cuBLAS (NVIDIA only; the OpenACC loops are the portable default)')
+  description: 'With -Daccel=gpu or omp_gpu (nvfortran): run the batched CSP matrix products through cuBLAS (NVIDIA only; the portable loops are the default)')
 
 option('tests', type: 'boolean', value: true,
   description: 'Build the test and benchmark programs (off when built as a subproject of a binding package)')
