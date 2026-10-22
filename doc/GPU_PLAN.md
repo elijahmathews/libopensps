@@ -165,10 +165,13 @@ Forecast to compare against: ~4 us per model (FP32) on the A100 at large N.
     function inside a target region; use a local copy;
   - (LLVM flang 22 on the Radeon 780M, #28) the context is mapped whole
     (`map(to: ctx)`) with its allocatable and pointer components attached, and a kernel that
-    reads `ctx%state%...` must say so: name every member the kernel and the device routines it
-    calls read in a `map(present, alloc: ...)` clause of the kernel. Without it flang maps `ctx`
-    implicitly (`tofrom`, through a default mapper that walks the allocatable components) and the
-    kernel dereferences host addresses. Name members that lie close together: the clause maps the
+    reads `ctx%state%...` must say so: read the arrays through `associate` names mapped with
+    `map(OMP_MAP_PRESENT_ALLOC: ...)` in the kernel, and name the members its device routines
+    read. `OMP_MAP_PRESENT_ALLOC` is a macro from `meson.build`: `present,alloc` with flang (a
+    missing map is an error), `alloc` with nvfortran 25.1, which does not parse the `present`
+    modifier. Without the clause flang maps `ctx` implicitly (`tofrom`, through a default mapper
+    that walks the allocatable components) and the kernel dereferences host addresses. Reading
+    `ctx%state%x` inside a kernel body, even with `x` named, returned stale data once. Name members that lie close together: the clause maps the
     address range from the first to the last member, and LLVM's runtime rejects a range that
     contains the start of another, smaller mapping ("explicit extension not allowed");
   - (LLVM flang) `target exit data map(delete: parent%component)` also deletes the mapping of
