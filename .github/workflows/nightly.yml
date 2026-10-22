@@ -1,8 +1,9 @@
 # Nightly (and on demand): the long-running and opt-in checks kept out of per-change CI.
-#   - Stress tests: every phase, more iterations, under ASan/UBSan, TSan and nvfortran OpenACC.
+#   - Stress tests: every phase, more iterations, under ASan/UBSan, TSan, nvfortran OpenACC
+#     multicore and nvfortran OpenMP host threads.
 #   - Newest toolchains: catch compiler regressions before they reach the pinned ones in ci.yml.
-#   - GPU: OpenACC on an NVIDIA GPU, on a self-hosted runner (enabled by the repository variable
-#     GPU_RUNNER = true; GitHub-hosted runners have no GPU).
+#   - GPU: OpenACC and OpenMP target on an NVIDIA GPU, on a self-hosted runner (enabled by the
+#     repository variable GPU_RUNNER = true; GitHub-hosted runners have no GPU).
 # Scheduled runs use the default branch. See doc/CI.md.
 
 name: Nightly

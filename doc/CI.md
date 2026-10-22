@@ -4,7 +4,7 @@ Three workflows, split by how often a check needs to run:
 
 | Workflow | When | What |
 |---|---|---|
-| `ci.yml` | Every push to `develop`/`master`, every pull request (skipped for documentation-only changes) | Six compiler/hardware builds running the unit and regression suites; AddressSanitizer and ThreadSanitizer jobs running focused stress phases |
+| `ci.yml` | Every push to `main`, every pull request (skipped for documentation-only changes) | Eleven compiler/hardware builds running the unit and regression suites; AddressSanitizer and ThreadSanitizer jobs running focused stress phases |
 | `nightly.yml` | Daily, and on demand | All stress phases at more iterations (ASan, TSan, nvfortran OpenACC and OpenMP host threads); newest gfortran on Linux and macOS; optional GPU jobs (OpenACC, OpenMP target) on a self-hosted runner |
 | `packaging.yml` | Changes to packaging or build files, pushes to `master`, weekly, on demand | Fedora RPM and Ubuntu DEB, each running the test suite with the distribution's compiler |
 
@@ -72,7 +72,7 @@ diagnostic lines starting with `#` so that they are TAP comments.
 GitHub's hosted runners have no GPUs. The nightly workflow has `gpu-openacc` and `gpu-openmp` jobs (the
 latter with `OMP_TARGET_OFFLOAD=MANDATORY`) that run on a
 self-hosted runner with the labels `self-hosted`, `linux`, `gpu-nvidia` and the NVIDIA HPC SDK
-installed. It is skipped unless the repository variable `GPU_RUNNER` is `true`. To enable it:
+installed. Both are skipped unless the repository variable `GPU_RUNNER` is `true`. To enable it:
 
 1. Register the machine as a runner (repository Settings, Actions, Runners) with the extra label
    `gpu-nvidia`, and install the NVIDIA HPC SDK so that `nvfortran` and `nvc` are on its `PATH`.
