@@ -178,7 +178,8 @@ contains
 
         ! (Vega magnitudes from the context's resident copy: no upload per call)
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(v, vv)
+        !$omp target teams distribute parallel do collapse(2) private(v, vv) &
+        !$omp map(present, alloc: ctx%state%magvega)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(v, vv)
 #endif
@@ -277,12 +278,19 @@ contains
         end do
         g%igm_t = 1.0_KP
 #ifdef OMP_TARGET
-        !$omp target enter data map(to: g%i_lo, g%j_lo, g%j_hi, g%t_obs, g%wt, g%wtl, g%wl, g%bands_t, g%igm_t)
+        ! Associate names, not g%component: on LLVM flang a map of parent%component takes the parent
+        ! (here part of the mapped context) with it when it is deleted again
+        associate (d_i_lo => g%i_lo, d_j_lo => g%j_lo, d_j_hi => g%j_hi, d_t_obs => g%t_obs, d_wt => g%wt, &
+                   d_wtl => g%wtl, d_wl => g%wl, d_bands_t => g%bands_t, d_igm_t => g%igm_t)
+            !$omp target enter data map(to: d_i_lo, d_j_lo, d_j_hi, d_t_obs, d_wt, d_wtl, d_wl, d_bands_t, d_igm_t)
+        end associate
 #endif
         if (igm) call compute_igm_transmission(ctx%state%spec_lambda, zred, igm_factor, g%igm_t)
         ! (with OpenMP target offload compute_igm_transmission runs on the host)
 #ifdef OMP_TARGET
-        !$omp target update to(g%igm_t)
+        associate (d_igm_t => g%igm_t)
+            !$omp target update to(d_igm_t)
+        end associate
 #endif
 
 #ifdef FSPS_CUBLAS
@@ -301,7 +309,9 @@ contains
             end do
         end do
 #ifdef OMP_TARGET
-        !$omp target enter data map(to: g%cmat)
+        associate (d_cmat => g%cmat)
+            !$omp target enter data map(to: d_cmat)
+        end associate
 #endif
 #endif
         g%ready = .true.
@@ -329,7 +339,9 @@ contains
         if (g%sm_ready) then
             if (g%sm_sigma == sigma .and. g%sm_minl == minl .and. g%sm_maxl == maxl) return
 #ifdef OMP_TARGET
-            !$omp target exit data map(delete: g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef)
+            associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef)
+                !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef)
+            end associate
 #endif
             deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef)
             g%sm_ready = .false.
@@ -344,7 +356,9 @@ contains
             call move_alloc(kern%coef, g%sm_coef)
         end if
 #ifdef OMP_TARGET
-        !$omp target enter data map(to: g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef)
+        associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef)
+            !$omp target enter data map(to: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef)
+        end associate
 #endif
         g%sm_sigma = sigma
         g%sm_minl = minl
@@ -446,7 +460,8 @@ contains
         real(KP) :: f
 
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(il, v, target, t, f)
+        !$omp target teams distribute parallel do collapse(2) private(il, v, target, t, f) &
+        !$omp map(present, alloc: ctx%state%spec_lambda)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(il, v, target, t, f)
 #endif
@@ -630,7 +645,10 @@ contains
         integer  :: m, j, b, mb, ml
         real(KP) :: s, c, term, tsum
 
-#if defined(OMP_TARGET)
+#if defined(OMP_TARGET) && !defined(__flang__)
+        ! (Not with LLVM flang: there the result of a parallel do reduction nested in a teams
+        ! distribute loop was lost, and the teams loop reduction is a plain FP32 tree sum, ~4e-5 mag
+        ! at 6000 pixels; the compensated kernel below serves every N)
         if (n_mod < SMALL_N) then
             ! Few spectra: a gang per (band, spectrum), the pixels reduced across its threads
             ! (a tree reduction, pairwise like the dust integrals in opensps_dust). Measured on the

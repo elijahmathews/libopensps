@@ -503,7 +503,9 @@ contains
             end do
         else
 #if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do
+            !$omp target teams distribute parallel do &
+            !$omp map(present, alloc: ctx%state%time_full, ctx%state%zlegend, ctx%state%ntfull, ctx%state%nz, &
+            !$omp     ctx%state%ntabsfh, ctx%state%sfh_tab, ctx%interpolation_type_val, ctx%tiny_logt_val)
 #elif defined(_OPENMP)
             !$omp parallel do
 #endif
@@ -511,11 +513,13 @@ contains
                 call sfh_weights_core(ctx, psets(m), psets(m)%tage, 1, weights(:, :, m), tmp1(:, m), tmp2(:, m))
             end do
         end if
+        associate (bas_mass => ctx%state%ssp_basis_mass, bas_lbol => ctx%state%ssp_basis_lbol)
         if (zw) then
             ! Weights over ages and metallicities: mass and L_bol summed over both (metallicities
             ! outer, as compute_csp_scenario with nzin > 1), the weights cast once to KP
 #if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do private(k, z, w, mk, lk) if(target: .not. host_m)
+            !$omp target teams distribute parallel do private(k, z, w, mk, lk) if(target: .not. host_m) &
+            !$omp& map(present, alloc: bas_lbol, bas_mass)
 #elif defined(_OPENMP)
             !$omp parallel do private(k, z, w, mk, lk)
 #endif
@@ -527,8 +531,8 @@ contains
                     do k = 1, nt
                         w = weights(k, z, m)
                         if (w > SAFE_FLOOR) then
-                            mk = w * ctx%state%ssp_basis_mass(k, z)
-                            lk = w * 10.0_wp**ctx%state%ssp_basis_lbol(k, z)
+                            mk = w * bas_mass(k, z)
+                            lk = w * 10.0_wp**bas_lbol(k, z)
                             msum(m) = msum(m) + mk
                             lsum(m) = lsum(m) + lk
                             if (k <= it_tesc(m)) then
@@ -545,7 +549,8 @@ contains
             end do
         else
 #if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do private(k, w, mk, lk) if(target: .not. host_m)
+            !$omp target teams distribute parallel do private(k, w, mk, lk) if(target: .not. host_m) &
+            !$omp& map(present, alloc: bas_lbol, bas_mass)
 #elif defined(_OPENMP)
             !$omp parallel do private(k, w, mk, lk)
 #endif
@@ -558,12 +563,12 @@ contains
                     if (w > SAFE_FLOOR) then
                         if (zmode) then
                             ! The interpolated SSP's mass and L_bol (compute_interpolated_ssp)
-                            mk = w * ((1.0_wp - dz(m)) * ctx%state%ssp_basis_mass(k, zlo(m)) + &
-                                      dz(m) * ctx%state%ssp_basis_mass(k, zhi(m)))
-                            lk = w * 10.0_wp**((1.0_wp - dz(m)) * ctx%state%ssp_basis_lbol(k, zlo(m)) + &
-                                               dz(m) * ctx%state%ssp_basis_lbol(k, zhi(m)))
+                            mk = w * ((1.0_wp - dz(m)) * bas_mass(k, zlo(m)) + &
+                                      dz(m) * bas_mass(k, zhi(m)))
+                            lk = w * 10.0_wp**((1.0_wp - dz(m)) * bas_lbol(k, zlo(m)) + &
+                                               dz(m) * bas_lbol(k, zhi(m)))
                         else
-                            mk = w * ctx%state%ssp_basis_mass(k, 1)
+                            mk = w * bas_mass(k, 1)
                             lk = w * lum_linear(k)
                         end if
                         msum(m) = msum(m) + mk
@@ -586,6 +591,7 @@ contains
             end do
 
         end if
+        end associate
 
         if (host_m) then
 #ifdef OMP_TARGET
@@ -673,6 +679,10 @@ contains
 #endif
 #ifdef OMP_TARGET
         !$omp end target data
+        ! LLVM flang leaves the allocatable components of psets mapped (reference count 1) when
+        ! the region ends; a later call whose psets lands at the same host address would find
+        ! them present, skip the copy and read stale parameters
+        !$omp target exit data map(delete: psets)
 #endif
 
         if (present(emlines)) then
@@ -1174,23 +1184,33 @@ contains
         ! 1. Ionizing photons of each young basis spectrum (the photon-number integral of
         !    process_ionizing_radiation, without the absorbed fraction)
         !    (linear in the spectrum, so interpolated SSPs take the interpolated Q)
+        ! (One thread per (age, metallicity) with a compensated serial sum over the pixels: on LLVM
+        ! flang / AMD the result of a parallel do reduction nested in a teams distribute loop was
+        ! lost; the sums are short, ~120 pixels)
+        associate (a_spec_nu => ctx%state%spec_nu)
 #ifdef OMP_TARGET
-        !$omp target teams distribute collapse(2) private(s, c)
+        !$omp target teams distribute parallel do collapse(2) private(s, c, wt, v, i, y, wk) &
+        !$omp map(present, alloc: a_spec_nu)
 #endif
         do iz = 1, nzb
         do t = 1, nt_neb
             s = 0.0_KP
             c = 0.0_KP
             if (whlylim >= 2) then
-#ifdef OMP_TARGET
-                !$omp parallel do reduction(+:s) private(wt, v)
-#endif
                 do i = 1, whlylim - 1
-                    wt = real(0.5_wp * abs(ctx%state%spec_nu(i+1) - ctx%state%spec_nu(i)), KP)
-                    v = wt * (basis(i, t, iz) / real(ctx%state%spec_nu(i), KP) + &
-                              basis(i+1, t, iz) / real(ctx%state%spec_nu(i+1), KP))
+                    wt = real(0.5_wp * abs(a_spec_nu(i+1) - a_spec_nu(i)), KP)
+                    v = wt * (basis(i, t, iz) / real(a_spec_nu(i), KP) + &
+                              basis(i+1, t, iz) / real(a_spec_nu(i+1), KP))
 #if defined(OMP_TARGET)
-                    s = s + v
+                    ! (kahan_add inline: it is not a device routine)
+                    if (KP == WP) then
+                        s = s + v
+                    else
+                        y = v - c
+                        wk = s + y
+                        c = (wk - s) - y
+                        s = wk
+                    end if
 #else
                     if (KP == WP) then
                         s = s + v
@@ -1205,6 +1225,7 @@ contains
             end if
         end do
         end do
+        end associate
 
         ! 2. EUV rows: the age sums again, the nebular ages' spectra times the escaping fraction
         if (whlylim > 0) then
@@ -1273,9 +1294,11 @@ contains
                 end do
             end do
 
+            associate (a_nebem_cont => ctx%state%nebem_cont, a_xnebem_cont => ctx%state%xnebem_cont)
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do collapse(2) private(y, o, sy, so, ra, rb, dl, f, r, &
-            !$omp& a, a_prev, t, iz, iu, c00, c01, c10, c11)
+            !$omp& a, a_prev, t, iz, iu, c00, c01, c10, c11) &
+            !$omp& map(present, alloc: a_nebem_cont, a_xnebem_cont)
 #elif defined(_OPENMP)
             !$omp parallel do collapse(2) private(y, o, sy, so, ra, rb, dl, f, r, &
             !$omp& a, a_prev, t, iz, iu, c00, c01, c10, c11)
@@ -1311,27 +1334,27 @@ contains
                                 ra = rb
                             else
                                 if (xrb) then
-                                    ra = c00 * ctx%state%xnebem_cont(j, iz, a, iu) + &
-                                         c01 * ctx%state%xnebem_cont(j, iz, a, iu + 1) + &
-                                         c10 * ctx%state%xnebem_cont(j, iz + 1, a, iu) + &
-                                         c11 * ctx%state%xnebem_cont(j, iz + 1, a, iu + 1)
+                                    ra = c00 * a_xnebem_cont(j, iz, a, iu) + &
+                                         c01 * a_xnebem_cont(j, iz, a, iu + 1) + &
+                                         c10 * a_xnebem_cont(j, iz + 1, a, iu) + &
+                                         c11 * a_xnebem_cont(j, iz + 1, a, iu + 1)
                                 else
-                                    ra = c00 * ctx%state%nebem_cont(j, iz, a, iu) + &
-                                         c01 * ctx%state%nebem_cont(j, iz, a, iu + 1) + &
-                                         c10 * ctx%state%nebem_cont(j, iz + 1, a, iu) + &
-                                         c11 * ctx%state%nebem_cont(j, iz + 1, a, iu + 1)
+                                    ra = c00 * a_nebem_cont(j, iz, a, iu) + &
+                                         c01 * a_nebem_cont(j, iz, a, iu + 1) + &
+                                         c10 * a_nebem_cont(j, iz + 1, a, iu) + &
+                                         c11 * a_nebem_cont(j, iz + 1, a, iu + 1)
                                 end if
                             end if
                             if (xrb) then
-                                rb = c00 * ctx%state%xnebem_cont(j, iz, a + 1, iu) + &
-                                     c01 * ctx%state%xnebem_cont(j, iz, a + 1, iu + 1) + &
-                                     c10 * ctx%state%xnebem_cont(j, iz + 1, a + 1, iu) + &
-                                     c11 * ctx%state%xnebem_cont(j, iz + 1, a + 1, iu + 1)
+                                rb = c00 * a_xnebem_cont(j, iz, a + 1, iu) + &
+                                     c01 * a_xnebem_cont(j, iz, a + 1, iu + 1) + &
+                                     c10 * a_xnebem_cont(j, iz + 1, a + 1, iu) + &
+                                     c11 * a_xnebem_cont(j, iz + 1, a + 1, iu + 1)
                             else
-                                rb = c00 * ctx%state%nebem_cont(j, iz, a + 1, iu) + &
-                                     c01 * ctx%state%nebem_cont(j, iz, a + 1, iu + 1) + &
-                                     c10 * ctx%state%nebem_cont(j, iz + 1, a + 1, iu) + &
-                                     c11 * ctx%state%nebem_cont(j, iz + 1, a + 1, iu + 1)
+                                rb = c00 * a_nebem_cont(j, iz, a + 1, iu) + &
+                                     c01 * a_nebem_cont(j, iz, a + 1, iu + 1) + &
+                                     c10 * a_nebem_cont(j, iz + 1, a + 1, iu) + &
+                                     c11 * a_nebem_cont(j, iz + 1, a + 1, iu + 1)
                             end if
                             a_prev = a
                             dl = (rb - ra) * LN10
@@ -1349,12 +1372,15 @@ contains
                     yo(j, n_mod + m) = yo(j, n_mod + m) + o
                 end do
             end do
+            end associate
         end if
 
         ! 4. Line luminosities per (line, model), young and old: sum over ages of the weight times
         !    10**(log grid interpolated) * Q
+        associate (a_nebem_line => ctx%state%nebem_line, a_xnebem_line => ctx%state%xnebem_line)
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(y, o, wk, q, lg, ra, rb, a, t)
+        !$omp target teams distribute parallel do collapse(2) private(y, o, wk, q, lg, ra, rb, a, t) &
+        !$omp map(present, alloc: a_nebem_line, a_xnebem_line)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(y, o, wk, q, lg, ra, rb, a, t)
 #endif
@@ -1373,11 +1399,11 @@ contains
                     if (q <= SAFE_FLOOR) cycle
                     a = nb_ia(t)
                     if (xrb) then
-                        ra = zu_point(ctx%state%xnebem_line, i, a, nb_iz(m), nb_iu(m), nb_wz(m), nb_wu(m))
-                        rb = zu_point(ctx%state%xnebem_line, i, a + 1, nb_iz(m), nb_iu(m), nb_wz(m), nb_wu(m))
+                        ra = zu_point(a_xnebem_line, i, a, nb_iz(m), nb_iu(m), nb_wz(m), nb_wu(m))
+                        rb = zu_point(a_xnebem_line, i, a + 1, nb_iz(m), nb_iu(m), nb_wz(m), nb_wu(m))
                     else
-                        ra = zu_point(ctx%state%nebem_line, i, a, nb_iz(m), nb_iu(m), nb_wz(m), nb_wu(m))
-                        rb = zu_point(ctx%state%nebem_line, i, a + 1, nb_iz(m), nb_iu(m), nb_wz(m), nb_wu(m))
+                        ra = zu_point(a_nebem_line, i, a, nb_iz(m), nb_iu(m), nb_wz(m), nb_wu(m))
+                        rb = zu_point(a_nebem_line, i, a + 1, nb_iz(m), nb_iu(m), nb_wz(m), nb_wu(m))
                     end if
                     lg = (1.0_wp - nb_wa(t)) * ra + nb_wa(t) * rb
                     if (t <= it_tesc(m)) then
@@ -1391,11 +1417,14 @@ contains
                 eml(i, m) = y + o
             end do
         end do
+        end associate
 
         ! 5. Line profiles: per pixel, the lines whose profile reaches it
         if (nb_lines_in_spec) then
+            associate (a_gaussnebarr => ctx%state%gaussnebarr)
 #if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do collapse(2) private(s, p, i)
+            !$omp target teams distribute parallel do collapse(2) private(s, p, i) &
+            !$omp map(present, alloc: a_gaussnebarr)
 #elif defined(_OPENMP)
             !$omp parallel do collapse(2) private(s, p, i)
 #endif
@@ -1404,11 +1433,12 @@ contains
                     s = 0.0_KP
                     do p = nb_lptr(j), nb_lptr(j + 1) - 1
                         i = nb_lid(p)
-                        s = s + ctx%state%gaussnebarr(j, i) * nb_lum(i, m)
+                        s = s + a_gaussnebarr(j, i) * nb_lum(i, m)
                     end do
                     yo(j, m) = yo(j, m) + s
                 end do
             end do
+            end associate
         end if
     end subroutine nebular_kernels
 
@@ -1430,7 +1460,8 @@ contains
         real(KP) :: ly, lo_
 
 #ifdef OMP_TARGET
-        !$omp target teams distribute private(si, sa, fob, fnd)
+        !$omp target teams distribute private(si, sa, fob, fnd) &
+        !$omp map(present, alloc: ctx%state%spec_lambda, ctx%state%nebem_line_pos)
 #endif
         do m = 1, n_mod
             si = 0.0_wp
@@ -1506,8 +1537,10 @@ contains
         integer  :: m, i
         real(WP) :: lagn, tmpl, lb
 
+        associate (a_agndust_spec => ctx%state%agndust_spec)
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(lagn, tmpl, lb)
+        !$omp target teams distribute parallel do collapse(2) private(lagn, tmpl, lb) &
+        !$omp map(present, alloc: a_agndust_spec)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(lagn, tmpl, lb)
 #endif
@@ -1521,8 +1554,8 @@ contains
                         lb = 0.0_wp
                     end if
                     lagn = (10.0_wp**lb) * psets(m)%fagn
-                    tmpl = (1.0_wp - wta(m)) * ctx%state%agndust_spec(i, ita(m)) + &
-                           wta(m) * ctx%state%agndust_spec(i, ita(m) + 1)
+                    tmpl = (1.0_wp - wta(m)) * a_agndust_spec(i, ita(m)) + &
+                           wta(m) * a_agndust_spec(i, ita(m) + 1)
                     ! exp(-dust2 curve) (exp(-curve) for dust_type 3): the transmission of attenuate_batch,
                     ! kept at KP as opensps_dust keeps it
                     tmpl = tmpl * real(tdiff(i, m), WP)
@@ -1530,6 +1563,7 @@ contains
                 end if
             end do
         end do
+        end associate
     end subroutine add_agn_batch
 
     !> Interval and weight of log Z = logzsol in the context's metallicities, as
@@ -1662,7 +1696,8 @@ contains
         real(WP) :: tmax
 
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2)
+        !$omp target teams distribute parallel do collapse(2) &
+        !$omp map(present, alloc: ctx%state%spec_lambda)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2)
 #endif
@@ -1859,7 +1894,8 @@ contains
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(young, old, curve, tau_b, tau_o, &
         !$omp& tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust, one_m_tb, one_m_to, &
-        !$omp& one_m_td, a_young, spec_sum)
+        !$omp& one_m_td, a_young, spec_sum) &
+        !$omp& map(present, alloc: ctx%state%spec_lambda, ctx%state%dustem2_dustem)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(young, old, curve, tau_b, tau_o, &
         !$omp& tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust, one_m_tb, one_m_to, &

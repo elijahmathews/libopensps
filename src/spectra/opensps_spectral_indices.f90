@@ -236,7 +236,8 @@ contains
             end do
         end do
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2)
+        !$omp target teams distribute parallel do collapse(2) &
+        !$omp map(present, alloc: ctx%state%indexdefined)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2)
 #endif

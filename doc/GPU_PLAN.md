@@ -162,7 +162,25 @@ Forecast to compare against: ~4 us per model (FP32) on the A100 at large N.
     (pass its arrays as dummies; `nebular_kernels`, `smooth_kernel`). LLVM's offload runtime
     rejects overlapping maps that nvfortran tolerates;
   - (nvfortran 25.1, OpenMP) do not pass an assumed-shape dummy of the host routine to a device
-    function inside a target region; use a local copy.
+    function inside a target region; use a local copy;
+  - (LLVM flang 22 on the Radeon 780M, #28) the context is mapped whole
+    (`map(to: ctx)`) with its allocatable and pointer components attached, and a kernel that
+    reads `ctx%state%...` must say so: name every member the kernel and the device routines it
+    calls read in a `map(present, alloc: ...)` clause of the kernel. Without it flang maps `ctx`
+    implicitly (`tofrom`, through a default mapper that walks the allocatable components) and the
+    kernel dereferences host addresses. Name members that lie close together: the clause maps the
+    address range from the first to the last member, and LLVM's runtime rejects a range that
+    contains the start of another, smaller mapping ("explicit extension not allowed");
+  - (LLVM flang) `target exit data map(delete: parent%component)` also deletes the mapping of
+    `parent`. When `parent` lives inside the mapped context (`ctx%state%batch`, the SSP basis)
+    the context disappears and the next kernel faults. Map and delete such components through an
+    associate name (`associate (d => ctx%state%x)`, `map(delete: d)`), which does not name the
+    parent;
+  - (LLVM flang) the end of a `target data` region that maps an array of derived types with
+    allocatable components (`psets`) leaves the components mapped; delete the array explicitly
+    after the region;
+  - no array constructors in device routines (`any([1, 4, 5] == k)`): LLVM flang allocates them
+    on the device heap, which is small and fixed; compare the scalar.
 
 ## OpenACC and OpenMP
 

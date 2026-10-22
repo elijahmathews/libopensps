@@ -1265,17 +1265,25 @@ contains
 
         if (allocated(ctx%state%spec_ssp_zz)) then
 #ifdef OMP_TARGET
-            !$omp target exit data map(delete: ctx%state%spec_ssp_zz)
+            ! Associate names, not ctx%state%component: on LLVM flang a delete of parent%component
+            ! also deletes the mapping of the parent (the context)
+            associate (d_spec => ctx%state%spec_ssp_zz)
+                !$omp target exit data map(delete: d_spec)
+            end associate
 #endif
         end if
         if (allocated(ctx%state%mass_ssp_zz)) then
 #ifdef OMP_TARGET
-            !$omp target exit data map(delete: ctx%state%mass_ssp_zz)
+            associate (d_mass => ctx%state%mass_ssp_zz)
+                !$omp target exit data map(delete: d_mass)
+            end associate
 #endif
         end if
         if (allocated(ctx%state%lbol_ssp_zz)) then
 #ifdef OMP_TARGET
-            !$omp target exit data map(delete: ctx%state%lbol_ssp_zz)
+            associate (d_lbol => ctx%state%lbol_ssp_zz)
+                !$omp target exit data map(delete: d_lbol)
+            end associate
 #endif
         end if
     end subroutine unmap_ssp_zz

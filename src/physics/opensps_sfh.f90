@@ -306,7 +306,7 @@ contains
         ! --------------------------------------------------------------------
         ! ANALYTIC SFHs (1=Tau, 4=Delayed, 5=Simha)
         ! --------------------------------------------------------------------
-        if (any([1, 4, 5] == pset%sfh)) then
+        if (pset%sfh == 1 .or. pset%sfh == 4 .or. pset%sfh == 5) then
             
             ! 1. Time Definitions
             ! Tmax: Age of oldest isochrone in the library (Gyr)
@@ -1063,7 +1063,7 @@ contains
     !> @brief compute_sfh_weights for one output, with caller-provided scratch columns (the batched
     !> CSP runs one per model on the device).
     subroutine sfh_weights_core(ctx, pset, tage, nzin, w, tmp1, tmp2)
-        type(opensps_context_t), intent(inout) :: ctx
+        type(opensps_context_t), intent(in) :: ctx
         type(params), intent(in)            :: pset
         real(WP), intent(in)                :: tage
         integer, intent(in)                 :: nzin
@@ -1298,7 +1298,7 @@ contains
         real(WP) :: start_time
         
         ! 1. Determine Start Time (Offset)
-        if (any([1, 4, 5] == pset%sfh)) then
+        if (pset%sfh == 1 .or. pset%sfh == 4 .or. pset%sfh == 5) then
             start_time = pset%sf_start * 1.0e9_wp
         else
             start_time = 0.0_wp

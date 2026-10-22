@@ -325,11 +325,18 @@ contains
 
         if (g%ready) then
 #ifdef OMP_TARGET
-            !$omp target exit data map(delete: g%i_lo, g%j_lo, g%j_hi, g%t_obs, g%wt, g%wtl, g%wl, g%bands_t, g%igm_t)
+            ! Associate names, not g%component: on LLVM flang a delete of parent%component also
+            ! deletes the mapping of the parent, and g lives inside the mapped context
+            associate (d_i_lo => g%i_lo, d_j_lo => g%j_lo, d_j_hi => g%j_hi, d_t_obs => g%t_obs, d_wt => g%wt, &
+                       d_wtl => g%wtl, d_wl => g%wl, d_bands_t => g%bands_t, d_igm_t => g%igm_t)
+                !$omp target exit data map(delete: d_i_lo, d_j_lo, d_j_hi, d_t_obs, d_wt, d_wtl, d_wl, d_bands_t, d_igm_t)
+            end associate
 #endif
             if (allocated(g%cmat)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: g%cmat)
+                associate (d_cmat => g%cmat)
+                    !$omp target exit data map(delete: d_cmat)
+                end associate
 #endif
             end if
         end if
@@ -338,7 +345,9 @@ contains
         g%ready = .false.
         if (g%sm_ready) then
 #ifdef OMP_TARGET
-            !$omp target exit data map(delete: g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef)
+            associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef)
+                !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef)
+            end associate
 #endif
         end if
         if (allocated(g%sm_lo)) deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef)
@@ -371,7 +380,9 @@ contains
 #endif
         if (on_device) then
 #ifdef OMP_TARGET
-            !$omp target enter data map(alloc: o%spec)
+            associate (d_spec => o%spec)
+                !$omp target enter data map(alloc: d_spec)
+            end associate
 #endif
         end if
     end subroutine batch_out_reserve
@@ -384,7 +395,9 @@ contains
         if (.not. allocated(o%spec)) return
         if (on_device) then
 #ifdef OMP_TARGET
-            !$omp target exit data map(delete: o%spec)
+            associate (d_spec => o%spec)
+                !$omp target exit data map(delete: d_spec)
+            end associate
 #endif
         end if
 #ifdef FSPS_PINNED
