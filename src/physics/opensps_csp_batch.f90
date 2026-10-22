@@ -1187,12 +1187,16 @@ contains
         ! 1. Ionizing photons of each young basis spectrum (the photon-number integral of
         !    process_ionizing_radiation, without the absorbed fraction)
         !    (linear in the spectrum, so interpolated SSPs take the interpolated Q)
-        ! (One thread per (age, metallicity) with a compensated serial sum over the pixels: on LLVM
-        ! flang / AMD the result of a parallel do reduction nested in a teams distribute loop was
-        ! lost; the sums are short, ~120 pixels)
+        ! (LLVM flang / AMD: one thread per (age, metallicity) with a compensated serial sum over the
+        ! pixels, ~120 of them: the result of a parallel do reduction nested in a teams distribute
+        ! loop was lost there. nvfortran: gang per (age, metallicity), pixels reduced across its
+        ! threads; the serial form was 3-5% slower on the A100 for a single call)
         associate (a_spec_nu => ctx%state%spec_nu)
-#ifdef OMP_TARGET
+#if defined(OMP_TARGET) && defined(__flang__)
         !$omp target teams distribute parallel do collapse(2) private(s, c, wt, v, i, y, wk) &
+        !$omp map(OMP_MAP_PRESENT_ALLOC: a_spec_nu)
+#elif defined(OMP_TARGET)
+        !$omp target teams distribute collapse(2) private(s, c) &
         !$omp map(OMP_MAP_PRESENT_ALLOC: a_spec_nu)
 #endif
         do iz = 1, nzb
@@ -1200,11 +1204,14 @@ contains
             s = 0.0_KP
             c = 0.0_KP
             if (whlylim >= 2) then
+#if defined(OMP_TARGET) && !defined(__flang__)
+                !$omp parallel do reduction(+:s) private(wt, v)
+#endif
                 do i = 1, whlylim - 1
                     wt = real(0.5_wp * abs(a_spec_nu(i+1) - a_spec_nu(i)), KP)
                     v = wt * (basis(i, t, iz) / real(a_spec_nu(i), KP) + &
                               basis(i+1, t, iz) / real(a_spec_nu(i+1), KP))
-#if defined(OMP_TARGET)
+#if defined(OMP_TARGET) && defined(__flang__)
                     ! (kahan_add inline: it is not a device routine)
                     if (KP == WP) then
                         s = s + v
@@ -1214,6 +1221,8 @@ contains
                         c = (wk - s) - y
                         s = wk
                     end if
+#elif defined(OMP_TARGET)
+                    s = s + v
 #else
                     if (KP == WP) then
                         s = s + v
