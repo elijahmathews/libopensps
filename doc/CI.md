@@ -5,7 +5,7 @@ Three workflows, split by how often a check needs to run:
 | Workflow | When | What |
 |---|---|---|
 | `ci.yml` | Every push to `develop`/`master`, every pull request (skipped for documentation-only changes) | Six compiler/hardware builds running the unit and regression suites; AddressSanitizer and ThreadSanitizer jobs running focused stress phases |
-| `nightly.yml` | Daily, and on demand | All stress phases at more iterations (ASan, TSan, nvfortran OpenACC and OpenMP host threads); newest gfortran on Linux and macOS; optional GPU jobs (OpenACC, OpenMP target) on a self-hosted runner |
+| `nightly.yml` | Daily, and on demand | All stress phases at more iterations (ASan, TSan, nvfortran OpenMP host threads); newest gfortran on Linux and macOS; optional GPU job (OpenMP target) on a self-hosted runner |
 | `packaging.yml` | Changes to packaging or build files, pushes to `master`, weekly, on demand | Fedora RPM and Ubuntu DEB, each running the test suite with the distribution's compiler |
 
 Pull requests that supersede a running build cancel it. Every job has a timeout.
@@ -19,9 +19,8 @@ Pull requests that supersede a running build cancel it. Every job has a timeout.
 | gfortran / macOS arm64 | gfortran 14 (Homebrew) | Apple silicon | macOS toolchain and linker |
 | LLVM flang / Linux x86-64 | flang 20 | x86-64 | LLVM front end |
 | Intel ifx / Linux x86-64 | ifx 2026.1 | x86-64 | Intel LLVM-based compiler |
-| nvfortran / OpenACC multicore | nvfortran 26.1, `-Daccel=multicore` | x86-64 | OpenACC directive paths on host cores |
-| gfortran / OpenMP host threads | gfortran, `-Denable_openmp=true` | x86-64 | The batch's OpenMP loops on host threads (to replace OpenACC multicore) |
-| nvfortran / OpenMP host threads (FP64, FP32) | nvfortran 26.1, `-Denable_openmp=true` | x86-64 | The same with nvfortran; replaces the OpenACC multicore jobs when OpenACC is retired |
+| gfortran / OpenMP host threads | gfortran, `-Denable_openmp=true` | x86-64 | The OpenMP loops of the device kernels on host threads |
+| nvfortran / OpenMP host threads (FP64, FP32) | nvfortran 26.1, `-Denable_openmp=true` | x86-64 | The same with nvfortran (nvfortran's front end and OpenMP runtime) |
 | AddressSanitizer + UBSan | gfortran | x86-64 | Unit tests; stress phases A (leaks) and C (reallocation) |
 | ThreadSanitizer | gfortran + OpenMP threads | x86-64 | Unit tests; stress phases B (concurrent compute) and D (concurrent setup/release) |
 
@@ -69,8 +68,8 @@ diagnostic lines starting with `#` so that they are TAP comments.
 
 ## Hardware and compilers not covered by hosted runners
 
-GitHub's hosted runners have no GPUs. The nightly workflow has `gpu-openacc` and `gpu-openmp` jobs (the
-latter with `OMP_TARGET_OFFLOAD=MANDATORY`) that run on a
+GitHub's hosted runners have no GPUs. The nightly workflow has a `gpu-openmp` job (with
+`OMP_TARGET_OFFLOAD=MANDATORY`) that runs on a
 self-hosted runner with the labels `self-hosted`, `linux`, `gpu-nvidia` and the NVIDIA HPC SDK
 installed. It is skipped unless the repository variable `GPU_RUNNER` is `true`. To enable it:
 
@@ -85,9 +84,9 @@ repository.
 GitHub also offers paid GPU runners (NVIDIA T4) for organization accounts; the same job works
 there by changing `runs-on`.
 
-## Adding OpenMP target offload
+## More OpenMP target offload checks
 
-The planned move from OpenACC to OpenMP target offload adds a backend axis. Most of it can be
+GPU builds are OpenMP target offload (`-Daccel=omp_gpu`; OpenACC was removed). More of it can be
 tested without a GPU: compile with each vendor's offload flags, and run the suites with
 `OMP_TARGET_OFFLOAD=DISABLED`, which executes the target regions on the host. That checks that
 the directives compile and that the host fallback gives the reference results, on every compiler.
@@ -99,12 +98,11 @@ the directives compile and that the host fallback gives the reference results, o
 | nvfortran | `-mp=gpu -gpu=...` | Host fallback | NVIDIA GPU |
 | AMD flang (`amdflang`, ROCm) | `-fopenmp --offload-arch=gfx...` | Compile and host fallback in a ROCm container | AMD GPU |
 
-Suggested steps when the OpenMP backend lands:
+Suggested next steps:
 
-1. Add a meson option (for example `-Doffload=openmp`) next to `accel`, setting the per-compiler
-   flags above.
+1. Extend `-Daccel=omp_gpu` (nvfortran, LLVM flang today) with the gfortran and ifx flags above.
 2. In `ci.yml`, add host-fallback rows for gfortran, ifx and nvfortran with
-   `OMP_TARGET_OFFLOAD=DISABLED`, and keep the OpenACC row until OpenACC is retired.
+   `OMP_TARGET_OFFLOAD=DISABLED`.
 3. In `nightly.yml`, add the AMD flang row (ROCm container; larger download, so not per-change)
    and device rows on self-hosted GPU runners (`gpu-nvidia`, and `gpu-amd` if available), run with
    `OMP_TARGET_OFFLOAD=MANDATORY` so that a silent fallback to the host fails the job.

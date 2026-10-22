@@ -11,7 +11,7 @@ or to independent identities. Most of the rules below exist to protect that.
 You need:
 
 - a Fortran 2008 compiler: gfortran (the reference compiler), Intel ifx or LLVM flang;
-  NVIDIA HPC SDK (nvfortran) for OpenACC and NVIDIA GPU builds;
+  NVIDIA HPC SDK (nvfortran) or LLVM flang for GPU builds (OpenMP target offload);
 - Meson and Ninja (`python3 -m pip install --user meson ninja` if your system lacks them);
 - Python 3 (standard library only) for the data tools.
 
@@ -34,7 +34,7 @@ meson setup build32 --buildtype=release -Dkernel_precision=single  # FP32 kernel
 meson compile -C build
 ```
 
-GPU builds (OpenACC with nvfortran, OpenMP target offload with nvfortran or LLVM flang) are
+GPU builds (OpenMP target offload with nvfortran or LLVM flang) are
 described in `doc/GPU_PLAN.md`.
 
 ## Running the test suite

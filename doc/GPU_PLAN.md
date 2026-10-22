@@ -1,5 +1,13 @@
 # GPU plan: first GPU session (A100 or P100)
 
+> **OpenACC was removed (roadmap priority 2).** GPU builds are OpenMP target offload only:
+> `FC=nvfortran CC=nvc meson setup b -Daccel=omp_gpu -Dgpu_arch=cc80` (`-Dcublas=true` for
+> the cuBLAS products; LLVM flang with `-Dgpu_arch=gfx1103` etc. for AMD), run with
+> `OMP_TARGET_OFFLOAD=MANDATORY`; CPU threads with `-Denable_openmp=true`. The OpenACC
+> commands and notes below (`-Daccel=gpu`, `-Daccel=multicore`, `!$acc` directives) are the
+> history of the sessions that built the GPU path; "Rules learned so far" still applies,
+> with `!$omp declare target` in place of `!$acc routine seq`.
+
 Runbook for the first session on an NVIDIA GPU node (A100, or P100: see below). The goal is to measure, then build the two
 kernels that matter, with every step validated against the CPU build. Work on a branch
 (`gpu/a100-<topic>`), commit and push as you go (`git push origin <branch>`), and do not merge.
