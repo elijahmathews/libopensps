@@ -54,16 +54,16 @@ module opensps_ssp
     public :: ssp_per_star, opensps_ssp_set_per_star
 
     !> Sum the SSP over individual star spectra instead of over library templates (the two are
-    !> equal; the per-star form is kept for the OpenACC build and to test the template form)
+    !> equal; the per-star form is kept to test the template form)
     logical :: ssp_per_star = .false.
 
     !> Exact power of two keeping the O/C-rich AGB sums (before lambda^2) clear of FP32 subnormals;
     !> 1 with FP64 kernels, which do not need it (with it, gfortran FP64 SSP grids ran 25% slower)
     real(WP), parameter :: AGB_SCALE = merge(2.0_wp**64, 1.0_wp, KP /= WP)
-    !> Libraries of the deferred template weights (OpenACC builds: main library, then these)
+    !> Libraries of the deferred template weights (the main library, then these)
     integer, parameter :: L_MAIN = 0, L_WMB = 1, L_PAGB = 2, L_WRN = 3, L_WRC = 4, L_CAR = 5, L_AGBO = 6, L_AGBC = 7
 
-    !> Dust-shell AGB corners of all ages, deferred to the device product (OpenACC builds): per
+    !> Dust-shell AGB corners of all ages, deferred to the template product: per
     !> corner ("slot") its age, transfer-function indices (flux_dagb) and template weights
     !> (library, a, b, weight), stored as consecutive entries slot_ptr(s) .. slot_ptr(s+1) - 1.
     type :: dusty_defer_t
@@ -208,7 +208,6 @@ contains
             
             ! Push the assigned arrays to the device so downstream device
             ! kernels (like CSP) see the valid data.
-            !$acc update device(spec_grid, lbol_grid, mass_grid) if_present
             
             return ! Exit immediately
         end if
@@ -225,18 +224,6 @@ contains
         call init_isochrone_buffer(buf)
         
         ! Move buffer to device
-        !$acc enter data copyin(buf)
-        !$acc enter data create(buf%initial_mass, buf%current_mass, buf%log_lum, buf%log_teff)
-        !$acc enter data create(buf%log_g, buf%phase, buf%co_ratio, buf%log_mdot, buf%weights)
-        !$acc enter data attach(buf%initial_mass)
-        !$acc enter data attach(buf%current_mass)
-        !$acc enter data attach(buf%log_lum)
-        !$acc enter data attach(buf%log_teff)
-        !$acc enter data attach(buf%log_g)
-        !$acc enter data attach(buf%phase)
-        !$acc enter data attach(buf%co_ratio)
-        !$acc enter data attach(buf%log_mdot)
-        !$acc enter data attach(buf%weights)
 
         ! --------------------------------------------------------------------
         ! 4. EVOLUTION LOOP
@@ -252,7 +239,6 @@ contains
 
         ! The per-star kernel builds each age's spectrum on the device; the template path
         ! aggregates weights on the host and adds the main library for all ages at the end
-        !$acc data present(ctx, buf) copy(spec_grid) if(ssp_per_star)
         do i_time = 1, n_times
             
             ! Optimization: Skip ages not requested by the user
@@ -277,11 +263,7 @@ contains
             ! compute_integrated_properties then run on the host)
             n_curr = buf%n_stars
             if (ssp_per_star) then
-                !$acc update device(buf%n_stars)
                 if (n_curr > 0) then
-                    !$acc update device(buf%initial_mass(1:n_curr), buf%current_mass(1:n_curr), buf%log_lum(1:n_curr))
-                    !$acc update device(buf%log_teff(1:n_curr), buf%log_g(1:n_curr), buf%phase(1:n_curr))
-                    !$acc update device(buf%co_ratio(1:n_curr), buf%log_mdot(1:n_curr), buf%weights(1:n_curr))
                 end if
             end if
 
@@ -290,7 +272,6 @@ contains
             call compute_integrated_properties(ctx, buf, mass_grid(out_idx), lbol_grid(out_idx))
 
             ! Prevent host/device desync if the caller mapped these to the device
-            !$acc update device(mass_grid(out_idx), lbol_grid(out_idx)) if_present
 
             ! D. ACCUMULATE SPECTRA
             !    Sum individual stellar spectra into the grid
@@ -302,11 +283,9 @@ contains
             end if
 
         end do
-        !$acc end data
         ! The per-star kernel left the spectra on the device; if the caller mapped spec_grid
         ! (copy above was then a no-op), bring them back for the host post-processing below
         if (ssp_per_star) then
-            !$acc update self(spec_grid) if_present
         end if
 
         if (allocated(w_main_all)) then
@@ -315,9 +294,6 @@ contains
         end if
 
         ! Release buffer memory from device
-        !$acc exit data delete(buf%initial_mass, buf%current_mass, buf%log_lum, buf%log_teff)
-        !$acc exit data delete(buf%log_g, buf%phase, buf%co_ratio, buf%log_mdot, buf%weights)
-        !$acc exit data delete(buf)
 
         call free_isochrone_buffer(buf)
 
@@ -328,7 +304,6 @@ contains
         call finish_ssp_grid(ctx, pset, mass_grid, lbol_grid, spec_grid)
 
         ! Outputs are final on the host; refresh device copies the caller may have mapped
-        !$acc update device(spec_grid, mass_grid, lbol_grid) if_present
 
     end subroutine generate_ssp_grid
 
@@ -710,7 +685,7 @@ contains
         !> If present (template path), the main-library template weights are returned here instead
         !> of summed, and spec_out holds the rest, unfloored (see add_main_library_templates)
         real(WP), intent(inout), optional   :: w_main_out(:)
-        !> If present (OpenACC template path), dust-shell AGB corners are appended here
+        !> Dust-shell AGB corners (template path) are appended here
         type(dusty_defer_t), intent(inout), optional :: dusty
 
         ! Local variables
@@ -732,12 +707,9 @@ contains
             (ctx%state%ssp_temp_nspec < nspec) .or. &
             (ctx%state%ssp_temp_nstars < nstars)) then
             if (allocated(ctx%state%ssp_temp_grid)) then
-                !$acc exit data delete(ctx%state%ssp_temp_grid)
                 deallocate(ctx%state%ssp_temp_grid)
             end if
             allocate(ctx%state%ssp_temp_grid(nspec, nstars))
-            !$acc enter data create(ctx%state%ssp_temp_grid)
-            !$acc enter data attach(ctx%state%ssp_temp_grid)
             ctx%state%ssp_temp_nspec = nspec
             ctx%state%ssp_temp_nstars = nstars
         end if
@@ -770,21 +742,16 @@ contains
             return
         end if
 
-        !$acc data create(active_idx, active_w) pcopy(spec_out)
         if (n_active == 0) then
             spec_out = 0.0_wp
         else
-            !$acc update device(active_idx, active_w)
 
             ! Initialize output
-            !$acc kernels present(spec_out)
             spec_out = 0.0_wp
-            !$acc end kernels
 
             ! ----------------------------------------------------------------
             ! PHASE 1: PARALLEL GENERATION (Gang over Stars)
             ! ----------------------------------------------------------------
-            !$acc parallel loop gang vector collapse(1) present(ctx, buf)
             do ia = 1, n_active
                 j = active_idx(ia)
 
@@ -814,32 +781,6 @@ contains
             ! kernels the sum over thousands of stars is compensated (Kahan): a plain FP32 sum
             ! loses up to 1e-5 of the result, the compensated one stays at FP32 rounding (~1e-7).
             ! KP == WP is a compile-time constant, so each build keeps one loop.
-#ifdef _OPENACC
-            ! One thread per pixel, summing over the stars
-            if (KP == WP) then
-                !$acc parallel loop gang vector private(ia, acc) present(ctx, spec_out)
-                do i_spec = 1, nspec
-                    acc = 0.0_KP
-                    do ia = 1, n_active
-                        acc = acc + ctx%state%ssp_temp_grid(i_spec, ia) * active_w(ia)
-                    end do
-                    spec_out(i_spec) = max(real(acc, WP), SAFE_FLOOR)
-                end do
-            else
-                !$acc parallel loop gang vector private(ia, acc, comp, term, tsum) present(ctx, spec_out)
-                do i_spec = 1, nspec
-                    acc = 0.0_KP
-                    comp = 0.0_KP
-                    do ia = 1, n_active
-                        term = ctx%state%ssp_temp_grid(i_spec, ia) * active_w(ia) - comp
-                        tsum = acc + term
-                        comp = (tsum - acc) - term
-                        acc = tsum
-                    end do
-                    spec_out(i_spec) = max(real(acc, WP), SAFE_FLOOR)
-                end do
-            end if
-#else
             ! Stars outer, pixels inner: contiguous and vectorizable, with one accumulator (and
             ! compensation) per pixel; each pixel still sums the stars in the same order
             allocate(acc_v(nspec))
@@ -867,10 +808,8 @@ contains
                 spec_out(i_spec) = max(real(acc_v(i_spec), WP), SAFE_FLOOR)
             end do
             deallocate(acc_v)
-#endif
         end if
 
-        !$acc end data
         deallocate(active_idx, active_w)
 
     end subroutine accumulate_spectrum
@@ -1140,7 +1079,7 @@ contains
         d%slot_ptr(d%n_slots + 1) = d%n_ent + 1
     end subroutine dusty_push_entry
 
-    !> Number of templates of the libraries other than the main one (deferred rows, OpenACC).
+    !> Number of templates of the libraries other than the main one (deferred rows).
     integer function n_small_templates(ctx)
         type(opensps_context_t), intent(in) :: ctx
         n_small_templates = size(ctx%state%wmb_spec, 3) * size(ctx%state%wmb_spec, 4) + &
@@ -1211,7 +1150,7 @@ contains
     !> the dust-shell AGB corners (dusty) are added per age after them. One thread per (pixel,
     !> age) sums the used templates in row order (compensated at FP32 kernel precision; the O/C-
     !> rich AGB terms apart, times lambda^2, always compensated), reading the context's library.
-    !> The same loop runs on the device (OpenACC or OpenMP target, for a context on the device)
+    !> The same loop runs on the device (OpenMP target, for a context on the device)
     !> and on the host (OpenMP threads in CPU builds), so every build sums in the same order.
     !> Ages with no stars are left at zero; computed ages are floored.
     subroutine add_main_library_templates(ctx, pset, w, spec_grid, dusty)
@@ -1307,17 +1246,13 @@ contains
             sl_key = 1; sl_ptr = 1; e_lib = 0; e_a = 1; e_b = 1; e_w = 0.0_wp
         end if
         ! On the device for a context there (its libraries resident); otherwise (CPU builds,
-        ! OpenACC multicore, a context not moved to the device) the CPU loop below, which sums
+        ! a context not moved to the device) the CPU loop below, which sums
         ! each (pixel, age) in the same order
         dev = ctx%on_device
-#if (!defined(_OPENACC) && !defined(OMP_TARGET)) || defined(ACC_MULTICORE)
+#if !defined(OMP_TARGET)
         dev = .false.
 #endif
         if (dev) then
-        !$acc parallel loop gang vector collapse(2) present(ctx) &
-        !$acc private(acc1, comp1, lacc, lcomp, x, lib, wk, term, tsum, k, ta, tc, la, lc, tmpv, sl, e, j, wv, low) &
-        !$acc copyin(w_used, a_used, b_used, lib_used, has_stars, age_first, age_last, sl_key, sl_ptr, e_lib, e_a, &
-        !$acc        e_b, e_w) copyout(t_sum)
 #ifdef OMP_TARGET
         !$omp target teams distribute parallel do collapse(2) &
         !$omp private(acc1, comp1, lacc, lcomp, x, lib, wk, term, tsum, k, ta, tc, la, lc, tmpv, sl, e, j, wv, low) &
@@ -1331,7 +1266,6 @@ contains
                     comp1 = 0.0_KP
                     lacc = 0.0_KP
                     lcomp = 0.0_KP
-                    !$acc loop seq
                     do k = 1, n_used
                         wk = w_used(k, i_time)
                         if (wk == 0.0_KP) cycle
@@ -1378,10 +1312,8 @@ contains
                     ! Dust-shell AGB corners of this age, as step 3 of accumulate_by_templates: the
                     ! template sum (smoothed beyond 3 um; O/C-rich below it times lambda^2, with the
                     ! factor AGB_SCALE) times the corner's transfer function
-                    !$acc loop seq
                     do sl = age_first(i_time), age_last(i_time)
                         ta = 0.0_KP; tc = 0.0_KP; la = 0.0_KP; lc = 0.0_KP
-                        !$acc loop seq
                         do e = sl_ptr(sl), sl_ptr(sl + 1) - 1
                             wv = e_w(e)
                             low = .false.

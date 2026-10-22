@@ -82,13 +82,10 @@ contains
 
         ! sspi is either mapped by the caller (the SSP basis in compute_csp_scenario, current on the
         ! device) or copied in here; no update (it re-sent the whole basis on every call)
-        !$acc data pcopyin(sspi) pcopy(sspo)
 
         ! 0. Initialization & Validation
         ! ------------------------------
-        !$acc kernels present(sspo, sspi)
         sspo = sspi
-        !$acc end kernels
         
         if (present(nebemline)) then
             nebemline = 0.0_wp
@@ -113,14 +110,9 @@ contains
         ! 2. Dimensionality Reduction
         ! ----------------------------------------------
 
-        ! On the device, where the CLOUDY grids are (on the host this was ~60000 interpolations
-        ! and a 0.5 MB upload per call, about a quarter of a full-physics compute_csp_scenario call).
-        ! OpenACC multicore keeps the host loop: there the parallel loop segfaulted reading the
-        ! grids through ctx (the same multicore problem as compute_igm_transmission's loop)
+        ! (On the host: SSP generation with add_neb_emission = 2; the batch interpolates the grids
+        ! on the device itself, nebular_kernels)
         if (calc_cont) then
-#ifndef ACC_MULTICORE
-            !$acc parallel loop collapse(2) present(ctx)
-#endif
             do k = 1, NEBNAGE
                 do t = 1, nspec
                     if (use_xrb_grid) then
@@ -135,9 +127,6 @@ contains
         end if
 
         if (calc_lines) then
-#ifndef ACC_MULTICORE
-            !$acc parallel loop collapse(2) present(ctx)
-#endif
             do k = 1, NEBNAGE
                 do t = 1, NEMLINE
                     if (use_xrb_grid) then
@@ -155,16 +144,9 @@ contains
         ! -----------------
         max_neb_time_idx = find_interval(ctx%state%time_full, ctx%state%nebem_age(NEBNAGE))
 
-#ifdef _OPENACC
-        ! On the device all young ages are done at once (a few kernels instead of ~6 launches and a
-        ! copy-back of Q per age); same operations per pixel and age as the loop below
-        call nebular_all_ages(ctx, pset, sspi, sspo, max_neb_time_idx, calc_cont, calc_lines, nebemline)
-#else
         ! Scratch arrays initialized directly on the device
-        !$acc kernels present(ctx)
         ctx%state%gas_current_step_cont = 0.0_wp
         ctx%state%gas_current_step_lines = log10(SAFE_FLOOR)
-        !$acc end kernels
 
         do t = 1, max_neb_time_idx
             
@@ -182,8 +164,6 @@ contains
             ! C. Add Continuum
             ! ----------------
             if (calc_cont) then
-                !$acc parallel loop present(ctx, sspo) &
-                !$acc               firstprivate(idx_a, w_a, q_ionizing, t)
                 do k = 1, nspec
                     ctx%state%gas_current_step_cont(k) = (1.0_wp - w_a) * ctx%state%gas_neb_cont_reduced(k, idx_a) + &
                                                          (         w_a) * ctx%state%gas_neb_cont_reduced(k, idx_a + 1)
@@ -195,15 +175,12 @@ contains
             ! D. Add Lines
             ! ------------
             if (calc_lines) then
-                !$acc parallel loop present(ctx) &
-                !$acc               firstprivate(idx_a, w_a)
                 do k = 1, NEMLINE
                     ctx%state%gas_current_step_lines(k) = (1.0_wp - w_a) * ctx%state%gas_neb_line_reduced(k, idx_a) + &
                                                           (         w_a) * ctx%state%gas_neb_line_reduced(k, idx_a + 1)
                 end do
 
                 if (present(nebemline)) then
-                    !$acc parallel loop present(ctx, nebemline) firstprivate(t, q_ionizing)
                     do k = 1, NEMLINE
                         nebemline(k,t) = (10.0_wp**ctx%state%gas_current_step_lines(k)) * q_ionizing
                     end do
@@ -215,9 +192,7 @@ contains
             end if
 
         end do
-#endif
 
-        !$acc end data
 
     end subroutine apply_nebular_emission
 
@@ -232,7 +207,6 @@ contains
             if (pset%sigma_smooth /= ctx%state%gauss_built_sigma .or. &
                 ctx%smooth_velocity_val /= ctx%state%gauss_built_velocity) then
                 call compute_line_gaussians(ctx, pset)
-                !$acc update device(ctx%state%gaussnebarr(:,:))
 #ifdef OMP_TARGET
                 !$omp target update if(ctx%on_device) to(ctx%state%gaussnebarr)
 #endif
@@ -242,125 +216,6 @@ contains
         end if
     end subroutine prepare_line_gaussians
 
-#ifdef _OPENACC
-    !> @brief The time loop of apply_nebular_emission for all young ages at once (device).
-    !>
-    !> @details
-    !> Per age t <= nt_neb, as process_ionizing_radiation and the loop body: the EUV below the
-    !> Lyman limit is scaled by frac_obrun, Q(t) is integrated from the input spectrum, and ages
-    !> with Q > SAFE_FLOOR get the nebular continuum and lines (Q times the grid interpolated in
-    !> age). sspi and sspo are present (apply_nebular_emission's data region).
-    subroutine nebular_all_ages(ctx, pset, sspi, sspo, nt_neb, calc_cont, calc_lines, nebemline)
-        type(opensps_context_t), intent(inout)       :: ctx
-        type(params), intent(in)                  :: pset
-        real(KP), dimension(:,:), intent(in)      :: sspi
-        real(KP), dimension(:,:), intent(inout)   :: sspo
-        integer, intent(in)                       :: nt_neb
-        logical, intent(in)                       :: calc_cont, calc_lines
-        real(KP), dimension(:,:), intent(inout), optional :: nebemline
-
-        integer  :: t, i, j, k, nspec, whlylim
-        integer, allocatable  :: ia(:)
-        real(WP), allocatable :: wa(:), q(:), amp(:,:)
-        real(WP) :: frac, line_log, cont_log
-        real(KP) :: s, wt, sum_val
-        logical  :: lines_in_spec, have_lines
-
-        if (nt_neb < 1) return
-        nspec = size(sspi, 1)
-        whlylim = ctx%state%whlylim
-        frac = max(0.0_wp, min(pset%frac_obrun, 1.0_wp))
-        lines_in_spec = ctx%nebemlineinspec_val == 1
-        have_lines = present(nebemline)
-        allocate(ia(nt_neb), wa(nt_neb), q(nt_neb), amp(NEMLINE, nt_neb))
-        do t = 1, nt_neb
-            call get_grid_indices_weights(ctx%state%nebem_age, ctx%state%time_full(t), NEBNAGE, ia(t), wa(t))
-        end do
-
-        !$acc data copyin(ia, wa) create(q, amp) present(ctx, sspi, sspo)
-
-        ! 1. EUV escaping the nebula
-        if (whlylim > 0) then
-            !$acc parallel loop collapse(2) firstprivate(frac)
-            do t = 1, nt_neb
-                do i = 1, whlylim
-                    sspo(i, t) = sspi(i, t) * real(frac, KP)
-                end do
-            end do
-        end if
-
-        ! 2. Ionizing photons absorbed, per age (photon-number integral of L_nu / nu at KP)
-        !$acc parallel loop gang private(s)
-        do t = 1, nt_neb
-            s = 0.0_KP
-            if (whlylim >= 2) then
-                !$acc loop vector reduction(+:s) private(wt)
-                do i = 1, whlylim - 1
-                    wt = real(0.5_wp * abs(ctx%state%spec_nu(i+1) - ctx%state%spec_nu(i)), KP)
-                    s = s + wt * (sspi(i, t) / real(ctx%state%spec_nu(i), KP) + &
-                                  sspi(i+1, t) / real(ctx%state%spec_nu(i+1), KP))
-                end do
-                q(t) = abs((real(s, WP) / H_PLANCK * L_SOL) * (1.0_wp - pset%frac_obrun))
-            else
-                q(t) = 0.0_wp
-            end if
-        end do
-
-        ! 3. Continuum (log grid interpolated in age, in WP)
-        if (calc_cont) then
-            !$acc parallel loop collapse(2) private(cont_log)
-            do t = 1, nt_neb
-                do k = 1, nspec
-                    if (.not. (q(t) <= SAFE_FLOOR)) then
-                        cont_log = (1.0_wp - wa(t)) * ctx%state%gas_neb_cont_reduced(k, ia(t)) + &
-                                   wa(t) * ctx%state%gas_neb_cont_reduced(k, ia(t) + 1)
-                        sspo(k, t) = sspo(k, t) + (10.0_wp**cont_log) * q(t)
-                    end if
-                end do
-            end do
-        end if
-
-        ! 4. Lines: luminosities (10**log * Q, as add_lines_to_spectrum), then their profiles
-        if (calc_lines) then
-            !$acc parallel loop collapse(2) private(line_log)
-            do t = 1, nt_neb
-                do k = 1, NEMLINE
-                    line_log = (1.0_wp - wa(t)) * ctx%state%gas_neb_line_reduced(k, ia(t)) + &
-                               wa(t) * ctx%state%gas_neb_line_reduced(k, ia(t) + 1)
-                    if (.not. (q(t) <= SAFE_FLOOR)) then
-                        amp(k, t) = (10.0_wp**line_log) * q(t)
-                    else
-                        amp(k, t) = 0.0_wp
-                    end if
-                end do
-            end do
-            if (have_lines) then
-                !$acc parallel loop collapse(2) present(nebemline)
-                do t = 1, nt_neb
-                    do k = 1, NEMLINE
-                        if (.not. (q(t) <= SAFE_FLOOR)) nebemline(k, t) = amp(k, t)
-                    end do
-                end do
-            end if
-            if (lines_in_spec) then
-                !$acc parallel loop gang vector collapse(2) private(sum_val, i)
-                do t = 1, nt_neb
-                    do j = 1, nspec
-                        if (.not. (q(t) <= SAFE_FLOOR)) then
-                            sum_val = 0.0_KP
-                            !$acc loop seq
-                            do i = 1, NEMLINE
-                                sum_val = sum_val + ctx%state%gaussnebarr(j, i) * real(amp(i, t), KP)
-                            end do
-                            sspo(j, t) = sspo(j, t) + sum_val
-                        end if
-                    end do
-                end do
-            end if
-        end if
-        !$acc end data
-    end subroutine nebular_all_ages
-#endif
 
     ! ------------------------------------------------------------------------
     ! PRIVATE HELPER ROUTINES
@@ -400,11 +255,9 @@ contains
 
         ! spec_in is mapped by the caller or copied in here; an update here re-sent the whole SSP
         ! grid for every young age (~50 x 5 MB per nebular CSP call)
-        !$acc data pcopyin(spec_in) pcopy(spec_out)
 
         ! 1. Attenuate Output Spectrum (EUV < 912 A)
         if (whlylim > 0) then
-            !$acc parallel loop present(ctx, spec_in, spec_out) firstprivate(frac_obrun_clamped, t_idx)
             do i = 1, whlylim
                 spec_out(i, t_idx) = spec_in(i, t_idx) * real(frac_obrun_clamped, KP)
             end do
@@ -418,13 +271,8 @@ contains
             ! ~6e59, stays in WP): a plain reduction on the GPU, compensated on the CPU
             integral_flux = 0.0_KP
             comp = 0.0_KP
-            !$acc parallel loop reduction(+:integral_flux) present(ctx, spec_in) firstprivate(t_idx) private(wt)
             do i = 1, whlylim - 1
                 wt = real(0.5_wp * abs(ctx%state%spec_nu(i+1) - ctx%state%spec_nu(i)), KP)
-#ifdef _OPENACC
-                integral_flux = integral_flux + wt * (spec_in(i, t_idx) / real(ctx%state%spec_nu(i), KP) + &
-                                                      spec_in(i+1, t_idx) / real(ctx%state%spec_nu(i+1), KP))
-#else
                 if (KP == WP) then   ! compile-time constant: plain sum, no call
                     integral_flux = integral_flux + wt * (spec_in(i, t_idx) / real(ctx%state%spec_nu(i), KP) + &
                                                           spec_in(i+1, t_idx) / real(ctx%state%spec_nu(i+1), KP))
@@ -432,7 +280,6 @@ contains
                     call kahan_add(integral_flux, comp, wt * (spec_in(i, t_idx) / real(ctx%state%spec_nu(i), KP) + &
                                                               spec_in(i+1, t_idx) / real(ctx%state%spec_nu(i+1), KP)))
                 end if
-#endif
             end do
             
             ! We check NaN on host? Or device?
@@ -441,7 +288,6 @@ contains
             q_val = abs((real(integral_flux, WP) / H_PLANCK * L_SOL) * (1.0_wp - pset%frac_obrun))
         end if
 
-        !$acc end data
 
     end subroutine process_ionizing_radiation
 
@@ -511,23 +357,10 @@ contains
 
         ! Line amplitudes once per call: in the wavelength loop below, 10** would be evaluated for
         ! every line at every pixel (~1e6 times per SSP age), which dominated nebular CSP calls
-        !$acc data create(amp)
-        !$acc parallel loop present(line_lum_log) firstprivate(q_val)
         do i = 1, NEMLINE
             amp(i) = (10.0_wp**line_lum_log(i)) * q_val
         end do
 
-#ifdef _OPENACC
-        ! spectrum(j) = sum(gauss(j, i) * amp(i)): one thread per pixel suits the device
-        !$acc parallel loop gang vector present(ctx, spectrum, amp) private(sum_val, i) firstprivate(t_idx)
-        do j = 1, size(spectrum, 1)
-            sum_val = 0.0_KP
-            do i = 1, NEMLINE
-                sum_val = sum_val + ctx%state%gaussnebarr(j, i) * real(amp(i), KP)
-            end do
-            spectrum(j, t_idx) = spectrum(j, t_idx) + sum_val
-        end do
-#else
         ! On the CPU, add each line only where its profile is non-negligible: a line spans tens of
         ! the ~6000 pixels, so the dense sum is ~99% multiplications by (nearly) zero. The window
         ! extends from the pixel nearest the line centre until the profile falls below
@@ -550,8 +383,6 @@ contains
             end do
             spectrum(j_lo:j_hi, t_idx) = spectrum(j_lo:j_hi, t_idx) + real(amp(i), KP) * ctx%state%gaussnebarr(j_lo:j_hi, i)
         end do
-#endif
-        !$acc end data
     end subroutine add_lines_to_spectrum
 
     !> @brief
@@ -584,7 +415,6 @@ contains
     !> Scalar version of interpolate_zu_slice for use inside parallel loops.
     !> Returns single value at index `i_wave`.
     pure function interpolate_zu_slice_point(grid, i_wave, idx_age, idx_z, idx_u, w_z, w_u) result(val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif

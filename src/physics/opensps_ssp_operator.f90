@@ -25,7 +25,7 @@ module opensps_ssp_operator
     !> (age_row_ptr), each with a kind and an index:
     !>   - ROW_MAIN:   main-library template (index (logg - 1) * nt_lib + teff, speclib order);
     !>   - ROW_SMALL:  WMBasic, post-AGB, WN, WC, carbon-star, O- and C-rich AGB templates
-    !>                 (concatenated in that order, as the OpenACC deferred rows of opensps_ssp);
+    !>                 (concatenated in that order, as the deferred rows of opensps_ssp);
     !>   - ROW_DUSTY:  a template (main, carbon, O-rich, C-rich) of one dust-shell corner (slot):
     !>                 dust-shell AGB stars are bilinear in templates and the shell's transfer
     !>                 function, so their template weights are kept per corner of the dust grid

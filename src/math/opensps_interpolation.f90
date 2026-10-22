@@ -10,8 +10,7 @@ module opensps_interpolation
     !> It exposes a generic interface `interpolate_linear` that automatically
     !> handles both scalar and array query points.
     !>
-    !> OpenACC notes:
-    !> - Device-callable routines are marked with `!$acc routine seq`.
+    !> Device-callable routines are marked `!$omp declare target` (OpenMP target builds).
     
     use opensps_precision, only: WP
     implicit none
@@ -44,7 +43,6 @@ contains
     !>
     !> @return    y_out  The interpolated value.
     pure function interpolate_linear_scalar(x_in, y_in, x_out) result(y_out)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -87,7 +85,6 @@ contains
     !>
     !> @return    y_out  The interpolated values at x_out.
     pure function interpolate_linear_array(x_in, y_in, x_out) result(y_out)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -113,7 +110,6 @@ contains
         idx = 1
 
         ! Sequential hint-accelerated path.
-        !$acc loop seq
         do i = 1, m
             ! Find the interval index and clamp to valid interpolation range.
             idx = find_interval_with_hint(x_in, x_out(i), idx)
@@ -140,7 +136,6 @@ contains
     !>
     !> @return    idx    Lower interval index.
     pure function find_interval(array, value) result(idx)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -155,7 +150,6 @@ contains
     !> Finds the index `i` in an array such that `array(i) <= value < array(i+1)`.
     !> (Standard version without hint)
     pure function find_interval_no_hint(array, value) result(idx)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -219,7 +213,6 @@ contains
     !>
     !> @return    idx    Lower index of the interpolation interval.
     pure function find_interval_with_hint(array, value, hint) result(idx)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -311,7 +304,6 @@ contains
     !> Wraps the IEEE_ARITHMETIC intrinsic to avoid module namespace pollution
     !> and ensures a safe return value for error conditions in PURE functions.
     pure function get_quiet_nan() result(res)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif

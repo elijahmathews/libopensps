@@ -120,16 +120,7 @@ contains
 
         ctx%state%nebem_line_pos = 5500.0_wp
 
-        !$acc enter data copyin(ctx)
-        !$acc enter data copyin(ctx%state)
-        !$acc enter data copyin(ctx%state%time_full, ctx%state%spec_lambda, ctx%state%spec_nu, ctx%state%zlegend)
-        !$acc enter data attach(ctx%state%time_full)
-        !$acc enter data attach(ctx%state%spec_lambda)
-        !$acc enter data attach(ctx%state%spec_nu)
-        !$acc enter data attach(ctx%state%zlegend)
         if (associated(ctx%state%bands)) then
-            !$acc enter data copyin(ctx%state%bands)
-            !$acc enter data attach(ctx%state%bands)
         end if
     end subroutine setup_basic_context
 
@@ -139,31 +130,21 @@ contains
         if (.not. allocated(ctx)) return
 
         if (associated(ctx%state%time_full)) then
-            !$acc exit data delete(ctx%state%time_full)
         end if
         if (associated(ctx%state%spec_lambda)) then
-            !$acc exit data delete(ctx%state%spec_lambda)
         end if
         if (associated(ctx%state%spec_nu)) then
-            !$acc exit data delete(ctx%state%spec_nu)
         end if
         if (associated(ctx%state%bands)) then
-            !$acc exit data delete(ctx%state%bands)
         end if
         if (associated(ctx%state%zlegend)) then
-            !$acc exit data delete(ctx%state%zlegend)
         end if
         if (associated(ctx%state%neb_res_min)) then
-            !$acc exit data delete(ctx%state%neb_res_min)
         end if
         if (associated(ctx%state%gaussnebarr)) then
-            !$acc exit data delete(ctx%state%gaussnebarr)
         end if
         if (allocated(ctx%state%ssp_temp_grid)) then
-            !$acc exit data delete(ctx%state%ssp_temp_grid)
         end if
-        !$acc exit data delete(ctx%state)
-        !$acc exit data delete(ctx)
 
         if (associated(ctx%state%time_full)) deallocate(ctx%state%time_full)
         if (allocated(ctx%state%sfh_t_calc)) deallocate(ctx%state%sfh_t_calc)

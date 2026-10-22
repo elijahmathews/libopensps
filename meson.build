@@ -33,7 +33,7 @@ includedir = get_option('includedir')
 datadir = get_option('datadir')
 
 # -----------------------------------
-# Hardware Acceleration (OpenACC)
+# GPU offload (OpenMP target)
 # -----------------------------------
 
 accel_target = get_option('accel')
@@ -45,33 +45,18 @@ if accel_target == 'omp_gpu' and fc_id in ['llvm-flang', 'flang']
     # (doc/GPU_PLAN.md, "AMD GPUs with LLVM flang")
     accel_args = ['-fopenmp', '--offload-arch=' + get_option('gpu_arch')]
     accel_defs = ['-DOMP_TARGET']
-elif accel_target != 'none'
+elif accel_target == 'omp_gpu'
     if fc_id != 'nvidia_hpc'
-        warning('Hardware acceleration requested but compiler does not support OpenACC. Ignoring accel option.')
-    else
-        if accel_target == 'multicore'
-            accel_args = ['-acc=multicore']
-            accel_defs = ['-DACC_MULTICORE']
-        elif accel_target == 'omp_gpu'
-            # OpenMP target offload of the SSP template product and the whole batched CSP
-            # (compute_csp_batch, batch photometry and indices; compute_csp_scenario runs as a
-            # batch); OpenACC is off. Run with OMP_TARGET_OFFLOAD=MANDATORY to catch a silent
-            # host fallback.
-            accel_args = ['-mp=gpu', '-gpu=' + get_option('gpu_arch')]
-            accel_defs = ['-DOMP_TARGET', '-DFSPS_PINNED']
-            if get_option('cublas')
-                accel_args += ['-cudalib=cublas']
-                accel_defs += ['-DFSPS_CUBLAS']
-            endif
-        elif accel_target == 'gpu'
-            # Fat binary targeting Volta, Ampere, Hopper, plus PTX fallback
-            accel_args = ['-acc=gpu', '-gpu=' + get_option('gpu_arch')]
-            accel_defs = ['-DACC_GPU', '-DFSPS_PINNED']
-            if get_option('cublas')
-                accel_args += ['-cudalib=cublas']
-                accel_defs += ['-DFSPS_CUBLAS']
-            endif
-        endif
+        error('-Daccel=omp_gpu needs nvfortran or LLVM flang')
+    endif
+    # OpenMP target offload of the SSP template product and the whole batched CSP
+    # (compute_csp_batch, batch photometry and indices; compute_csp_scenario runs as a batch).
+    # Run with OMP_TARGET_OFFLOAD=MANDATORY to catch a silent host fallback.
+    accel_args = ['-mp=gpu', '-gpu=' + get_option('gpu_arch')]
+    accel_defs = ['-DOMP_TARGET', '-DFSPS_PINNED']
+    if get_option('cublas')
+        accel_args += ['-cudalib=cublas']
+        accel_defs += ['-DFSPS_CUBLAS']
     endif
 endif
 

@@ -301,7 +301,6 @@ contains
         num_wavelengths = size(wavelength_grid)
 
         ! 1. Calculate Tau directly into transmission array (Single Pass)
-        !$acc parallel loop present(wavelength_grid, transmission) private(observed_wavelength, lambda_ratio, tau_val, i)
         do j = 1, num_wavelengths
             observed_wavelength = wavelength_grid(j) * one_plus_z
             lambda_ratio        = observed_wavelength / LYMAN_LIMIT
@@ -333,7 +332,6 @@ contains
 
         ! 2. Safety Cap for Short Wavelengths
         ! Serial device execution to avoid PCIe bounce while tracking maxloc
-        !$acc serial present(transmission)
         max_tau = 0.0_wp
         max_valid_idx = 1
         do j = 1, num_wavelengths
@@ -348,10 +346,8 @@ contains
                 transmission(j) = max_tau
             end do
         end if
-        !$acc end serial
 
         ! 3. Convert to Transmission
-        !$acc parallel loop present(transmission)
         do j = 1, num_wavelengths
             transmission(j) = exp(-transmission(j) * optical_depth_factor)
         end do
@@ -361,11 +357,10 @@ contains
     !> @brief Madau (1995) IGM optical depth at rest wavelength `wavelength` for a source at
     !> redshift one_plus_z - 1 (the per-wavelength part of compute_igm_transmission, before the
     !> short-wavelength cap and the optical_depth_factor), for the batch's per-model IGM.
-    !> compute_igm_transmission keeps its own copy of these lines: calling this function from
-    !> its OpenACC kernel gave wrong optical depths in OpenACC multicore builds (nvfortran 25.1,
-    !> IGM unit tests; GPU builds were fine), cause not found.
+    !> compute_igm_transmission keeps its own copy of these lines (history: calling this function
+    !> from its former OpenACC kernel gave wrong optical depths in OpenACC multicore builds,
+    !> nvfortran 25.1).
     function igm_tau(wavelength, one_plus_z) result(tau_val)
-        !$acc routine seq
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -374,8 +369,7 @@ contains
         real(WP) :: observed_wavelength, lambda_ratio
         integer  :: i
         ! Local copies for OpenMP target builds: OpenMP device code (nvfortran 25.1) does not take
-        ! the module's parameter arrays in a declare-target routine; OpenACC multicore (nvfortran
-        ! 25.1) gets the local copies wrong (IGM unit tests fail), so other builds use the module's
+        ! the module's parameter arrays in a declare-target routine; other builds use the module's
 #ifdef OMP_TARGET
         real(WP), parameter :: LYW(N_LYMAN_LINES) = LY_WAVE, LYC(N_LYMAN_LINES) = LY_COEFF
 #else
