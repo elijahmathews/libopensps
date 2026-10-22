@@ -1,8 +1,9 @@
 program test_ssp_operator
-    !> The batched SSP operator (opensps_ssp_operator) against generate_ssp_grid: S is built once
-    !> per isochrone set and non-IMF parameter set, then evaluated for many IMFs (all six types,
-    !> changed slopes, characteristic and break masses, mass limits, a tabulated user IMF), and
-    !> its spectra, masses and L_bol are compared with generate_ssp_grid run for each IMF.
+    !> The SSP operator (opensps_ssp_operator, which generate_ssp_grid runs) against the per-star
+    !> sum: S is built once per isochrone set and non-IMF parameter set, then evaluated for many
+    !> IMFs (all six types, changed slopes, characteristic and break masses, mass limits, a
+    !> tabulated user IMF), and its spectra, masses and L_bol are compared with the SSP summed
+    !> star by star (generate_ssp_grid with opensps_ssp_set_per_star) for each IMF.
     !> Also with the isochrone modifications on (blue HB, blue stragglers, TP-AGB and post-AGB
     !> weights and shifts), for MIST (HB tagged) and Padova (HB detected, 10 blue stars per HB
     !> point). Requires the FSPS data tree, like the regression tests.
@@ -10,7 +11,7 @@ program test_ssp_operator
     use opensps_precision, only: WP, KP
     use opensps_types, only: PARAMS
     use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
-    use opensps_ssp, only: generate_ssp_grid, configure_imf_parameters
+    use opensps_ssp, only: generate_ssp_grid, configure_imf_parameters, opensps_ssp_set_per_star
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_evaluate, ssp_operator_free
     use opensps_imf, only: imf_pack_params, IMF_NPAR
     use opensps_context, only: opensps_context_get_pset, opensps_context_prepare_pset, &
@@ -21,8 +22,9 @@ program test_ssp_operator
 
     integer :: total_tests = 0
     integer :: total_failures = 0
-    ! FP64: the operator aggregates the same products in another order (rounding only); FP32
-    ! kernels: the template weights round to FP32 at slightly different values, 100 eps(KP)
+    ! FP64: the operator sums the same products in another order (rounding only); FP32 kernels:
+    ! 100 eps(KP), for pixels within 6 decades of the age's peak (below, near FP32 underflow, the
+    ! two orders round differently; as test_physics_oracles)
     real(WP), parameter :: SPEC_RTOL = merge(1.0e-12_wp, 100.0_wp * real(epsilon(1.0_KP), WP), KP == WP)
     real(WP), parameter :: MASS_RTOL = 1.0e-13_wp
     real(WP), parameter :: LBOL_ATOL = 1.0e-13_wp
@@ -30,7 +32,7 @@ program test_ssp_operator
     type(ssp_operator_t) :: op
 
     call skip_without_data()
-    call print_major_header("Batched SSP operator vs generate_ssp_grid")
+    call print_major_header("SSP operator vs the per-star sum")
 
     ! ---------------- MIST + MILES ----------------
     allocate(ctx)
@@ -128,7 +130,7 @@ contains
             ', entries ', op%nnz, ', dust corners ', op%n_slots, ', direct stars ', op%n_direct
     end subroutine build
 
-    !> generate_ssp_grid and the operator for the context's current IMF.
+    !> The per-star SSP and the operator (built once) for the context's current IMF.
     subroutine check(label)
         character(len=*), intent(in) :: label
         type(PARAMS) :: pset
@@ -142,7 +144,9 @@ contains
         nt = ctx%state%ntfull
         ns = ctx%state%nspec
         allocate(m_ref(nt), l_ref(nt), s_ref(ns, nt), m_op(nt), l_op(nt), s_op(ns, nt))
+        call opensps_ssp_set_per_star(.true.)
         call generate_ssp_grid(ctx, pset, m_ref, l_ref, s_ref)
+        call opensps_ssp_set_per_star(.false.)
         call configure_imf_parameters(ctx, pset)
         call imf_pack_params(ctx, p)
         call ssp_operator_evaluate(ctx, pset, op, ctx%imf_type_val, p, m_op, l_op, s_op)
@@ -150,6 +154,7 @@ contains
         dspec = 0.0_wp; dmass = 0.0_wp; dlbol = 0.0_wp
         do t = 1, nt
             do i = 1, ns
+                if (KP /= WP .and. s_ref(i, t) <= 1.0e-6_wp * maxval(s_ref(:, t))) cycle
                 if (s_ref(i, t) > 0.0_wp) then
                     dspec = max(dspec, abs(s_op(i, t) / s_ref(i, t) - 1.0_wp))
                 else

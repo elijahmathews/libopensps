@@ -81,15 +81,14 @@ module opensps_ssp_operator
     !> (direct spectra); C3K none.
 
     use opensps_precision, only: WP, KP
-    use opensps_constants, only: NM, SAFE_FLOOR, TIME_RES_INCR
+    use opensps_constants, only: NM, SAFE_FLOOR, TIME_RES_INCR, C_LIGHT
     use opensps_types, only: params
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings
     use opensps_imf, only: imf_integral_p, IMF_NPAR, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT, IMF_P_LOWER_BOUND
     use opensps_stellar_modifications, only: add_remnant_mass_p
     use opensps_ssp, only: isochrone_buffer_t, init_isochrone_buffer, free_isochrone_buffer, load_timestep_data, &
-                        apply_isochrone_modifications, add_main_library_templates, finish_ssp_grid, &
-                        add_column, dusty_defer_t, dusty_push_slot, dusty_push_entry, L_MAIN, L_CAR, &
-                        L_AGBO, L_AGBC
+                        apply_isochrone_modifications, finish_ssp_grid, small_template_index, &
+                        L_WMB, L_PAGB, L_WRN, L_WRC, L_CAR, L_AGBO
     use opensps_spectral_library, only: get_stellar_spectrum, get_stellar_terms, SRC_MAIN_LIB, SRC_WMBASIC, &
                                      SRC_AGB_O, SRC_AGB_C, SRC_PAGB, SRC_WRN, SRC_WRC, SRC_AGB_CAR
     use opensps_dust, only: get_agb_dust_terms
@@ -98,7 +97,7 @@ module opensps_ssp_operator
     private
 
     public :: ssp_operator_t, ssp_operator_build, ssp_operator_evaluate, ssp_operator_free
-    public :: ssp_op_model_weights, ssp_op_imf_weights, ssp_op_spmv
+    public :: ssp_op_model_weights, ssp_op_imf_weights, ssp_op_spmv, ssp_template_product
 
     !> Row kinds (the order of the rows within an age)
     integer, parameter, public :: ROW_MAIN = 1, ROW_SMALL = 2, ROW_DUSTY = 3, ROW_DIRECT = 4, &
@@ -133,6 +132,13 @@ module opensps_ssp_operator
         !> Library sizes (to unpack the small-library and dust-corner rows)
         integer :: n_wmb(2) = 0, n_pagb(2) = 0, n_wrn = 0, n_wrc = 0, n_car = 0, n_agbo = 0, n_agbc = 0
         integer :: ng_lib = 0
+        !> Effective templates: the distinct spectra the template rows of all ages weight (a library
+        !> template, a direct star, or a template times a dust-shell transfer function), as the
+        !> columns of etpl, ordered by the first age that uses them (then by row kind and index).
+        !> row_eff maps each row to its column (0: the mass and L_bol rows).
+        integer :: n_eff = 0
+        integer,  allocatable :: row_eff(:), eff_age0(:)
+        real(KP), allocatable :: etpl(:,:)
     end type ssp_operator_t
 
 contains
@@ -308,6 +314,7 @@ contains
         if (op%n_slots > 0) op%slot_key = g_slot_key(:, 1:op%n_slots)
         op%direct_spec = 0.0_KP
         if (op%n_direct > 0) op%direct_spec = d_spec(:, 1:op%n_direct)
+        call build_effective_templates(ctx, op)
 
     contains
 
@@ -484,6 +491,219 @@ contains
 
     end subroutine ssp_operator_build
 
+    !> The effective templates of op (n_eff, row_eff, eff_age0, etpl) from its rows: one column per
+    !> distinct (row kind, index), dust-shell rows per distinct (transfer function, template)
+    !> over all ages. Columns, as the template sum of each age adds them:
+    !>   - main library, WMBasic, post-AGB, WN, WC, carbon stars: the template;
+    !>   - O- and C-rich AGB: lambda^2 times the template;
+    !>   - direct stars: their spectrum;
+    !>   - dust-shell corners: the template (O/C-rich: lambda^2 times it) below the smoothed
+    !>     range, the smoothed template (O/C-rich: c times it) in it, times the corner's transfer
+    !>     function flux_dagb.
+    !> Formed in FP64, stored at kernel precision.
+    subroutine build_effective_templates(ctx, op)
+        type(opensps_context_t), intent(in) :: ctx
+        type(ssp_operator_t), intent(inout) :: op
+
+        integer(int64), allocatable :: key(:), age_key(:)
+        integer, allocatable :: age_of_row(:), perm(:), eff_of_sorted(:), rep(:), order(:), new_id(:)
+        integer  :: r, t, n, e, sl, q, i, a, b, lib, nk_t, nk_tau, corner, i0, nspec, z
+        integer(int64) :: prev
+        real(WP), allocatable :: col(:)
+
+        nspec = op%nspec
+        z = op%zmet
+        allocate(key(op%n_rows), age_of_row(op%n_rows), op%row_eff(op%n_rows))
+        do t = 1, op%n_ages
+            age_of_row(op%age_row_ptr(t):op%age_row_ptr(t + 1) - 1) = t
+        end do
+        nk_t = 1; nk_tau = 1
+        if (associated(ctx%state%flux_dagb)) then
+            nk_t = size(ctx%state%flux_dagb, 3)
+            nk_tau = size(ctx%state%flux_dagb, 4)
+        end if
+        do r = 1, op%n_rows
+            select case (op%row_kind(r))
+            case (ROW_MAIN, ROW_SMALL, ROW_DIRECT)
+                key(r) = ior(ishft(int(op%row_kind(r), int64), 56), int(op%row_idx(r), int64))
+            case (ROW_DUSTY)
+                sl = (op%row_idx(r) - 1) / op%n_dtpl + 1
+                q = mod(op%row_idx(r) - 1, op%n_dtpl) + 1
+                corner = ((op%slot_key(1, sl) - 1) * nk_t + op%slot_key(2, sl) - 1) * nk_tau + op%slot_key(3, sl) - 1
+                key(r) = ior(ishft(int(ROW_DUSTY, int64), 56), int(corner, int64) * op%n_dtpl + q)
+            case default
+                key(r) = huge(1_int64)   ! mass and L_bol rows: sorted last, no column
+            end select
+        end do
+
+        ! Distinct keys in key order, each with its first row (the rows are in age order)
+        allocate(perm(op%n_rows), eff_of_sorted(op%n_rows), rep(op%n_rows))
+        call sort_keys(key, perm)
+        n = 0
+        prev = -1_int64
+        do i = 1, op%n_rows
+            r = perm(i)
+            if (key(r) == huge(1_int64)) exit
+            if (key(r) /= prev) then
+                n = n + 1
+                rep(n) = r
+                prev = key(r)
+            end if
+            op%row_eff(r) = n
+        end do
+        do i = 1, op%n_rows
+            if (key(perm(i)) == huge(1_int64)) op%row_eff(perm(i)) = 0
+        end do
+
+        ! Order the columns by the first age using them (stable: key order within an age), so
+        ! that the columns of the ages up to t are among the first ones
+        allocate(age_key(n), order(n), new_id(n))
+        do e = 1, n
+            age_key(e) = int(op%n_ages + 1, int64)
+        end do
+        do r = 1, op%n_rows
+            e = op%row_eff(r)
+            if (e > 0) age_key(e) = min(age_key(e), int(age_of_row(r), int64))
+        end do
+        call sort_keys(age_key, order)
+        do e = 1, n
+            new_id(order(e)) = e
+        end do
+        do r = 1, op%n_rows
+            if (op%row_eff(r) > 0) op%row_eff(r) = new_id(op%row_eff(r))
+        end do
+        op%n_eff = n
+        allocate(op%eff_age0(max(n, 1)), op%etpl(nspec, max(n, 1)))
+        op%eff_age0 = 0
+        op%etpl = 0.0_KP
+
+        i0 = nspec + 1
+        if (associated(ctx%state%speclib_agb_smooth)) i0 = nspec - size(ctx%state%speclib_agb_smooth, 1) + 1
+        !$omp parallel do schedule(dynamic, 16) private(r, a, b, lib, sl, q, col)
+        do e = 1, n
+            if (.not. allocated(col)) allocate(col(nspec))
+            r = rep(order(e))
+            op%eff_age0(e) = int(age_key(order(e)))
+            select case (op%row_kind(r))
+            case (ROW_MAIN)
+                a = mod(op%row_idx(r) - 1, op%nt_lib) + 1
+                b = (op%row_idx(r) - 1) / op%nt_lib + 1
+                col = real(ctx%state%speclib(1:nspec, z, a, b), WP)
+            case (ROW_SMALL)
+                call small_template_index(ctx, op%row_idx(r), lib, a, b)
+                select case (lib)
+                case (L_WMB);  col = real(ctx%state%wmb_spec(1:nspec, z, a, b), WP)
+                case (L_PAGB); col = real(ctx%state%pagb_spec(1:nspec, a, b), WP)
+                case (L_WRN);  col = real(ctx%state%wrn_spec(1:nspec, a, z), WP)
+                case (L_WRC);  col = real(ctx%state%wrc_spec(1:nspec, a, z), WP)
+                case (L_CAR);  col = real(ctx%state%agb_spec_car(1:nspec, a), WP)
+                case (L_AGBO); col = ctx%state%spec_lambda(1:nspec)**2 * real(ctx%state%agb_spec_o(1:nspec, a), WP)
+                case default;  col = ctx%state%spec_lambda(1:nspec)**2 * real(ctx%state%agb_spec_c(1:nspec, a), WP)
+                end select
+            case (ROW_DIRECT)
+                col = real(op%direct_spec(:, op%row_idx(r)), WP)
+            case default
+                ! Dust-shell corner sl, template q (main library, carbon stars, O-rich, C-rich):
+                ! the template below i0, the smoothed template from i0 on
+                sl = (op%row_idx(r) - 1) / op%n_dtpl + 1
+                q = mod(op%row_idx(r) - 1, op%n_dtpl) + 1
+                if (q <= op%n_main) then
+                    a = mod(q - 1, op%nt_lib) + 1
+                    b = (q - 1) / op%nt_lib + 1
+                    col(1:i0 - 1) = real(ctx%state%speclib(1:i0 - 1, z, a, b), WP)
+                    col(i0:nspec) = real(ctx%state%speclib_agb_smooth(1:nspec - i0 + 1, z, a, b), WP)
+                else if (q <= op%n_main + op%n_car) then
+                    a = q - op%n_main
+                    col(1:i0 - 1) = real(ctx%state%agb_spec_car(1:i0 - 1, a), WP)
+                    col(i0:nspec) = real(ctx%state%agb_spec_car_smooth(1:nspec - i0 + 1, a), WP)
+                else if (q <= op%n_main + op%n_car + op%n_agbo) then
+                    a = q - op%n_main - op%n_car
+                    col(1:i0 - 1) = ctx%state%spec_lambda(1:i0 - 1)**2 * real(ctx%state%agb_spec_o(1:i0 - 1, a), WP)
+                    col(i0:nspec) = C_LIGHT * real(ctx%state%agb_spec_o_smooth(1:nspec - i0 + 1, a), WP)
+                else
+                    a = q - op%n_main - op%n_car - op%n_agbo
+                    col(1:i0 - 1) = ctx%state%spec_lambda(1:i0 - 1)**2 * real(ctx%state%agb_spec_c(1:i0 - 1, a), WP)
+                    col(i0:nspec) = C_LIGHT * real(ctx%state%agb_spec_c_smooth(1:nspec - i0 + 1, a), WP)
+                end if
+                col = col * real(ctx%state%flux_dagb(1:nspec, op%slot_key(1, sl), op%slot_key(2, sl), &
+                                                     op%slot_key(3, sl)), WP)
+            end select
+            op%etpl(:, e) = real(col, KP)
+        end do
+    end subroutine build_effective_templates
+
+    !> y = etpl . b (pixels x columns), the template product of the SSP: each (pixel, column)
+    !> sums the effective templates in column order, skipping zero weights; compensated (Kahan)
+    !> with FP32 kernels. On the device (dev, OpenMP target builds) one thread per (pixel,
+    !> column); on the host a block of pixels at a time (each template block read once for all
+    !> columns), in the same order.
+    subroutine ssp_template_product(nspec, n_eff, ncol, etpl, b, y, dev)
+        integer, intent(in)   :: nspec, n_eff, ncol
+        real(KP), intent(in)  :: etpl(nspec, n_eff), b(n_eff, ncol)
+        real(KP), intent(out) :: y(nspec, ncol)
+        logical, intent(in)   :: dev
+
+        integer, parameter :: PIX_BLOCK = 512
+        integer  :: i, c, k, p0, p1, nb, q
+        real(KP) :: acc, comp, wk, term, tsum
+        real(KP), allocatable :: va(:,:), vc(:,:)
+
+        if (dev) then
+#ifdef OMP_TARGET
+            !$omp target teams distribute parallel do collapse(2) private(acc, comp, wk, term, tsum, k) &
+            !$omp map(to: etpl, b) map(from: y)
+#endif
+            do c = 1, ncol
+                do i = 1, nspec
+                    acc = 0.0_KP
+                    comp = 0.0_KP
+                    do k = 1, n_eff
+                        wk = b(k, c)
+                        if (wk == 0.0_KP) cycle
+                        if (KP == WP) then
+                            acc = acc + wk * etpl(i, k)
+                        else
+                            term = wk * etpl(i, k) - comp
+                            tsum = acc + term
+                            comp = (tsum - acc) - term
+                            acc = tsum
+                        end if
+                    end do
+                    y(i, c) = acc
+                end do
+            end do
+            return
+        end if
+
+        !$omp parallel do schedule(dynamic) private(p0, p1, nb, q, k, c, wk, term, tsum, va, vc)
+        do p0 = 1, nspec, PIX_BLOCK
+            p1 = min(p0 + PIX_BLOCK - 1, nspec)
+            nb = p1 - p0 + 1
+            allocate(va(PIX_BLOCK, ncol), vc(PIX_BLOCK, ncol))
+            va = 0.0_KP; vc = 0.0_KP
+            do k = 1, n_eff
+                do c = 1, ncol
+                    wk = b(k, c)
+                    if (wk == 0.0_KP) cycle
+                    if (KP == WP) then
+                        do q = 1, nb
+                            va(q, c) = va(q, c) + wk * etpl(p0 + q - 1, k)
+                        end do
+                    else
+                        do q = 1, nb
+                            term = wk * etpl(p0 + q - 1, k) - vc(q, c)
+                            tsum = va(q, c) + term
+                            vc(q, c) = (tsum - va(q, c)) - term
+                            va(q, c) = tsum
+                        end do
+                    end if
+                end do
+            end do
+            y(p0:p1, 1:ncol) = va(1:nb, 1:ncol)
+            deallocate(va, vc)
+        end do
+    end subroutine ssp_template_product
+
     ! ------------------------------------------------------------------------
     ! Growing arrays (module procedures: with nvfortran 26.1 -acc, move_alloc on host-associated
     ! allocatables inside internal procedures corrupted the heap)
@@ -593,6 +813,10 @@ contains
         if (allocated(op%val)) deallocate(op%val)
         if (allocated(op%slot_key)) deallocate(op%slot_key)
         if (allocated(op%direct_spec)) deallocate(op%direct_spec)
+        if (allocated(op%row_eff)) deallocate(op%row_eff)
+        if (allocated(op%eff_age0)) deallocate(op%eff_age0)
+        if (allocated(op%etpl)) deallocate(op%etpl)
+        op%n_eff = 0
         op%n_pts = 0; op%n_rows = 0; op%nnz = 0; op%n_slots = 0; op%n_direct = 0
     end subroutine ssp_operator_free
 
@@ -664,8 +888,11 @@ contains
     ! EVALUATE: generate_ssp_grid from the operator
     ! ------------------------------------------------------------------------
 
-    !> @brief The SSP grid (as generate_ssp_grid) of the IMF (imf_type, p) from the operator.
-    !> @details wrow_out, if present, returns the row weights S . w_IMF (size op%n_rows).
+    !> @brief The SSP grid of the IMF (imf_type, p) from the operator: generate_ssp_grid.
+    !> @details Per age t: mass and L_bol from the mass and L_bol rows (plus the remnants), the
+    !> template weights B(:, t) from the template rows; then spec = etpl . B for all ages at once
+    !> (ssp_template_product, on the device for a context there) and the post-processing
+    !> (finish_ssp_grid). wrow_out, if present, returns the row weights S . w_IMF (op%n_rows).
     subroutine ssp_operator_evaluate(ctx, pset, op, imf_type, p, mass_grid, lbol_grid, spec_grid, wrow_out)
         type(opensps_context_t), target, intent(inout) :: ctx
         type(params), intent(in)          :: pset
@@ -675,23 +902,20 @@ contains
         real(WP), intent(out), contiguous :: mass_grid(:), lbol_grid(:), spec_grid(:,:)
         real(WP), intent(out), optional   :: wrow_out(:)
 
-        real(WP), allocatable :: w(:), wrow(:), w_main_all(:,:), dw_main(:,:,:), dw_o(:,:), dw_c(:,:), dw_car(:,:)
-        real(KP), allocatable :: acc(:), comp(:)
-        type(dusty_defer_t) :: dusty
-        integer :: t, r, out_idx, nspec, nslot, s0, idx, sl, q, a, b
+        real(WP), allocatable :: w(:), wrow(:)
+        real(KP), allocatable :: b(:,:), y(:,:)
+        integer :: t, r, out_idx
         real(WP) :: tot_mass, lin_l
+        logical :: dev
 
-        nspec = op%nspec
         mass_grid = 0.0_wp; lbol_grid = 0.0_wp; spec_grid = 0.0_wp
         allocate(w(op%n_pts), wrow(op%n_rows))
         call ssp_op_model_weights(imf_type, p, op%n_pts, op%pt_mini, op%pt_m1, op%pt_m2, op%pt_first, &
                                   op%n_rows, op%nnz, op%row_ptr, op%col, op%val, w, wrow)
         if (present(wrow_out)) wrow_out(1:op%n_rows) = wrow
 
-        ! The template weights of all ages: the main library's rows, then the other libraries'
-        ! (generate_ssp_grid's order, small_template_index)
-        allocate(w_main_all(op%n_main + op%n_small, op%n_ages), acc(nspec), comp(nspec))
-        w_main_all = 0.0_wp
+        allocate(b(max(op%n_eff, 1), op%n_ages), y(op%nspec, op%n_ages))
+        b = 0.0_KP
         do t = 1, op%n_ages
             if (.not. op%age_on(t)) cycle
             out_idx = 1 + (t - 1) * TIME_RES_INCR
@@ -710,65 +934,24 @@ contains
                 mass_grid(out_idx) = tot_mass
                 lbol_grid(out_idx) = log10(max(lin_l, SAFE_FLOOR))
             end if
-
-            ! The direct stars here; the template rows and the dust-shell corners (accumulate_by_templates
-            ! order) for add_main_library_templates
-            acc = 0.0_KP; comp = 0.0_KP
-            nslot = op%age_slot_ptr(t + 1) - op%age_slot_ptr(t)
-            s0 = op%age_slot_ptr(t) - 1
-            if (nslot > 0) then
-                allocate(dw_main(op%nt_lib, op%ng_lib, nslot), dw_o(op%n_agbo, nslot), dw_c(op%n_agbc, nslot), &
-                         dw_car(op%n_car, nslot))
-                dw_main = 0.0_wp; dw_o = 0.0_wp; dw_c = 0.0_wp; dw_car = 0.0_wp
-            end if
+            ! Template weights (one row per effective template and age)
             do r = op%age_row_ptr(t), op%age_row_ptr(t + 1) - 1
-                idx = op%row_idx(r)
-                select case (op%row_kind(r))
-                case (ROW_MAIN)
-                    w_main_all(idx, t) = wrow(r)
-                case (ROW_SMALL)
-                    w_main_all(op%n_main + idx, t) = wrow(r)
-                case (ROW_DIRECT)
-                    call add_column(acc, comp, real(wrow(r), KP), op%direct_spec(:, idx))
-                case (ROW_DUSTY)
-                    sl = (idx - 1) / op%n_dtpl + 1 - s0
-                    q = mod(idx - 1, op%n_dtpl) + 1
-                    if (q <= op%n_main) then
-                        dw_main(mod(q - 1, op%nt_lib) + 1, (q - 1) / op%nt_lib + 1, sl) = wrow(r)
-                    else if (q <= op%n_main + op%n_car) then
-                        dw_car(q - op%n_main, sl) = wrow(r)
-                    else if (q <= op%n_main + op%n_car + op%n_agbo) then
-                        dw_o(q - op%n_main - op%n_car, sl) = wrow(r)
-                    else
-                        dw_c(q - op%n_main - op%n_car - op%n_agbo, sl) = wrow(r)
-                    end if
-                end select
+                if (op%row_eff(r) > 0) b(op%row_eff(r), t) = real(wrow(r), KP)
             end do
-            ! The age's dust corners (key: flux_dagb indices), entries in the order of
-            ! accumulate_by_templates (main library, carbon stars, O-rich, C-rich)
-            do sl = 1, nslot
-                call dusty_push_slot(dusty, t, op%slot_key(:, s0 + sl))
-                do b = 1, op%ng_lib
-                    do a = 1, op%nt_lib
-                        if (dw_main(a, b, sl) /= 0.0_wp) call dusty_push_entry(dusty, L_MAIN, a, b, dw_main(a, b, sl))
-                    end do
-                end do
-                do a = 1, op%n_car
-                    if (dw_car(a, sl) /= 0.0_wp) call dusty_push_entry(dusty, L_CAR, a, 1, dw_car(a, sl))
-                end do
-                do a = 1, op%n_agbo
-                    if (dw_o(a, sl) /= 0.0_wp) call dusty_push_entry(dusty, L_AGBO, a, 1, dw_o(a, sl))
-                end do
-                do a = 1, op%n_agbc
-                    if (dw_c(a, sl) /= 0.0_wp) call dusty_push_entry(dusty, L_AGBC, a, 1, dw_c(a, sl))
-                end do
-            end do
-            if (nslot > 0) deallocate(dw_main, dw_o, dw_c, dw_car)
-            spec_grid(:, out_idx) = real(acc, WP)
         end do
 
-        ! The templates and dust corners of all ages (floors computed ages), then the post-processing
-        call add_main_library_templates(ctx, pset, w_main_all, spec_grid, dusty)
+        dev = ctx%on_device
+#if !defined(OMP_TARGET)
+        dev = .false.
+#endif
+        call ssp_template_product(op%nspec, max(op%n_eff, 1), op%n_ages, op%etpl, b, y, dev)
+        ! Ages with stars floored (as the per-star sum); ages without stay at zero
+        do t = 1, op%n_ages
+            if (.not. op%age_on(t)) cycle
+            if (all(b(:, t) == 0.0_KP)) cycle
+            out_idx = 1 + (t - 1) * TIME_RES_INCR
+            spec_grid(:, out_idx) = max(real(y(:, t), WP), SAFE_FLOOR)
+        end do
         call finish_ssp_grid(ctx, pset, mass_grid, lbol_grid, spec_grid)
     end subroutine ssp_operator_evaluate
 
