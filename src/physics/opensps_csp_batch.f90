@@ -539,7 +539,7 @@ contains
             !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%time_full, ctx%state%zlegend, ctx%state%ntfull, ctx%state%nz, &
             !$omp     ctx%state%ntabsfh, ctx%state%sfh_tab, ctx%interpolation_type_val, ctx%tiny_logt_val)
 #elif defined(_OPENMP)
-            !$omp parallel do
+            !$omp parallel do private(pl)
 #endif
             do m = 1, n_mod
 #if !defined(__flang__)
