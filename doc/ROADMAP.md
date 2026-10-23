@@ -280,8 +280,8 @@ priority 3 (not implemented).
 | Ryzen 7 7840U, 1 core | ~0.23 s naive / ~60 ms folded | ~60 ms | **6.7 ms** (fixed Z), ~8 ms | ~8 ms |
 | 7840U, 8 cores | ~30 ms / ~8 ms | ~8 ms | ~1 ms (throughput) | ~1 ms |
 | 2x Xeon Gold 6248R (48 cores) | — | ~1.5-2 ms (throughput) | ~0.15-0.2 ms (throughput) | ~0.15-0.2 ms |
-| **Radeon 780M (iGPU)**, measured 2026-10-22 | ~0.2 s / ~5-10 ms (projected) | ~0.6-1 ms / ~5 ms (projected) | **10.4 / 20.1 ms** (median of 5; FP32 7.7-11.6, FP64 19.3-21.0) | **311 / 369 us** (N = 10^4; 355 / 420 at N = 100) |
-| Radeon 780M, projected after optimization | ~0.2 s / ~5-10 ms | ~0.6-1 ms / ~5 ms | ~4-6 / ~8-12 ms | ~150-220 / ~250-330 us |
+| **Radeon 780M (iGPU)**, measured 2026-10-22 | ~0.2 s / ~5-10 ms (projected) | ~0.6-1 ms / ~5 ms (projected) | **7.8 / 9.9 ms** (median of 3; FP32 6.6-8.6, FP64 5.9-12.8) | **221 / 354 us** (N = 10^4, median of 3; FP32 218-295, FP64 284-390; 297 / 377 at N = 100) |
+| Radeon 780M, projected after further optimization | ~0.2 s / ~5-10 ms | ~0.6-1 ms / ~5 ms | ~3.5-5 / ~6-9 ms | ~130-180 / ~230-300 us |
 | Intel Arc Pro B70 | ~0.15 s / ~3-5 ms | ~100 / ~400 us | ~1.5-3 ms | ~20-30 / ~150-250 us |
 | AMD Radeon AI Pro R9700 | ~0.15 s / ~3-5 ms | ~80 / ~300 us | ~1.5-3 ms | ~15-25 / ~100-150 us |
 | NVIDIA P100 | ~0.5 s / ~3 ms | ~100 / ~140 us | ~1.5-2.5 ms | ~15-18 / ~25-30 us |
@@ -291,20 +291,23 @@ priority 3 (not implemented).
 | NVIDIA H100 | ~0.1 s / ~1.5 ms | ~20-25 / ~25-30 us | ~0.8-1.2 ms | ~3.5-4.5 / ~5 us |
 | GeForce RTX 4090 / 5090 class | ~0.1 s / ~2 ms | ~40 / ~1 ms | ~1 ms | ~6-9 / ~150 us |
 
-The 780M row is measured with LLVM flang 22.1.8 + ROCm 7.1 (`perf/amd-780m` at 0336361,
-`benchmark_csp_batch 10000 200 full_smooth_z`, FP32 and FP64 builds): before the parameter-packing
-change (PR to follow) the same runs took 12-29 ms per single call and ~25 ms per model at N = 100,
-and did not finish at N = 1000. The SSP+CSP columns were not measured. At large N the 780M is
-limited by memory and kernel time, not by its slow FP64: FP64 costs only ~20% more than FP32
-(369 against 311 us per model), so the old FP64 projection (~1.5-2.5 ms) was far too pessimistic.
-Where the large-N time goes (FP32, N = 10^4, us per model): nebular continuum 96 (FP64
-exponentials), SSP age sums 49, continuum attenuation 40, dust emission 36, magnitudes 28, AGN 21,
-smoothing 15, the rest ~20. A single call is ~18 kernel launches at ~380 us each (~230 us waiting
-for the kernel, ~160 us in ~16 small host-to-device and ~4 device-to-host copies, mostly pointer
-attachments of array arguments). The projected-final row assumes: explicit-shape kernel arguments
-and fewer launches (single call ~4-6 ms in FP32) and the FP32 ratio of the nebular exponential
-progression plus tuning of the age sums and attenuation kernels (batched 150-220 us in FP32);
-each is an estimate with ~2x uncertainty, not a measurement.
+The 780M row is measured with LLVM flang 22.1.8 + ROCm 7.1 (`perf/amd-780m`,
+`benchmark_csp_batch 10000 200 full_smooth_z`, FP32 and FP64 builds; `full_smooth_z` is the
+configuration this table describes: full physics, smoothing, metallicity per model, magnitudes
+only; the A100 figures come from `full_smooth` and `full_smooth_z`, which differ by ~3% there).
+The iGPU runs at 68-80 C and ~30 W under load and its time varies by up to ~30% from run to run,
+so the cells are medians of three interleaved runs with the observed range. The SSP+CSP columns
+were not measured. Before the optimization work of 2026-10-22 the same runs took 12-29 ms per
+single call and ~25 ms per model at N = 100, and did not finish at N = 1000.
+Where the large-N time goes (FP32, N = 10^4, us per model): nebular continuum ~78 (FP64
+exponentials; the 780M does 129 GFLOPS in FP64 against ~4 TFLOPS in FP32), continuum attenuation
+~40 (FP64 powers and exponentials), magnitudes ~28, SSP age sums ~18, smoothing ~15, the rest ~25.
+FP64 costs only ~60% more than FP32 here, so the old FP64 projection (~1.5-2.5 ms) was far too
+pessimistic. A single call is ~22 kernel launches, each ~230 us of launch and kernel latency plus
+a few small host-device copies; the setup of the call's data region adds ~85 more.
+The projected-final row assumes the remaining known items: the FP32 form of the nebular exponential
+progression, FP64 transcendental work moved out of per-pixel loops (attenuation), fewer launches
+and a smaller data region per call. Each is an estimate with ~2x uncertainty, not a measurement.
 
 Spectra on the host add per model ~1.7 us (A100, kernel precision; ~6-7 us converted to
 double) or ~2-4 us on other PCIe GPUs; none on the 780M (shared memory). FP64 on the A40, R9700,
