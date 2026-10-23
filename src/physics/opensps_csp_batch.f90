@@ -61,6 +61,14 @@ module opensps_csp_batch
     !> Redshifted colours (redshift_colors = 1) need zred_mags, each model's magnitude redshift
     !> (compute_csp_scenario's all-ages mode gives the redshift of each output's age).
     !>
+    !> IMF free per model (ssp_op: the template operator of the batch's metallicity,
+    !> opensps_ssp_operator): instead of a resident basis, each model's age sums come from the
+    !> operator with its own imf1, imf2, imf3, vdmc and mdave (imf_type, the IMF mass limits and
+    !> the isochrone modifications are the operator's and the context's, shared by the batch;
+    !> opensps_ssp_batch). The rest of the batch is unchanged. Not with per-model metallicity,
+    !> ssp_weights_z, SSP-level nebular emission (add_neb_emission = 2), X-ray binaries or the
+    !> instrumental LSF (status 2).
+    !>
     !> Not supported (status 2): redshifted colours without zred_mags, and models with tage <= 0
     !> without a weight matrix (the all-ages output of compute_csp_scenario is a batch with a
     !> weight matrix). Models must share the smoothing parameters (sigma_smooth,
@@ -87,6 +95,10 @@ module opensps_csp_batch
     use opensps_smoothing, only: apply_smoothing
     use opensps_batch_photometry, only: compute_magnitudes_columns, prepare_batch_grid, smoothing_on_device, &
                                      prepare_smoothing_kernel, smooth_columns
+    use opensps_ssp, only: configure_imf_parameters
+    use opensps_imf, only: imf_pack_params, IMF_NPAR, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE
+    use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_to_device
+    use opensps_ssp_batch, only: ssp_batch_age_sums
 #ifdef FSPS_CUBLAS
     use opensps_batch_photometry, only: blas, blas_init
     use cublas
@@ -183,9 +195,12 @@ contains
     !> @param[in]    zred_mags Optional redshift of each model's magnitudes (N), in place of its
     !>                       zred for the magnitudes only: the spectrum, its IGM absorption and
     !>                       the SFH stay at zred (compute_csp_scenario's redshift_colors = 1).
+    !> @param[inout] ssp_op  Optional template operator (ssp_operator_build, for psets(1)%zmet and
+    !>                       the context's non-IMF parameters): the IMF free per model, no basis
+    !>                       needed (moved to the device on first use in device builds).
     subroutine compute_csp_batch(ctx, psets, mags, status, spec, mass, lbol, mdust, sfr, emlines, indx, ssp_weights, &
                                  spec_young, spec_old, mass_young, mass_old, lbol_young, lbol_old, zred_mags, &
-                                 ssp_weights_z)
+                                 ssp_weights_z, ssp_op)
         type(opensps_context_t), intent(inout) :: ctx
         type(params), intent(in)            :: psets(:)
         real(WP), intent(out)               :: mags(:,:)
@@ -198,10 +213,15 @@ contains
         real(WP), intent(out), optional     :: mass_young(:), mass_old(:), lbol_young(:), lbol_old(:)
         real(WP), intent(in), optional      :: zred_mags(:)
         real(WP), intent(in), optional      :: ssp_weights_z(:,:,:)
+        type(ssp_operator_t), intent(inout), optional :: ssp_op
 
         integer :: n_mod, nt, nspec, nbands, m, k
         real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk
-        logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw, host_m
+        logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw, host_m, imf, dev
+        ! IMF per model (ssp_op): IMF parameters (IMF_NPAR x N), per age and model the surviving mass
+        ! and linear L_bol, the SFH weights (FP64, masked as w2), and a placeholder basis
+        real(WP), allocatable :: pm(:,:), smass(:,:), slum(:,:), wsfh(:,:)
+        real(KP), allocatable :: nobasis(:,:,:)
         !> Below this batch size the SFH weights are computed on the host: on the device each
         !> model's SFH integral is one serial thread (~0.3 ms on the A100, the same on the P100),
         !> on the host ~20 us per model. (Hardware note: the crossover depends on the host core
@@ -250,8 +270,21 @@ contains
         ! ------------------------------------------------------------------
         ! 0. Checks
         ! ------------------------------------------------------------------
-        if (ctx%state%check_sps_setup == 0 .or. .not. allocated(ctx%state%ssp_basis_spec)) then
+        imf = present(ssp_op)
+        if (ctx%state%check_sps_setup == 0 .or. (.not. imf .and. .not. allocated(ctx%state%ssp_basis_spec))) then
             status = 1; return
+        end if
+        if (imf) then
+            if (ssp_op%n_pts == 0 .or. .not. allocated(ssp_op%pt_q)) then
+                status = 1; return
+            end if
+            if (ssp_op%nspec /= nspec .or. ssp_op%n_ages /= nt .or. ssp_op%zmet /= psets(1)%zmet) then
+                status = 3; return
+            end if
+            if (present(ssp_weights_z) .or. ctx%add_neb_emission_val == 2 .or. ctx%add_xrb_emission_val == 1 .or. &
+                ctx%smooth_lsf_val == 1 .or. .not. all(ssp_op%age_on)) then
+                status = 2; return
+            end if
         end if
         if (size(mags, 1) < nbands .or. size(mags, 2) < n_mod) then
             status = 3; return
@@ -295,7 +328,8 @@ contains
             end if
         end if
         ! Weights over ages and metallicities: every resident basis summed with its own weights
-        nzb = size(ctx%state%ssp_basis_spec, 3)
+        nzb = 1
+        if (.not. imf) nzb = size(ctx%state%ssp_basis_spec, 3)
         zw = present(ssp_weights_z)
         nzw = 1
         if (zw) then
@@ -324,6 +358,14 @@ contains
 #if defined(OMP_TARGET)
         host_w = (.not. given_w) .and. n_mod < HOST_SFH_MAX
 #endif
+        ! IMF per model: one metallicity (the operator's)
+        if (imf) then
+            do m = 1, n_mod
+                if (psets(m)%zmet /= psets(1)%zmet) then
+                    status = 2; return
+                end if
+            end do
+        end if
         nw = 1
         if (given_w .or. host_w) nw = nt * nzw * n_mod
         allocate(ipk(6 * n_mod), rpk(6 * n_mod + nt + nw), lpk(2 * n_mod), rout(10 * n_mod))
@@ -409,7 +451,11 @@ contains
         else
             allocate(wz(1, 1, 1))
         end if
-        lum_linear = 10.0_wp**ctx%state%ssp_basis_lbol(1:nt, 1)
+        if (imf) then
+            lum_linear = 0.0_wp
+        else
+            lum_linear = 10.0_wp**ctx%state%ssp_basis_lbol(1:nt, 1)
+        end if
         do m = 1, n_mod
             if (psets(m)%dust_tesc > SAFE_FLOOR) then
                 dust_age_log = psets(m)%dust_tesc
@@ -433,7 +479,35 @@ contains
         any_emis = any(emis)
         agn = any(agn_on)
         neb = ctx%add_neb_emission_val == 1
-        call nebular_setup(ctx, psets, neb, nzb, nb)
+        if (imf) then
+            call nebular_setup(ctx, psets, neb, n_mod, nb)   ! ionizing photons per age and model
+        else
+            call nebular_setup(ctx, psets, neb, nzb, nb)
+        end if
+
+        ! IMF per model: the IMF parameters of each model (the context's IMF with its slopes,
+        ! characteristic and break masses), the operator on the device
+        dev = .false.
+        if (imf) then
+            call configure_imf_parameters(ctx, psets(1))
+            allocate(pm(IMF_NPAR, n_mod), smass(nt, n_mod), slum(nt, n_mod), wsfh(n_mod, nt), nobasis(1, 1, 1))
+            call imf_pack_params(ctx, pm(:, 1))
+            do m = 1, n_mod
+                pm(:, m) = pm(:, 1)
+                pm(IMF_P_ALPHA, m) = psets(m)%imf1
+                pm(IMF_P_ALPHA + 1, m) = psets(m)%imf2
+                pm(IMF_P_ALPHA + 2, m) = psets(m)%imf3
+                pm(IMF_P_VDMC, m) = psets(m)%vdmc
+                pm(IMF_P_MDAVE, m) = psets(m)%mdave
+            end do
+            nobasis = 0.0_KP
+#if defined(OMP_TARGET)
+            call ssp_operator_to_device(ssp_op)
+            dev = ctx%on_device
+#endif
+        else
+            allocate(pm(1, 1), smass(1, 1), slum(1, 1), wsfh(1, 1), nobasis(1, 1, 1))
+        end if
         if (neb) then
             allocate(eml(NEMLINE, n_mod))
         else
@@ -470,7 +544,7 @@ contains
 #ifdef OMP_TARGET
         !$omp target data map(to: psets, ipk, rpk, lpk) &
         !$omp map(alloc: w2, wz, weights, tmp1, tmp2, yo, absorbed, tdiff) &
-        !$omp map(from: rout, eml)
+        !$omp map(from: rout, eml) map(to: pm, nobasis) map(alloc: smass, slum, wsfh)
 #endif
 #ifdef OMP_TARGET
         !$omp target data if(neb) map(to: nb%ipk, nb%rpk, nb%lpk) map(alloc: nb%q0, nb%lum, nb%cy, nb%co)
@@ -484,7 +558,7 @@ contains
         ! results go up in one update each (one device thread per model took ~90 us at N = 1)
         host_m = .false.
 #if defined(OMP_TARGET)
-        host_m = (given_w .or. host_w) .and. n_mod < HOST_SFH_MAX
+        host_m = (given_w .or. host_w) .and. n_mod < HOST_SFH_MAX .and. .not. imf
 #endif
         if (given_w .or. host_w) then
 #if defined(OMP_TARGET)
@@ -509,6 +583,32 @@ contains
                 call sfh_weights_core(ctx, psets(m), psets(m)%tage, 1, weights(:, :, m), tmp1(:, m), tmp2(:, m))
             end do
         end if
+        ! IMF per model: the young and old age sums, and per age and model the mass, L_bol and
+        ! ionizing photons, from the operator (opensps_ssp_batch), with the SFH weights masked as
+        ! below
+        if (imf) then
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2) if(target: dev)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2)
+#endif
+            do k = 1, nt
+                do m = 1, n_mod
+                    if (weights(k, 1, m) > SAFE_FLOOR) then
+                        wsfh(m, k) = weights(k, 1, m)
+                    else
+                        wsfh(m, k) = 0.0_wp
+                    end if
+                end do
+            end do
+            call ssp_batch_age_sums(dev, ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &
+                                    ssp_op%n_pts, ssp_op%n_eff, pm, wsfh, it_tesc, ssp_op%pt_ptr, ssp_op%pt_mini, &
+                                    ssp_op%pt_m1, ssp_op%pt_m2, ssp_op%pt_first, ssp_op%pt_cm, ssp_op%pt_cl, &
+                                    ssp_op%pt_q, ssp_op%age_mmax, ssp_op%pt_age, ssp_op%eff_ptr, ssp_op%eff_pt, &
+                                    ssp_op%eff_val, ssp_op%k_age, ssp_op%etpl, nb%nt_neb, nb%whlylim, nb%fesc, yo, &
+                                    smass, slum, nb%q0)
+        end if
+
         if (zw) then
             ! Weights over ages and metallicities: mass and L_bol summed over both (metallicities
             ! outer, as compute_csp_scenario with nzin > 1), the weights cast once to KP
@@ -554,7 +654,11 @@ contains
                 do k = 1, nt
                     w = weights(k, 1, m)
                     if (w > SAFE_FLOOR) then
-                        if (zmode) then
+                        if (imf) then
+                            ! The model's own SSPs (IMF per model)
+                            mk = w * smass(k, m)
+                            lk = w * slum(k, m)
+                        else if (zmode) then
                             ! The interpolated SSP's mass and L_bol (compute_interpolated_ssp)
                             mk = w * ((1.0_wp - dz(m)) * ctx%state%ssp_basis_mass(k, zlo(m)) + &
                                       dz(m) * ctx%state%ssp_basis_mass(k, zhi(m)))
@@ -591,15 +695,22 @@ contains
 #endif
         end if
 
-        if (zw) then
+        if (imf) then
+            ! (done above, from the operator)
+        else if (zw) then
             call age_sums_w(nspec, nt, nzw, n_mod, ctx%state%ssp_basis_spec, wz, it_tesc, yo)
         else if (zmode) then
             call age_sums_z(nspec, nt, n_mod, ctx%state%ssp_basis_spec, w2, it_tesc, zlo, zhi, dz, yo)
         else
             call age_sums(nspec, nt, n_mod, ctx%state%ssp_basis_spec(:, :, 1), w2, it_tesc, yo)
         end if
-        if (neb) call add_nebular_batch(ctx, n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, w2, it_tesc, &
-                                        zlo, zhi, dz, nb, yo, eml)
+        if (neb .and. imf) then
+            call add_nebular_batch(ctx, n_mod, nspec, nt, nzb, nobasis, w2, it_tesc, zlo, zhi, dz, nb, yo, eml, &
+                                   q_model=.true.)
+        else if (neb) then
+            call add_nebular_batch(ctx, n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, w2, it_tesc, &
+                                   zlo, zhi, dz, nb, yo, eml, q_model=.false.)
+        end if
         if (neb) call attenuate_lines(ctx, psets, n_mod, nb%lum, nb%llo, eml, s_line)
         ! Intrinsic young and old spectra (the input of the attenuation), on request
         if (parts) then
@@ -1109,7 +1220,10 @@ contains
     !> compute_csp_scenario: (1) the EUV escapes with fraction fesc, (2) the continuum
     !> 10**log(t; Z, U) * Q(t), (3) the lines, whose luminosities (also returned in eml) are summed
     !> over ages first and then spread over their profiles.
-    subroutine add_nebular_batch(ctx, n_mod, nspec, nt, nzb, basis, w2, it_tesc, zlo, zhi, dz, nb, yo, eml)
+    !> q_model: the ionizing photons per age are per model (nb%q0(t, m), the IMF per model) and
+    !> the EUV pixels of yo already have the escaping fraction (opensps_ssp_batch); basis is
+    !> then not read.
+    subroutine add_nebular_batch(ctx, n_mod, nspec, nt, nzb, basis, w2, it_tesc, zlo, zhi, dz, nb, yo, eml, q_model)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)              :: n_mod, nspec, nt, nzb, it_tesc(:), zlo(:), zhi(:)
         real(KP), intent(in), contiguous :: basis(:,:,:), w2(:,:)
@@ -1117,6 +1231,7 @@ contains
         type(nebular_setup_t), intent(inout) :: nb
         real(KP), intent(inout)          :: yo(:,:)
         real(KP), intent(out)            :: eml(:,:)
+        logical, intent(in)              :: q_model
 
         ! The kernels take the components as plain arrays: device code never refers to the
         ! derived type itself, which is mapped only through its components (mapping it whole and
@@ -1124,14 +1239,14 @@ contains
         call nebular_kernels(ctx, n_mod, nspec, nt, nzb, basis, w2, it_tesc, zlo, zhi, dz, &
                              nb%nt_neb, nb%whlylim, nb%cont, nb%lines_in_spec, nb%xrb, nb%ia, nb%wa, nb%dwa, &
                              nb%newr, nb%q0, nb%iz, nb%wz, nb%iu, nb%wu, nb%fesc, nb%fabs, nb%cy, nb%co, nb%lum, &
-                             nb%lptr, nb%lid, yo, eml)
+                             nb%lptr, nb%lid, yo, eml, q_model)
     end subroutine add_nebular_batch
 
     !> The kernels of add_nebular_batch, on the components of its nebular_setup_t.
     subroutine nebular_kernels(ctx, n_mod, nspec, nt, nzb, basis, w2, it_tesc, zlo, zhi, dz, &
                                nb_nt_neb, nb_whlylim, nb_cont, nb_lines_in_spec, nb_xrb, nb_ia, nb_wa, nb_dwa, &
                                nb_newr, nb_q0, nb_iz, nb_wz, nb_iu, nb_wu, nb_fesc, nb_fabs, nb_cy, nb_co, nb_lum, &
-                               nb_lptr, nb_lid, yo, eml)
+                               nb_lptr, nb_lid, yo, eml, q_model)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)              :: n_mod, nspec, nt, nzb, it_tesc(:), zlo(:), zhi(:)
         real(KP), intent(in), contiguous :: basis(:,:,:), w2(:,:)
@@ -1145,6 +1260,7 @@ contains
         real(KP), intent(inout), contiguous :: nb_lum(:,:)
         real(KP), intent(inout)          :: yo(:,:)
         real(KP), intent(out)            :: eml(:,:)
+        logical, intent(in)              :: q_model
 
         integer  :: m, i, j, k, t, nt_neb, whlylim, a, a_prev, p, iz, iu
         real(KP) :: s, c, wt, bk, y, o, wk, v, dzk
@@ -1168,6 +1284,9 @@ contains
             end do
             return
         end if
+
+        ! (IMF per model: steps 1 and 2 were done from the operator)
+        if (.not. q_model) then
 
         ! 1. Ionizing photons of each young basis spectrum (the photon-number integral of
         !    process_ionizing_radiation, without the absorbed fraction)
@@ -1235,6 +1354,8 @@ contains
             end do
         end if
 
+        end if
+
         ! 3. Continuum: per (pixel, model), sum over the nebular ages t of C(t) 10**lg(t), with
         !    C = SFH weight * Q (per model, young or old; FP64) and lg the log grid interpolated
         !    in Z, U (FP64) and age. Within one CLOUDY age interval [ra, rb], lg = ra + wa (rb - ra)
@@ -1253,7 +1374,11 @@ contains
 #endif
             do m = 1, n_mod
                 do t = 1, nt_neb
-                    q = abs(((1.0_wp - dz(m)) * nb_q0(t, zlo(m)) + dz(m) * nb_q0(t, zhi(m))) * nb_fabs(m))
+                    if (q_model) then
+                        q = abs(nb_q0(t, m) * nb_fabs(m))
+                    else
+                        q = abs(((1.0_wp - dz(m)) * nb_q0(t, zlo(m)) + dz(m) * nb_q0(t, zhi(m))) * nb_fabs(m))
+                    end if
                     if (t <= it_tesc(m)) then
                         wk = w2(t, m)
                     else
@@ -1367,7 +1492,11 @@ contains
                         wk = w2(t, n_mod + m)
                     end if
                     if (wk == 0.0_KP) cycle
-                    q = abs(((1.0_wp - dz(m)) * nb_q0(t, zlo(m)) + dz(m) * nb_q0(t, zhi(m))) * nb_fabs(m))
+                    if (q_model) then
+                        q = abs(nb_q0(t, m) * nb_fabs(m))
+                    else
+                        q = abs(((1.0_wp - dz(m)) * nb_q0(t, zlo(m)) + dz(m) * nb_q0(t, zhi(m))) * nb_fabs(m))
+                    end if
                     if (q <= SAFE_FLOOR) cycle
                     a = nb_ia(t)
                     if (xrb) then

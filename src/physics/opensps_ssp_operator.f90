@@ -81,10 +81,11 @@ module opensps_ssp_operator
     !> (direct spectra); C3K none.
 
     use opensps_precision, only: WP, KP
-    use opensps_constants, only: NM, SAFE_FLOOR, TIME_RES_INCR, C_LIGHT
+    use opensps_constants, only: NM, SAFE_FLOOR, TIME_RES_INCR, C_LIGHT, H_PLANCK, L_SOL
     use opensps_types, only: params
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings
-    use opensps_imf, only: imf_integral_p, IMF_NPAR, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT, IMF_P_LOWER_BOUND
+    use opensps_imf, only: imf_integral_p, IMF_NPAR, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT, IMF_P_LOWER_BOUND, &
+                        imf_bin_weights
     use opensps_stellar_modifications, only: add_remnant_mass_p
     use opensps_ssp, only: isochrone_buffer_t, init_isochrone_buffer, free_isochrone_buffer, load_timestep_data, &
                         apply_isochrone_modifications, finish_ssp_grid, small_template_index, &
@@ -98,6 +99,7 @@ module opensps_ssp_operator
 
     public :: ssp_operator_t, ssp_operator_build, ssp_operator_evaluate, ssp_operator_free
     public :: ssp_op_model_weights, ssp_op_imf_weights, ssp_op_spmv, ssp_template_product
+    public :: ssp_operator_to_device, ssp_operator_from_device
 
     !> Row kinds (the order of the rows within an age)
     integer, parameter, public :: ROW_MAIN = 1, ROW_SMALL = 2, ROW_DUSTY = 3, ROW_DIRECT = 4, &
@@ -139,6 +141,18 @@ module opensps_ssp_operator
         integer :: n_eff = 0
         integer,  allocatable :: row_eff(:), eff_age0(:)
         real(KP), allocatable :: etpl(:,:)
+        !> Batch form (compute_csp_batch with the IMF per model, opensps_ssp_batch): the template
+        !> rows of S by effective template, over the points in age order (CSR: eff_ptr, eff_pt,
+        !> eff_val); per point its age and its coefficients of the age's surviving mass (pt_cm),
+        !> linear L_bol (pt_cl) and ionizing photon rate (pt_q, photons/s per unit IMF weight,
+        !> from the effective templates as the batch integrates a basis spectrum); per age t,
+        !> k_age(t) = the number of effective templates first used at ages <= t (the columns the
+        !> ages up to t use)
+        integer,  allocatable :: eff_ptr(:), eff_pt(:), pt_age(:), k_age(:)
+        real(WP), allocatable :: eff_val(:), pt_cm(:), pt_cl(:), pt_q(:)
+        !> The batch form and the point and template arrays are mapped to the device
+        !> (ssp_operator_to_device)
+        logical :: on_device = .false.
     end type ssp_operator_t
 
 contains
@@ -236,7 +250,9 @@ contains
                 if (j == 1) then
                     g_m1(k) = 0.0_wp
                 else
-                    g_m1(k) = buf%initial_mass(j) - 0.5_wp * (buf%initial_mass(j) - buf%initial_mass(j-1))
+                    ! The previous bin's upper edge (the same mass as compute_imf_weights' lower
+                    ! edge, to rounding), so consecutive bins share it exactly (imf_bin_weights)
+                    g_m1(k) = g_m2(k - 1)
                 end if
                 if (j == n_nat) then
                     g_m2(k) = buf%initial_mass(j)
@@ -630,7 +646,101 @@ contains
             end select
             op%etpl(:, e) = real(col, KP)
         end do
+        call build_batch_form(ctx, op)
     end subroutine build_effective_templates
+
+    !> The batch form of op (see ssp_operator_t) from its rows and effective templates.
+    subroutine build_batch_form(ctx, op)
+        type(opensps_context_t), intent(in) :: ctx
+        type(ssp_operator_t), intent(inout) :: op
+        integer  :: t, r, e, k, i, whl
+        real(WP) :: s, wt
+        real(WP), allocatable :: q_eff(:)
+        integer, allocatable :: cnt(:)
+
+        allocate(op%k_age(op%n_ages), op%pt_cm(op%n_pts), op%pt_cl(op%n_pts), op%pt_q(op%n_pts), op%pt_age(op%n_pts))
+        allocate(op%eff_ptr(op%n_eff + 1), cnt(op%n_eff + 1))
+        op%pt_cm = 0.0_wp; op%pt_cl = 0.0_wp; op%pt_q = 0.0_wp
+        do t = 1, op%n_ages
+            op%pt_age(op%pt_ptr(t):op%pt_ptr(t + 1) - 1) = t
+            op%k_age(t) = count(op%eff_age0(1:op%n_eff) <= t)
+        end do
+        ! Entries per effective template, then filled in row order (ages ascending, and within a
+        ! row the points ascending: each template's points in age order)
+        cnt = 0
+        do r = 1, op%n_rows
+            e = op%row_eff(r)
+            if (e > 0) cnt(e) = cnt(e) + op%row_ptr(r + 1) - op%row_ptr(r)
+        end do
+        op%eff_ptr(1) = 1
+        do e = 1, op%n_eff
+            op%eff_ptr(e + 1) = op%eff_ptr(e) + cnt(e)
+        end do
+        allocate(op%eff_pt(max(op%eff_ptr(op%n_eff + 1) - 1, 1)), op%eff_val(max(op%eff_ptr(op%n_eff + 1) - 1, 1)))
+        cnt = 0
+        do r = 1, op%n_rows
+            e = op%row_eff(r)
+            if (e < 1) cycle
+            do k = op%row_ptr(r), op%row_ptr(r + 1) - 1
+                op%eff_pt(op%eff_ptr(e) + cnt(e)) = op%col(k)
+                op%eff_val(op%eff_ptr(e) + cnt(e)) = op%val(k)
+                cnt(e) = cnt(e) + 1
+            end do
+        end do
+
+        ! Ionizing photons of each effective template (the batch's integral over the pixels below
+        ! the Lyman limit)
+        whl = ctx%state%whlylim
+        allocate(q_eff(max(op%n_eff, 1)))
+        q_eff = 0.0_wp
+        if (whl >= 2) then
+            do e = 1, op%n_eff
+                s = 0.0_wp
+                do i = 1, whl - 1
+                    wt = 0.5_wp * abs(ctx%state%spec_nu(i + 1) - ctx%state%spec_nu(i))
+                    s = s + wt * (real(op%etpl(i, e), WP) / ctx%state%spec_nu(i) + &
+                                  real(op%etpl(i + 1, e), WP) / ctx%state%spec_nu(i + 1))
+                end do
+                q_eff(e) = s / H_PLANCK * L_SOL
+            end do
+        end if
+        ! Per point through S (rows in order), and the mass and L_bol rows' coefficients
+        do r = 1, op%n_rows
+            e = op%row_eff(r)
+            do k = op%row_ptr(r), op%row_ptr(r + 1) - 1
+                if (e > 0) then
+                    op%pt_q(op%col(k)) = op%pt_q(op%col(k)) + op%val(k) * q_eff(e)
+                else if (op%row_kind(r) == ROW_MASS) then
+                    op%pt_cm(op%col(k)) = op%val(k)
+                else if (op%row_kind(r) == ROW_LBOL) then
+                    op%pt_cl(op%col(k)) = op%val(k)
+                end if
+            end do
+        end do
+    end subroutine build_batch_form
+
+    !> Maps op's batch form, point arrays and effective templates to the device (OpenMP target
+    !> builds; no-op otherwise), once: compute_csp_batch reads them there.
+    subroutine ssp_operator_to_device(op)
+        type(ssp_operator_t), intent(inout) :: op
+#ifdef OMP_TARGET
+        if (op%on_device) return
+        !$omp target enter data map(to: op%etpl, op%eff_ptr, op%eff_pt, op%eff_val, op%pt_age, op%pt_cm, &
+        !$omp     op%pt_cl, op%pt_q, op%pt_mini, op%pt_m1, op%pt_m2, op%pt_first, op%age_mmax, op%k_age, op%pt_ptr)
+        op%on_device = .true.
+#endif
+    end subroutine ssp_operator_to_device
+
+    !> Releases the device copies of ssp_operator_to_device.
+    subroutine ssp_operator_from_device(op)
+        type(ssp_operator_t), intent(inout) :: op
+#ifdef OMP_TARGET
+        if (.not. op%on_device) return
+        !$omp target exit data map(delete: op%etpl, op%eff_ptr, op%eff_pt, op%eff_val, op%pt_age, op%pt_cm, &
+        !$omp     op%pt_cl, op%pt_q, op%pt_mini, op%pt_m1, op%pt_m2, op%pt_first, op%age_mmax, op%k_age, op%pt_ptr)
+        op%on_device = .false.
+#endif
+    end subroutine ssp_operator_from_device
 
     !> y = etpl . b (pixels x columns), the template product of the SSP: each (pixel, column)
     !> sums the effective templates in column order, skipping zero weights; compensated (Kahan)
@@ -795,7 +905,9 @@ contains
 
     subroutine ssp_operator_free(op)
         type(ssp_operator_t), intent(inout) :: op
-        ! Component by component (no derived-type assignment: plain for every compiler)
+        ! Component by component (no derived-type assignment: plain for every compiler), after
+        ! the device copies
+        call ssp_operator_from_device(op)
         if (allocated(op%pt_ptr)) deallocate(op%pt_ptr)
         if (allocated(op%pt_mini)) deallocate(op%pt_mini)
         if (allocated(op%pt_m1)) deallocate(op%pt_m1)
@@ -816,6 +928,14 @@ contains
         if (allocated(op%row_eff)) deallocate(op%row_eff)
         if (allocated(op%eff_age0)) deallocate(op%eff_age0)
         if (allocated(op%etpl)) deallocate(op%etpl)
+        if (allocated(op%k_age)) deallocate(op%k_age)
+        if (allocated(op%eff_ptr)) deallocate(op%eff_ptr)
+        if (allocated(op%eff_pt)) deallocate(op%eff_pt)
+        if (allocated(op%eff_val)) deallocate(op%eff_val)
+        if (allocated(op%pt_age)) deallocate(op%pt_age)
+        if (allocated(op%pt_cm)) deallocate(op%pt_cm)
+        if (allocated(op%pt_cl)) deallocate(op%pt_cl)
+        if (allocated(op%pt_q)) deallocate(op%pt_q)
         op%n_eff = 0
         op%n_pts = 0; op%n_rows = 0; op%nnz = 0; op%n_slots = 0; op%n_direct = 0
     end subroutine ssp_operator_free
@@ -825,32 +945,19 @@ contains
     ! ------------------------------------------------------------------------
 
     !> IMF weights of all native isochrone points (compute_imf_weights for every age): number of
-    !> stars per bin per unit initial stellar mass. imf_type and p(IMF_NPAR) as in opensps_imf.
+    !> stars per bin per unit initial stellar mass. imf_type and p(IMF_NPAR) as in opensps_imf;
+    !> imf_bin_weights, as the batch (opensps_ssp_batch) computes them.
     subroutine ssp_op_imf_weights(imf_type, p, n_pts, pt_mini, pt_m1, pt_m2, pt_first, w)
         integer, intent(in)  :: imf_type, n_pts
         real(WP), intent(in) :: p(IMF_NPAR)
         real(WP), intent(in) :: pt_mini(n_pts), pt_m1(n_pts), pt_m2(n_pts)
         integer, intent(in)  :: pt_first(n_pts)
         real(WP), intent(out) :: w(n_pts)
-        real(WP) :: m1, m2, total_mass, lo, hi
-        integer :: k
+        real(WP) :: total_mass
 
-        lo = p(IMF_P_LOWER_LIMIT)
-        hi = p(IMF_P_UPPER_LIMIT)
-        total_mass = imf_integral_p(imf_type, p, lo, hi, .true.)
-        do k = 1, n_pts
-            w(k) = 0.0_wp
-            if (pt_mini(k) < lo .or. pt_mini(k) > hi) cycle
-            if (pt_first(k) == 1) then
-                m1 = p(IMF_P_LOWER_BOUND)
-            else
-                m1 = pt_m1(k)
-            end if
-            m2 = pt_m2(k)
-            if (m2 <= m1) cycle      ! empty or inverted bin: no stars (compute_imf_weights)
-            w(k) = imf_integral_p(imf_type, p, m1, m2, .false.)
-            if (total_mass > 0.0_wp) w(k) = w(k) / total_mass
-        end do
+        total_mass = imf_integral_p(imf_type, p, p(IMF_P_LOWER_LIMIT), p(IMF_P_UPPER_LIMIT), .true.)
+        ! (one run: the first point of each age starts a new one)
+        call imf_bin_weights(imf_type, p, total_mass, n_pts, pt_mini, pt_m1, pt_m2, pt_first, w, 1)
     end subroutine ssp_op_imf_weights
 
     !> wrow = S . w (one row per CSR row).

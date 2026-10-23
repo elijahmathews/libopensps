@@ -6,7 +6,9 @@ program benchmark_csp_batch
     !> fitting configuration (dust1 = 0.5, dust2 = 0.3, DL07 dust emission, nebular emission,
     !> IGM at zred = 0.5, AGN with fagn = 0.1, spectral indices; tau, age, U_min and gas_logu vary);
     !> "full_smooth": the same with velocity smoothing, sigma_smooth = 150 km/s; "full_z" and
-    !> "full_smooth_z": with the bases of all metallicities resident and logzsol varying per model.
+    !> "full_smooth_z": with the bases of all metallicities resident and logzsol varying per model;
+    !> any config ending in "_imf": the IMF free per model (Kroupa, imf1-3 varied; the batch
+    !> from the template operator, built once and timed).
     !> Prints one line per metric: name, value: one compute_csp_scenario call per model, one
     !> all-ages call (tage = 0, every age of the grid) and, per batch size: magnitudes only; with spectra
     !> copied back to a host array (reused, as in a fitting loop); with spectra left on the device.
@@ -22,6 +24,7 @@ program benchmark_csp_batch
                             opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
                             opensps_context_set_param_int, opensps_context_set_param_float
     use opensps_context_types, only: opensps_context_t
+    use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build
     implicit none
 
     type(opensps_context_t), allocatable :: ctx
@@ -30,7 +33,8 @@ program benchmark_csp_batch
     type(COMPSPOUT), allocatable :: results(:)
     real(WP), allocatable :: spec_ssp(:, :), mass_ssp(:), lbol_ssp(:), mags(:, :), spec(:, :)
     character(len=32) :: arg, config = 'basic'
-    logical :: full, zvar = .false.
+    logical :: full, zvar = .false., imf = .false.
+    type(ssp_operator_t) :: op
     real(WP), allocatable :: spec_z(:, :, :), mass_z(:, :), lbol_z(:, :)
     integer :: z
     real(WP), allocatable :: indx(:, :)
@@ -49,6 +53,7 @@ program benchmark_csp_batch
     if (len_trim(arg) > 0) config = arg
     full = index(config, 'full') == 1
     zvar = index(config, '_z') > 0
+    imf = index(config, '_imf') > 0
     call system_clock(count_rate=rate)
 
     allocate(ctx)
@@ -56,7 +61,7 @@ program benchmark_csp_batch
     ctx%pset%zmet = 10
     call opensps_setup(ctx, 10, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
     call opensps_context_move_to_device(ctx)
-    call set_int('imf_type', 1)
+    call set_int('imf_type', merge(2, 1, imf))
     call set_int('zmet', 10)
     call set_int('sfh', 1)
     call set_float('tau', 1.0_wp)
@@ -101,6 +106,13 @@ program benchmark_csp_batch
         call opensps_context_get_pset(ctx, pset)
     end if
 
+    if (imf) then
+        call system_clock(t0)
+        call ssp_operator_build(ctx, pset, op)
+        call system_clock(t1)
+        write(*, '(A,F14.3)') 'ssp_operator_build_s ', real(t1 - t0, WP) / rate
+    end if
+
     ! One compute_csp_scenario call per model (the existing path)
     total = 0.0_wp
     call compute_csp_scenario(ctx, pset, 1, results, status)
@@ -112,7 +124,7 @@ program benchmark_csp_batch
         total = total + results(1)%mags(1)
     end do
     call system_clock(t1)
-    write(*, '(A,F14.3)') 'single_call_us_per_model ', 1.0e6_wp * real(t1 - t0, WP) / rate / n_single
+    if (n_single > 0) write(*, '(A,F14.3)') 'single_call_us_per_model ', 1.0e6_wp * real(t1 - t0, WP) / rate / n_single
 
     ! One all-ages call (tage = 0: every age of the grid), n_single / 20 times
     if (n_single >= 20) then
@@ -202,7 +214,15 @@ contains
     subroutine batch(n, with_spec)
         integer, intent(in) :: n
         logical, intent(in) :: with_spec
-        if (full .and. with_spec) then
+        if (imf .and. full .and. with_spec) then
+            call compute_csp_batch(ctx, psets(1:n), mags, status, spec=spec, indx=indx, ssp_op=op)
+        else if (imf .and. full) then
+            call compute_csp_batch(ctx, psets(1:n), mags, status, indx=indx, ssp_op=op)
+        else if (imf .and. with_spec) then
+            call compute_csp_batch(ctx, psets(1:n), mags, status, spec=spec, ssp_op=op)
+        else if (imf) then
+            call compute_csp_batch(ctx, psets(1:n), mags, status, ssp_op=op)
+        else if (full .and. with_spec) then
             call compute_csp_batch(ctx, psets(1:n), mags, status, spec=spec, indx=indx)
         else if (full) then
             call compute_csp_batch(ctx, psets(1:n), mags, status, indx=indx)
@@ -222,6 +242,11 @@ contains
         p%tage = 1.0_wp + 0.1_wp * mod(i, 113)
         p%duste_umin = 1.0_wp + 0.2_wp * mod(i, 71)
         if (zvar) p%logzsol = -1.5_wp + 0.017_wp * mod(i, 97)
+        if (imf) then
+            p%imf1 = 0.9_wp + 0.01_wp * mod(i, 61)
+            p%imf2 = 1.8_wp + 0.01_wp * mod(i, 83)
+            p%imf3 = 2.0_wp + 0.01_wp * mod(i, 79)
+        end if
         if (full) then
             p%gas_logu = -3.5_wp + 0.05_wp * mod(i, 41)
         else
