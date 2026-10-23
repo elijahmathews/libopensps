@@ -1156,18 +1156,23 @@ contains
                                nb_newr, nb_q0, nb_iz, nb_wz, nb_iu, nb_wu, nb_fesc, nb_fabs, nb_cy, nb_co, nb_lum, &
                                nb_lptr, nb_lid, yo, eml)
         type(opensps_context_t), intent(in) :: ctx
-        integer, intent(in)              :: n_mod, nspec, nt, nzb, it_tesc(:), zlo(:), zhi(:)
-        real(KP), intent(in), contiguous :: basis(:,:,:), w2(:,:)
-        real(WP), intent(in)             :: dz(:)
-        integer, intent(in)              :: nb_nt_neb, nb_whlylim
+        integer, intent(in)              :: n_mod, nspec, nt, nzb, nb_nt_neb, nb_whlylim
+        ! Explicit-shape arguments (no descriptors to map per launch), except nb_lid, whose size is not
+        ! known here (the pixels' line lists)
+        integer, intent(in)              :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
+        real(KP), intent(in)             :: basis(nspec, nt, nzb), w2(nt, 2 * n_mod)
+        real(WP), intent(in)             :: dz(n_mod)
         logical, intent(in)              :: nb_cont, nb_lines_in_spec, nb_xrb
-        integer, intent(in), contiguous  :: nb_ia(:), nb_iz(:), nb_iu(:), nb_lptr(:), nb_lid(:)
-        real(WP), intent(in), contiguous :: nb_wa(:), nb_dwa(:), nb_wz(:), nb_wu(:), nb_fesc(:), nb_fabs(:)
-        logical, intent(in), contiguous  :: nb_newr(:)
-        real(WP), intent(inout), contiguous :: nb_q0(:,:), nb_cy(:,:), nb_co(:,:)
-        real(KP), intent(inout), contiguous :: nb_lum(:,:)
-        real(KP), intent(inout)          :: yo(:,:)
-        real(KP), intent(out)            :: eml(:,:)
+        integer, intent(in)              :: nb_ia(max(1, nb_nt_neb)), nb_iz(n_mod), nb_iu(n_mod), nb_lptr(nspec + 1)
+        integer, intent(in), contiguous  :: nb_lid(:)
+        real(WP), intent(in)             :: nb_wa(max(1, nb_nt_neb)), nb_dwa(max(1, nb_nt_neb)), nb_wz(n_mod)
+        real(WP), intent(in)             :: nb_wu(n_mod), nb_fesc(n_mod), nb_fabs(n_mod)
+        logical, intent(in)              :: nb_newr(max(1, nb_nt_neb))
+        real(WP), intent(inout)          :: nb_q0(max(1, nb_nt_neb), nzb)
+        real(WP), intent(inout)          :: nb_cy(max(1, nb_nt_neb), n_mod), nb_co(max(1, nb_nt_neb), n_mod)
+        real(KP), intent(inout)          :: nb_lum(NEMLINE, 2 * n_mod)
+        real(KP), intent(inout)          :: yo(nspec, 2 * n_mod)
+        real(KP), intent(out)            :: eml(NEMLINE, n_mod)
 
         integer  :: m, i, j, k, t, nt_neb, whlylim, a, a_prev, p, iz, iu
         real(KP) :: s, c, wt, bk, y, o, wk, v, dzk
