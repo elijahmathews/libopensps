@@ -8,11 +8,13 @@ program imf_batch_dump
                                opensps_context_prepare_pset, opensps_context_set_param_int, opensps_context_set_param_float
     use opensps_context_types, only: opensps_context_t
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build
+    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build
     implicit none
     type(opensps_context_t), allocatable :: ctx
     type(PARAMS) :: pset
     type(PARAMS), allocatable :: psets(:)
-    type(ssp_operator_t) :: op
+    type(ssp_opset_t) :: opset
+    type(ssp_operator_t), allocatable :: ops(:)
     real(WP), allocatable :: mags(:,:), spec(:,:), mass(:), lbol(:), mdust(:)
     character(len=256) :: arg, fname
     integer :: status, itype, i, n, nspec, u
@@ -31,7 +33,9 @@ program imf_batch_dump
     call opensps_context_prepare_pset(ctx)
     call opensps_context_get_pset(ctx, pset)
     nspec = ctx%state%nspec
-    call ssp_operator_build(ctx, pset, op)
+    allocate(ops(1))
+    call ssp_operator_build(ctx, pset, ops(1))
+    call ssp_opset_build(ops, opset)
     allocate(psets(n), mags(ctx%state%nbands, n), spec(nspec, n), mass(n), lbol(n), mdust(n))
     do i = 1, n
         psets(i) = pset
@@ -44,7 +48,7 @@ program imf_batch_dump
         psets(i)%vdmc = 0.02_wp + 0.004_wp * mod(i, 40)
         psets(i)%mdave = 0.1_wp + 0.03_wp * mod(i, 40)
     end do
-    call compute_csp_batch(ctx, psets, mags, status, spec=spec, mass=mass, lbol=lbol, mdust=mdust, ssp_op=op)
+    call compute_csp_batch(ctx, psets, mags, status, spec=spec, mass=mass, lbol=lbol, mdust=mdust, ssp_ops=opset)
     write(*, *) 'status', status
     if (status /= 0) stop 1
     open(newunit=u, file=trim(fname), form='unformatted', access='stream', status='replace')
