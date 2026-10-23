@@ -375,16 +375,34 @@ contains
     !> The IMF free per model: a batch with the template operator (Kroupa slopes varied per model)
     !> against, model by model, the basis batch with the SSP basis generated for that model's IMF;
     !> z = 0.5, IGM, nebular emission, AGN, dust emission.
+    !> The IMF-per-model batch against a per-model SSP basis (generate_ssp_grid) for every IMF type, a
+    !> range of the per-model parameters (Kroupa slopes, van Dokkum characteristic mass, Dave break
+    !> mass) and of the shared mass limits.
     subroutine check_imf_per_model()
+        call imf_case("Kroupa slopes varied", 2, 0.08_wp, 120.0_wp)
+        call imf_case("Salpeter", 0, 0.08_wp, 120.0_wp)
+        call imf_case("Salpeter, 0.08-80 Msun", 0, 0.08_wp, 80.0_wp)
+        call imf_case("Chabrier", 1, 0.08_wp, 120.0_wp)
+        call imf_case("Kroupa slopes varied, 0.15-60 Msun", 2, 0.15_wp, 60.0_wp)
+        call imf_case("Kroupa slopes varied, 1-120 Msun (one segment)", 2, 1.0_wp, 120.0_wp)
+        call imf_case("van Dokkum, characteristic mass varied", 3, 0.08_wp, 120.0_wp)
+        call imf_case("Dave, break mass varied", 4, 0.08_wp, 120.0_wp)
+        call imf_case("user IMF (data/imf.dat)", 5, 0.08_wp, 120.0_wp)
+    end subroutine check_imf_per_model
+
+    subroutine imf_case(label, imf_type, mlo, mhi)
+        character(len=*), intent(in) :: label
+        integer, intent(in) :: imf_type
+        real(WP), intent(in) :: mlo, mhi
         type(PARAMS) :: pset, psets(N_MOD)
         type(ssp_operator_t) :: op
         real(WP), allocatable :: spec(:, :), mags(:, :), ref_spec(:, :), ref_mags(:, :), eml(:, :), ref_eml(:, :)
         real(WP), allocatable :: s1(:, :), g1(:, :), e1(:, :)
         real(WP) :: mass(N_MOD), lbol(N_MOD), mdust(N_MOD), ref_mass(N_MOD), ref_lbol(N_MOD), ref_mdust(N_MOD)
-        real(WP) :: d_spec, d_mag, d_scal, d_line, imf(3, N_MOD)
+        real(WP) :: d_spec, d_mag, d_scal, d_line, imf(5, N_MOD)
         integer  :: m, status, nspec, nbands
 
-        call print_group("Batched CSP: IMF per model (template operator), Kroupa slopes varied")
+        call print_group("Batched CSP: IMF per model (template operator), " // label)
         nspec = ctx%state%nspec
         nbands = ctx%state%nbands
         allocate(spec(nspec, N_MOD), mags(nbands, N_MOD), ref_spec(nspec, N_MOD), ref_mags(nbands, N_MOD), &
@@ -393,9 +411,11 @@ contains
         call set_int('add_igm_absorption', 1)
         call set_int('add_neb_emission', 1)
         call set_int('add_agn_dust', 1)
-        call set_int('imf_type', 2)
+        call set_int('imf_type', imf_type)
+        call set_float('imf_lower_limit', mlo); call set_float('imf_upper_limit', mhi)
         do m = 1, N_MOD
-            imf(:, m) = [0.5_wp + 0.1_wp * m, 1.6_wp + 0.08_wp * m, 1.9_wp + 0.1_wp * mod(7 * m, N_MOD)]
+            imf(:, m) = [0.5_wp + 0.1_wp * m, 1.6_wp + 0.08_wp * m, 1.9_wp + 0.1_wp * mod(7 * m, N_MOD), &
+                         0.05_wp + 0.025_wp * mod(5 * m, N_MOD), 0.3_wp + 0.15_wp * mod(7 * m, N_MOD)]
         end do
 
         ! The operator (built with the default slopes; S does not depend on them)
@@ -406,17 +426,19 @@ contains
         do m = 1, N_MOD
             call set_model(m, 0.5_wp)
             call set_float('imf1', imf(1, m)); call set_float('imf2', imf(2, m)); call set_float('imf3', imf(3, m))
+            call set_float('vdmc', imf(4, m)); call set_float('mdave', imf(5, m))
             call opensps_context_prepare_pset(ctx)
             call opensps_context_get_pset(ctx, psets(m))
         end do
         call compute_csp_batch(ctx, psets, mags, status, spec=spec, mass=mass, lbol=lbol, mdust=mdust, emlines=eml, &
                                ssp_op=op)
         if (status /= 0) write(*, '(A,I0)') "# status = ", status
-        call assert_true(status == 0, "status 0", total_tests, total_failures)
+        call assert_true(status == 0, label // ": status 0", total_tests, total_failures)
 
         ! Reference: each model with its own basis
         do m = 1, N_MOD
             call set_float('imf1', imf(1, m)); call set_float('imf2', imf(2, m)); call set_float('imf3', imf(3, m))
+            call set_float('vdmc', imf(4, m)); call set_float('mdave', imf(5, m))
             call build_basis()
             call compute_csp_batch(ctx, psets(m:m), g1, status, spec=s1, mass=ref_mass(m:m), lbol=ref_lbol(m:m), &
                                    mdust=ref_mdust(m:m), emlines=e1)
@@ -429,17 +451,19 @@ contains
         d_line = maxval(abs(eml / ref_eml - 1.0_wp), mask=ref_eml > 1.0e-3_wp * maxval(ref_eml))
         write(*, '(A,5ES10.2)') "# max difference (spectrum, mag, mass/lbol, mdust, lines): ", d_spec, d_mag, &
             d_scal, maxval(abs(mdust / ref_mdust - 1.0_wp)), d_line
-        write(*, '(A,2F9.5)') "# the IMF matters: mass of models 1 and 12: ", ref_mass(1), ref_mass(N_MOD)
-        call assert_true(d_spec <= SPEC_RTOL, "spectra", total_tests, total_failures)
-        call assert_true(d_mag <= MAG_TOL, "magnitudes", total_tests, total_failures)
-        call assert_true(d_scal <= 1.0e-12_wp, "mass, L_bol", total_tests, total_failures)
-        call assert_true(maxval(abs(mdust / ref_mdust - 1.0_wp)) <= SPEC_RTOL, "dust mass", total_tests, total_failures)
-        call assert_true(d_line <= SPEC_RTOL, "emission lines", total_tests, total_failures)
+        write(*, '(A,2F9.5)') "# mass of models 1 and 12: ", ref_mass(1), ref_mass(N_MOD)
+        call assert_true(d_spec <= SPEC_RTOL, label // ": spectra", total_tests, total_failures)
+        call assert_true(d_mag <= MAG_TOL, label // ": magnitudes", total_tests, total_failures)
+        call assert_true(d_scal <= 1.0e-12_wp, label // ": mass, L_bol", total_tests, total_failures)
+        call assert_true(maxval(abs(mdust / ref_mdust - 1.0_wp)) <= SPEC_RTOL, label // ": dust mass", total_tests, total_failures)
+        call assert_true(d_line <= SPEC_RTOL, label // ": emission lines", total_tests, total_failures)
 
         call ssp_operator_free(op)
         call set_int('imf_type', 1)
         call set_float('imf1', 1.3_wp); call set_float('imf2', 2.3_wp); call set_float('imf3', 2.3_wp)
-    end subroutine check_imf_per_model
+        call set_float('vdmc', 0.08_wp); call set_float('mdave', 0.5_wp)
+        call set_float('imf_lower_limit', 0.08_wp); call set_float('imf_upper_limit', 120.0_wp)
+    end subroutine imf_case
 
     !> Largest relative spectrum difference (pixels above 1e-6 of each peak) and magnitude
     !> difference (bands within 30 mag of the brightest) over the columns.
