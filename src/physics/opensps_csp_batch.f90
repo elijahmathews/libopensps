@@ -314,7 +314,7 @@ contains
             end if
         end if
         if (zimf) then
-            ! The metallicity free per model: one operator per metallicity of the context, device builds
+            ! The metallicity free per model: one operator per metallicity of the context
             if (ssp_ops%nz /= ctx%state%nz .or. .not. allocated(ssp_ops%ops)) then
                 status = 3; return
             end if
@@ -337,8 +337,6 @@ contains
             if (.not. ctx%on_device) then
                 status = 2; return
             end if
-#else
-            status = 2; return
 #endif
         end if
         if (size(mags, 1) < nbands .or. size(mags, 2) < n_mod) then

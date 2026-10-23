@@ -283,6 +283,11 @@ contains
         real(WP), intent(inout), contiguous :: smass(:,:), slum(:,:), q0(:,:)
 
         integer, parameter :: CHUNK = 2048
+#ifdef OMP_TARGET
+        logical, parameter :: dev = .true.
+#else
+        logical, parameter :: dev = .false.
+#endif
         integer :: nc_max, neb_cols, nz, pass, m, k, t, ntq
         integer, allocatable :: perm1(:), perm2(:), viz1(:), viz2(:), ptr1(:), ptr2(:), cnt(:)
         real(WP), allocatable :: cz1(:), cz2(:), w(:,:), tot(:), vp(:,:,:), pps(:,:,:)
@@ -310,8 +315,14 @@ contains
         allocate(w(nc_max, set%n_pts_max), wk(nc_max, set%n_pts_max), tot(nc_max), v(set%n_eff_max, 2 * nc_max))
         allocate(veuv(set%n_eff_max, max(1, neb_cols * 2 * nc_max)), vp(nc_max, 4, set%n_seg_max), &
                  pps(nc_max, 3, set%n_pc_max), yz(nspec, 2 * nc_max))
+#ifdef OMP_TARGET
         !$omp target data map(alloc: w, wk, tot, v, veuv, vp, pps, yz) map(to: perm1, perm2, viz1, viz2, cz1, cz2)
+#endif
+#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2)
+#endif
         do m = 1, n_mod
             do t = 1, nt
                 smass(t, m) = 0.0_wp
@@ -319,14 +330,22 @@ contains
             end do
         end do
         if (nt_neb > 0) then
+#if defined(OMP_TARGET)
             !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2)
+#endif
             do m = 1, n_mod
                 do t = 1, ntq
                     q0(t, m) = 0.0_wp
                 end do
             end do
         end if
+#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2)
+#endif
         do m = 1, 2 * n_mod
             do k = 1, nspec
                 yo(k, m) = 0.0_KP
@@ -339,13 +358,19 @@ contains
                 call run_pass(ptr2(nz + 1) - 1, perm2, viz2, cz2)
             end if
         end do
+#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2)
+#endif
         do m = 1, n_mod
             do t = 1, nt
                 slum(t, m) = 10.0_wp**slum(t, m)
             end do
         end do
+#ifdef OMP_TARGET
         !$omp end target data
+#endif
 
     contains
 
@@ -380,13 +405,13 @@ contains
                         ky = max(ky, it_tesc(perm(m0 + j - 1)))
                     end do
                     ky = set%ops(iz)%k_age(max(1, min(nt, ky)))
-                    call template_columns(.true., nspec, nspec, size(v, 1), ky, nrun, set%ops(iz)%etpl, v, j0 - 1, yz, j0 - 1)
-                    call template_columns(.true., nspec, nspec, size(v, 1), set%ops(iz)%n_eff, nrun, set%ops(iz)%etpl, v, &
+                    call template_columns(dev, nspec, nspec, size(v, 1), ky, nrun, set%ops(iz)%etpl, v, j0 - 1, yz, j0 - 1)
+                    call template_columns(dev, nspec, nspec, size(v, 1), set%ops(iz)%n_eff, nrun, set%ops(iz)%etpl, v, &
                                           nc + j0 - 1, yz, nc + j0 - 1)
                     if (neb_cols > 0) then
-                        call template_columns(.true., whl, nspec, size(v, 1), ky, nrun, set%ops(iz)%etpl, veuv, j0 - 1, &
+                        call template_columns(dev, whl, nspec, size(v, 1), ky, nrun, set%ops(iz)%etpl, veuv, j0 - 1, &
                                               yz, j0 - 1)
-                        call template_columns(.true., whl, nspec, size(v, 1), set%ops(iz)%n_eff, nrun, set%ops(iz)%etpl, &
+                        call template_columns(dev, whl, nspec, size(v, 1), set%ops(iz)%n_eff, nrun, set%ops(iz)%etpl, &
                                               veuv, nc + j0 - 1, yz, nc + j0 - 1)
                     end if
                     j0 = jr + 1
@@ -416,12 +441,20 @@ contains
         integer  :: j, t, k, m, q, k0, n, iz, o, kl
         real(WP) :: sm, sl, sq
 
+#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do
+#elif defined(_OPENMP)
+        !$omp parallel do
+#endif
         do j = 1, nc
             tot(j) = imf_integral_p(imf_type, pm(:, perm(m0 + j - 1)), pm(IMF_P_LOWER_LIMIT, perm(m0 + j - 1)), &
                                     pm(IMF_P_UPPER_LIMIT, perm(m0 + j - 1)), .true.)
         end do
+#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(k, m, k0, n, sm, sl, sq, iz, o, kl)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(k, m, k0, n, sm, sl, sq, iz, o, kl)
+#endif
         do q = 1, n_pc_max
             do j = 1, nc
                 iz = viz(m0 + j - 1)
@@ -448,7 +481,11 @@ contains
                 pps(j, 3, q) = sq
             end do
         end do
+#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(q, sm, sl, sq, iz, m)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(q, sm, sl, sq, iz, m)
+#endif
         do t = 1, nt
             do j = 1, nc
                 iz = viz(m0 + j - 1)
@@ -486,8 +523,12 @@ contains
         integer  :: s, e, j, k, t, m, tesc, tc, iz, sg, eg
         real(WP) :: x, y, o, ye, oe, f, a, ae
 
+#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(k, t, m, tesc, tc, x, y, o, ye, oe, f, a, ae, &
         !$omp     iz, sg) map(to: fesc)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(k, t, m, tesc, tc, x, y, o, ye, oe, f, a, ae, iz, sg)
+#endif
         do s = 1, n_seg_max
             do j = 1, nc
                 iz = viz(m0 + j - 1)
@@ -529,7 +570,11 @@ contains
                 vp(j, 4, s) = oe
             end do
         end do
+#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(s, y, o, ye, oe, iz, eg)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(s, y, o, ye, oe, iz, eg)
+#endif
         do e = 1, n_eff_max
             do j = 1, nc
                 iz = viz(m0 + j - 1)
@@ -585,7 +630,11 @@ contains
         real(KP), intent(inout), contiguous :: yo(:,:)
         integer :: j, i, m
 
+#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(m)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(m)
+#endif
         do j = 1, nc
             do i = 1, nspec
                 m = perm(m0 + j - 1)
