@@ -1490,17 +1490,20 @@ contains
 
         integer, parameter :: PT = 4
         real(WP), parameter :: LN10 = log(10.0_wp)
-        integer  :: m, ip, npt, p, t, a, a_prev, jz, ju, jj(PT)
-        real(KP) :: y(PT), o(PT)
-        real(WP) :: sy(PT), so(PT), ra(PT), rb(PT), dl(PT), f(PT), r(PT), c00, c01, c10, c11, wat, cyt, cot
-        logical  :: valid(PT)
+        integer  :: m, ip, npt
 
         npt = (nspec + PT - 1) / PT
+        ! (The small work arrays are declared in a block of the loop body: flang maps `private` arrays,
+        ! one host-device copy each way per launch, a block-local array it does not)
         !$omp target teams distribute parallel do collapse(2) &
-        !$omp private(p, t, a, a_prev, jz, ju, jj, y, o, sy, so, ra, rb, dl, f, r, c00, c01, c10, c11, wat, cyt, cot, valid) &
         !$omp map(OMP_MAP_PRESENT_ALLOC: tab)
         do m = 1, n_mod
             do ip = 1, npt
+              block
+                integer  :: p, t, a, a_prev, jz, ju, jj(PT)
+                real(KP) :: y(PT), o(PT)
+                real(WP) :: sy(PT), so(PT), ra(PT), rb(PT), dl(PT), f(PT), r(PT), c00, c01, c10, c11, wat, cyt, cot
+                logical  :: valid(PT)
                 do p = 1, PT
                     jj(p) = min(ip + (p - 1) * npt, nspec)
                     valid(p) = ip + (p - 1) * npt <= nspec
@@ -1565,6 +1568,7 @@ contains
                         yo(jj(p), n_mod + m) = yo(jj(p), n_mod + m) + o(p)
                     end if
                 end do
+              end block
             end do
         end do
     end subroutine nebular_continuum_tiled
@@ -1828,10 +1832,8 @@ contains
         ! it, address arithmetic and loads were ~97% of the instructions). The arithmetic per model
         ! is unchanged (same results bit for bit).
         integer, parameter :: MT = 8, PT = 4
-        integer  :: m, mq, ip, npt, i, k, l, p, mm(MT), ii(PT), zl, zh, key, nzk, it(MT), oy(MT), oo(MT)
+        integer  :: m, mq, ip, npt, key, nzk
         integer, allocatable :: zord(:), starts(:)
-        real(KP) :: b_lo(PT), b_hi(PT), bk, wy, y(PT, MT), o(PT, MT), d(MT)
-        logical  :: same
 
         nzk = maxval(zhi(1:n_mod))
         allocate(zord(n_mod), starts(nzk + 1))
@@ -1849,10 +1851,14 @@ contains
         end do
 
         npt = (nspec + PT - 1) / PT
-        !$omp target teams distribute parallel do collapse(2) &
-        !$omp private(k, l, p, b_lo, b_hi, bk, wy, mm, ii, y, o, d, same, zl, zh, it, oy, oo) map(to: zord)
+        ! (Work arrays in a block of the loop body: flang maps `private` arrays, a copy each way per launch)
+        !$omp target teams distribute parallel do collapse(2) map(to: zord)
         do mq = 1, (n_mod + MT - 1) / MT
             do ip = 1, npt
+              block
+                integer  :: i, k, l, p, mm(MT), ii(PT), zl, zh, it(MT), oy(MT), oo(MT)
+                real(KP) :: b_lo(PT), b_hi(PT), bk, wy, y(PT, MT), o(PT, MT), d(MT)
+                logical  :: same
                 do l = 1, MT
                     mm(l) = zord(min((mq - 1) * MT + l, n_mod))
                     d(l) = real(dz(mm(l)), KP)
@@ -1918,6 +1924,7 @@ contains
                         yo(ii(p), n_mod + mm(l)) = o(p, l)
                     end do
                 end do
+              end block
             end do
         end do
 #else
