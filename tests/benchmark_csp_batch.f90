@@ -25,6 +25,7 @@ program benchmark_csp_batch
                             opensps_context_set_param_int, opensps_context_set_param_float
     use opensps_context_types, only: opensps_context_t
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build
+    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build
     implicit none
 
     type(opensps_context_t), allocatable :: ctx
@@ -36,6 +37,7 @@ program benchmark_csp_batch
     logical :: full, zvar = .false., imf = .false.
     type(ssp_operator_t) :: op
     type(ssp_operator_t), allocatable :: ops(:)
+    type(ssp_opset_t) :: opset
     real(WP), allocatable :: spec_z(:, :, :), mass_z(:, :), lbol_z(:, :)
     integer :: z
     real(WP), allocatable :: indx(:, :)
@@ -124,6 +126,7 @@ program benchmark_csp_batch
         call opensps_context_prepare_pset(ctx)
         call opensps_context_get_pset(ctx, pset)
         call opensps_context_set_pset(ctx, pset)
+        call ssp_opset_build(ops, opset)
         call system_clock(t1)
         write(*, '(A,F14.3)') 'ssp_operators_build_s ', real(t1 - t0, WP) / rate
     else if (imf) then
@@ -236,13 +239,13 @@ contains
         logical, intent(in) :: with_spec
         if (imf .and. zvar) then
             if (full .and. with_spec) then
-                call compute_csp_batch(ctx, psets(1:n), mags, status, spec=spec, indx=indx, ssp_ops=ops)
+                call compute_csp_batch(ctx, psets(1:n), mags, status, spec=spec, indx=indx, ssp_ops=opset)
             else if (full) then
-                call compute_csp_batch(ctx, psets(1:n), mags, status, indx=indx, ssp_ops=ops)
+                call compute_csp_batch(ctx, psets(1:n), mags, status, indx=indx, ssp_ops=opset)
             else if (with_spec) then
-                call compute_csp_batch(ctx, psets(1:n), mags, status, spec=spec, ssp_ops=ops)
+                call compute_csp_batch(ctx, psets(1:n), mags, status, spec=spec, ssp_ops=opset)
             else
-                call compute_csp_batch(ctx, psets(1:n), mags, status, ssp_ops=ops)
+                call compute_csp_batch(ctx, psets(1:n), mags, status, ssp_ops=opset)
             end if
         else if (imf .and. full .and. with_spec) then
             call compute_csp_batch(ctx, psets(1:n), mags, status, spec=spec, indx=indx, ssp_op=op)
