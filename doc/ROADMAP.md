@@ -280,7 +280,7 @@ priority 3 (not implemented).
 | Ryzen 7 7840U, 1 core | ~0.23 s naive / ~60 ms folded | ~60 ms | **6.7 ms** (fixed Z), ~8 ms | ~8 ms |
 | 7840U, 8 cores | ~30 ms / ~8 ms | ~8 ms | ~1 ms (throughput) | ~1 ms |
 | 2x Xeon Gold 6248R (48 cores) | — | ~1.5-2 ms (throughput) | ~0.15-0.2 ms (throughput) | ~0.15-0.2 ms |
-| **Radeon 780M (iGPU)**, measured 2026-10-22 | ~0.2 s / ~5-10 ms (projected) | ~0.6-1 ms / ~5 ms (projected) | **7.8 / 9.9 ms** (median of 3; FP32 6.6-8.6, FP64 5.9-12.8) | **221 / 354 us** (N = 10^4, median of 3; FP32 218-295, FP64 284-390; 297 / 377 at N = 100) |
+| **Radeon 780M (iGPU)**, measured 2026-10-22/23 | ~0.2 s / ~5-10 ms (projected) | ~0.6-1 ms / ~5 ms (projected) | **6.9 / 9.5 ms** (median of 3; range over both series: FP32 4.0-8.6, FP64 5.9-12.8) | **217 / 284 us** (N = 10^4, median of 3; both series: FP32 214-295, FP64 280-390; 293 / 375 at N = 100) |
 | Radeon 780M, projected after further optimization | ~0.2 s / ~5-10 ms | ~0.6-1 ms / ~5 ms | ~3.5-5 / ~6-9 ms | ~130-180 / ~230-300 us |
 | Intel Arc Pro B70 | ~0.15 s / ~3-5 ms | ~100 / ~400 us | ~1.5-3 ms | ~20-30 / ~150-250 us |
 | AMD Radeon AI Pro R9700 | ~0.15 s / ~3-5 ms | ~80 / ~300 us | ~1.5-3 ms | ~15-25 / ~100-150 us |
@@ -296,7 +296,8 @@ The 780M row is measured with LLVM flang 22.1.8 + ROCm 7.1 (`perf/amd-780m`,
 configuration this table describes: full physics, smoothing, metallicity per model, magnitudes
 only; the A100 figures come from `full_smooth` and `full_smooth_z`, which differ by ~3% there).
 The iGPU runs at 68-80 C and ~30 W under load and its time varies by up to ~30% from run to run,
-so the cells are medians of three interleaved runs with the observed range. The SSP+CSP columns
+so the cells are medians of three interleaved runs (a second series a day later agreed within the
+range) with the observed range over both series. The SSP+CSP columns
 were not measured. Before the optimization work of 2026-10-22 the same runs took 12-29 ms per
 single call and ~25 ms per model at N = 100, and did not finish at N = 1000.
 Where the large-N time goes (FP32, N = 10^4, us per model): nebular continuum ~78 (FP64
