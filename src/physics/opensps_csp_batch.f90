@@ -1707,6 +1707,80 @@ contains
         real(KP), intent(in), contiguous :: basis(:,:,:), w2(:,:)
         real(WP), intent(in)             :: dz(:)
         real(KP), intent(out)            :: yo(:,:)
+#if defined(OMP_TARGET) && defined(__flang__)
+        ! LLVM flang / AMD (memory bound, ~50 GB of basis reads per call at N = 10^4): the models are
+        ! visited sorted by their metallicity interval, so that a tile of MT consecutive models
+        ! usually shares one pair of basis slabs, which is then loaded once for the tile instead of
+        ! once per model. The arithmetic per model is unchanged (same results bit for bit).
+        integer, parameter :: MT = 8
+        integer  :: m, mq, i, k, l, mm(MT), zl, zh, key, nzk
+        integer, allocatable :: zord(:), starts(:)
+        real(KP) :: b_lo, b_hi, bk, y(MT), o(MT), d(MT)
+        logical  :: same
+
+        nzk = maxval(zhi(1:n_mod))
+        allocate(zord(n_mod), starts(nzk + 1))
+        starts = 0
+        do m = 1, n_mod
+            starts(zlo(m) + 1) = starts(zlo(m) + 1) + 1
+        end do
+        starts(1) = 1
+        do key = 2, nzk + 1
+            starts(key) = starts(key) + starts(key - 1)
+        end do
+        do m = 1, n_mod
+            zord(starts(zlo(m))) = m
+            starts(zlo(m)) = starts(zlo(m)) + 1
+        end do
+
+        !$omp target teams distribute parallel do collapse(2) private(k, l, b_lo, b_hi, bk, mm, y, o, d, same, zl, zh) &
+        !$omp map(to: zord)
+        do mq = 1, (n_mod + MT - 1) / MT
+            do i = 1, nspec
+                do l = 1, MT
+                    mm(l) = zord(min((mq - 1) * MT + l, n_mod))
+                    d(l) = real(dz(mm(l)), KP)
+                    y(l) = 0.0_KP
+                    o(l) = 0.0_KP
+                end do
+                same = .true.
+                do l = 2, MT
+                    if (zlo(mm(l)) /= zlo(mm(1)) .or. zhi(mm(l)) /= zhi(mm(1))) same = .false.
+                end do
+                if (same) then
+                    zl = zlo(mm(1))
+                    zh = zhi(mm(1))
+                    do k = 1, nt
+                        b_lo = basis(i, k, zl)
+                        b_hi = basis(i, k, zh)
+                        do l = 1, MT
+                            bk = (1.0_KP - d(l)) * b_lo + d(l) * b_hi
+                            if (k <= it_tesc(mm(l))) then
+                                y(l) = y(l) + w2(k, mm(l)) * bk
+                            else
+                                o(l) = o(l) + w2(k, n_mod + mm(l)) * bk
+                            end if
+                        end do
+                    end do
+                else
+                    do k = 1, nt
+                        do l = 1, MT
+                            bk = (1.0_KP - d(l)) * basis(i, k, zlo(mm(l))) + d(l) * basis(i, k, zhi(mm(l)))
+                            if (k <= it_tesc(mm(l))) then
+                                y(l) = y(l) + w2(k, mm(l)) * bk
+                            else
+                                o(l) = o(l) + w2(k, n_mod + mm(l)) * bk
+                            end if
+                        end do
+                    end do
+                end if
+                do l = 1, MT
+                    yo(i, mm(l)) = y(l)
+                    yo(i, n_mod + mm(l)) = o(l)
+                end do
+            end do
+        end do
+#else
         integer, parameter :: MT = 4
         integer  :: mq, i, k, l, mm(MT)
         real(KP) :: bk, y(MT), o(MT), d(MT)
@@ -1740,6 +1814,7 @@ contains
                 end do
             end do
         end do
+#endif
     end subroutine age_sums_z
 
     !> IGM transmission per model (redshift and igm_factor per model), as compute_igm_transmission:
