@@ -1556,6 +1556,43 @@ contains
         integer  :: m, i
         real(WP) :: lagn, tmpl, lb
         type(params_core), pointer :: pl
+#if defined(OMP_TARGET) && defined(__flang__)
+        real(WP), allocatable :: lag(:)
+
+        ! LLVM flang / AMD: the AGN luminosity (a log10 and a power in FP64, one per model) is
+        ! computed once per model, not per pixel (FP64 is 1/32 of FP32 on the 780M)
+        allocate(lag(n_mod))
+        !$omp target data map(alloc: lag)
+        !$omp target teams distribute parallel do private(lb, pl)
+        do m = 1, n_mod
+            call c_f_pointer(c_loc(pbuf(1, m)), pl)
+            lag(m) = 0.0_wp
+            if (agn_on(m)) then
+                if (lsum(m) > SAFE_FLOOR) then
+                    lb = log10(lsum(m))
+                else
+                    lb = 0.0_wp
+                end if
+                lag(m) = (10.0_wp**lb) * pl%fagn
+            end if
+        end do
+        associate (a_agndust_spec => ctx%state%agndust_spec)
+        !$omp target teams distribute parallel do collapse(2) private(tmpl) &
+        !$omp map(OMP_MAP_PRESENT_ALLOC: a_agndust_spec)
+        do m = 1, n_mod
+            do i = 1, nspec
+                if (agn_on(m)) then
+                    tmpl = (1.0_wp - wta(m)) * a_agndust_spec(i, ita(m)) + &
+                           wta(m) * a_agndust_spec(i, ita(m) + 1)
+                    tmpl = tmpl * real(tdiff(i, m), WP)
+                    total(i, m) = total(i, m) + lag(m) * tmpl
+                end if
+            end do
+        end do
+        end associate
+        !$omp end target data
+        return
+#endif
 
         associate (a_agndust_spec => ctx%state%agndust_spec)
 #if defined(OMP_TARGET)
