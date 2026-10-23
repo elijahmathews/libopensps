@@ -149,24 +149,7 @@ program test_csp_batch
     call check_batch_z()
     ! Weights over ages and metallicities (several metallicities; tabular SFHs with Z per bin)
     call check_weights_z()
-
-    ! The checks over metallicities need the isochrones and libraries of every metallicity (the
-    ! context above holds only zmet = 10; the other bases and operators would be empty)
-    call opensps_destroy(ctx)
-    deallocate(ctx)
-    allocate(ctx)
-    call opensps_create(ctx)
-    ctx%pset%zmet = 10
-    call opensps_setup(ctx, 0, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
-    call opensps_context_move_to_device(ctx)
-    call set_int('zmet', 10)
-    call set_int('imf_type', 1)
-    call set_int('add_dust_emission', 1)
-    call set_int('compute_indices', 1)
-    call build_basis()
-    ! Per-model metallicity: all bases resident, logzsol varied
-    call check_batch_z()
-    ! The IMF and the metallicity free per model (the blend of two operators)
+    ! The IMF and the metallicity free per model (the blend of operators)
     call check_imf_z()
 
     call opensps_destroy(ctx)
