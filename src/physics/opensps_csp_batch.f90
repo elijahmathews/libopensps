@@ -1312,6 +1312,17 @@ contains
                 end do
             end do
 
+#if defined(OMP_TARGET) && defined(__flang__)
+            if (xrb) then
+                call nebular_continuum_tiled(n_mod, nspec, size(ctx%state%xnebem_cont, 1), nt_neb, &
+                                             ctx%state%xnebem_cont, nb_ia, nb_wa, nb_dwa, nb_newr, &
+                                             nb_cy, nb_co, nb_iz, nb_wz, nb_iu, nb_wu, yo)
+            else
+                call nebular_continuum_tiled(n_mod, nspec, size(ctx%state%nebem_cont, 1), nt_neb, &
+                                             ctx%state%nebem_cont, nb_ia, nb_wa, nb_dwa, nb_newr, &
+                                             nb_cy, nb_co, nb_iz, nb_wz, nb_iu, nb_wu, yo)
+            end if
+#else
             associate (a_nebem_cont => ctx%state%nebem_cont, a_xnebem_cont => ctx%state%xnebem_cont)
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do collapse(2) private(y, o, sy, so, ra, rb, dl, f, r, &
@@ -1391,6 +1402,7 @@ contains
                 end do
             end do
             end associate
+#endif
         end if
 
         ! 4. Line luminosities per (line, model), young and old: sum over ages of the weight times
@@ -1459,6 +1471,102 @@ contains
             end associate
         end if
     end subroutine nebular_kernels
+
+#if defined(OMP_TARGET) && defined(__flang__)
+    !> The continuum kernel of nebular_kernels for LLVM flang / AMD: explicit-shape arguments (no
+    !> array descriptors in the kernel), and each thread does PT pixels (strided, so the loads are
+    !> coalesced) of one model, which shares the per-age loads (CLOUDY age interval, weights, step
+    !> flags, SFH weight * Q) among them: with one pixel per thread the loop was ~90% address
+    !> arithmetic and loads. The arithmetic per pixel is the one of the generic kernel, in the same
+    !> order, so the results are identical bit for bit.
+    subroutine nebular_continuum_tiled(n_mod, nspec, ntab, nt_neb, tab, ia, wa, dwa, newr, cy, co, iz, wz, iu, wu, yo)
+        integer, intent(in)     :: n_mod, nspec, ntab, nt_neb, ia(nt_neb), iz(n_mod), iu(n_mod)
+        real(WP), intent(in)    :: tab(ntab, NEBNZ, NEBNAGE, NEBNIP), wa(nt_neb), dwa(nt_neb)
+        real(WP), intent(in)    :: cy(nt_neb, n_mod), co(nt_neb, n_mod), wz(n_mod), wu(n_mod)
+        logical, intent(in)     :: newr(nt_neb)
+        real(KP), intent(inout) :: yo(nspec, 2 * n_mod)
+
+        integer, parameter :: PT = 4
+        real(WP), parameter :: LN10 = log(10.0_wp)
+        integer  :: m, ip, npt, p, t, a, a_prev, jz, ju, jj(PT)
+        real(KP) :: y(PT), o(PT)
+        real(WP) :: sy(PT), so(PT), ra(PT), rb(PT), dl(PT), f(PT), r(PT), c00, c01, c10, c11, wat, cyt, cot
+        logical  :: valid(PT)
+
+        npt = (nspec + PT - 1) / PT
+        !$omp target teams distribute parallel do collapse(2) &
+        !$omp private(p, t, a, a_prev, jz, ju, jj, y, o, sy, so, ra, rb, dl, f, r, c00, c01, c10, c11, wat, cyt, cot, valid) &
+        !$omp map(OMP_MAP_PRESENT_ALLOC: tab)
+        do m = 1, n_mod
+            do ip = 1, npt
+                do p = 1, PT
+                    jj(p) = min(ip + (p - 1) * npt, nspec)
+                    valid(p) = ip + (p - 1) * npt <= nspec
+                    y(p) = 0.0_KP
+                    o(p) = 0.0_KP
+                    sy(p) = 0.0_wp
+                    so(p) = 0.0_wp
+                    ra(p) = 0.0_wp
+                    rb(p) = 0.0_wp
+                    dl(p) = 0.0_wp
+                    f(p) = 0.0_wp
+                    r(p) = 1.0_wp
+                end do
+                a_prev = -1
+                jz = iz(m)
+                ju = iu(m)
+                c00 = (1.0_wp - wz(m)) * (1.0_wp - wu(m))
+                c01 = (1.0_wp - wz(m)) * (         wu(m))
+                c10 = (         wz(m)) * (1.0_wp - wu(m))
+                c11 = (         wz(m)) * (         wu(m))
+                do t = 1, nt_neb
+                    a = ia(t)
+                    wat = wa(t)
+                    cyt = cy(t, m)
+                    cot = co(t, m)
+                    if (a /= a_prev) then
+                        do p = 1, PT
+                            ! Close the previous interval
+                            y(p) = y(p) + real(sy(p), KP)
+                            o(p) = o(p) + real(so(p), KP)
+                            sy(p) = 0.0_wp
+                            so(p) = 0.0_wp
+                            ! The interval only advances: its lower end is the previous upper end
+                            if (a == a_prev + 1) then
+                                ra(p) = rb(p)
+                            else
+                                ra(p) = c00 * tab(jj(p), jz, a, ju) + c01 * tab(jj(p), jz, a, ju + 1) + &
+                                        c10 * tab(jj(p), jz + 1, a, ju) + c11 * tab(jj(p), jz + 1, a, ju + 1)
+                            end if
+                            rb(p) = c00 * tab(jj(p), jz, a + 1, ju) + c01 * tab(jj(p), jz, a + 1, ju + 1) + &
+                                    c10 * tab(jj(p), jz + 1, a + 1, ju) + c11 * tab(jj(p), jz + 1, a + 1, ju + 1)
+                            dl(p) = (rb(p) - ra(p)) * LN10
+                            f(p) = exp(ra(p) * LN10 + wat * dl(p))
+                        end do
+                        a_prev = a
+                    else
+                        do p = 1, PT
+                            if (newr(t)) r(p) = exp(dwa(t) * dl(p))
+                            f(p) = f(p) * r(p)
+                        end do
+                    end if
+                    do p = 1, PT
+                        sy(p) = sy(p) + cyt * f(p)
+                        so(p) = so(p) + cot * f(p)
+                    end do
+                end do
+                do p = 1, PT
+                    y(p) = y(p) + real(sy(p), KP)
+                    o(p) = o(p) + real(so(p), KP)
+                    if (valid(p)) then
+                        yo(jj(p), m) = yo(jj(p), m) + y(p)
+                        yo(jj(p), n_mod + m) = yo(jj(p), n_mod + m) + o(p)
+                    end if
+                end do
+            end do
+        end do
+    end subroutine nebular_continuum_tiled
+#endif
 
     !> Line luminosities after dust (legacy add_dust): young lines through
     !> the birth cloud, all through the diffuse dust at the line wavelength (the transmission
