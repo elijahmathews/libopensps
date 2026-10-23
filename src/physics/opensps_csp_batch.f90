@@ -98,6 +98,12 @@ module opensps_csp_batch
 
     public :: compute_csp_batch, batch_spectra_device, batch_spectra_host
 
+#if defined(__flang__)
+#define PBUF_ARG pbuf
+#else
+#define PBUF_ARG psets
+#endif
+
     !> Words per model of the packed parameters (PARAMS_CORE) that flang kernels read through c_f_pointer
     integer, parameter :: NPW = (storage_size(params_core()) + 63) / 64
 
@@ -191,7 +197,11 @@ contains
                                  spec_young, spec_old, mass_young, mass_old, lbol_young, lbol_old, zred_mags, &
                                  ssp_weights_z)
         type(opensps_context_t), intent(inout) :: ctx
+#if defined(__flang__)
         type(params), intent(in)            :: psets(:)
+#else
+        type(params), intent(in), target    :: psets(:)
+#endif
         real(WP), intent(out)               :: mags(:,:)
         integer, intent(out)                :: status
         real(WP), intent(out), optional     :: spec(:,:)
@@ -223,11 +233,9 @@ contains
         logical,  allocatable, target :: lpk(:)
         !> The parameters of every model (PARAMS_CORE). LLVM flang: raw words (from transfer) that
         !> device code reads a row of through c_f_pointer, because its default mapper made a kernel
-        !> launch cost ~10 ms per model for an array of derived type. Other compilers: an array of
-        !> PARAMS_CORE (nvfortran rejects c_f_pointer in device code: NVFORTRAN-S-1058)
-#if !defined(__flang__)
-        type(params_core), allocatable, target :: pbuf(:)
-#else
+        !> launch cost ~10 ms per model for an array of derived type. Other compilers read psets itself
+        !> (no copy; nvfortran rejects c_f_pointer in device code: NVFORTRAN-S-1058)
+#if defined(__flang__)
         integer(int64), allocatable, target :: pbuf(:,:)
 #endif
         type(params_core), pointer :: pl
@@ -483,19 +491,18 @@ contains
         end if
 
         ! Nebular data only with nebular emission (its kernels run only then)
-#if !defined(__flang__)
-        allocate(pbuf(n_mod))
-        do m = 1, n_mod
-            pbuf(m) = psets(m)%params_core
-        end do
-#else
+#if defined(__flang__)
         allocate(pbuf(NPW, n_mod))
         do m = 1, n_mod
             pbuf(:, m) = transfer(psets(m)%params_core, pbuf(:, m))
         end do
 #endif
 #ifdef OMP_TARGET
+#if defined(__flang__)
         !$omp target data map(to: pbuf, ipk, rpk, lpk) &
+#else
+        !$omp target data map(to: psets, ipk, rpk, lpk) &
+#endif
         !$omp map(alloc: w2, wz, weights, tmp1, tmp2, yo, absorbed, tdiff) &
         !$omp map(from: rout, eml)
 #endif
@@ -536,7 +543,7 @@ contains
 #endif
             do m = 1, n_mod
 #if !defined(__flang__)
-                pl => pbuf(m)
+                pl => psets(m)%params_core
 #else
                 call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
@@ -639,7 +646,7 @@ contains
         end if
         if (neb) call add_nebular_batch(ctx, n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, w2, it_tesc, &
                                         zlo, zhi, dz, nb, yo, eml)
-        if (neb) call attenuate_lines(ctx, pbuf, n_mod, nb%lum, nb%llo, eml, s_line)
+        if (neb) call attenuate_lines(ctx, PBUF_ARG, n_mod, nb%lum, nb%llo, eml, s_line)
         ! Intrinsic young and old spectra (the input of the attenuation), on request
         if (parts) then
 #ifdef OMP_TARGET
@@ -651,7 +658,7 @@ contains
             end do
         end if
         associate(total => ctx%state%batch_out%spec)
-        call attenuate_batch(ctx, pbuf, n_mod, nspec, iq, iu, wq, wu, gam, emis, agn_on, yo, total, absorbed, tdiff)
+        call attenuate_batch(ctx, PBUF_ARG, n_mod, nspec, iq, iu, wq, wu, gam, emis, agn_on, yo, total, absorbed, tdiff)
         if (any_emis) then
             call dust_emission_reductions(n_mod, nspec, emis, ctx%state%batch%wt, yo, absorbed, s_abs, s_norm, s_esc)
             ! Lines not in the spectrum: their absorbed part (intrinsic - attenuated) is added to
@@ -670,11 +677,11 @@ contains
         end if
 
         if (igm .and. zvar) then
-            call apply_igm_z(ctx, pbuf, n_mod, nspec, absorbed, total)   ! absorbed: free by now
+            call apply_igm_z(ctx, PBUF_ARG, n_mod, nspec, absorbed, total)   ! absorbed: free by now
         else if (igm) then
             call apply_igm(n_mod, nspec, ctx%state%batch%igm_t, total)
         end if
-        if (agn) call add_agn_batch(ctx, pbuf, n_mod, nspec, agn_on, ita, wta, lsum, tdiff, total)
+        if (agn) call add_agn_batch(ctx, PBUF_ARG, n_mod, nspec, agn_on, ita, wta, lsum, tdiff, total)
         if (smooth .and. smoothing_on_device(ctx)) then
             call smooth_columns(ctx, total, n_mod)
         else if (smooth) then
@@ -1603,7 +1610,7 @@ contains
         type(opensps_context_t), intent(in)  :: ctx
         integer, intent(in)               :: n_mod
 #if !defined(__flang__)
-        type(params_core), intent(in), target :: pbuf(n_mod)
+        type(params), intent(in), target :: pbuf(n_mod)
 #else
         integer(int64), intent(in), target :: pbuf(NPW, n_mod)
 #endif
@@ -1623,7 +1630,7 @@ contains
 #endif
         do m = 1, n_mod
 #if !defined(__flang__)
-            pl => pbuf(m)
+            pl => pbuf(m)%params_core
 #else
             call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
@@ -1692,7 +1699,7 @@ contains
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)              :: n_mod, nspec
 #if !defined(__flang__)
-        type(params_core), intent(in), target :: pbuf(n_mod)
+        type(params), intent(in), target :: pbuf(n_mod)
 #else
         integer(int64), intent(in), target :: pbuf(NPW, n_mod)
 #endif
@@ -1715,7 +1722,7 @@ contains
         !$omp target teams distribute parallel do private(lb, pl)
         do m = 1, n_mod
 #if !defined(__flang__)
-            pl => pbuf(m)
+            pl => pbuf(m)%params_core
 #else
             call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
@@ -1757,7 +1764,7 @@ contains
         do m = 1, n_mod
             do i = 1, nspec
 #if !defined(__flang__)
-                pl => pbuf(m)
+                pl => pbuf(m)%params_core
 #else
                 call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
@@ -2014,7 +2021,7 @@ contains
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)              :: n_mod, nspec
 #if !defined(__flang__)
-        type(params_core), intent(in), target :: pbuf(n_mod)
+        type(params), intent(in), target :: pbuf(n_mod)
 #else
         integer(int64), intent(in), target :: pbuf(NPW, n_mod)
 #endif
@@ -2032,7 +2039,7 @@ contains
         do m = 1, n_mod
             do j = 1, nspec
 #if !defined(__flang__)
-                pl => pbuf(m)
+                pl => pbuf(m)%params_core
 #else
                 call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
@@ -2047,7 +2054,7 @@ contains
 #endif
         do m = 1, n_mod
 #if !defined(__flang__)
-            pl => pbuf(m)
+            pl => pbuf(m)%params_core
 #else
             call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
@@ -2075,7 +2082,7 @@ contains
         do m = 1, n_mod
             do j = 1, nspec
 #if !defined(__flang__)
-                pl => pbuf(m)
+                pl => pbuf(m)%params_core
 #else
                 call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
@@ -2225,7 +2232,7 @@ contains
         ! Explicit-shape arguments (no array descriptors to map and re-read in every launch), except tdiff:
         ! allocated 1 x 1 without AGN
 #if !defined(__flang__)
-        type(params_core), intent(in), target :: pbuf(n_mod)
+        type(params), intent(in), target :: pbuf(n_mod)
 #else
         integer(int64), intent(in), target :: pbuf(NPW, n_mod)
 #endif
@@ -2258,7 +2265,7 @@ contains
                 old = yo(i, n_mod + m)
 
 #if !defined(__flang__)
-                pl => pbuf(m)
+                pl => pbuf(m)%params_core
 #else
                 call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
