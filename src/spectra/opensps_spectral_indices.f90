@@ -98,24 +98,61 @@ contains
         integer, intent(in) :: j
         real(WP) :: val
 
-        real(WP) :: idx_feat_lo, idx_feat_hi, idx_type
-        real(WP) :: idx_blue_lo, idx_blue_hi
-        real(WP) :: idx_red_lo, idx_red_hi
+        val = spectral_index_core(ctx%state%indexdefined(IDX_FEAT_START, j), ctx%state%indexdefined(IDX_FEAT_END, j), &
+                                  ctx%state%indexdefined(IDX_BLUE_START, j), ctx%state%indexdefined(IDX_BLUE_END, j), &
+                                  ctx%state%indexdefined(IDX_RED_START, j), ctx%state%indexdefined(IDX_RED_END, j), &
+                                  ctx%state%indexdefined(IDX_T, j), lambda, spec)
+    end function spectral_index_value
+
+#if defined(OMP_TARGET) && defined(__flang__)
+    !> The two kernels of compute_spectral_indices_columns for LLVM flang / AMD, with explicit-shape
+    !> arguments (no descriptors to map per launch) and the index definitions passed as an array, not
+    !> through the context.
+    subroutine index_columns_kernel(n_col, nspec, nrow, n_idx, lam, spec, idef, ind)
+        integer, intent(in)   :: n_col, nspec, nrow, n_idx
+        real(WP), intent(in)  :: lam(nspec), idef(nrow, n_idx)
+        real(KP), intent(in)  :: spec(nspec, n_col)
+        real(WP), intent(out) :: ind(n_idx, n_col)
+
+        real(WP), allocatable :: specw(:,:)
+        integer :: j, m, i
+
+        allocate(specw(nspec, n_col))
+        !$omp target data map(to: lam, idef) map(alloc: specw) map(from: ind)
+        !$omp target teams distribute parallel do collapse(2)
+        do m = 1, n_col
+            do i = 1, nspec
+                specw(i, m) = real(spec(i, m), WP)
+            end do
+        end do
+        !$omp target teams distribute parallel do collapse(2)
+        do m = 1, n_col
+            do j = 1, n_idx
+                ind(j, m) = spectral_index_core(idef(IDX_FEAT_START, j), idef(IDX_FEAT_END, j), idef(IDX_BLUE_START, j), &
+                                                idef(IDX_BLUE_END, j), idef(IDX_RED_START, j), idef(IDX_RED_END, j), &
+                                                idef(IDX_T, j), lam, specw(:, m))
+            end do
+        end do
+        !$omp end target data
+    end subroutine index_columns_kernel
+#endif
+
+    !> @brief Value of one spectral index from its definition (the body of spectral_index_value).
+    function spectral_index_core(idx_feat_lo, idx_feat_hi, idx_blue_lo, idx_blue_hi, idx_red_lo, idx_red_hi, idx_type, &
+                                 lambda, spec) result(val)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(WP), intent(in) :: idx_feat_lo, idx_feat_hi, idx_blue_lo, idx_blue_hi, idx_red_lo, idx_red_hi, idx_type
+        real(WP), dimension(:), intent(in), contiguous :: lambda, spec
+        real(WP) :: val
+
         real(WP) :: val_blue_cont, val_red_cont
         real(WP) :: lambda_blue_cen, lambda_red_cen
         real(WP) :: integrated_flux, feature_width
         real(WP) :: cont_slope, cont_intercept, denom_width
 
         val = IND_UNDEFINED
-        
-        ! 1. Extract Definitions
-        idx_feat_lo = ctx%state%indexdefined(IDX_FEAT_START, j)
-        idx_feat_hi = ctx%state%indexdefined(IDX_FEAT_END, j)
-        idx_blue_lo = ctx%state%indexdefined(IDX_BLUE_START, j)
-        idx_blue_hi = ctx%state%indexdefined(IDX_BLUE_END, j)
-        idx_red_lo  = ctx%state%indexdefined(IDX_RED_START, j)
-        idx_red_hi  = ctx%state%indexdefined(IDX_RED_END, j)
-        idx_type    = ctx%state%indexdefined(IDX_T, j)
 
         ! 2. Check Bounds
         ! If the feature definition is outside the provided wavelength grid, skip
@@ -190,7 +227,7 @@ contains
                 val = IND_UNDEFINED
             end if
         end if
-    end function spectral_index_value
+    end function spectral_index_core
 
     !> @brief compute_spectral_indices for the columns spec(:, 1:n_col) of a spectrum array
     !> resident on the device at kernel precision (e.g. the CSP outputs): one thread per (index,
@@ -209,6 +246,13 @@ contains
 
         n_idx = ctx%state%nindx
         nspec = size(lambda)
+#if defined(OMP_TARGET) && defined(__flang__)
+        allocate(ind(n_idx, n_col))
+        call index_columns_kernel(n_col, nspec, size(ctx%state%indexdefined, 1), n_idx, lambda, spec, &
+                                  ctx%state%indexdefined, ind)
+        indices(1:n_idx, 1:n_col) = ind
+        return
+#endif
         ! Results in a local array: indices may have more columns than n_col, and mapping a
         ! section of it while the kernel refers to the whole dummy is "partially present"
         allocate(specw(nspec, n_col), ind(n_idx, n_col))
