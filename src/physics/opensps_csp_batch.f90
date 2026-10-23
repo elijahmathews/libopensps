@@ -534,8 +534,6 @@ contains
             call ssp_operator_to_device(ssp_op)
             dev = ctx%on_device
 #endif
-        else
-            allocate(pm(1, 1), smass(1, 1), slum(1, 1), wsfh(1, 1), nobasis(1, 1, 1))
         end if
         if (neb) then
             allocate(eml(NEMLINE, n_mod))
