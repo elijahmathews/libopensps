@@ -115,6 +115,26 @@ the same numbers (offload vs host 4e-16): not FMA (`-Mnofma` gives the same), no
 Existing paths vs `main`, alternating, median of 6: all ratios 0.92 to 1.03 (N = 1 and 10^4; basic,
 `full_smooth`, `full_smooth_z`, FP32; FP64 basic).
 
+## A100 verification of `zvar2` @ 2468916 (end of the 2026-10-23 session)
+
+Offload (nvfortran 25.1, `OMP_TARGET_OFFLOAD=MANDATORY`): unit + regression 38 / 38 in FP64, FP32 tile
+and FP64 + cuBLAS; `test_csp_batch` 362 / 362 in FP32 + cuBLAS. compute-sanitizer on `test_csp_batch`
+restricted to the `ssp_batch` kernels: racecheck 0 hazards, memcheck 0 errors (FP32 + cuBLAS, FP64, FP32
+tile). Alternating timing against `main` (ab08100), median of 6, N = 1 and 10^4, FP32, mags / spec:
+existing paths within 0.99 to 1.05 of `main` everywhere except two cases: **tile `full_smooth_z`
+N = 10^4 +9% / +11% (8.0 -> 8.7 / 15.0 -> 16.7)** and cuBLAS `full_smooth` N = 1 mags +11% (1048 -> 1159,
+spec +5%; N = 1 spread is ~5-10%). The first is not the code: with `zin = 10` in the benchmark (empty bases
+for the other metallicities, as `main` has it) the `zvar2` tile build measures 7.94 / 14.95, equal to
+`main`; real bases for every metallicity cost 8.7 / 16.7 in the tile build (8.5 / 15.4 with cuBLAS), so the
+old `*_z` baselines were slightly optimistic. The N = 1 cuBLAS `full_smooth` case was not repeated.
+The one-metallicity IMF case through the unified kernels is +5% at N = 10^4 (17.5 vs 16.6 us/model): the
+per-launch kernel times show +4.7% in the weights kernel and +3% in the fold (table lookups by
+metallicity: `viz`, `perm`, the offsets); accepted for one code path. Host builds on this tip: see the
+issue (#32) for the last run; before the rebase gfortran 13.4 serial / OpenMP host threads (FP64, FP32) and
+nvfortran 25.1 host threads passed 38 / 38. **Not done by the A100 side:** flang / 780M and ifx on this
+tip (the laptop agent is validating), the legacy parity matrix, the CPU case matrix against gfortran on
+this tip (done earlier at cb5ff34: PASS), the `a31e56e` weights change settled.
+
 ## Isochrone modifications per model: the design (not built)
 
 `fbhb`, `sbss`, `agb`, `pagb`, `redgb` and the TP-AGB normalisation are per-point factors on a fixed
