@@ -18,7 +18,7 @@ module opensps_dust
     use opensps_constants, only: NTEFF_DAGB, NTAU_DAGB, C_LIGHT, NEMLINE, GRAVITY_L_M_T_COEFF, &
                               M_SOL, G_NEWTON, R_SOL, YEAR_TO_SECOND, &
                               SAFE_FLOOR, PI
-    use opensps_types, only: params
+    use opensps_types, only: params, params_core
     use opensps_context_types, only: opensps_context_t
     use opensps_integration, only: integrate_trapezoid_array
     use opensps_interpolation, only: interpolate_linear, find_interval
@@ -29,6 +29,12 @@ module opensps_dust
 
     ! Public Interface
     public :: compute_attenuation_curve_point
+
+    !> The device-callable form takes PARAMS_CORE (no allocatable components); the generic name also
+    !> takes a PARAMS.
+    interface compute_attenuation_curve_point
+        module procedure compute_attenuation_curve_point_pc, compute_attenuation_curve_point_pp
+    end interface
     public :: apply_agb_dust_screen, get_agb_dust_terms
     public :: agb_circumstellar_tau
     public :: AGB_SMOOTH_SIGMA, AGB_SMOOTH_LAMBDA_MIN, AGB_SMOOTH_LAMBDA_MAX
@@ -225,13 +231,13 @@ contains
     !> @brief Computes attenuation at a single point (Device Compatible).
     !> We refactor the array function into an elemental/scalar one for the parallel loop.
     !> @return attenuation_val
-    pure function compute_attenuation_curve_point(wavelength, idx, dust_type_id, settings, ctx) result(attenuation_val)
+    pure function compute_attenuation_curve_point_pc(wavelength, idx, dust_type_id, settings, ctx) result(attenuation_val)
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
         real(WP), intent(in) :: wavelength
         integer, intent(in)                :: idx, dust_type_id
-        type(params), intent(in)           :: settings
+        type(params_core), intent(in)      :: settings
         type(opensps_context_t), intent(in)   :: ctx
         real(WP) :: attenuation_val
         
@@ -257,7 +263,7 @@ contains
         case default
             attenuation_val = ieee_value(1.0_wp, ieee_quiet_nan)
         end select
-    end function compute_attenuation_curve_point
+    end function compute_attenuation_curve_point_pc
 
     !> @brief The circumstellar dust transfer function of an AGB star as a combination of grid
     !> corners: transfer = sum(c(n) * flux_dagb(:, rich + 1, corner n)), with corners (it, itau),
@@ -763,5 +769,17 @@ contains
             y = 1.0_wp - t
         end if
     end function one_minus_trans
+
+
+    !> compute_attenuation_curve_point for a PARAMS.
+    pure function compute_attenuation_curve_point_pp(wavelength, idx, dust_type_id, settings, ctx) result(attenuation_val)
+        real(WP), intent(in) :: wavelength
+        integer, intent(in)                :: idx, dust_type_id
+        type(params), intent(in)           :: settings
+        type(opensps_context_t), intent(in)   :: ctx
+        real(WP) :: attenuation_val
+
+        attenuation_val = compute_attenuation_curve_point_pc(wavelength, idx, dust_type_id, settings%params_core, ctx)
+    end function compute_attenuation_curve_point_pp
 
 end module opensps_dust

@@ -13,6 +13,7 @@ module opensps_types
     private
 
     public :: PARAMS
+    public :: PARAMS_CORE
     public :: COMPSPOUT
     public :: SFHPARAMS
     public :: TLSF
@@ -23,8 +24,12 @@ module opensps_types
     ! Derived types
     ! ---------------------------------------------------------------------
 
-    !> @brief Parameter set used to generate a model.
-    type PARAMS
+    !> @brief The scalar and character members of PARAMS: what device code reads. It has no
+    !> allocatable components, so a row of bytes copied from it (transfer) can be reinterpreted
+    !> inside a kernel (c_f_pointer). An array of PARAMS (or of this type) cannot be mapped
+    !> to the device with LLVM flang: its default mapper maps every member of every element
+    !> separately, ~10 ms per element per kernel launch.
+    type PARAMS_CORE
         real(WP) :: pagb = 1.0_wp, dell = 0.0_wp, delt = 0.0_wp, fbhb = 0.0_wp, sbss = 0.0_wp, tau = 1.0_wp, &
                     const = 0.0_wp, tage = 0.0_wp, fburst = 0.0_wp, tburst = 11.0_wp, dust1 = 0.0_wp, dust2 = 0.0_wp, &
                     logzsol = 0.0_wp, zred = 0.0_wp, pmetals = 0.02_wp, imf1 = 1.3_wp, imf2 = 2.3_wp, imf3 = 2.3_wp, &
@@ -37,9 +42,13 @@ module opensps_types
                     fagn = 0.0_wp, agn_tau = 10.0_wp, frac_xrb = 1.0_wp, dust3 = 0.0_wp
         integer :: zmet = 1, sfh = 0, wgp1 = 1, wgp2 = 1, wgp3 = 1, evtype = -1
         integer :: compute_mags = 1, compute_indices = 1
+        character(50) :: imf_filename = '', sfh_filename = ''
+    end type PARAMS_CORE
+
+    !> @brief Parameter set used to generate a model: PARAMS_CORE and the arrays that go with it.
+    type, extends(PARAMS_CORE) :: PARAMS
         integer, allocatable :: mag_compute(:)
         integer, allocatable :: ssp_gen_age(:)
-        character(50) :: imf_filename = '', sfh_filename = ''
     end type PARAMS
 
     !> @brief Output container for CSP results.

@@ -72,9 +72,10 @@ module opensps_csp_batch
 
     use opensps_precision, only: WP, KP, kahan_add
     use opensps_constants, only: SAFE_FLOOR, PI, NEMLINE, NEBNAGE, NEBNZ, NEBNIP, H_PLANCK, L_SOL
-    use opensps_types, only: params
+    use opensps_types, only: params, params_core
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings, batch_out_reserve
-    use, intrinsic :: iso_c_binding, only: c_ptr, c_null_ptr, c_loc, c_int, c_size_t, c_intptr_t
+    use, intrinsic :: iso_c_binding, only: c_ptr, c_null_ptr, c_loc, c_int, c_size_t, c_intptr_t, c_f_pointer
+    use, intrinsic :: iso_fortran_env, only: int64
     use opensps_context, only: opensps_context_move_to_device
     use opensps_sfh, only: sfh_weights_core
     use opensps_sfh, only: get_sfh_properties_at_age
@@ -96,6 +97,15 @@ module opensps_csp_batch
     private
 
     public :: compute_csp_batch, batch_spectra_device, batch_spectra_host
+
+#if defined(__flang__)
+#define PBUF_ARG pbuf
+#else
+#define PBUF_ARG psets
+#endif
+
+    !> Words per model of the packed parameters (PARAMS_CORE) that flang kernels read through c_f_pointer
+    integer, parameter :: NPW = (storage_size(params_core()) + 63) / 64
 
 #if defined(FSPS_PINNED) && defined(OMP_TARGET)
     !> Device-to-host DMA into a page-locked buffer on a given CUDA stream (src/core/opensps_pinned.c)
@@ -187,7 +197,11 @@ contains
                                  spec_young, spec_old, mass_young, mass_old, lbol_young, lbol_old, zred_mags, &
                                  ssp_weights_z)
         type(opensps_context_t), intent(inout) :: ctx
+#if defined(__flang__)
         type(params), intent(in)            :: psets(:)
+#else
+        type(params), intent(in), target    :: psets(:)
+#endif
         real(WP), intent(out)               :: mags(:,:)
         integer, intent(out)                :: status
         real(WP), intent(out), optional     :: spec(:,:)
@@ -217,6 +231,14 @@ contains
         integer,  allocatable, target :: ipk(:)
         real(WP), allocatable, target :: rpk(:), rout(:)
         logical,  allocatable, target :: lpk(:)
+        !> The parameters of every model (PARAMS_CORE). LLVM flang: raw words (from transfer) that
+        !> device code reads a row of through c_f_pointer, because its default mapper made a kernel
+        !> launch cost ~10 ms per model for an array of derived type. Other compilers read psets itself
+        !> (no copy; nvfortran rejects c_f_pointer in device code: NVFORTRAN-S-1058)
+#if defined(__flang__)
+        integer(int64), allocatable, target :: pbuf(:,:)
+#endif
+        type(params_core), pointer :: pl
         integer,  pointer, contiguous :: it_tesc(:), iq(:), iu(:), ita(:), zlo(:), zhi(:)
         real(WP), pointer, contiguous :: wq(:), wu(:), gam(:), wta(:), dz(:), zcol(:), lum_linear(:), wext(:,:)
         logical,  pointer, contiguous :: emis(:), agn_on(:)
@@ -375,7 +397,7 @@ contains
             ! then used as a given weight matrix
             allocate(wh(nt, 1), t1h(nt), t2h(nt))
             do m = 1, n_mod
-                call sfh_weights_core(ctx, psets(m), psets(m)%tage, 1, wh, t1h, t2h)
+                call sfh_weights_core(ctx, psets(m)%params_core, psets(m)%tage, 1, wh, t1h, t2h)
                 wext(:, m) = wh(:, 1)
             end do
         end if
@@ -422,7 +444,7 @@ contains
             if (present(sfr) .and. given_w) then
                 sfr(m) = ieee_value(1.0_wp, ieee_quiet_nan)
             else if (present(sfr)) then
-                call get_sfh_properties_at_age(ctx, psets(m), psets(m)%tage, mass_frac, sfr_norm, frac_linear)
+                call get_sfh_properties_at_age(ctx, psets(m)%params_core, psets(m)%tage, mass_frac, sfr_norm, frac_linear)
                 if (mass_frac > SAFE_FLOOR) sfr_norm = sfr_norm / mass_frac
                 sfr(m) = sfr_norm
             end if
@@ -469,8 +491,18 @@ contains
         end if
 
         ! Nebular data only with nebular emission (its kernels run only then)
+#if defined(__flang__)
+        allocate(pbuf(NPW, n_mod))
+        do m = 1, n_mod
+            pbuf(:, m) = transfer(psets(m)%params_core, pbuf(:, m))
+        end do
+#endif
 #ifdef OMP_TARGET
+#if defined(__flang__)
+        !$omp target data map(to: pbuf, ipk, rpk, lpk) &
+#else
         !$omp target data map(to: psets, ipk, rpk, lpk) &
+#endif
         !$omp map(alloc: w2, wz, weights, tmp1, tmp2, yo, absorbed, tdiff) &
         !$omp map(from: rout, eml)
 #endif
@@ -503,14 +535,19 @@ contains
             end do
         else
 #if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do &
+            !$omp target teams distribute parallel do private(pl) &
             !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%time_full, ctx%state%zlegend, ctx%state%ntfull, ctx%state%nz, &
             !$omp     ctx%state%ntabsfh, ctx%state%sfh_tab, ctx%interpolation_type_val, ctx%tiny_logt_val)
 #elif defined(_OPENMP)
-            !$omp parallel do
+            !$omp parallel do private(pl)
 #endif
             do m = 1, n_mod
-                call sfh_weights_core(ctx, psets(m), psets(m)%tage, 1, weights(:, :, m), tmp1(:, m), tmp2(:, m))
+#if !defined(__flang__)
+                pl => psets(m)%params_core
+#else
+                call c_f_pointer(c_loc(pbuf(1, m)), pl)
+#endif
+                call sfh_weights_core(ctx, pl, pl%tage, 1, weights(:, :, m), tmp1(:, m), tmp2(:, m))
             end do
         end if
         associate (bas_mass => ctx%state%ssp_basis_mass, bas_lbol => ctx%state%ssp_basis_lbol)
@@ -602,13 +639,14 @@ contains
         if (zw) then
             call age_sums_w(nspec, nt, nzw, n_mod, ctx%state%ssp_basis_spec, wz, it_tesc, yo)
         else if (zmode) then
-            call age_sums_z(nspec, nt, n_mod, ctx%state%ssp_basis_spec, w2, it_tesc, zlo, zhi, dz, yo)
+            call age_sums_z(nspec, nt, size(ctx%state%ssp_basis_spec, 3), n_mod, ctx%state%ssp_basis_spec, w2, w2, &
+                            it_tesc, zlo, zhi, dz, yo)
         else
             call age_sums(nspec, nt, n_mod, ctx%state%ssp_basis_spec(:, :, 1), w2, it_tesc, yo)
         end if
         if (neb) call add_nebular_batch(ctx, n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, w2, it_tesc, &
                                         zlo, zhi, dz, nb, yo, eml)
-        if (neb) call attenuate_lines(ctx, psets, n_mod, nb%lum, nb%llo, eml, s_line)
+        if (neb) call attenuate_lines(ctx, PBUF_ARG, n_mod, nb%lum, nb%llo, eml, s_line)
         ! Intrinsic young and old spectra (the input of the attenuation), on request
         if (parts) then
 #ifdef OMP_TARGET
@@ -620,7 +658,7 @@ contains
             end do
         end if
         associate(total => ctx%state%batch_out%spec)
-        call attenuate_batch(ctx, psets, n_mod, nspec, iq, iu, wq, wu, gam, emis, agn_on, yo, total, absorbed, tdiff)
+        call attenuate_batch(ctx, PBUF_ARG, n_mod, nspec, iq, iu, wq, wu, gam, emis, agn_on, yo, total, absorbed, tdiff)
         if (any_emis) then
             call dust_emission_reductions(n_mod, nspec, emis, ctx%state%batch%wt, yo, absorbed, s_abs, s_norm, s_esc)
             ! Lines not in the spectrum: their absorbed part (intrinsic - attenuated) is added to
@@ -639,11 +677,11 @@ contains
         end if
 
         if (igm .and. zvar) then
-            call apply_igm_z(ctx, psets, n_mod, nspec, absorbed, total)   ! absorbed: free by now
+            call apply_igm_z(ctx, PBUF_ARG, n_mod, nspec, absorbed, total)   ! absorbed: free by now
         else if (igm) then
             call apply_igm(n_mod, nspec, ctx%state%batch%igm_t, total)
         end if
-        if (agn) call add_agn_batch(ctx, psets, n_mod, nspec, agn_on, ita, wta, lsum, tdiff, total)
+        if (agn) call add_agn_batch(ctx, PBUF_ARG, n_mod, nspec, agn_on, ita, wta, lsum, tdiff, total)
         if (smooth .and. smoothing_on_device(ctx)) then
             call smooth_columns(ctx, total, n_mod)
         else if (smooth) then
@@ -679,13 +717,6 @@ contains
 #endif
 #ifdef OMP_TARGET
         !$omp end target data
-#endif
-#if defined(OMP_TARGET) && defined(__flang__)
-        ! LLVM flang leaves the allocatable components of psets mapped (reference count 1) when
-        ! the region ends; a later call whose psets lands at the same host address would find
-        ! them present, skip the copy and read stale parameters. (Not for nvfortran: main passed
-        ! its suites without it, and a single call on the A100 was a few percent slower with it.)
-        !$omp target exit data map(delete: psets)
 #endif
 
         if (present(emlines)) then
@@ -1104,7 +1135,7 @@ contains
         !$omp declare target
 #endif
         type(opensps_context_t), intent(in) :: ctx
-        type(params), intent(in)         :: pset
+        type(params_core), intent(in)    :: pset
         integer, intent(in)              :: i
         real(WP), intent(out)            :: curve, tau_d, trans
 
@@ -1148,18 +1179,23 @@ contains
                                nb_newr, nb_q0, nb_iz, nb_wz, nb_iu, nb_wu, nb_fesc, nb_fabs, nb_cy, nb_co, nb_lum, &
                                nb_lptr, nb_lid, yo, eml)
         type(opensps_context_t), intent(in) :: ctx
-        integer, intent(in)              :: n_mod, nspec, nt, nzb, it_tesc(:), zlo(:), zhi(:)
-        real(KP), intent(in), contiguous :: basis(:,:,:), w2(:,:)
-        real(WP), intent(in)             :: dz(:)
-        integer, intent(in)              :: nb_nt_neb, nb_whlylim
+        integer, intent(in)              :: n_mod, nspec, nt, nzb, nb_nt_neb, nb_whlylim
+        ! Explicit-shape arguments (no descriptors to map per launch), except nb_lid, whose size is not
+        ! known here (the pixels' line lists)
+        integer, intent(in)              :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
+        real(KP), intent(in)             :: basis(nspec, nt, nzb), w2(nt, 2 * n_mod)
+        real(WP), intent(in)             :: dz(n_mod)
         logical, intent(in)              :: nb_cont, nb_lines_in_spec, nb_xrb
-        integer, intent(in), contiguous  :: nb_ia(:), nb_iz(:), nb_iu(:), nb_lptr(:), nb_lid(:)
-        real(WP), intent(in), contiguous :: nb_wa(:), nb_dwa(:), nb_wz(:), nb_wu(:), nb_fesc(:), nb_fabs(:)
-        logical, intent(in), contiguous  :: nb_newr(:)
-        real(WP), intent(inout), contiguous :: nb_q0(:,:), nb_cy(:,:), nb_co(:,:)
-        real(KP), intent(inout), contiguous :: nb_lum(:,:)
-        real(KP), intent(inout)          :: yo(:,:)
-        real(KP), intent(out)            :: eml(:,:)
+        integer, intent(in)              :: nb_ia(max(1, nb_nt_neb)), nb_iz(n_mod), nb_iu(n_mod), nb_lptr(nspec + 1)
+        integer, intent(in), contiguous  :: nb_lid(:)
+        real(WP), intent(in)             :: nb_wa(max(1, nb_nt_neb)), nb_dwa(max(1, nb_nt_neb)), nb_wz(n_mod)
+        real(WP), intent(in)             :: nb_wu(n_mod), nb_fesc(n_mod), nb_fabs(n_mod)
+        logical, intent(in)              :: nb_newr(max(1, nb_nt_neb))
+        real(WP), intent(inout)          :: nb_q0(max(1, nb_nt_neb), nzb)
+        real(WP), intent(inout)          :: nb_cy(max(1, nb_nt_neb), n_mod), nb_co(max(1, nb_nt_neb), n_mod)
+        real(KP), intent(inout)          :: nb_lum(NEMLINE, 2 * n_mod)
+        real(KP), intent(inout)          :: yo(nspec, 2 * n_mod)
+        real(KP), intent(out)            :: eml(NEMLINE, n_mod)
 
         integer  :: m, i, j, k, t, nt_neb, whlylim, a, a_prev, p, iz, iu
         real(KP) :: s, c, wt, bk, y, o, wk, v, dzk
@@ -1306,6 +1342,17 @@ contains
                 end do
             end do
 
+#if defined(OMP_TARGET) && defined(__flang__)
+            if (xrb) then
+                call nebular_continuum_tiled(n_mod, nspec, size(ctx%state%xnebem_cont, 1), nt_neb, &
+                                             ctx%state%xnebem_cont, nb_ia, nb_wa, nb_dwa, nb_newr, &
+                                             nb_cy, nb_co, nb_iz, nb_wz, nb_iu, nb_wu, yo)
+            else
+                call nebular_continuum_tiled(n_mod, nspec, size(ctx%state%nebem_cont, 1), nt_neb, &
+                                             ctx%state%nebem_cont, nb_ia, nb_wa, nb_dwa, nb_newr, &
+                                             nb_cy, nb_co, nb_iz, nb_wz, nb_iu, nb_wu, yo)
+            end if
+#else
             associate (a_nebem_cont => ctx%state%nebem_cont, a_xnebem_cont => ctx%state%xnebem_cont)
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do collapse(2) private(y, o, sy, so, ra, rb, dl, f, r, &
@@ -1385,6 +1432,7 @@ contains
                 end do
             end do
             end associate
+#endif
         end if
 
         ! 4. Line luminosities per (line, model), young and old: sum over ages of the weight times
@@ -1454,32 +1502,142 @@ contains
         end if
     end subroutine nebular_kernels
 
+#if defined(OMP_TARGET) && defined(__flang__)
+    !> The continuum kernel of nebular_kernels for LLVM flang / AMD: explicit-shape arguments (no
+    !> array descriptors in the kernel), and each thread does PT pixels (strided, so the loads are
+    !> coalesced) of one model, which shares the per-age loads (CLOUDY age interval, weights, step
+    !> flags, SFH weight * Q) among them: with one pixel per thread the loop was ~90% address
+    !> arithmetic and loads. The arithmetic per pixel is the one of the generic kernel, in the same
+    !> order, so the results are identical bit for bit.
+    subroutine nebular_continuum_tiled(n_mod, nspec, ntab, nt_neb, tab, ia, wa, dwa, newr, cy, co, iz, wz, iu, wu, yo)
+        integer, intent(in)     :: n_mod, nspec, ntab, nt_neb, ia(nt_neb), iz(n_mod), iu(n_mod)
+        real(WP), intent(in)    :: tab(ntab, NEBNZ, NEBNAGE, NEBNIP), wa(nt_neb), dwa(nt_neb)
+        real(WP), intent(in)    :: cy(nt_neb, n_mod), co(nt_neb, n_mod), wz(n_mod), wu(n_mod)
+        logical, intent(in)     :: newr(nt_neb)
+        real(KP), intent(inout) :: yo(nspec, 2 * n_mod)
+
+        integer, parameter :: PT = 4
+        real(WP), parameter :: LN10 = log(10.0_wp)
+        integer  :: m, ip, npt
+
+        npt = (nspec + PT - 1) / PT
+        ! (The small work arrays are declared in a block of the loop body: flang maps `private` arrays,
+        ! one host-device copy each way per launch, a block-local array it does not)
+        !$omp target teams distribute parallel do collapse(2) &
+        !$omp map(OMP_MAP_PRESENT_ALLOC: tab)
+        do m = 1, n_mod
+            do ip = 1, npt
+              block
+                integer  :: p, t, a, a_prev, jz, ju, jj(PT)
+                real(KP) :: y(PT), o(PT)
+                real(WP) :: sy(PT), so(PT), ra(PT), rb(PT), dl(PT), f(PT), r(PT), c00, c01, c10, c11, wat, cyt, cot
+                logical  :: valid(PT)
+                do p = 1, PT
+                    jj(p) = min(ip + (p - 1) * npt, nspec)
+                    valid(p) = ip + (p - 1) * npt <= nspec
+                    y(p) = 0.0_KP
+                    o(p) = 0.0_KP
+                    sy(p) = 0.0_wp
+                    so(p) = 0.0_wp
+                    ra(p) = 0.0_wp
+                    rb(p) = 0.0_wp
+                    dl(p) = 0.0_wp
+                    f(p) = 0.0_wp
+                    r(p) = 1.0_wp
+                end do
+                a_prev = -1
+                jz = iz(m)
+                ju = iu(m)
+                c00 = (1.0_wp - wz(m)) * (1.0_wp - wu(m))
+                c01 = (1.0_wp - wz(m)) * (         wu(m))
+                c10 = (         wz(m)) * (1.0_wp - wu(m))
+                c11 = (         wz(m)) * (         wu(m))
+                do t = 1, nt_neb
+                    a = ia(t)
+                    wat = wa(t)
+                    cyt = cy(t, m)
+                    cot = co(t, m)
+                    if (a /= a_prev) then
+                        do p = 1, PT
+                            ! Close the previous interval
+                            y(p) = y(p) + real(sy(p), KP)
+                            o(p) = o(p) + real(so(p), KP)
+                            sy(p) = 0.0_wp
+                            so(p) = 0.0_wp
+                            ! The interval only advances: its lower end is the previous upper end
+                            if (a == a_prev + 1) then
+                                ra(p) = rb(p)
+                            else
+                                ra(p) = c00 * tab(jj(p), jz, a, ju) + c01 * tab(jj(p), jz, a, ju + 1) + &
+                                        c10 * tab(jj(p), jz + 1, a, ju) + c11 * tab(jj(p), jz + 1, a, ju + 1)
+                            end if
+                            rb(p) = c00 * tab(jj(p), jz, a + 1, ju) + c01 * tab(jj(p), jz, a + 1, ju + 1) + &
+                                    c10 * tab(jj(p), jz + 1, a + 1, ju) + c11 * tab(jj(p), jz + 1, a + 1, ju + 1)
+                            dl(p) = (rb(p) - ra(p)) * LN10
+                            f(p) = exp(ra(p) * LN10 + wat * dl(p))
+                        end do
+                        a_prev = a
+                    else
+                        do p = 1, PT
+                            if (newr(t)) r(p) = exp(dwa(t) * dl(p))
+                            f(p) = f(p) * r(p)
+                        end do
+                    end if
+                    do p = 1, PT
+                        sy(p) = sy(p) + cyt * f(p)
+                        so(p) = so(p) + cot * f(p)
+                    end do
+                end do
+                do p = 1, PT
+                    y(p) = y(p) + real(sy(p), KP)
+                    o(p) = o(p) + real(so(p), KP)
+                    if (valid(p)) then
+                        yo(jj(p), m) = yo(jj(p), m) + y(p)
+                        yo(jj(p), n_mod + m) = yo(jj(p), n_mod + m) + o(p)
+                    end if
+                end do
+              end block
+            end do
+        end do
+    end subroutine nebular_continuum_tiled
+#endif
+
     !> Line luminosities after dust (legacy add_dust): young lines through
     !> the birth cloud, all through the diffuse dust at the line wavelength (the transmission
     !> interpolated between pixels, at KP as there). eml = attenuated luminosities; s_line =
     !> intrinsic - attenuated, per model.
-    subroutine attenuate_lines(ctx, psets, n_mod, nb_lum, nb_llo, eml, s_line)
+    subroutine attenuate_lines(ctx, pbuf, n_mod, nb_lum, nb_llo, eml, s_line)
         type(opensps_context_t), intent(in)  :: ctx
-        type(params), intent(in)          :: psets(:)
         integer, intent(in)               :: n_mod
-        real(KP), intent(in), contiguous  :: nb_lum(:,:)   ! line luminosities (nebular_setup_t)
-        integer, intent(in), contiguous   :: nb_llo(:)     ! line pixel intervals
-        real(KP), intent(out)             :: eml(:,:)
-        real(WP), intent(out)             :: s_line(:)
+#if !defined(__flang__)
+        type(params), intent(in), target :: pbuf(n_mod)
+#else
+        integer(int64), intent(in), target :: pbuf(NPW, n_mod)
+#endif
+        real(KP), intent(in)              :: nb_lum(NEMLINE, 2 * n_mod)   ! line luminosities (nebular_setup_t)
+        integer, intent(in)               :: nb_llo(NEMLINE)              ! line pixel intervals
+        real(KP), intent(out)             :: eml(NEMLINE, n_mod)
+        real(WP), intent(out)             :: s_line(n_mod)
 
         integer  :: m, i, lo
         real(WP) :: si, sa, t_lo, t_hi, curve, tau_d, trans, td, birth, ay, ao, fob, fnd, pos
         real(KP) :: ly, lo_
+        type(params_core), pointer :: pl
 
 #ifdef OMP_TARGET
-        !$omp target teams distribute private(si, sa, fob, fnd) &
+        !$omp target teams distribute private(si, sa, fob, fnd, pl) &
         !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%nebem_line_pos)
 #endif
         do m = 1, n_mod
+#if !defined(__flang__)
+            pl => pbuf(m)%params_core
+#else
+            call c_f_pointer(c_loc(pbuf(1, m)), pl)
+#endif
             si = 0.0_wp
             sa = 0.0_wp
-            fob = psets(m)%frac_obrun
-            fnd = psets(m)%frac_nodust
+            fob = pl%frac_obrun
+            fnd = pl%frac_nodust
 #ifdef OMP_TARGET
             !$omp parallel do reduction(+:si, sa) private(lo, t_lo, t_hi, curve, tau_d, trans, td, birth, &
             !$omp& ay, ao, ly, lo_, pos)
@@ -1490,18 +1648,18 @@ contains
                     td = 1.0_wp
                 else
                     lo = nb_llo(i)
-                    call diffuse_transmission(ctx, psets(m), lo, curve, tau_d, trans)
+                    call diffuse_transmission(ctx, pl, lo, curve, tau_d, trans)
                     t_lo = real(real(trans, KP), WP)
-                    call diffuse_transmission(ctx, psets(m), lo + 1, curve, tau_d, trans)
+                    call diffuse_transmission(ctx, pl, lo + 1, curve, tau_d, trans)
                     t_hi = real(real(trans, KP), WP)
                     td = t_lo + (t_hi - t_lo) / (ctx%state%spec_lambda(lo + 1) - ctx%state%spec_lambda(lo)) * &
                          (pos - ctx%state%spec_lambda(lo))
                 end if
                 if (td /= td) td = 1.0_wp
-                if (psets(m)%dust1 <= SAFE_FLOOR .or. 1.0_wp - fob <= SAFE_FLOOR) then
+                if (pl%dust1 <= SAFE_FLOOR .or. 1.0_wp - fob <= SAFE_FLOOR) then
                     birth = 1.0_wp
                 else
-                    birth = exp(-psets(m)%dust1 * (pos / V_BAND_ANGSTROMS)**psets(m)%dust1_index)
+                    birth = exp(-pl%dust1 * (pos / V_BAND_ANGSTROMS)**pl%dust1_index)
                 end if
                 ly = nb_lum(i, m)
                 lo_ = nb_lum(i, n_mod + m)
@@ -1537,27 +1695,79 @@ contains
 
     !> AGN dust emission (legacy agn_dust): fagn L_bol times the agn_tau template,
     !> attenuated by the model's diffuse dust; after the IGM transmission, as there.
-    subroutine add_agn_batch(ctx, psets, n_mod, nspec, agn_on, ita, wta, lsum, tdiff, total)
+    subroutine add_agn_batch(ctx, pbuf, n_mod, nspec, agn_on, ita, wta, lsum, tdiff, total)
         type(opensps_context_t), intent(in) :: ctx
-        type(params), intent(in)         :: psets(:)
-        integer, intent(in)              :: n_mod, nspec, ita(:)
-        logical, intent(in)              :: agn_on(:)
-        real(WP), intent(in)             :: wta(:), lsum(:)
+        integer, intent(in)              :: n_mod, nspec
+#if !defined(__flang__)
+        type(params), intent(in), target :: pbuf(n_mod)
+#else
+        integer(int64), intent(in), target :: pbuf(NPW, n_mod)
+#endif
+        integer, intent(in)              :: ita(n_mod)
+        logical, intent(in)              :: agn_on(n_mod)
+        real(WP), intent(in)             :: wta(n_mod), lsum(n_mod)
         real(KP), intent(in)             :: tdiff(:,:)   ! the diffuse transmission (attenuate_batch)
-        real(KP), intent(inout)          :: total(:,:)
+        real(KP), intent(inout)          :: total(nspec, n_mod)
 
         integer  :: m, i
         real(WP) :: lagn, tmpl, lb
+        type(params_core), pointer :: pl
+#if defined(OMP_TARGET) && defined(__flang__)
+        real(WP), allocatable :: lag(:)
+
+        ! LLVM flang / AMD: the AGN luminosity (a log10 and a power in FP64, one per model) is
+        ! computed once per model, not per pixel (FP64 is 1/32 of FP32 on the 780M)
+        allocate(lag(n_mod))
+        !$omp target data map(alloc: lag)
+        !$omp target teams distribute parallel do private(lb, pl)
+        do m = 1, n_mod
+#if !defined(__flang__)
+            pl => pbuf(m)%params_core
+#else
+            call c_f_pointer(c_loc(pbuf(1, m)), pl)
+#endif
+            lag(m) = 0.0_wp
+            if (agn_on(m)) then
+                if (lsum(m) > SAFE_FLOOR) then
+                    lb = log10(lsum(m))
+                else
+                    lb = 0.0_wp
+                end if
+                lag(m) = (10.0_wp**lb) * pl%fagn
+            end if
+        end do
+        associate (a_agndust_spec => ctx%state%agndust_spec)
+        !$omp target teams distribute parallel do collapse(2) private(tmpl) &
+        !$omp map(OMP_MAP_PRESENT_ALLOC: a_agndust_spec)
+        do m = 1, n_mod
+            do i = 1, nspec
+                if (agn_on(m)) then
+                    tmpl = (1.0_wp - wta(m)) * a_agndust_spec(i, ita(m)) + &
+                           wta(m) * a_agndust_spec(i, ita(m) + 1)
+                    tmpl = tmpl * real(tdiff(i, m), WP)
+                    total(i, m) = total(i, m) + lag(m) * tmpl
+                end if
+            end do
+        end do
+        end associate
+        !$omp end target data
+        return
+#endif
 
         associate (a_agndust_spec => ctx%state%agndust_spec)
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(lagn, tmpl, lb) &
+        !$omp target teams distribute parallel do collapse(2) private(lagn, tmpl, lb, pl) &
         !$omp map(OMP_MAP_PRESENT_ALLOC: a_agndust_spec)
 #elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(lagn, tmpl, lb)
+        !$omp parallel do collapse(2) private(lagn, tmpl, lb, pl)
 #endif
         do m = 1, n_mod
             do i = 1, nspec
+#if !defined(__flang__)
+                pl => pbuf(m)%params_core
+#else
+                call c_f_pointer(c_loc(pbuf(1, m)), pl)
+#endif
                 if (agn_on(m)) then
                     ! L_bol through its logarithm, as compute_csp_scenario stores it
                     if (lsum(m) > SAFE_FLOOR) then
@@ -1565,7 +1775,7 @@ contains
                     else
                         lb = 0.0_wp
                     end if
-                    lagn = (10.0_wp**lb) * psets(m)%fagn
+                    lagn = (10.0_wp**lb) * pl%fagn
                     tmpl = (1.0_wp - wta(m)) * a_agndust_spec(i, ita(m)) + &
                            wta(m) * a_agndust_spec(i, ita(m) + 1)
                     ! exp(-dust2 curve) (exp(-curve) for dust_type 3): the transmission of attenuate_batch,
@@ -1656,11 +1866,118 @@ contains
     !> Age sums with per-model metallicity: each model's basis is (1 - dz) basis(:, :, zlo) +
     !> dz basis(:, :, zhi), formed at kernel precision term by term (portable kernel; also used in
     !> cuBLAS builds). One pass over the ages (young or old per model), 4 models per thread.
-    subroutine age_sums_z(nspec, nt, n_mod, basis, w2, it_tesc, zlo, zhi, dz, yo)
-        integer, intent(in)              :: nspec, nt, n_mod, it_tesc(:), zlo(:), zhi(:)
-        real(KP), intent(in), contiguous :: basis(:,:,:), w2(:,:)
-        real(WP), intent(in)             :: dz(:)
-        real(KP), intent(out)            :: yo(:,:)
+    subroutine age_sums_z(nspec, nt, nz, n_mod, basis, w2, w2flat, it_tesc, zlo, zhi, dz, yo)
+        ! Explicit-shape dummies (no array descriptors in the kernel)
+        integer, intent(in)              :: nspec, nt, nz, n_mod, it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
+        real(KP), intent(in)             :: basis(nspec, nt, nz), w2(nt, 2 * n_mod), w2flat(nt * 2 * n_mod)
+        real(WP), intent(in)             :: dz(n_mod)
+        real(KP), intent(out)            :: yo(nspec, 2 * n_mod)
+#if defined(OMP_TARGET) && defined(__flang__)
+        ! LLVM flang / AMD. The models are visited sorted by their metallicity interval, so that a tile
+        ! of MT consecutive models usually shares one pair of basis slabs; each thread does PT pixels
+        ! (strided, so that the loads are coalesced) of the tile, which shares the per-model weight
+        ! loads among the pixels. The per-model offsets are formed once, outside the age loop (inside
+        ! it, address arithmetic and loads were ~97% of the instructions). The arithmetic per model
+        ! is unchanged (same results bit for bit).
+        ! Tile of PT pixels x MT models per thread. FP64 on the 780M: 4 pixels spill registers (890 ms at
+        ! N = 10^4; 658 ms with 2; 8 models x 1-4 pixels is the best range, 16 or more models 6-8 s)
+        integer, parameter :: MT = 8, PT = merge(2, 4, KP == WP)
+        integer  :: m, mq, ip, npt, key, nzk
+        integer, allocatable :: zord(:), starts(:)
+
+        nzk = maxval(zhi(1:n_mod))
+        allocate(zord(n_mod), starts(nzk + 1))
+        starts = 0
+        do m = 1, n_mod
+            starts(zlo(m) + 1) = starts(zlo(m) + 1) + 1
+        end do
+        starts(1) = 1
+        do key = 2, nzk + 1
+            starts(key) = starts(key) + starts(key - 1)
+        end do
+        do m = 1, n_mod
+            zord(starts(zlo(m))) = m
+            starts(zlo(m)) = starts(zlo(m)) + 1
+        end do
+
+        npt = (nspec + PT - 1) / PT
+        ! (Work arrays in a block of the loop body: flang maps `private` arrays, a copy each way per launch)
+        !$omp target teams distribute parallel do collapse(2) map(to: zord)
+        do mq = 1, (n_mod + MT - 1) / MT
+            do ip = 1, npt
+              block
+                integer  :: i, k, l, p, mm(MT), ii(PT), zl, zh, it(MT), oy(MT), oo(MT)
+                real(KP) :: b_lo(PT), b_hi(PT), bk, wy, y(PT, MT), o(PT, MT), d(MT)
+                logical  :: same
+                do l = 1, MT
+                    mm(l) = zord(min((mq - 1) * MT + l, n_mod))
+                    d(l) = real(dz(mm(l)), KP)
+                    it(l) = it_tesc(mm(l))
+                    oy(l) = (mm(l) - 1) * nt          ! offsets of the model's young and old weight columns
+                    oo(l) = (n_mod + mm(l) - 1) * nt
+                end do
+                do p = 1, PT
+                    ii(p) = min(ip + (p - 1) * npt, nspec)
+                end do
+                y = 0.0_KP
+                o = 0.0_KP
+                same = .true.
+                do l = 2, MT
+                    if (zlo(mm(l)) /= zlo(mm(1)) .or. zhi(mm(l)) /= zhi(mm(1))) same = .false.
+                end do
+                if (same) then
+                    zl = zlo(mm(1))
+                    zh = zhi(mm(1))
+                    do k = 1, nt
+                        do p = 1, PT
+                            b_lo(p) = basis(ii(p), k, zl)
+                            b_hi(p) = basis(ii(p), k, zh)
+                        end do
+                        do l = 1, MT
+                            if (k <= it(l)) then
+                                wy = w2flat(oy(l) + k)
+                                do p = 1, PT
+                                    bk = (1.0_KP - d(l)) * b_lo(p) + d(l) * b_hi(p)
+                                    y(p, l) = y(p, l) + wy * bk
+                                end do
+                            else
+                                wy = w2flat(oo(l) + k)
+                                do p = 1, PT
+                                    bk = (1.0_KP - d(l)) * b_lo(p) + d(l) * b_hi(p)
+                                    o(p, l) = o(p, l) + wy * bk
+                                end do
+                            end if
+                        end do
+                    end do
+                else
+                    do k = 1, nt
+                        do l = 1, MT
+                            if (k <= it(l)) then
+                                wy = w2flat(oy(l) + k)
+                                do p = 1, PT
+                                    bk = (1.0_KP - d(l)) * basis(ii(p), k, zlo(mm(l))) + d(l) * basis(ii(p), k, zhi(mm(l)))
+                                    y(p, l) = y(p, l) + wy * bk
+                                end do
+                            else
+                                wy = w2flat(oo(l) + k)
+                                do p = 1, PT
+                                    bk = (1.0_KP - d(l)) * basis(ii(p), k, zlo(mm(l))) + d(l) * basis(ii(p), k, zhi(mm(l)))
+                                    o(p, l) = o(p, l) + wy * bk
+                                end do
+                            end if
+                        end do
+                    end do
+                end if
+                do l = 1, MT
+                    do p = 1, PT
+                        yo(ii(p), mm(l)) = y(p, l)
+                        yo(ii(p), n_mod + mm(l)) = o(p, l)
+                    end do
+                end do
+              end block
+            end do
+        end do
+#else
         integer, parameter :: MT = 4
         integer  :: mq, i, k, l, mm(MT)
         real(KP) :: bk, y(MT), o(MT), d(MT)
@@ -1694,38 +2011,54 @@ contains
                 end do
             end do
         end do
+#endif
     end subroutine age_sums_z
 
     !> IGM transmission per model (redshift and igm_factor per model), as compute_igm_transmission:
     !> the optical depth at KP, capped below the wavelength of its maximum, then exp(-tau factor).
     !> tau is work space (pixels x models).
-    subroutine apply_igm_z(ctx, psets, n_mod, nspec, tau, total)
+    subroutine apply_igm_z(ctx, pbuf, n_mod, nspec, tau, total)
         type(opensps_context_t), intent(in) :: ctx
-        type(params), intent(in)         :: psets(:)
         integer, intent(in)              :: n_mod, nspec
-        real(KP), intent(inout)          :: tau(:,:), total(:,:)
+#if !defined(__flang__)
+        type(params), intent(in), target :: pbuf(n_mod)
+#else
+        integer(int64), intent(in), target :: pbuf(NPW, n_mod)
+#endif
+        real(KP), intent(inout)          :: tau(nspec, n_mod), total(nspec, n_mod)
         integer  :: m, j, jmax
         real(WP) :: tmax
+        type(params_core), pointer :: pl
 
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) &
+        !$omp target teams distribute parallel do collapse(2) private(pl) &
         !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda)
 #elif defined(_OPENMP)
-        !$omp parallel do collapse(2)
+        !$omp parallel do collapse(2) private(pl)
 #endif
         do m = 1, n_mod
             do j = 1, nspec
-                if (psets(m)%zred > SAFE_FLOOR) tau(j, m) = real(igm_tau(ctx%state%spec_lambda(j), 1.0_wp + psets(m)%zred), KP)
+#if !defined(__flang__)
+                pl => pbuf(m)%params_core
+#else
+                call c_f_pointer(c_loc(pbuf(1, m)), pl)
+#endif
+                if (pl%zred > SAFE_FLOOR) tau(j, m) = real(igm_tau(ctx%state%spec_lambda(j), 1.0_wp + pl%zred), KP)
             end do
         end do
         ! The short-wavelength cap, one thread per model
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do private(tmax, jmax, j)
+        !$omp target teams distribute parallel do private(tmax, jmax, j, pl)
 #elif defined(_OPENMP)
-        !$omp parallel do private(tmax, jmax, j)
+        !$omp parallel do private(tmax, jmax, j, pl)
 #endif
         do m = 1, n_mod
-            if (psets(m)%zred > SAFE_FLOOR) then
+#if !defined(__flang__)
+            pl => pbuf(m)%params_core
+#else
+            call c_f_pointer(c_loc(pbuf(1, m)), pl)
+#endif
+            if (pl%zred > SAFE_FLOOR) then
                 tmax = 0.0_wp
                 jmax = 1
                 do j = 1, nspec
@@ -1742,14 +2075,19 @@ contains
             end if
         end do
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2)
+        !$omp target teams distribute parallel do collapse(2) private(pl)
 #elif defined(_OPENMP)
-        !$omp parallel do collapse(2)
+        !$omp parallel do collapse(2) private(pl)
 #endif
         do m = 1, n_mod
             do j = 1, nspec
-                if (psets(m)%zred > SAFE_FLOOR) &
-                    total(j, m) = total(j, m) * real(exp(-real(tau(j, m), WP) * psets(m)%igm_factor), KP)
+#if !defined(__flang__)
+                pl => pbuf(m)%params_core
+#else
+                call c_f_pointer(c_loc(pbuf(1, m)), pl)
+#endif
+                if (pl%zred > SAFE_FLOOR) &
+                    total(j, m) = total(j, m) * real(exp(-real(tau(j, m), WP) * pl%igm_factor), KP)
             end do
         end do
     end subroutine apply_igm_z
@@ -1757,8 +2095,8 @@ contains
     !> Common IGM transmission.
     subroutine apply_igm(n_mod, nspec, igm_t, total)
         integer, intent(in)     :: n_mod, nspec
-        real(KP), intent(in)    :: igm_t(:)
-        real(KP), intent(inout) :: total(:,:)
+        real(KP), intent(in)    :: igm_t(nspec)
+        real(KP), intent(inout) :: total(nspec, n_mod)
         integer :: m, i
 
 #if defined(OMP_TARGET)
@@ -1888,52 +2226,65 @@ contains
     !> Attenuation and absorbed light per (pixel, model). For models with dust emission the age
     !> sums are then replaced by what the emission stages need: yo(:, m) = diffuse transmission
     !> (stored at KP, as opensps_dust stores it), yo(:, N + m) = Draine & Li template.
-    subroutine attenuate_batch(ctx, psets, n_mod, nspec, iq, iu, wq, wu, gam, emis, agn_on, yo, total, absorbed, tdiff)
+    subroutine attenuate_batch(ctx, pbuf, n_mod, nspec, iq, iu, wq, wu, gam, emis, agn_on, yo, total, absorbed, tdiff)
         type(opensps_context_t), intent(in) :: ctx
-        type(params), intent(in)         :: psets(:)
-        integer, intent(in)              :: n_mod, nspec, iq(:), iu(:)
-        real(WP), intent(in)             :: wq(:), wu(:), gam(:)
-        logical, intent(in)              :: emis(:), agn_on(:)
-        real(KP), intent(inout)          :: yo(:,:)   ! in: young (1:N), old (N+1:2N)
-        real(KP), intent(out)            :: total(:,:), absorbed(:,:)
+        integer, intent(in)              :: n_mod, nspec
+        ! Explicit-shape arguments (no array descriptors to map and re-read in every launch), except tdiff:
+        ! allocated 1 x 1 without AGN
+#if !defined(__flang__)
+        type(params), intent(in), target :: pbuf(n_mod)
+#else
+        integer(int64), intent(in), target :: pbuf(NPW, n_mod)
+#endif
+        integer, intent(in)              :: iq(n_mod), iu(n_mod)
+        real(WP), intent(in)             :: wq(n_mod), wu(n_mod), gam(n_mod)
+        logical, intent(in)              :: emis(n_mod), agn_on(n_mod)
+        real(KP), intent(inout)          :: yo(nspec, 2 * n_mod)   ! in: young (1:N), old (N+1:2N)
+        real(KP), intent(out)            :: total(nspec, n_mod), absorbed(nspec, n_mod)
         real(KP), intent(inout)          :: tdiff(:,:)   ! diffuse transmission of AGN models
 
         integer  :: m, i
         real(KP) :: young, old
         real(WP) :: curve, tau_b, tau_o, tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust
         real(WP) :: one_m_tb, one_m_to, one_m_td, a_young, spec_sum
+        type(params_core), pointer :: pl
 
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(young, old, curve, tau_b, tau_o, &
         !$omp& tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust, one_m_tb, one_m_to, &
-        !$omp& one_m_td, a_young, spec_sum) &
+        !$omp& one_m_td, a_young, spec_sum, pl) &
         !$omp& map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%dustem2_dustem)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(young, old, curve, tau_b, tau_o, &
         !$omp& tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust, one_m_tb, one_m_to, &
-        !$omp& one_m_td, a_young, spec_sum)
+        !$omp& one_m_td, a_young, spec_sum, pl)
 #endif
         do m = 1, n_mod
             do i = 1, nspec
                 young = yo(i, m)
                 old = yo(i, n_mod + m)
 
-                frac_obrun = psets(m)%frac_obrun
-                frac_nodust = psets(m)%frac_nodust
-                call diffuse_transmission(ctx, psets(m), i, curve, tau_d, trans_d)
+#if !defined(__flang__)
+                pl => pbuf(m)%params_core
+#else
+                call c_f_pointer(c_loc(pbuf(1, m)), pl)
+#endif
+                frac_obrun = pl%frac_obrun
+                frac_nodust = pl%frac_nodust
+                call diffuse_transmission(ctx, pl, i, curve, tau_d, trans_d)
                 if (agn_on(m)) tdiff(i, m) = real(trans_d, KP)
-                if (psets(m)%dust1 <= SAFE_FLOOR .or. 1.0_wp - frac_obrun <= SAFE_FLOOR) then
+                if (pl%dust1 <= SAFE_FLOOR .or. 1.0_wp - frac_obrun <= SAFE_FLOOR) then
                     tau_b = 0.0_wp
                     trans_birth = 1.0_wp
                 else
-                    tau_b = psets(m)%dust1 * (ctx%state%spec_lambda(i) / V_BAND_ANGSTROMS)**psets(m)%dust1_index
+                    tau_b = pl%dust1 * (ctx%state%spec_lambda(i) / V_BAND_ANGSTROMS)**pl%dust1_index
                     trans_birth = exp(-tau_b)
                 end if
-                if (abs(psets(m)%dust3) <= SAFE_FLOOR) then
+                if (abs(pl%dust3) <= SAFE_FLOOR) then
                     tau_o = 0.0_wp
                     trans_old = 1.0_wp
                 else
-                    tau_o = psets(m)%dust3 * curve
+                    tau_o = pl%dust3 * curve
                     trans_old = exp(-tau_o)
                 end if
 
@@ -1967,12 +2318,54 @@ contains
     !> Per model: absorbed luminosity, template normalization and escaped template fraction.
     subroutine dust_emission_reductions(n_mod, nspec, emis, wt, yo, absorbed, s_abs, s_norm, s_esc)
         integer, intent(in)              :: n_mod, nspec
-        logical, intent(in)              :: emis(:)
-        real(KP), intent(in)             :: wt(:), yo(:,:), absorbed(:,:)
-        real(WP), intent(out)            :: s_abs(:), s_norm(:), s_esc(:)
+        logical, intent(in)              :: emis(n_mod)
+        real(KP), intent(in)             :: wt(nspec), yo(nspec, 2 * n_mod), absorbed(nspec, n_mod)
+        real(WP), intent(out)            :: s_abs(n_mod), s_norm(n_mod), s_esc(n_mod)
 
         integer  :: m, i
         real(KP) :: sa, sn, se, ca, cn, ce
+#if defined(OMP_TARGET) && defined(__flang__)
+        !> Partial sums per model: each takes every NCH-th pixel (consecutive threads, consecutive pixels)
+        integer, parameter :: NCH = 64
+        real(KP), allocatable :: part(:,:,:)
+        integer  :: c
+
+        ! LLVM flang rewrites the inner loop of a teams loop to a serial loop: one thread summed all
+        ! pixels of a model (33 us per model on the 780M, ~10x its memory time). Here (model, chunk)
+        ! pairs are threads and a second kernel adds the NCH partial sums
+        allocate(part(3, NCH, n_mod))
+        !$omp target data map(alloc: part)
+        !$omp target teams distribute parallel do collapse(2) private(sa, sn, se, i)
+        do m = 1, n_mod
+            do c = 1, NCH
+                sa = 0.0_KP; sn = 0.0_KP; se = 0.0_KP
+                if (emis(m)) then
+                    do i = c, nspec - 1, NCH
+                        sa = sa + wt(i) * (absorbed(i, m) + absorbed(i + 1, m))
+                        sn = sn + wt(i) * (yo(i, n_mod + m) + yo(i + 1, n_mod + m))
+                        se = se + wt(i) * (yo(i, n_mod + m) * yo(i, m) + yo(i + 1, n_mod + m) * yo(i + 1, m))
+                    end do
+                end if
+                part(1, c, m) = sa
+                part(2, c, m) = sn
+                part(3, c, m) = se
+            end do
+        end do
+        !$omp target teams distribute parallel do private(sa, sn, se, c)
+        do m = 1, n_mod
+            sa = 0.0_KP; sn = 0.0_KP; se = 0.0_KP
+            do c = 1, NCH
+                sa = sa + part(1, c, m)
+                sn = sn + part(2, c, m)
+                se = se + part(3, c, m)
+            end do
+            s_abs(m) = real(sa, WP)
+            s_norm(m) = real(sn, WP)
+            s_esc(m) = real(se, WP)
+        end do
+        !$omp end target data
+        return
+#endif
 
 #ifdef OMP_TARGET
         ! (teams loop + loop reduction: as fast as the former OpenACC gang / vector reduction with
@@ -2007,10 +2400,10 @@ contains
     !> Adds the dust emission, scaled to the absorbed luminosity (energy balance).
     subroutine add_dust_emission(n_mod, nspec, emis, yo, s_abs, s_esc, total)
         integer, intent(in)              :: n_mod, nspec
-        logical, intent(in)              :: emis(:)
-        real(KP), intent(in)             :: yo(:,:)
-        real(WP), intent(in)             :: s_abs(:), s_esc(:)
-        real(KP), intent(inout)          :: total(:,:)
+        logical, intent(in)              :: emis(n_mod)
+        real(KP), intent(in)             :: yo(nspec, 2 * n_mod)
+        real(WP), intent(in)             :: s_abs(n_mod), s_esc(n_mod)
+        real(KP), intent(inout)          :: total(nspec, n_mod)
 
         integer  :: m, i
 

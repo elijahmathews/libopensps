@@ -26,7 +26,7 @@ module opensps_sfh
 
     use opensps_precision, only: WP
     use opensps_context_types, only: opensps_context_t
-    use opensps_types, only: params, sfhparams, compspout
+    use opensps_types, only: params, params_core, sfhparams, compspout
     use opensps_constants, only: SAFE_FLOOR, NTABMAX
     use opensps_special_functions, only: expi, gammainc
     use opensps_interpolation, only: find_interval
@@ -40,6 +40,18 @@ module opensps_sfh
     public :: get_sfh_properties_at_age
     public :: sfh_weights_core, convert_sfhparams
     public :: compute_sfh_statistics
+
+    !> The SFH routines that device code calls take PARAMS_CORE (no allocatable components; see
+    !> opensps_types); the generic names also take a PARAMS.
+    interface get_sfh_properties_at_age
+        module procedure get_sfh_properties_at_age_pc, get_sfh_properties_at_age_pp
+    end interface
+    interface sfh_weights_core
+        module procedure sfh_weights_core_pc, sfh_weights_core_pp
+    end interface
+    interface convert_sfhparams
+        module procedure convert_sfhparams_pc, convert_sfhparams_pp
+    end interface
 
     ! ------------------------------------------------------------------------
     ! CONSTANTS
@@ -266,9 +278,9 @@ contains
     !> @param[out] mass_frac   Fraction of formed mass relative to total possible mass.
     !> @param[out] sfr_norm    Normalized Star Formation Rate (1/yr).
     !> @param[out] frac_linear Fraction of mass formed in the linear phase (Type 5 only).
-    pure subroutine get_sfh_properties_at_age(ctx, pset, age_gyr, mass_frac, sfr_norm, frac_linear)
+    pure subroutine get_sfh_properties_at_age_pc(ctx, pset, age_gyr, mass_frac, sfr_norm, frac_linear)
         type(opensps_context_t), intent(in) :: ctx
-        type(params), intent(in) :: pset
+        type(params_core), intent(in) :: pset
         real(WP), intent(in) :: age_gyr
         real(WP), intent(out) :: mass_frac, sfr_norm, frac_linear
 
@@ -471,7 +483,7 @@ contains
             sfr_norm = sfr_norm / 1.0e9_wp
         end if
 
-    end subroutine get_sfh_properties_at_age
+    end subroutine get_sfh_properties_at_age_pc
 
     !> 
 
@@ -1062,9 +1074,9 @@ contains
 
     !> @brief compute_sfh_weights for one output, with caller-provided scratch columns (the batched
     !> CSP runs one per model on the device).
-    subroutine sfh_weights_core(ctx, pset, tage, nzin, w, tmp1, tmp2)
+    subroutine sfh_weights_core_pc(ctx, pset, tage, nzin, w, tmp1, tmp2)
         type(opensps_context_t), intent(in) :: ctx
-        type(params), intent(in)            :: pset
+        type(params_core), intent(in)       :: pset
         real(WP), intent(in)                :: tage
         integer, intent(in)                 :: nzin
         real(WP), intent(inout), contiguous :: w(:,:)              ! (ages, nzin)
@@ -1279,7 +1291,7 @@ contains
             end do
         end if
 
-    end subroutine sfh_weights_core
+    end subroutine sfh_weights_core_pc
 
     !> @brief Converts user parameters (pset) into internal physical units (sfhparams).
     !>
@@ -1290,8 +1302,8 @@ contains
     !> @param[in]  pset Parameters from user.
     !> @param[in]  tage Age of the galaxy [Gyr].
     !> @param[out] sfh  Internal SFH structure.
-    pure subroutine convert_sfhparams(pset, tage, sfh)
-        type(params), intent(in)     :: pset
+    pure subroutine convert_sfhparams_pc(pset, tage, sfh)
+        type(params_core), intent(in) :: pset
         real(WP), intent(in)         :: tage
         type(sfhparams), intent(out) :: sfh
 
@@ -1340,6 +1352,38 @@ contains
         ! Initialize Simha flag
         sfh%use_simha_limits = 0
 
-    end subroutine convert_sfhparams
+    end subroutine convert_sfhparams_pc
+
+
+    !> get_sfh_properties_at_age for a PARAMS.
+    pure subroutine get_sfh_properties_at_age_pp(ctx, pset, age_gyr, mass_frac, sfr_norm, frac_linear)
+        type(opensps_context_t), intent(in) :: ctx
+        type(params), intent(in) :: pset
+        real(WP), intent(in) :: age_gyr
+        real(WP), intent(out) :: mass_frac, sfr_norm, frac_linear
+
+        call get_sfh_properties_at_age_pc(ctx, pset%params_core, age_gyr, mass_frac, sfr_norm, frac_linear)
+    end subroutine get_sfh_properties_at_age_pp
+
+    !> sfh_weights_core for a PARAMS.
+    subroutine sfh_weights_core_pp(ctx, pset, tage, nzin, w, tmp1, tmp2)
+        type(opensps_context_t), intent(in) :: ctx
+        type(params), intent(in)            :: pset
+        real(WP), intent(in)                :: tage
+        integer, intent(in)                 :: nzin
+        real(WP), intent(inout), contiguous :: w(:,:)
+        real(WP), intent(inout), contiguous :: tmp1(:), tmp2(:)
+
+        call sfh_weights_core_pc(ctx, pset%params_core, tage, nzin, w, tmp1, tmp2)
+    end subroutine sfh_weights_core_pp
+
+    !> convert_sfhparams for a PARAMS.
+    pure subroutine convert_sfhparams_pp(pset, tage, sfh)
+        type(params), intent(in)     :: pset
+        real(WP), intent(in)         :: tage
+        type(sfhparams), intent(out) :: sfh
+
+        call convert_sfhparams_pc(pset%params_core, tage, sfh)
+    end subroutine convert_sfhparams_pp
 
 end module opensps_sfh
