@@ -331,6 +331,7 @@ contains
         if (op%n_slots > 0) op%slot_key = g_slot_key(:, 1:op%n_slots)
         op%direct_spec = 0.0_KP
         if (op%n_direct > 0) op%direct_spec = d_spec(:, 1:op%n_direct)
+        call build_effective_templates(ctx, op)
 
     contains
 

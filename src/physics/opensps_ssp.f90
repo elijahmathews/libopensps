@@ -76,7 +76,7 @@ module opensps_ssp
     public :: load_timestep_data
     public :: apply_isochrone_physics, apply_isochrone_modifications
     public :: add_main_library_templates, finish_ssp_grid, dusty_defer_t, dusty_push_slot, dusty_push_entry, &
-              L_MAIN, L_CAR, L_AGBO, L_AGBC
+              L_MAIN, L_CAR, L_AGBO, L_AGBC, L_WMB, L_PAGB, L_WRN, L_WRC, small_template_index
     public :: add_column
     public :: compute_integrated_properties, accumulate_spectrum
     public :: interpolate_time_grid

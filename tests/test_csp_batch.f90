@@ -411,6 +411,7 @@ contains
         end do
         call compute_csp_batch(ctx, psets, mags, status, spec=spec, mass=mass, lbol=lbol, mdust=mdust, emlines=eml, &
                                ssp_op=op)
+        if (status /= 0) write(*, '(A,I0)') "# status = ", status
         call assert_true(status == 0, "status 0", total_tests, total_failures)
 
         ! Reference: each model with its own basis
