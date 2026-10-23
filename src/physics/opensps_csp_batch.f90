@@ -98,6 +98,9 @@ module opensps_csp_batch
 
     public :: compute_csp_batch, batch_spectra_device, batch_spectra_host
 
+    !> Words per model of the packed parameters (PARAMS_CORE) that kernels read through c_f_pointer
+    integer, parameter :: NPW = (storage_size(params_core()) + 63) / 64
+
 #if defined(FSPS_PINNED) && defined(OMP_TARGET)
     !> Device-to-host DMA into a page-locked buffer on a given CUDA stream (src/core/opensps_pinned.c)
     interface
@@ -221,7 +224,6 @@ contains
         !> The parameters of every model as raw words (PARAMS_CORE, from transfer): device code reads
         !> a row through c_f_pointer. Not an array of derived type: with LLVM flang its default
         !> mapper made a kernel launch cost ~10 ms per model
-        integer, parameter :: NPW = (storage_size(params_core()) + 63) / 64
         integer(int64), allocatable, target :: pbuf(:,:)
         type(params_core), pointer :: pl
         integer,  pointer, contiguous :: it_tesc(:), iq(:), iu(:), ita(:), zlo(:), zhi(:)
@@ -1574,12 +1576,12 @@ contains
     !> intrinsic - attenuated, per model.
     subroutine attenuate_lines(ctx, pbuf, n_mod, nb_lum, nb_llo, eml, s_line)
         type(opensps_context_t), intent(in)  :: ctx
-        integer(int64), intent(in), contiguous, target :: pbuf(:,:)
         integer, intent(in)               :: n_mod
-        real(KP), intent(in), contiguous  :: nb_lum(:,:)   ! line luminosities (nebular_setup_t)
-        integer, intent(in), contiguous   :: nb_llo(:)     ! line pixel intervals
-        real(KP), intent(out)             :: eml(:,:)
-        real(WP), intent(out)             :: s_line(:)
+        integer(int64), intent(in), target :: pbuf(NPW, n_mod)
+        real(KP), intent(in)              :: nb_lum(NEMLINE, 2 * n_mod)   ! line luminosities (nebular_setup_t)
+        integer, intent(in)               :: nb_llo(NEMLINE)              ! line pixel intervals
+        real(KP), intent(out)             :: eml(NEMLINE, n_mod)
+        real(WP), intent(out)             :: s_line(n_mod)
 
         integer  :: m, i, lo
         real(WP) :: si, sa, t_lo, t_hi, curve, tau_d, trans, td, birth, ay, ao, fob, fnd, pos
@@ -1655,12 +1657,13 @@ contains
     !> attenuated by the model's diffuse dust; after the IGM transmission, as there.
     subroutine add_agn_batch(ctx, pbuf, n_mod, nspec, agn_on, ita, wta, lsum, tdiff, total)
         type(opensps_context_t), intent(in) :: ctx
-        integer(int64), intent(in), contiguous, target :: pbuf(:,:)
-        integer, intent(in)              :: n_mod, nspec, ita(:)
-        logical, intent(in)              :: agn_on(:)
-        real(WP), intent(in)             :: wta(:), lsum(:)
+        integer, intent(in)              :: n_mod, nspec
+        integer(int64), intent(in), target :: pbuf(NPW, n_mod)
+        integer, intent(in)              :: ita(n_mod)
+        logical, intent(in)              :: agn_on(n_mod)
+        real(WP), intent(in)             :: wta(n_mod), lsum(n_mod)
         real(KP), intent(in)             :: tdiff(:,:)   ! the diffuse transmission (attenuate_batch)
-        real(KP), intent(inout)          :: total(:,:)
+        real(KP), intent(inout)          :: total(nspec, n_mod)
 
         integer  :: m, i
         real(WP) :: lagn, tmpl, lb
@@ -1959,9 +1962,9 @@ contains
     !> tau is work space (pixels x models).
     subroutine apply_igm_z(ctx, pbuf, n_mod, nspec, tau, total)
         type(opensps_context_t), intent(in) :: ctx
-        integer(int64), intent(in), contiguous, target :: pbuf(:,:)
         integer, intent(in)              :: n_mod, nspec
-        real(KP), intent(inout)          :: tau(:,:), total(:,:)
+        integer(int64), intent(in), target :: pbuf(NPW, n_mod)
+        real(KP), intent(inout)          :: tau(nspec, n_mod), total(nspec, n_mod)
         integer  :: m, j, jmax
         real(WP) :: tmax
         type(params_core), pointer :: pl
@@ -2019,8 +2022,8 @@ contains
     !> Common IGM transmission.
     subroutine apply_igm(n_mod, nspec, igm_t, total)
         integer, intent(in)     :: n_mod, nspec
-        real(KP), intent(in)    :: igm_t(:)
-        real(KP), intent(inout) :: total(:,:)
+        real(KP), intent(in)    :: igm_t(nspec)
+        real(KP), intent(inout) :: total(nspec, n_mod)
         integer :: m, i
 
 #if defined(OMP_TARGET)
@@ -2152,12 +2155,15 @@ contains
     !> (stored at KP, as opensps_dust stores it), yo(:, N + m) = Draine & Li template.
     subroutine attenuate_batch(ctx, pbuf, n_mod, nspec, iq, iu, wq, wu, gam, emis, agn_on, yo, total, absorbed, tdiff)
         type(opensps_context_t), intent(in) :: ctx
-        integer(int64), intent(in), contiguous, target :: pbuf(:,:)
-        integer, intent(in)              :: n_mod, nspec, iq(:), iu(:)
-        real(WP), intent(in)             :: wq(:), wu(:), gam(:)
-        logical, intent(in)              :: emis(:), agn_on(:)
-        real(KP), intent(inout)          :: yo(:,:)   ! in: young (1:N), old (N+1:2N)
-        real(KP), intent(out)            :: total(:,:), absorbed(:,:)
+        integer, intent(in)              :: n_mod, nspec
+        ! Explicit-shape arguments (no array descriptors to map and re-read in every launch), except tdiff:
+        ! allocated 1 x 1 without AGN
+        integer(int64), intent(in), target :: pbuf(NPW, n_mod)
+        integer, intent(in)              :: iq(n_mod), iu(n_mod)
+        real(WP), intent(in)             :: wq(n_mod), wu(n_mod), gam(n_mod)
+        logical, intent(in)              :: emis(n_mod), agn_on(n_mod)
+        real(KP), intent(inout)          :: yo(nspec, 2 * n_mod)   ! in: young (1:N), old (N+1:2N)
+        real(KP), intent(out)            :: total(nspec, n_mod), absorbed(nspec, n_mod)
         real(KP), intent(inout)          :: tdiff(:,:)   ! diffuse transmission of AGN models
 
         integer  :: m, i
@@ -2231,9 +2237,9 @@ contains
     !> Per model: absorbed luminosity, template normalization and escaped template fraction.
     subroutine dust_emission_reductions(n_mod, nspec, emis, wt, yo, absorbed, s_abs, s_norm, s_esc)
         integer, intent(in)              :: n_mod, nspec
-        logical, intent(in)              :: emis(:)
-        real(KP), intent(in)             :: wt(:), yo(:,:), absorbed(:,:)
-        real(WP), intent(out)            :: s_abs(:), s_norm(:), s_esc(:)
+        logical, intent(in)              :: emis(n_mod)
+        real(KP), intent(in)             :: wt(nspec), yo(nspec, 2 * n_mod), absorbed(nspec, n_mod)
+        real(WP), intent(out)            :: s_abs(n_mod), s_norm(n_mod), s_esc(n_mod)
 
         integer  :: m, i
         real(KP) :: sa, sn, se, ca, cn, ce
@@ -2313,10 +2319,10 @@ contains
     !> Adds the dust emission, scaled to the absorbed luminosity (energy balance).
     subroutine add_dust_emission(n_mod, nspec, emis, yo, s_abs, s_esc, total)
         integer, intent(in)              :: n_mod, nspec
-        logical, intent(in)              :: emis(:)
-        real(KP), intent(in)             :: yo(:,:)
-        real(WP), intent(in)             :: s_abs(:), s_esc(:)
-        real(KP), intent(inout)          :: total(:,:)
+        logical, intent(in)              :: emis(n_mod)
+        real(KP), intent(in)             :: yo(nspec, 2 * n_mod)
+        real(WP), intent(in)             :: s_abs(n_mod), s_esc(n_mod)
+        real(KP), intent(inout)          :: total(nspec, n_mod)
 
         integer  :: m, i
 
