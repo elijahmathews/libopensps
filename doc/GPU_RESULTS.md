@@ -999,6 +999,56 @@ full).
 
 ## Entries
 
+### 2026-10-23: batched SSP, the IMF free per model (issue #32; branches in `doc/BATCHED_SSP_HANDOFF.md`)
+
+Design: `doc/ROADMAP.md` priority 3 and the header of `src/physics/opensps_ssp_batch.f90`. The
+SFH is folded into the IMF weights, SSP age sums = effective templates . V with V = S . (w_IMF
+w_sfh); one pass over the isochrone points per model on the device, then the shared batch.
+
+Accuracy (`test_csp_batch`, IMF-per-model batch against each model's own `generate_ssp_grid`
+basis, full physics): CPU FP64 ~1e-14 for every IMF type; FP32 ~6e-7 (spectrum), narrow mass
+ranges 3.5e-7; 780M FP64 4.6e-11 (Chabrier) to 3.3e-10 (van Dokkum), FP32 <= 5.9e-7; A100 FP64
+Chabrier 2.1e-11, van Dokkum 6.0e-11, FP32 5-6e-7. Before the narrow-bin fix (`erf` difference of
+a lognormal bin) Chabrier and van Dokkum were 1.2e-9 and 3.4e-9 on the 780M (1.6e-9 and 2.4e-9
+on the A100): host and device both carried ~3e-9 error against the exact value.
+
+Case matrix against gfortran 16 FP64 (34 cases): flang CPU and flang 780M offload FP64 PASS,
+SSP cases <= 5e-14 (incl. Chabrier and van Dokkum), worst 6e-13 (`csp_smooth`). The A100 (nvfortran)
+against gfortran 13.4 differs by 5e-10 in every SSP case, Salpeter included, also on the
+nvfortran host (4.4e-16 between nvfortran offload and nvfortran host): a compiler pair effect,
+not FMA (`-Mnofma` unchanged), not bisected.
+
+Cost per model, 780M (flang, `full_smooth` / `full_smooth_imf`, MIST + MILES, nebular + IGM +
+AGN + DL07 + smoothing + indices, medians of 6 alternating runs, us/model, FP32):
+
+| N | resident-basis batch | IMF per model, draft kernels (ec78637) | + pieces / segments (89eaa28) |
+|---|---|---|---|
+| 10^4 | 227 | 828 | 830 |
+| 1000 | 224 | 879 | 857 |
+| 100 | 292 | 1103 | 931 |
+| 1 | ~6500 (noisy) | 18975 | 9963 |
+
+Stage split (FP32, N = 1000): IMF weights 332, fold 124, template product 178, rest of the batch
+~220. FP64 N = 10^4: 1820 (resident-basis batch ~350). `exp(e ln m2)` for the power-law edges
+(branch `feat/ssp-batch-v2-780m-weights`): FP32 N = 1000 857 -> ~709, FP64 -8%, accuracy 6.9e-11 vs
+4.6e-11 (Salpeter): not merged.
+
+A100 (nvfortran 25.1, `basic_imf`, mags, us/model, FP32): v2 draft 15100 (N = 1), 128 (100),
+32.6 (1000), 28.0 (10^4); with pieces / segments 4300, 59.7, 26.1, 25.2; FP32 + cuBLAS 1800-1900
+(N = 1), 37.5, 17.7, 16.5 (FP64 + cuBLAS 15.8 at 10^4); the resident-basis batch is 3.0 at 10^4.
+Existing paths: no regression (ratios 0.92-1.03 against main, median of 6). compute-sanitizer on
+the new kernels: memcheck 0 errors, racecheck 0 hazards (the ~6000 hazards seen on the whole run
+are in `band_fluxes`, `opensps_batch_photometry.f90:658-674`, also on main).
+
+Metallicity and IMF free per model (`ssp_ops`, experimental): A100 FP32 + cuBLAS, `full_smooth_z`
+(logzsol and IMF varied), us/model: resident-basis batch 1137 (N = 1), 25.9 (100), 9.3 (1000), 7.9
+(10^4); `ssp_ops` 3263, 98.8, 41.4, 34.5. 780M numbers: see the issue.
+
+Test bug found on the way: `opensps_setup(ctx, 10, ...)` loads `zmet = 10` only; the metallicity
+checks (`check_batch_z`, `check_weights_z`) and the `*_z` benchmark configs ran on empty bases
+until 9ee300a.
+
+
 ### 2026-10-15: node and toolchain
 
 - Node `p-gc-3150` (ICDS), 2x Xeon E5-2680 v4 (5 cores allocated), 251 GB RAM.

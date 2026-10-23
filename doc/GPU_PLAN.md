@@ -185,6 +185,39 @@ Forecast to compare against: ~4 us per model (FP32) on the A100 at large N.
   - no array constructors in device routines (`any([1, 4, 5] == k)`): LLVM flang allocates them
     on the device heap, which is small and fixed; compare the scalar.
 
+- Differences of nearly equal numbers amplify the last-bit differences between two libm
+  implementations (host vs device, or nvfortran vs gfortran) by the inverse relative width:
+  `erf(b) - erf(a)` over isochrone bins gave 1e-9 to 3e-9 per bin weight (the same on host and
+  device against the exact value: the formula, not a compiler bug). Narrow lognormal bins are now
+  integrated by Gauss-Legendre on `exp(-z^2)` (`integrate_lognormal`). Power-law bins
+  (`hi**e - lo**e`) have the same mechanism at 1e-11; `exp(e ln m2)` instead of a power
+  (`imf_bin_weights_ln`) is faster on the 780M but carries `|e ln m|` eps instead of eps, so it
+  stays an option until the A100 numbers are in.
+- Small batches are latency bound by long serial lists on one thread: cut every serial list into
+  pieces or segments that end at natural boundaries (ages), one thread per (piece, model) into
+  FP64 partials, then one thread per (age or template, model) adding the partials in order.
+  The A100 N = 1 time of the IMF-per-model path went from 15 to 4.3 ms; the 780M from 19 to 10 ms.
+  Large batches are bound by the FP64 transcendentals of the weights on the 780M (1/32 FP64 rate).
+- Every `map` clause of a `target data` region costs ~10 us per call: a region that serves an
+  optional feature (`if(imf)`) and the arrays only that feature uses keep the existing paths free
+  of it (N = 1 existing path was 3-11% slower until the IMF-per-model arrays moved into their own
+  region and were not allocated without `ssp_op`).
+- A kernel with `!$omp target` pragmas and no host alternative makes a feature device-only
+  (status 2 on host builds). Give each target loop an `#elif defined(_OPENMP)` host loop with the
+  same private list (copy it from the target clause) so that CI exercises the feature on every
+  compiler; `collapse(2)` and per-thread-distinct output elements carry over unchanged.
+- Test lessons: (1) a reference built by the same code as the thing tested agrees to 1e-16 and
+  proves nothing: check that the reference is non-zero and moves with the parameter under test
+  (a printed "the parameter matters" line); (2) `opensps_setup(ctx, 10, ...)` loads the
+  isochrones and libraries of `zmet = 10` only, so checks over metallicities need a context set
+  up with `zin = 0`; the metallicity checks of `test_csp_batch` and the `*_z` benchmark configs
+  compared zeros with zeros until 2026-10-23; (3) a relative comparison of emission lines needs
+  an absolute floor (models without ionizing stars give 1e-295 against 0).
+- Process lessons: `git rebase --continue` needs `-c commit.gpgsign=false` (a failing signing
+  step shows up as "could not commit staged changes"); a rewritten branch must not be pushed over
+  a branch the other agent has pulled; never `pkill -f` or `pgrep -f` with a pattern that appears
+  in the command line of the shell running it.
+
 ## OpenACC and OpenMP
 
 OpenACC is frozen: no new OpenACC-only features, and new kernels get OpenMP directives first.

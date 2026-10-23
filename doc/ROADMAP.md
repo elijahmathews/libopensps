@@ -153,13 +153,25 @@ before folding it into the batch. IMF *type* is best shared per batch. Isochrone
 rebuilt per model (the expensive case). Narrow mass bins: evaluate as midpoint value x width
 with a correction, so IMF weights work in FP32.
 
-Status (2026-10-23, branch `feat/ssp-batch-v2`, not merged): `compute_csp_batch(..., ssp_op=op)`
-takes the IMF (type shared per batch; slopes, `vdmc`, `mdave` per model; mass limits shared) free
-per model, for one metallicity. Checked against per-model `generate_ssp_grid` bases for every IMF
-type and a range of parameters and mass limits (`test_csp_batch`, FP64 ~1e-14 on CPU, FP32 ~6e-7).
-Per-model metallicity and isochrone modifications (`fbhb`, `sbss`, `delt`, `dell`, `agb`, `pagb`,
-`redgb`, `agb_dust`, `evtype`, `masscut`) are not supported: a model that differs from the
-operator's build returns status 2 (`ssp_op_mod_signature`); rebuilding S per model stays open.
+Status (2026-10-23; branches and the state of the work: `doc/BATCHED_SSP_HANDOFF.md`):
+
+- **IMF free per model, one metallicity** (`compute_csp_batch(..., ssp_op=op)`, branch
+  `feat/ssp-batch-v2`): IMF type shared per batch; slopes, `vdmc`, `mdave` per model; mass limits
+  shared. Checked against per-model `generate_ssp_grid` bases for every IMF type, a range of
+  parameters and mass limits including narrow ranges (`test_csp_batch`: CPU FP64 ~1e-14, FP32
+  ~6e-7; 780M FP64 <= 3e-10, A100 FP64 <= 1e-10). Verified on gfortran, ifx, nvfortran (host
+  threads and offload), flang CPU and offload. Isochrone modifications (`fbhb`, `sbss`, `delt`,
+  `dell`, `agb`, `pagb`, `redgb`, `agb_dust`, `evtype`, `masscut`) and per-model metallicity are
+  not supported there: a model that differs from the operator's build returns status 2
+  (`ssp_op_mod_signature`).
+- **IMF and metallicity free per model** (`ssp_ops`: one operator per metallicity of the
+  context; the SSP of a model is the blend of its two bracketing metallicities): experimental,
+  branches `feat/ssp-batch-v2-a100-zvar` (A100, nvfortran offload) and
+  `feat/ssp-batch-v2-a100-zvar-flang` (host loops; verified on the CPU compilers and the 780M).
+  Direction (issue #32): one code path, the single metallicity as the `nz = 1` case.
+- **Open:** isochrone modifications per model (design note in issue #32: per-point factors by
+  group, rebuilt tables), the public API (`ssp_op` / `ssp_ops` in `compute_csp_batch`, the C
+  header) and the legacy parity run for the lognormal bin change.
 
 Alongside, two input generalisations that reuse the same machinery:
 
