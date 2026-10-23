@@ -27,10 +27,11 @@ module opensps_ssp_batch
     use opensps_constants, only: SAFE_FLOOR
     use opensps_imf, only: imf_integral_p, imf_bin_weights, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT
     use opensps_stellar_modifications, only: add_remnant_mass_p
+    use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_to_device
     implicit none
     private
 
-    public :: ssp_batch_age_sums
+    public :: ssp_batch_age_sums, ssp_batch_age_sums_z
 
 contains
 
@@ -129,6 +130,178 @@ contains
         !$omp end target data
 #endif
     end subroutine ssp_batch_age_sums
+
+    !> The age sums with the metallicity free per model: the SSP of model m is the blend
+    !> (1 - dz(m)) SSP(zlo(m)) + dz(m) SSP(zhi(m)) of the SSPs of the two bracketing metallicities of
+    !> the context (as compute_csp_batch interpolates a resident basis), each from its own
+    !> operator ops(iz) (the operator of metallicity index iz: ssp_operator_build with that
+    !> pset%zmet; they differ in their isochrone points, templates and segments). The blend is
+    !> linear in the SFH-weighted template sums, so each model is processed twice, once per
+    !> bracketing operator, with its SFH weights scaled by the blend coefficient, and the results are
+    !> added: the models using an operator are gathered through a permutation (perm) and the
+    !> products of a chunk are added to yo. The mass and the ionizing photons are blended
+    !> linearly and L_bol in its logarithm, as for a basis. Device builds only (dev = .true.).
+    subroutine ssp_batch_age_sums_z(imf_type, remnants, n_mod, nt, nspec, ops, nz, zlo, zhi, dz, pm, wsfh, it_tesc, &
+                                    nt_neb, whl, fesc, yo, smass, slum, q0)
+        logical, intent(in)  :: remnants
+        integer, intent(in)  :: imf_type, n_mod, nt, nspec, nz, nt_neb, whl
+        type(ssp_operator_t), intent(inout) :: ops(:)
+        integer, intent(in), contiguous  :: zlo(:), zhi(:), it_tesc(:)
+        real(WP), intent(in), contiguous :: dz(:), pm(:,:), wsfh(:,:), fesc(:)
+        real(KP), intent(inout), contiguous :: yo(:,:)
+        real(WP), intent(inout), contiguous :: smass(:,:), slum(:,:), q0(:,:)
+
+        integer, parameter :: CHUNK = 2048
+        integer :: nc_max, n_pts_max, n_eff_max, n_seg_max, n_pc_max, neb_cols, iz, pass, m, j, k, t, np1, np2, ntq
+        integer, allocatable :: perm1(:), perm2(:), ptr1(:), ptr2(:), cnt(:)
+        real(WP), allocatable :: cz1(:), cz2(:), w(:,:), tot(:), vp(:,:,:), pps(:,:,:)
+        real(KP), allocatable :: wk(:,:), v(:,:), veuv(:,:), yz(:,:)
+
+        neb_cols = 0
+        if (nt_neb > 0 .and. whl > 0) neb_cols = 1
+        nc_max = min(CHUNK, n_mod)
+        n_pts_max = 1; n_eff_max = 1; n_seg_max = 1; n_pc_max = 1
+        do iz = 1, nz
+            n_pts_max = max(n_pts_max, ops(iz)%n_pts)
+            n_eff_max = max(n_eff_max, ops(iz)%n_eff)
+            n_seg_max = max(n_seg_max, ops(iz)%n_seg)
+            n_pc_max = max(n_pc_max, ops(iz)%n_pc)
+        end do
+        ! The models of each pass grouped by metallicity index: pass 1 the lower bracket (weight
+        ! 1 - dz), pass 2 the upper (dz); a model with a zero weight is left out
+        allocate(perm1(n_mod), perm2(n_mod), ptr1(nz + 1), ptr2(nz + 1), cnt(nz + 1), cz1(n_mod), cz2(n_mod))
+        cz1 = 1.0_wp - dz(1:n_mod)
+        cz2 = dz(1:n_mod)
+        call group_models(n_mod, nz, zlo, cz1, perm1, ptr1, cnt)
+        call group_models(n_mod, nz, zhi, cz2, perm2, ptr2, cnt)
+        np1 = ptr1(nz + 1) - 1
+        np2 = ptr2(nz + 1) - 1
+        ntq = size(q0, 1)
+
+        allocate(w(nc_max, n_pts_max), wk(nc_max, n_pts_max), tot(nc_max), v(n_eff_max, 2 * nc_max))
+        allocate(veuv(n_eff_max, max(1, neb_cols * 2 * nc_max)), vp(nc_max, 4, n_seg_max), pps(nc_max, 3, n_pc_max))
+        allocate(yz(nspec, 2 * nc_max))
+        !$omp target data map(alloc: w, wk, tot, v, veuv, vp, pps, yz) map(to: perm1, perm2, cz1, cz2)
+        ! Zero the accumulators
+        !$omp target teams distribute parallel do collapse(2)
+        do m = 1, n_mod
+            do t = 1, nt
+                smass(t, m) = 0.0_wp
+                slum(t, m) = 0.0_wp
+            end do
+        end do
+        if (nt_neb > 0) then
+            !$omp target teams distribute parallel do collapse(2)
+            do m = 1, n_mod
+                do t = 1, ntq
+                    q0(t, m) = 0.0_wp
+                end do
+            end do
+        end if
+        !$omp target teams distribute parallel do collapse(2)
+        do m = 1, 2 * n_mod
+            do k = 1, nspec
+                yo(k, m) = 0.0_KP
+            end do
+        end do
+        do pass = 1, 2
+            do iz = 1, nz
+                if (pass == 1) then
+                    if (ptr1(iz + 1) == ptr1(iz)) cycle
+                    call run_range(iz, ptr1(iz), ptr1(iz + 1) - 1, perm1, cz1)
+                else
+                    if (ptr2(iz + 1) == ptr2(iz)) cycle
+                    call run_range(iz, ptr2(iz), ptr2(iz + 1) - 1, perm2, cz2)
+                end if
+            end do
+        end do
+        ! L_bol: the blended logarithm to linear
+        !$omp target teams distribute parallel do collapse(2)
+        do m = 1, n_mod
+            do t = 1, nt
+                slum(t, m) = 10.0_wp**slum(t, m)
+            end do
+        end do
+        !$omp end target data
+
+    contains
+
+        !> The models perm(first .. last) with the operator iz, in chunks
+        subroutine run_range(iz, first, last, perm, cz)
+            integer, intent(in) :: iz, first, last
+            integer, intent(in), contiguous :: perm(:)
+            real(WP), intent(in), contiguous :: cz(:)
+            integer :: m0, nc, ky, jj
+
+            call ssp_operator_to_device(ops(iz))
+            do m0 = first, last, CHUNK
+                nc = min(CHUNK, last - m0 + 1)
+                call imf_pieces_chunk(imf_type, remnants, m0, nc, nt, ops(iz)%n_pc, nt_neb, pm, ops(iz)%pt_ptr, &
+                                      ops(iz)%pc_ptr, ops(iz)%age_pc, ops(iz)%pt_mini, ops(iz)%pt_m1, ops(iz)%pt_m2, &
+                                      ops(iz)%pt_first, ops(iz)%pt_cm, ops(iz)%pt_cl, ops(iz)%pt_q, ops(iz)%age_mmax, &
+                                      size(w, 1), ops(iz)%n_pts, w, wk, tot, pps, perm, cz, .true., smass, slum, q0)
+                call fold_segments(m0, nc, ops(iz)%n_eff, ops(iz)%n_seg, nt_neb, neb_cols, wsfh, it_tesc, fesc, &
+                                   ops(iz)%pt_age, ops(iz)%eff_pt, ops(iz)%eff_val, ops(iz)%seg_ptr, &
+                                   ops(iz)%seg_first, perm, cz, wk, vp, v, veuv)
+                ky = 0
+                do jj = m0, m0 + nc - 1
+                    ky = max(ky, it_tesc(perm(jj)))
+                end do
+                ky = ops(iz)%k_age(max(1, min(nt, ky)))
+                call template_columns(.true., nspec, nspec, size(v, 1), ky, nc, ops(iz)%etpl, v, 0, yz, 0)
+                call template_columns(.true., nspec, nspec, size(v, 1), ops(iz)%n_eff, nc, ops(iz)%etpl, v, nc, yz, nc)
+                if (neb_cols > 0) then
+                    call template_columns(.true., whl, nspec, size(v, 1), ky, nc, ops(iz)%etpl, veuv, 0, yz, 0)
+                    call template_columns(.true., whl, nspec, size(v, 1), ops(iz)%n_eff, nc, ops(iz)%etpl, veuv, nc, yz, nc)
+                end if
+                call add_columns(m0, nc, nspec, n_mod, perm, yz, yo)
+            end do
+        end subroutine run_range
+
+    end subroutine ssp_batch_age_sums_z
+
+    !> perm: the models m with a nonzero weight cz(m), grouped by key(m) (counting sort, models in
+    !> order within a key); ptr(iz) .. ptr(iz + 1) - 1 the entries of key iz.
+    subroutine group_models(n_mod, nz, key, cz, perm, ptr, cnt)
+        integer, intent(in)  :: n_mod, nz, key(:)
+        real(WP), intent(in) :: cz(:)
+        integer, intent(out) :: perm(:), ptr(:), cnt(:)
+        integer :: m
+        cnt = 0
+        do m = 1, n_mod
+            if (cz(m) /= 0.0_wp) cnt(key(m)) = cnt(key(m)) + 1
+        end do
+        ptr(1) = 1
+        do m = 1, nz
+            ptr(m + 1) = ptr(m) + cnt(m)
+        end do
+        cnt(1:nz) = ptr(1:nz)
+        do m = 1, n_mod
+            if (cz(m) /= 0.0_wp) then
+                perm(cnt(key(m))) = m
+                cnt(key(m)) = cnt(key(m)) + 1
+            end if
+        end do
+    end subroutine group_models
+
+    !> yo(:, perm(m0 + j - 1)) += yz(:, j) and yo(:, n_mod + perm(m0 + j - 1)) += yz(:, nc + j): the
+    !> young and old sums of a chunk added to the batch's.
+    subroutine add_columns(m0, nc, nspec, n_mod, perm, yz, yo)
+        integer, intent(in) :: m0, nc, nspec, n_mod
+        integer, intent(in), contiguous :: perm(:)
+        real(KP), intent(in), contiguous :: yz(:,:)
+        real(KP), intent(inout), contiguous :: yo(:,:)
+        integer :: j, i, m
+
+        !$omp target teams distribute parallel do collapse(2) private(m)
+        do j = 1, nc
+            do i = 1, nspec
+                m = perm(m0 + j - 1)
+                yo(i, m) = yo(i, m) + yz(i, j)
+                yo(i, n_mod + m) = yo(i, n_mod + m) + yz(i, nc + j)
+            end do
+        end do
+    end subroutine add_columns
 
     !> IMF weights w(j, p) of models m = m0 .. m0+nc-1 (j = m - m0 + 1) at every isochrone point p
     !> (imf_bin_weights, as the SSP grid), and per age and model the surviving mass (with the
