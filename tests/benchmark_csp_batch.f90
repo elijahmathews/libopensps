@@ -59,7 +59,7 @@ program benchmark_csp_batch
     allocate(ctx)
     call opensps_create(ctx)
     ctx%pset%zmet = 10
-    call opensps_setup(ctx, 10, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
+    call opensps_setup(ctx, merge(0, 10, zvar), isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
     call opensps_context_move_to_device(ctx)
     call set_int('imf_type', merge(2, 1, imf))
     call set_int('zmet', 10)
