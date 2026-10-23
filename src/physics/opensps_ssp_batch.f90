@@ -64,8 +64,10 @@ contains
         integer, parameter :: CHUNK = 2048
         real(WP), allocatable :: w(:,:), tot(:), vp(:,:,:), pps(:,:,:)
         real(KP), allocatable :: wk(:,:), v(:,:), veuv(:,:)
-        integer :: m0, nc, ky, neb_cols
+        integer :: m0, nc, ky, neb_cols, j
         logical :: useg
+        integer, allocatable :: perm(:)
+        real(WP), allocatable :: cz(:)
 
         neb_cols = 0
         if (nt_neb > 0 .and. whl > 0) neb_cols = 1
@@ -78,33 +80,43 @@ contains
         ! ~260 MB at 2048 models of MIST); faster than one thread per template at every batch size
         ! tried on the A100 (N = 1: 15 -> 10 ms, 100: 128 -> 85 us/model, 10^4: 28.0 -> 26.7 us/model)
         useg = dev
+        ! (The models in their own order, with unit weight: see ssp_batch_age_sums_z)
+        allocate(perm(n_mod), cz(n_mod))
+        do j = 1, n_mod
+            perm(j) = j
+        end do
+        cz = 1.0_wp
         if (useg) then
             allocate(vp(min(CHUNK, n_mod), 4, n_seg), pps(min(CHUNK, n_mod), 3, n_pc))
         else
             allocate(vp(1, 1, 1), pps(1, 1, 1))
         end if
 #ifdef OMP_TARGET
-        !$omp target data if(dev) map(alloc: w, wk, tot, v, veuv, vp, pps)
+        !$omp target data if(dev) map(alloc: w, wk, tot, v, veuv, vp, pps) map(to: perm, cz)
 #endif
         do m0 = 1, n_mod, CHUNK
             nc = min(CHUNK, n_mod - m0 + 1)
             if (useg) then
                 call imf_pieces_chunk(imf_type, remnants, m0, nc, nt, n_pc, nt_neb, pm, pt_ptr, pc_ptr, age_pc, pt_mini, &
                                       pt_m1, pt_m2, pt_first, pt_cm, pt_cl, pt_q, age_mmax, size(w, 1), n_pts, w, wk, &
-                                      tot, pps, smass, slum, q0)
+                                      tot, pps, perm, cz, .false., smass, slum, q0)
             else
                 call imf_ages_chunk(dev, imf_type, remnants, m0, nc, nt, nt_neb, pm, pt_ptr, pt_mini, pt_m1, pt_m2, &
                                     pt_first, pt_cm, pt_cl, pt_q, age_mmax, size(w, 1), n_pts, w, wk, tot, smass, slum, q0)
             end if
             if (useg) then
                 call fold_segments(m0, nc, n_eff, n_seg, nt_neb, neb_cols, wsfh, it_tesc, fesc, pt_age, eff_pt, eff_val, &
-                                   seg_ptr, seg_first, wk, vp, v, veuv)
+                                   seg_ptr, seg_first, perm, cz, wk, vp, v, veuv)
             else
                 call fold_chunk(dev, m0, nc, n_eff, nt_neb, neb_cols, wsfh, it_tesc, fesc, pt_age, eff_ptr, eff_pt, &
                                 eff_val, wk, v, veuv)
             end if
             ! Young sums: only the templates of the ages up to the chunk's last young age
-            ky = k_age(max(1, min(nt, maxval(it_tesc(m0:m0 + nc - 1)))))
+            ky = 0
+            do j = m0, m0 + nc - 1
+                ky = max(ky, it_tesc(perm(j)))
+            end do
+            ky = k_age(max(1, min(nt, ky)))
             call template_columns(dev, nspec, nspec, n_eff, ky, nc, etpl, v, 0, yo, m0 - 1)
             call template_columns(dev, nspec, nspec, n_eff, n_eff, nc, etpl, v, nc, yo, n_mod + m0 - 1)
             if (neb_cols > 0) then
@@ -186,9 +198,11 @@ contains
     !> the sums differ in FP64 rounding only.
     subroutine imf_pieces_chunk(imf_type, remnants, m0, nc, nt, n_pc, nt_neb, pm, pt_ptr, pc_ptr, age_pc, pt_mini, &
                                 pt_m1, pt_m2, pt_first, pt_cm, pt_cl, pt_q, age_mmax, ldw, n_pts, w, wk, tot, pps, &
-                                smass, slum, q0)
-        logical, intent(in) :: remnants
+                                perm, cz, accumulate, smass, slum, q0)
+        logical, intent(in) :: remnants, accumulate
         integer, intent(in) :: imf_type, m0, nc, nt, n_pc, nt_neb
+        integer, intent(in), contiguous :: perm(:)
+        real(WP), intent(in), contiguous :: cz(:)
         real(WP), intent(in), contiguous :: pm(:,:), pt_mini(:), pt_m1(:), pt_m2(:), pt_cm(:), pt_cl(:), pt_q(:), &
                                             age_mmax(:)
         integer, intent(in), contiguous  :: pt_ptr(:), pc_ptr(:), age_pc(:), pt_first(:)
@@ -201,13 +215,13 @@ contains
 
         !$omp target teams distribute parallel do
         do j = 1, nc
-            tot(j) = imf_integral_p(imf_type, pm(:, m0 + j - 1), pm(IMF_P_LOWER_LIMIT, m0 + j - 1), &
-                                    pm(IMF_P_UPPER_LIMIT, m0 + j - 1), .true.)
+            tot(j) = imf_integral_p(imf_type, pm(:, perm(m0 + j - 1)), pm(IMF_P_LOWER_LIMIT, perm(m0 + j - 1)), &
+                                    pm(IMF_P_UPPER_LIMIT, perm(m0 + j - 1)), .true.)
         end do
         !$omp target teams distribute parallel do collapse(2) private(k, m, k0, n, sm, sl, sq)
         do q = 1, n_pc
             do j = 1, nc
-                m = m0 + j - 1
+                m = perm(m0 + j - 1)
                 sm = 0.0_wp
                 sl = 0.0_wp
                 sq = 0.0_wp
@@ -230,7 +244,7 @@ contains
         !$omp target teams distribute parallel do collapse(2) private(q, sm, sl, sq)
         do t = 1, nt
             do j = 1, nc
-                m = m0 + j - 1
+                m = perm(m0 + j - 1)
                 sm = 0.0_wp
                 sl = 0.0_wp
                 sq = 0.0_wp
@@ -241,9 +255,18 @@ contains
                 end do
                 ! An empty isochrone has no mass (and no remnants), as ssp_operator_evaluate
                 if (remnants .and. pt_ptr(t + 1) > pt_ptr(t)) call add_remnant_mass_p(imf_type, pm(:, m), sm, age_mmax(t))
-                smass(t, m) = sm
-                slum(t, m) = sl
-                if (t <= nt_neb) q0(t, m) = sq
+                if (accumulate) then
+                    ! A blend over the operators of several metallicities (ssp_batch_age_sums_z): the
+                    ! mass and the photon rate linearly, L_bol in the logarithm (as the interpolated
+                    ! SSP of compute_csp_batch with a basis); slum holds the logarithm until the end
+                    smass(t, m) = smass(t, m) + cz(m) * sm
+                    slum(t, m) = slum(t, m) + cz(m) * log10(max(sl, SAFE_FLOOR))
+                    if (t <= nt_neb) q0(t, m) = q0(t, m) + cz(m) * sq
+                else
+                    smass(t, m) = sm
+                    slum(t, m) = sl
+                    if (t <= nt_neb) q0(t, m) = sq
+                end if
             end do
         end do
     end subroutine imf_pieces_chunk
@@ -319,8 +342,10 @@ contains
     !> with the escaping fraction; then one thread per (template, model) adds its segments in
     !> order. The same sums as fold_chunk with the ages grouped differently (FP64 rounding only).
     subroutine fold_segments(m0, nc, n_eff, n_seg, nt_neb, neb_cols, wsfh, it_tesc, fesc, pt_age, eff_pt, eff_val, &
-                             seg_ptr, seg_first, w, vp, v, veuv)
+                             seg_ptr, seg_first, perm, cz, w, vp, v, veuv)
         integer, intent(in) :: m0, nc, n_eff, n_seg, nt_neb, neb_cols
+        integer, intent(in), contiguous :: perm(:)
+        real(WP), intent(in), contiguous :: cz(:)
         real(WP), intent(in), contiguous :: wsfh(:,:), fesc(:), eff_val(:)
         real(KP), intent(in), contiguous :: w(:,:)
         integer, intent(in), contiguous  :: it_tesc(:), pt_age(:), eff_pt(:), seg_ptr(:), seg_first(:)
@@ -335,7 +360,7 @@ contains
 #endif
         do s = 1, n_seg
             do j = 1, nc
-                m = m0 + j - 1
+                m = perm(m0 + j - 1)
                 tesc = it_tesc(m)
                 f = fesc(m)
                 y = 0.0_wp; o = 0.0_wp; ye = 0.0_wp; oe = 0.0_wp
@@ -349,7 +374,7 @@ contains
                     end if
                     if (t /= tc) then
                         if (tc > 0) then
-                            x = a * wsfh(m, tc)
+                            x = a * wsfh(m, tc) * cz(m)
                             ae = x
                             if (tc <= nt_neb) ae = f * x
                             if (tc <= tesc) then
