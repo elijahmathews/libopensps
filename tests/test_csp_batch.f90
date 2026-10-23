@@ -98,6 +98,7 @@ program test_csp_batch
     call check_batch_z()
     ! The IMF per model (template operator) against each model's own basis
     call check_imf_per_model()
+    call check_imf_unsupported()
     ! compute_csp_scenario: all-ages outputs against single-age calls, in each mode, on the
     ! one-metallicity basis
     call build_basis()
@@ -388,7 +389,79 @@ contains
         call imf_case("van Dokkum, characteristic mass varied", 3, 0.08_wp, 120.0_wp)
         call imf_case("Dave, break mass varied", 4, 0.08_wp, 120.0_wp)
         call imf_case("user IMF (data/imf.dat)", 5, 0.08_wp, 120.0_wp)
+        ! Narrow mass ranges: few and narrow bins carry the weight (kernel-precision weights)
+        call imf_case("Kroupa slopes varied, 0.9-1.1 Msun", 2, 0.9_wp, 1.1_wp)
+        call imf_case("Chabrier, 0.3-0.5 Msun", 1, 0.3_wp, 0.5_wp)
+        call imf_case("van Dokkum, characteristic mass varied, 0.1-0.3 Msun", 3, 0.1_wp, 0.3_wp)
     end subroutine check_imf_per_model
+
+    !> The IMF-per-model batch rejects (status 2) what it does not support: a model whose metallicity
+    !> or isochrone modifications differ from the operator's, and accepts models that share them.
+    subroutine check_imf_unsupported()
+        type(PARAMS) :: pset, psets(3)
+        type(ssp_operator_t) :: op
+        real(WP), allocatable :: mags(:, :)
+        integer :: m, status
+        character(len=16) :: names(7)
+        real(WP) :: vals(7)
+        integer :: j
+
+        call print_group("Batched CSP: IMF per model, unsupported parameters return status 2")
+        allocate(mags(ctx%state%nbands, 3))
+        names = [character(len=16) :: 'fbhb', 'sbss', 'delt', 'dell', 'agb', 'pagb', 'redgb']
+        vals = [0.3_wp, 3.0_wp, 0.05_wp, -0.1_wp, 0.6_wp, 2.0_wp, 0.5_wp]
+        call set_int('imf_type', 2)
+        call set_model(1, 0.5_wp)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        call ssp_operator_build(ctx, pset, op)
+        do m = 1, 3
+            call set_model(m, 0.5_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
+        end do
+        call compute_csp_batch(ctx, psets, mags, status, ssp_op=op)
+        call assert_true(status == 0, "same modifications and metallicity: status 0", total_tests, total_failures)
+        do j = 1, size(names)
+            call set_float(trim(names(j)), vals(j))
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(2))
+            call set_float(trim(names(j)), 0.0_wp)
+            call compute_csp_batch(ctx, psets, mags, status, ssp_op=op)
+            call assert_true(status == 2, trim(names(j)) // " varied in one model: status 2", total_tests, total_failures)
+            call set_model(2, 0.5_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(2))
+        end do
+        call set_int('zmet', 2)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, psets(2))
+        call set_int('zmet', 10)
+        call compute_csp_batch(ctx, psets, mags, status, ssp_op=op)
+        call assert_true(status == 2, "metallicity varied in one model: status 2", total_tests, total_failures)
+        call ssp_operator_free(op)
+        call set_float('fbhb', 0.3_wp)
+        call set_model(1, 0.5_wp)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        call ssp_operator_build(ctx, pset, op)
+        do m = 1, 3
+            call set_model(m, 0.5_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
+        end do
+        call compute_csp_batch(ctx, psets, mags, status, ssp_op=op)
+        call assert_true(status == 0, "operator built with fbhb = 0.3, models with 0.3: status 0", &
+                         total_tests, total_failures)
+        call set_float('fbhb', 0.0_wp)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, psets(3))
+        call compute_csp_batch(ctx, psets, mags, status, ssp_op=op)
+        call assert_true(status == 2, "operator built with fbhb = 0.3, one model with 0: status 2", &
+                         total_tests, total_failures)
+        call ssp_operator_free(op)
+        call set_int('imf_type', 1)
+    end subroutine check_imf_unsupported
 
     subroutine imf_case(label, imf_type, mlo, mhi)
         character(len=*), intent(in) :: label
@@ -448,7 +521,8 @@ contains
         end do
         call max_differences(spec, mags, ref_spec, ref_mags, d_spec, d_mag)
         d_scal = max(maxval(abs(mass / ref_mass - 1.0_wp)), maxval(abs(lbol - ref_lbol)))
-        d_line = maxval(abs(eml / ref_eml - 1.0_wp), mask=ref_eml > 1.0e-3_wp * maxval(ref_eml))
+        ! (lines of a model without ionizing stars are denormal-level noise: skipped below 1e-100)
+        d_line = maxval(abs(eml / ref_eml - 1.0_wp), mask=ref_eml > max(1.0e-3_wp * maxval(ref_eml), 1.0e-100_wp))
         write(*, '(A,5ES10.2)') "# max difference (spectrum, mag, mass/lbol, mdust, lines): ", d_spec, d_mag, &
             d_scal, maxval(abs(mdust / ref_mdust - 1.0_wp)), d_line
         write(*, '(A,2F9.5)') "# mass of models 1 and 12: ", ref_mass(1), ref_mass(N_MOD)
@@ -561,7 +635,8 @@ contains
         if (status /= 0) return
         call max_differences(spec, mags, ref_spec, ref_mags, d_spec, d_mag)
         d_scal = max(maxval(abs(mass / ref_mass - 1.0_wp)), maxval(abs(lbol - ref_lbol)))
-        d_line = maxval(abs(eml / ref_eml - 1.0_wp), mask=ref_eml > 1.0e-3_wp * maxval(ref_eml))
+        ! (lines of a model without ionizing stars are denormal-level noise: skipped below 1e-100)
+        d_line = maxval(abs(eml / ref_eml - 1.0_wp), mask=ref_eml > max(1.0e-3_wp * maxval(ref_eml), 1.0e-100_wp))
         d_indx = maxval(abs(indx - ref_indx))
         write(*, '(A,5ES10.2)') "# max difference (spectrum, mag, mass/lbol, lines, indices): ", &
             d_spec, d_mag, d_scal, d_line, d_indx

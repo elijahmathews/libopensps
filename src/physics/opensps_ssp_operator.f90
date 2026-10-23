@@ -100,7 +100,7 @@ module opensps_ssp_operator
 
     public :: ssp_operator_t, ssp_operator_build, ssp_operator_evaluate, ssp_operator_free
     public :: ssp_op_model_weights, ssp_op_imf_weights, ssp_op_spmv, ssp_template_product
-    public :: ssp_operator_to_device, ssp_operator_from_device
+    public :: ssp_operator_to_device, ssp_operator_from_device, ssp_op_mod_signature, N_MOD_SIG
 
     !> Row kinds (the order of the rows within an age)
     integer, parameter, public :: ROW_MAIN = 1, ROW_SMALL = 2, ROW_DUSTY = 3, ROW_DIRECT = 4, &
@@ -110,8 +110,15 @@ module opensps_ssp_operator
     !> Composite sort key of an entry: kind, row index, local point index (< 2**KEY_COL_BITS)
     integer, parameter :: KEY_COL_BITS = 12, KEY_IDX_BITS = 44
 
+    !> Number of per-model parameters that shape S (isochrone modifications and the evolutionary
+    !> phase and mass cuts)
+    integer, parameter :: N_MOD_SIG = 10
+
     type :: ssp_operator_t
         integer :: zmet = 0, n_ages = 0, nspec = 0
+        !> The parameters S was built with (ssp_op_mod_signature of the build pset): a batch with
+        !> the IMF per model needs every model to have these values
+        real(WP) :: mod_sig(N_MOD_SIG) = 0.0_wp
         integer :: nt_lib = 0, n_main = 0, n_small = 0, n_dtpl = 0
         integer :: n_pts = 0, n_rows = 0, nnz = 0, n_slots = 0, n_direct = 0
         !> Native isochrone points (columns): initial mass and IMF bin edges; for the first point
@@ -162,6 +169,15 @@ contains
     ! BUILD (once per metallicity and non-IMF parameter set)
     ! ------------------------------------------------------------------------
 
+    !> The parameters of pset that determine S besides the metallicity: fbhb, sbss, delt, dell, pagb,
+    !> redgb, agb, agb_dust, evtype and masscut (the isochrone modifications and cuts).
+    pure function ssp_op_mod_signature(pset) result(sig)
+        type(params), intent(in) :: pset
+        real(WP) :: sig(N_MOD_SIG)
+        sig = [pset%fbhb, pset%sbss, pset%delt, pset%dell, pset%pagb, pset%redgb, pset%agb, pset%agb_dust, &
+               pset%masscut, real(pset%evtype, WP)]
+    end function ssp_op_mod_signature
+
     !> @brief Builds the IMF-independent operator S of metallicity pset%zmet.
     !> @details The context must be set up (opensps_setup). pset supplies the non-IMF parameters
     !> listed in the module notes; its IMF parameters are not used.
@@ -199,6 +215,7 @@ contains
         nz = pset%zmet
         nspec = ctx%state%nspec
         op%zmet = nz
+        op%mod_sig = ssp_op_mod_signature(pset)
         op%n_ages = ctx%state%nt
         op%nspec = nspec
         op%nt_lib = size(ctx%state%speclib, 3)

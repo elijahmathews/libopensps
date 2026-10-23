@@ -98,7 +98,7 @@ module opensps_csp_batch
                                      prepare_smoothing_kernel, smooth_columns
     use opensps_ssp, only: configure_imf_parameters
     use opensps_imf, only: imf_pack_params, IMF_NPAR, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE
-    use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_to_device
+    use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_to_device, ssp_op_mod_signature
     use opensps_ssp_batch, only: ssp_batch_age_sums
 #ifdef FSPS_CUBLAS
     use opensps_batch_photometry, only: blas, blas_init
@@ -386,6 +386,11 @@ contains
         if (imf) then
             do m = 1, n_mod
                 if (psets(m)%zmet /= psets(1)%zmet) then
+                    status = 2; return
+                end if
+                ! Isochrone modifications change which templates the stars use, so S is rebuilt for
+                ! them: not supported per model (status 2), and not different from the build either
+                if (any(ssp_op_mod_signature(psets(m)) /= ssp_op%mod_sig)) then
                     status = 2; return
                 end if
             end do
