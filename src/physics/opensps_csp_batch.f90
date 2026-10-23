@@ -1836,7 +1836,9 @@ contains
         ! loads among the pixels. The per-model offsets are formed once, outside the age loop (inside
         ! it, address arithmetic and loads were ~97% of the instructions). The arithmetic per model
         ! is unchanged (same results bit for bit).
-        integer, parameter :: MT = 8, PT = 4
+        ! Tile of PT pixels x MT models per thread. FP64 on the 780M: 4 pixels spill registers (890 ms at
+        ! N = 10^4; 658 ms with 2; 8 models x 1-4 pixels is the best range, 16 or more models 6-8 s)
+        integer, parameter :: MT = 8, PT = merge(2, 4, KP == WP)
         integer  :: m, mq, ip, npt, key, nzk
         integer, allocatable :: zord(:), starts(:)
 
