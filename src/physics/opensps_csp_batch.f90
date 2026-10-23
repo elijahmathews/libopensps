@@ -61,13 +61,14 @@ module opensps_csp_batch
     !> Redshifted colours (redshift_colors = 1) need zred_mags, each model's magnitude redshift
     !> (compute_csp_scenario's all-ages mode gives the redshift of each output's age).
     !>
-    !> IMF free per model (ssp_op: the template operator of the batch's metallicity,
-    !> opensps_ssp_operator): instead of a resident basis, each model's age sums come from the
-    !> operator with its own imf1, imf2, imf3, vdmc and mdave (imf_type, the IMF mass limits and
-    !> the isochrone modifications are the operator's and the context's, shared by the batch;
-    !> opensps_ssp_batch). The rest of the batch is unchanged. Not with per-model metallicity,
-    !> ssp_weights_z, SSP-level nebular emission (add_neb_emission = 2), X-ray binaries or the
-    !> instrumental LSF (status 2).
+    !> IMF free per model (ssp_ops: the template operators, opensps_ssp_operator and
+    !> opensps_ssp_batch): instead of a resident basis, each model's age sums come from the
+    !> operators with its own imf1, imf2, imf3, vdmc and mdave (imf_type, the IMF mass limits and
+    !> the isochrone modifications are the operators' and the context's, shared by the batch). One
+    !> operator (the batch's metallicity) or one per metallicity of the context, in which case the
+    !> metallicity is free per model too (logzsol; the SSP of a model is the blend of its two
+    !> bracketing metallicities' SSPs). The rest of the batch is unchanged. Not with ssp_weights_z,
+    !> SSP-level nebular emission (add_neb_emission = 2), X-ray binaries or the instrumental LSF (status 2).
     !>
     !> Not supported (status 2): redshifted colours without zred_mags, and models with tage <= 0
     !> without a weight matrix (the all-ages output of compute_csp_scenario is a batch with a
@@ -98,8 +99,8 @@ module opensps_csp_batch
                                      prepare_smoothing_kernel, smooth_columns
     use opensps_ssp, only: configure_imf_parameters
     use opensps_imf, only: imf_pack_params, IMF_NPAR, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE
-    use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_to_device, ssp_op_mod_signature
-    use opensps_ssp_batch, only: ssp_batch_age_sums, ssp_batch_age_sums_z, ssp_opset_t
+    use opensps_ssp_operator, only: ssp_op_mod_signature
+    use opensps_ssp_batch, only: ssp_batch_age_sums_z, ssp_opset_t
 #ifdef FSPS_CUBLAS
     use opensps_batch_photometry, only: blas, blas_init
     use cublas
@@ -205,12 +206,13 @@ contains
     !> @param[in]    zred_mags Optional redshift of each model's magnitudes (N), in place of its
     !>                       zred for the magnitudes only: the spectrum, its IGM absorption and
     !>                       the SFH stay at zred (compute_csp_scenario's redshift_colors = 1).
-    !> @param[inout] ssp_op  Optional template operator (ssp_operator_build, for psets(1)%zmet and
-    !>                       the context's non-IMF parameters): the IMF free per model, no basis
-    !>                       needed (moved to the device on first use in device builds).
+    !> @param[inout] ssp_ops Optional set of template operators (ssp_opset_build of ssp_operator_build
+    !>                       operators, for the context's non-IMF parameters): the IMF free per model, no
+    !>                       basis needed (moved to the device on first use in device builds). One operator
+    !>                       (psets%zmet) or one per metallicity of the context (logzsol per model).
     subroutine compute_csp_batch(ctx, psets, mags, status, spec, mass, lbol, mdust, sfr, emlines, indx, ssp_weights, &
                                  spec_young, spec_old, mass_young, mass_old, lbol_young, lbol_old, zred_mags, &
-                                 ssp_weights_z, ssp_op, ssp_ops)
+                                 ssp_weights_z, ssp_ops)
         type(opensps_context_t), intent(inout) :: ctx
 #if defined(__flang__)
         type(params), intent(in)            :: psets(:)
@@ -227,13 +229,12 @@ contains
         real(WP), intent(out), optional     :: mass_young(:), mass_old(:), lbol_young(:), lbol_old(:)
         real(WP), intent(in), optional      :: zred_mags(:)
         real(WP), intent(in), optional      :: ssp_weights_z(:,:,:)
-        type(ssp_operator_t), intent(inout), optional :: ssp_op
         type(ssp_opset_t), intent(inout), optional :: ssp_ops
 
         integer :: n_mod, nt, nspec, nbands, m, k
         real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk
         logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw, host_m, imf, dev, zimf
-        ! IMF per model (ssp_op): IMF parameters (IMF_NPAR x N), per age and model the surviving mass
+        ! IMF per model (ssp_ops): IMF parameters (IMF_NPAR x N), per age and model the surviving mass
         ! and linear L_bol, the SFH weights (FP64, masked as w2), and a placeholder basis
         real(WP), allocatable :: pm(:,:), smass(:,:), slum(:,:), wsfh(:,:)
         real(KP), allocatable :: nobasis(:,:,:)
@@ -293,53 +294,42 @@ contains
         ! ------------------------------------------------------------------
         ! 0. Checks
         ! ------------------------------------------------------------------
-        zimf = present(ssp_ops)
-        imf = present(ssp_op) .or. zimf
-        if (present(ssp_op) .and. zimf) then
-            status = 3; return
-        end if
+        imf = present(ssp_ops)
+        zimf = .false.
+        if (imf) zimf = ssp_ops%nz > 1
         if (ctx%state%check_sps_setup == 0 .or. (.not. imf .and. .not. allocated(ctx%state%ssp_basis_spec))) then
             status = 1; return
         end if
-        if (imf .and. .not. zimf) then
-            if (ssp_op%n_pts == 0 .or. .not. allocated(ssp_op%pt_q)) then
+        if (imf) then
+            ! The operators of the SSPs (one metallicity: the batch's; several: one per metallicity of
+            ! the context, the metallicity free per model)
+            if (ssp_ops%nz < 1 .or. .not. allocated(ssp_ops%ops)) then
                 status = 1; return
             end if
-            if (ssp_op%nspec /= nspec .or. ssp_op%n_ages /= nt .or. ssp_op%zmet /= psets(1)%zmet) then
-                status = 3; return
-            end if
-            if (present(ssp_weights_z) .or. ctx%add_neb_emission_val == 2 .or. ctx%add_xrb_emission_val == 1 .or. &
-                ctx%smooth_lsf_val == 1 .or. .not. all(ssp_op%age_on)) then
-                status = 2; return
-            end if
-        end if
-        if (zimf) then
-            ! The metallicity free per model: one operator per metallicity of the context, device builds
-            if (ssp_ops%nz /= ctx%state%nz .or. .not. allocated(ssp_ops%ops)) then
+            if (zimf .and. ssp_ops%nz /= ctx%state%nz) then
                 status = 3; return
             end if
             do m = 1, ssp_ops%nz
                 if (ssp_ops%ops(m)%n_pts == 0 .or. .not. allocated(ssp_ops%ops(m)%pt_q)) then
                     status = 1; return
                 end if
-                if (ssp_ops%ops(m)%nspec /= nspec .or. ssp_ops%ops(m)%n_ages /= nt .or. ssp_ops%ops(m)%zmet /= m) then
+                if (ssp_ops%ops(m)%nspec /= nspec .or. ssp_ops%ops(m)%n_ages /= nt) then
+                    status = 3; return
+                end if
+                if (zimf .and. ssp_ops%ops(m)%zmet /= m) then
                     status = 3; return
                 end if
                 if (.not. all(ssp_ops%ops(m)%age_on)) then
                     status = 2; return
                 end if
             end do
+            if (.not. zimf .and. ssp_ops%ops(1)%zmet /= psets(1)%zmet) then
+                status = 3; return
+            end if
             if (present(ssp_weights_z) .or. ctx%add_neb_emission_val == 2 .or. ctx%add_xrb_emission_val == 1 .or. &
                 ctx%smooth_lsf_val == 1) then
                 status = 2; return
             end if
-#if defined(OMP_TARGET)
-            if (.not. ctx%on_device) then
-                status = 2; return
-            end if
-#else
-            status = 2; return
-#endif
         end if
         if (size(mags, 1) < nbands .or. size(mags, 2) < n_mod) then
             status = 3; return
@@ -384,8 +374,8 @@ contains
         end if
         ! Weights over ages and metallicities: every resident basis summed with its own weights
         nzb = 1
-        if (zimf) nzb = ssp_ops%nz
         if (.not. imf) nzb = size(ctx%state%ssp_basis_spec, 3)
+        if (imf) nzb = ssp_ops%nz
         zw = present(ssp_weights_z)
         nzw = 1
         if (zw) then
@@ -426,14 +416,8 @@ contains
                 end if
                 ! Isochrone modifications change which templates the stars use, so S is rebuilt for
                 ! them: not supported per model (status 2), and not different from the build either
-                if (zimf) then
-                    if (any(ssp_op_mod_signature(psets(m)) /= ssp_ops%ops(1)%mod_sig)) then
-                        status = 2; return
-                    end if
-                else
-                    if (any(ssp_op_mod_signature(psets(m)) /= ssp_op%mod_sig)) then
-                        status = 2; return
-                    end if
+                if (any(ssp_op_mod_signature(psets(m)) /= ssp_ops%ops(1)%mod_sig)) then
+                    status = 2; return
                 end if
             end do
         end if
@@ -573,7 +557,6 @@ contains
             end do
             nobasis = 0.0_KP
 #if defined(OMP_TARGET)
-            if (.not. zimf) call ssp_operator_to_device(ssp_op)
             dev = ctx%on_device
 #endif
         end if
@@ -689,19 +672,9 @@ contains
                     end if
                 end do
             end do
-            if (zimf) then
-                call ssp_batch_age_sums_z(ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &
-                                          ssp_ops, zlo, zhi, dz, pm, wsfh, it_tesc, nb%nt_neb, &
-                                          nb%whlylim, nb%fesc, yo, smass, slum, nb%q0)
-            else
-                call ssp_batch_age_sums(dev, ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &
-                                        ssp_op%n_pts, ssp_op%n_eff, pm, wsfh, it_tesc, ssp_op%pt_ptr, ssp_op%pt_mini, &
-                                        ssp_op%pt_m1, ssp_op%pt_m2, ssp_op%pt_first, ssp_op%pt_cm, ssp_op%pt_cl, &
-                                        ssp_op%pt_q, ssp_op%age_mmax, ssp_op%pt_age, ssp_op%eff_ptr, ssp_op%eff_pt, &
-                                        ssp_op%eff_val, ssp_op%k_age, ssp_op%n_seg, ssp_op%seg_ptr, ssp_op%seg_first, &
-                                        ssp_op%n_pc, ssp_op%pc_ptr, ssp_op%age_pc, &
-                                        ssp_op%etpl, nb%nt_neb, nb%whlylim, nb%fesc, yo, smass, slum, nb%q0)
-            end if
+            call ssp_batch_age_sums_z(ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &
+                                      ssp_ops, zlo, zhi, dz, pm, wsfh, it_tesc, nb%nt_neb, nb%whlylim, nb%fesc, yo, &
+                                      smass, slum, nb%q0)
         end if
 
         associate (bas_mass => ctx%state%ssp_basis_mass, bas_lbol => ctx%state%ssp_basis_lbol)

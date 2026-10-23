@@ -397,6 +397,17 @@ contains
     !> The IMF-per-model batch against a per-model SSP basis (generate_ssp_grid) for every IMF type, a
     !> range of the per-model parameters (Kroupa slopes, van Dokkum characteristic mass, Dave break
     !> mass) and of the shared mass limits.
+    !> The operator set of one metallicity (pset%zmet): ssp_operator_build, as a set of one operator
+    subroutine build_set(pset, set)
+        type(PARAMS), intent(in) :: pset
+        type(ssp_opset_t), intent(inout) :: set
+        type(ssp_operator_t), allocatable :: ops(:)
+
+        allocate(ops(1))
+        call ssp_operator_build(ctx, pset, ops(1))
+        call ssp_opset_build(ops, set)
+    end subroutine build_set
+
     subroutine check_imf_per_model()
         call imf_case("Kroupa slopes varied", 2, 0.08_wp, 120.0_wp)
         call imf_case("Salpeter", 0, 0.08_wp, 120.0_wp)
@@ -417,7 +428,7 @@ contains
     !> or isochrone modifications differ from the operator's, and accepts models that share them.
     subroutine check_imf_unsupported()
         type(PARAMS) :: pset, psets(3)
-        type(ssp_operator_t) :: op
+        type(ssp_opset_t) :: op
         real(WP), allocatable :: mags(:, :)
         integer :: m, status
         character(len=16) :: names(7)
@@ -432,20 +443,20 @@ contains
         call set_model(1, 0.5_wp)
         call opensps_context_prepare_pset(ctx)
         call opensps_context_get_pset(ctx, pset)
-        call ssp_operator_build(ctx, pset, op)
+        call build_set(pset, op)
         do m = 1, 3
             call set_model(m, 0.5_wp)
             call opensps_context_prepare_pset(ctx)
             call opensps_context_get_pset(ctx, psets(m))
         end do
-        call compute_csp_batch(ctx, psets, mags, status, ssp_op=op)
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
         call assert_true(status == 0, "same modifications and metallicity: status 0", total_tests, total_failures)
         do j = 1, size(names)
             call set_float(trim(names(j)), vals(j))
             call opensps_context_prepare_pset(ctx)
             call opensps_context_get_pset(ctx, psets(2))
             call set_float(trim(names(j)), 0.0_wp)
-            call compute_csp_batch(ctx, psets, mags, status, ssp_op=op)
+            call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
             call assert_true(status == 2, trim(names(j)) // " varied in one model: status 2", total_tests, total_failures)
             call set_model(2, 0.5_wp)
             call opensps_context_prepare_pset(ctx)
@@ -455,29 +466,29 @@ contains
         call opensps_context_prepare_pset(ctx)
         call opensps_context_get_pset(ctx, psets(2))
         call set_int('zmet', 10)
-        call compute_csp_batch(ctx, psets, mags, status, ssp_op=op)
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
         call assert_true(status == 2, "metallicity varied in one model: status 2", total_tests, total_failures)
-        call ssp_operator_free(op)
+        call ssp_opset_free(op)
         call set_float('fbhb', 0.3_wp)
         call set_model(1, 0.5_wp)
         call opensps_context_prepare_pset(ctx)
         call opensps_context_get_pset(ctx, pset)
-        call ssp_operator_build(ctx, pset, op)
+        call build_set(pset, op)
         do m = 1, 3
             call set_model(m, 0.5_wp)
             call opensps_context_prepare_pset(ctx)
             call opensps_context_get_pset(ctx, psets(m))
         end do
-        call compute_csp_batch(ctx, psets, mags, status, ssp_op=op)
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
         call assert_true(status == 0, "operator built with fbhb = 0.3, models with 0.3: status 0", &
                          total_tests, total_failures)
         call set_float('fbhb', 0.0_wp)
         call opensps_context_prepare_pset(ctx)
         call opensps_context_get_pset(ctx, psets(3))
-        call compute_csp_batch(ctx, psets, mags, status, ssp_op=op)
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
         call assert_true(status == 2, "operator built with fbhb = 0.3, one model with 0: status 2", &
                          total_tests, total_failures)
-        call ssp_operator_free(op)
+        call ssp_opset_free(op)
         call set_int('imf_type', 1)
     end subroutine check_imf_unsupported
 
@@ -486,7 +497,7 @@ contains
         integer, intent(in) :: imf_type
         real(WP), intent(in) :: mlo, mhi
         type(PARAMS) :: pset, psets(N_MOD)
-        type(ssp_operator_t) :: op
+        type(ssp_opset_t) :: op
         real(WP), allocatable :: spec(:, :), mags(:, :), ref_spec(:, :), ref_mags(:, :), eml(:, :), ref_eml(:, :)
         real(WP), allocatable :: s1(:, :), g1(:, :), e1(:, :)
         real(WP) :: mass(N_MOD), lbol(N_MOD), mdust(N_MOD), ref_mass(N_MOD), ref_lbol(N_MOD), ref_mdust(N_MOD)
@@ -513,7 +524,7 @@ contains
         call set_model(1, 0.5_wp)
         call opensps_context_prepare_pset(ctx)
         call opensps_context_get_pset(ctx, pset)
-        call ssp_operator_build(ctx, pset, op)
+        call build_set(pset, op)
         do m = 1, N_MOD
             call set_model(m, 0.5_wp)
             call set_float('imf1', imf(1, m)); call set_float('imf2', imf(2, m)); call set_float('imf3', imf(3, m))
@@ -522,7 +533,7 @@ contains
             call opensps_context_get_pset(ctx, psets(m))
         end do
         call compute_csp_batch(ctx, psets, mags, status, spec=spec, mass=mass, lbol=lbol, mdust=mdust, emlines=eml, &
-                               ssp_op=op)
+                               ssp_ops=op)
         if (status /= 0) write(*, '(A,I0)') "# status = ", status
         call assert_true(status == 0, label // ": status 0", total_tests, total_failures)
 
@@ -550,7 +561,7 @@ contains
         call assert_true(maxval(abs(mdust / ref_mdust - 1.0_wp)) <= SPEC_RTOL, label // ": dust mass", total_tests, total_failures)
         call assert_true(d_line <= SPEC_RTOL, label // ": emission lines", total_tests, total_failures)
 
-        call ssp_operator_free(op)
+        call ssp_opset_free(op)
         call set_int('imf_type', 1)
         call set_float('imf1', 1.3_wp); call set_float('imf2', 2.3_wp); call set_float('imf3', 2.3_wp)
         call set_float('vdmc', 0.08_wp); call set_float('mdave', 0.5_wp)
