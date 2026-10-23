@@ -432,6 +432,8 @@ contains
     !> With x = log10 m and k = ln 10:
     !>   number: k sigma sqrt(pi/2) [erf((x2 - a)/(sigma sqrt 2)) - erf((x1 - a)/(sigma sqrt 2))], a = log_mc
     !>   mass:   the same about b = a + k sigma^2, times exp(k a + k^2 sigma^2 / 2)
+    !> Bins narrower than NARROW_DZ in the erf argument are integrated by Gauss-Legendre instead (no
+    !> cancellation).
     pure function integrate_lognormal(m1, m2, log_mc, sigma2, mass_weighted) result(val)
 #ifdef OMP_TARGET
         !$omp declare target
@@ -440,7 +442,11 @@ contains
         logical,  intent(in) :: mass_weighted
         real(WP) :: val
         real(WP), parameter :: K = log(10.0_wp)
-        real(WP) :: sig, centre, scale
+        real(WP), parameter :: NARROW_DZ = 0.1_wp
+        real(WP), parameter :: GL_X1 = 0.5384693101056831_wp, GL_X2 = 0.9061798459386640_wp, &
+                               GL_W0 = 0.5688888888888889_wp, GL_W1 = 0.4786286704993665_wp, &
+                               GL_W2 = 0.2369268850561891_wp
+        real(WP) :: sig, centre, scale, z1, z2, zc, zh, q
         sig = sqrt(sigma2)
         if (mass_weighted) then
             centre = log_mc + K * sigma2
@@ -449,8 +455,22 @@ contains
             centre = log_mc
             scale = 1.0_wp
         end if
-        val = scale * K * sig * sqrt(0.5_wp * acos(-1.0_wp)) * &
-              (erf((log10(m2) - centre) / (sig * sqrt(2.0_wp))) - erf((log10(m1) - centre) / (sig * sqrt(2.0_wp))))
+        z1 = (log10(m1) - centre) / (sig * sqrt(2.0_wp))
+        z2 = (log10(m2) - centre) / (sig * sqrt(2.0_wp))
+        if (z2 - z1 < NARROW_DZ) then
+            ! Narrow bin: erf(z2) - erf(z1) loses digits to cancellation (a 1-ulp difference between
+            ! two erf implementations, e.g. a device libm, becomes ~1e-9 of the bin for isochrone
+            ! bins), so integrate exp(-z^2) over [z1, z2] by 5-point Gauss-Legendre (error < 1e-16
+            ! of the bin for this width)
+            zc = 0.5_wp * (z1 + z2)
+            zh = 0.5_wp * (z2 - z1)
+            q = GL_W0 * exp(-zc * zc) &
+                + GL_W1 * (exp(-(zc - zh * GL_X1)**2) + exp(-(zc + zh * GL_X1)**2)) &
+                + GL_W2 * (exp(-(zc - zh * GL_X2)**2) + exp(-(zc + zh * GL_X2)**2))
+            val = scale * K * sig * sqrt(2.0_wp) * zh * q
+        else
+            val = scale * K * sig * sqrt(0.5_wp * acos(-1.0_wp)) * (erf(z2) - erf(z1))
+        end if
     end function integrate_lognormal
 
     !> @brief Integral of coeff * m^(-alpha) or coeff * m^(1-alpha) over [lo, hi].
