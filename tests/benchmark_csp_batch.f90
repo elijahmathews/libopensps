@@ -35,6 +35,7 @@ program benchmark_csp_batch
     character(len=32) :: arg, config = 'basic'
     logical :: full, zvar = .false., imf = .false.
     type(ssp_operator_t) :: op
+    type(ssp_operator_t), allocatable :: ops(:)
     real(WP), allocatable :: spec_z(:, :, :), mass_z(:, :), lbol_z(:, :)
     integer :: z
     real(WP), allocatable :: indx(:, :)
@@ -59,7 +60,9 @@ program benchmark_csp_batch
     allocate(ctx)
     call opensps_create(ctx)
     ctx%pset%zmet = 10
-    call opensps_setup(ctx, 10, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
+    ! (zin = 0: the isochrones and libraries of every metallicity, for the configs that vary it;
+    ! with zin = 10 the other metallicities would be empty)
+    call opensps_setup(ctx, merge(0, 10, zvar), isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
     call opensps_context_move_to_device(ctx)
     call set_int('imf_type', merge(2, 1, imf))
     call set_int('zmet', 10)
@@ -91,7 +94,7 @@ program benchmark_csp_batch
     call generate_ssp_grid(ctx, pset, mass_ssp, lbol_ssp, spec_ssp)
     call opensps_context_update_ssp_basis(ctx, reshape(spec_ssp, [nspec, ntfull, 1]), &
                                        reshape(mass_ssp, [ntfull, 1]), reshape(lbol_ssp, [ntfull, 1]), 1)
-    if (zvar) then
+    if (zvar .and. .not. imf) then
         ! The bases of all metallicities (the single call keeps the zmet = 10 basis)
         allocate(spec_z(nspec, ntfull, ctx%state%nz), mass_z(ntfull, ctx%state%nz), lbol_z(ntfull, ctx%state%nz))
         do z = 1, ctx%state%nz
@@ -106,7 +109,24 @@ program benchmark_csp_batch
         call opensps_context_get_pset(ctx, pset)
     end if
 
-    if (imf) then
+    if (imf .and. zvar) then
+        ! One operator per metallicity (the metallicity free per model: ssp_ops)
+        call system_clock(t0)
+        allocate(ops(ctx%state%nz))
+        do z = 1, ctx%state%nz
+            call set_int('zmet', z)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pset)
+            call opensps_context_set_pset(ctx, pset)
+            call ssp_operator_build(ctx, pset, ops(z))
+        end do
+        call set_int('zmet', 10)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        call opensps_context_set_pset(ctx, pset)
+        call system_clock(t1)
+        write(*, '(A,F14.3)') 'ssp_operators_build_s ', real(t1 - t0, WP) / rate
+    else if (imf) then
         call system_clock(t0)
         call ssp_operator_build(ctx, pset, op)
         call system_clock(t1)
@@ -142,7 +162,7 @@ program benchmark_csp_batch
     end if
 
     ! Batched, magnitudes only and with spectra
-    if (zvar) then
+    if (zvar .and. .not. imf) then
         ctx%state%ssp_basis_is_dirty = .true.
         call opensps_context_update_ssp_basis(ctx, spec_z, mass_z, lbol_z, ctx%state%nz)
     end if
@@ -214,7 +234,17 @@ contains
     subroutine batch(n, with_spec)
         integer, intent(in) :: n
         logical, intent(in) :: with_spec
-        if (imf .and. full .and. with_spec) then
+        if (imf .and. zvar) then
+            if (full .and. with_spec) then
+                call compute_csp_batch(ctx, psets(1:n), mags, status, spec=spec, indx=indx, ssp_ops=ops)
+            else if (full) then
+                call compute_csp_batch(ctx, psets(1:n), mags, status, indx=indx, ssp_ops=ops)
+            else if (with_spec) then
+                call compute_csp_batch(ctx, psets(1:n), mags, status, spec=spec, ssp_ops=ops)
+            else
+                call compute_csp_batch(ctx, psets(1:n), mags, status, ssp_ops=ops)
+            end if
+        else if (imf .and. full .and. with_spec) then
             call compute_csp_batch(ctx, psets(1:n), mags, status, spec=spec, indx=indx, ssp_op=op)
         else if (imf .and. full) then
             call compute_csp_batch(ctx, psets(1:n), mags, status, indx=indx, ssp_op=op)
