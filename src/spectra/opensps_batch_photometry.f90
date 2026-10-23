@@ -144,7 +144,7 @@ contains
             else
                 call observed_frame_t(n_col, nspec, g%i_lo, g%t_obs, g%wl, spec, fobs)
             end if
-            call band_fluxes(n_col, nbands, g%bands_t, g%j_lo, g%j_hi, do_band, g%wtl, fobs, fband)
+            call band_fluxes(n_col, nspec, nbands, g%bands_t, g%j_lo, g%j_hi, do_band, g%wtl, fobs, fband)
             call magnitudes_from_fluxes(ctx, n_col, nbands, do_band, dist, fband, mags_l)
 #ifdef OMP_TARGET
             !$omp end target data
@@ -164,10 +164,10 @@ contains
     !> On the device (one thread per band and spectrum; the host loop was ~2 us per spectrum).
     subroutine magnitudes_from_fluxes(ctx, n_col, nbands, do_band, dist, fband, mags_l)
         type(opensps_context_t), intent(in) :: ctx
-        integer, intent(in)              :: n_col, nbands, do_band(:)
-        real(WP), intent(in)             :: dist(:)   ! distance term per column (present)
-        real(WP), intent(in)             :: fband(:,:)
-        real(WP), intent(out)            :: mags_l(:,:)
+        integer, intent(in)              :: n_col, nbands, do_band(nbands)
+        real(WP), intent(in)             :: dist(n_col)   ! distance term per column (present)
+        real(WP), intent(in)             :: fband(nbands, n_col)
+        real(WP), intent(out)            :: mags_l(nbands, n_col)
 
         integer  :: m, b
         real(WP) :: qnan, v, vv
@@ -376,15 +376,16 @@ contains
 
         ! The operator's arrays passed as arrays: device code does not refer to the cache's
         ! derived type, which is mapped only through its components
-        call smooth_kernel(ctx%state%nspec, n_col, ctx%state%batch%sm_lo, ctx%state%batch%sm_hi, &
-                           ctx%state%batch%sm_off, ctx%state%batch%sm_coef, spec)
+        call smooth_kernel(ctx%state%nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
+                           ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_coef, spec)
     end subroutine smooth_columns
 
-    subroutine smooth_kernel(nspec, n_col, sm_lo, sm_hi, sm_off, sm_coef, spec)
-        integer, intent(in)                 :: nspec, n_col
-        integer, intent(in), contiguous     :: sm_lo(:), sm_hi(:), sm_off(:)
-        real(WP), intent(in), contiguous    :: sm_coef(:)
-        real(KP), intent(inout)             :: spec(:,:)
+    subroutine smooth_kernel(nspec, n_col, ncoef, sm_lo, sm_hi, sm_off, sm_coef, spec)
+        ! Explicit-shape arguments: no array descriptors to map in every launch
+        integer, intent(in)                 :: nspec, n_col, ncoef
+        integer, intent(in)                 :: sm_lo(nspec), sm_hi(nspec), sm_off(nspec)
+        real(WP), intent(in)                :: sm_coef(ncoef)
+        real(KP), intent(inout)             :: spec(nspec, n_col)
 
         real(KP), allocatable :: sm(:,:)
         integer  :: m, i, k, lo, off
@@ -524,10 +525,10 @@ contains
 
     !> observed_frame, written transposed (models, pixels) for band_fluxes.
     subroutine observed_frame_t(n_mod, nspec, i_lo, t_obs, wl, total, fobs_t)
-        integer, intent(in)     :: n_mod, nspec, i_lo(:)
-        real(WP), intent(in)    :: t_obs(:)
-        real(KP), intent(in)    :: wl(:), total(:,:)
-        real(KP), intent(out)   :: fobs_t(:,:)
+        integer, intent(in)     :: n_mod, nspec, i_lo(nspec)
+        real(WP), intent(in)    :: t_obs(nspec)
+        real(KP), intent(in)    :: wl(nspec), total(nspec, n_mod)
+        real(KP), intent(out)   :: fobs_t(n_mod, nspec)
 
         integer  :: m, j, il
         real(WP) :: v
@@ -632,12 +633,12 @@ contains
 
     !> Band fluxes: the trapezoid filter integral of fobs over each band's support, compensated at
     !> FP32 kernel precision.
-    subroutine band_fluxes(n_mod, nbands, bands_t, j_lo, j_hi, do_band, wt, fobs_t, fband)
-        integer, intent(in)     :: n_mod, nbands, j_lo(:), j_hi(:), do_band(:)
+    subroutine band_fluxes(n_mod, nspec, nbands, bands_t, j_lo, j_hi, do_band, wt, fobs_t, fband)
+        integer, intent(in)     :: n_mod, nspec, nbands, j_lo(nbands), j_hi(nbands), do_band(nbands)
         !> Observed spectrum / lambda, transposed (models, pixels): the threads of a gang read
         !> consecutive models
-        real(KP), intent(in)    :: bands_t(:,:), wt(:), fobs_t(:,:)
-        real(WP), intent(out)   :: fband(:,:)
+        real(KP), intent(in)    :: bands_t(nbands, nspec), wt(nspec), fobs_t(n_mod, nspec)
+        real(WP), intent(out)   :: fband(nbands, n_mod)
 
         !> Models per gang: the threads of a gang share one band, hence one trip count (no
         !> divergence)
