@@ -614,7 +614,8 @@ contains
         if (zw) then
             call age_sums_w(nspec, nt, nzw, n_mod, ctx%state%ssp_basis_spec, wz, it_tesc, yo)
         else if (zmode) then
-            call age_sums_z(nspec, nt, n_mod, ctx%state%ssp_basis_spec, w2, it_tesc, zlo, zhi, dz, yo)
+            call age_sums_z(nspec, nt, size(ctx%state%ssp_basis_spec, 3), n_mod, ctx%state%ssp_basis_spec, w2, w2, &
+                            it_tesc, zlo, zhi, dz, yo)
         else
             call age_sums(nspec, nt, n_mod, ctx%state%ssp_basis_spec(:, :, 1), w2, it_tesc, yo)
         end if
@@ -1702,20 +1703,23 @@ contains
     !> Age sums with per-model metallicity: each model's basis is (1 - dz) basis(:, :, zlo) +
     !> dz basis(:, :, zhi), formed at kernel precision term by term (portable kernel; also used in
     !> cuBLAS builds). One pass over the ages (young or old per model), 4 models per thread.
-    subroutine age_sums_z(nspec, nt, n_mod, basis, w2, it_tesc, zlo, zhi, dz, yo)
-        integer, intent(in)              :: nspec, nt, n_mod, it_tesc(:), zlo(:), zhi(:)
-        real(KP), intent(in), contiguous :: basis(:,:,:), w2(:,:)
-        real(WP), intent(in)             :: dz(:)
-        real(KP), intent(out)            :: yo(:,:)
+    subroutine age_sums_z(nspec, nt, nz, n_mod, basis, w2, w2flat, it_tesc, zlo, zhi, dz, yo)
+        ! Explicit-shape dummies (no array descriptors in the kernel)
+        integer, intent(in)              :: nspec, nt, nz, n_mod, it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
+        real(KP), intent(in)             :: basis(nspec, nt, nz), w2(nt, 2 * n_mod), w2flat(nt * 2 * n_mod)
+        real(WP), intent(in)             :: dz(n_mod)
+        real(KP), intent(out)            :: yo(nspec, 2 * n_mod)
 #if defined(OMP_TARGET) && defined(__flang__)
-        ! LLVM flang / AMD (memory bound, ~50 GB of basis reads per call at N = 10^4): the models are
-        ! visited sorted by their metallicity interval, so that a tile of MT consecutive models
-        ! usually shares one pair of basis slabs, which is then loaded once for the tile instead of
-        ! once per model. The arithmetic per model is unchanged (same results bit for bit).
-        integer, parameter :: MT = 8
-        integer  :: m, mq, i, k, l, mm(MT), zl, zh, key, nzk
+        ! LLVM flang / AMD. The models are visited sorted by their metallicity interval, so that a tile
+        ! of MT consecutive models usually shares one pair of basis slabs; each thread does PT pixels
+        ! (strided, so that the loads are coalesced) of the tile, which shares the per-model weight
+        ! loads among the pixels. The per-model offsets are formed once, outside the age loop (inside
+        ! it, address arithmetic and loads were ~97% of the instructions). The arithmetic per model
+        ! is unchanged (same results bit for bit).
+        integer, parameter :: MT = 8, PT = 4
+        integer  :: m, mq, ip, npt, i, k, l, p, mm(MT), ii(PT), zl, zh, key, nzk, it(MT), oy(MT), oo(MT)
         integer, allocatable :: zord(:), starts(:)
-        real(KP) :: b_lo, b_hi, bk, y(MT), o(MT), d(MT)
+        real(KP) :: b_lo(PT), b_hi(PT), bk, wy, y(PT, MT), o(PT, MT), d(MT)
         logical  :: same
 
         nzk = maxval(zhi(1:n_mod))
@@ -1733,16 +1737,23 @@ contains
             starts(zlo(m)) = starts(zlo(m)) + 1
         end do
 
-        !$omp target teams distribute parallel do collapse(2) private(k, l, b_lo, b_hi, bk, mm, y, o, d, same, zl, zh) &
-        !$omp map(to: zord)
+        npt = (nspec + PT - 1) / PT
+        !$omp target teams distribute parallel do collapse(2) &
+        !$omp private(k, l, p, b_lo, b_hi, bk, wy, mm, ii, y, o, d, same, zl, zh, it, oy, oo) map(to: zord)
         do mq = 1, (n_mod + MT - 1) / MT
-            do i = 1, nspec
+            do ip = 1, npt
                 do l = 1, MT
                     mm(l) = zord(min((mq - 1) * MT + l, n_mod))
                     d(l) = real(dz(mm(l)), KP)
-                    y(l) = 0.0_KP
-                    o(l) = 0.0_KP
+                    it(l) = it_tesc(mm(l))
+                    oy(l) = (mm(l) - 1) * nt          ! offsets of the model's young and old weight columns
+                    oo(l) = (n_mod + mm(l) - 1) * nt
                 end do
+                do p = 1, PT
+                    ii(p) = min(ip + (p - 1) * npt, nspec)
+                end do
+                y = 0.0_KP
+                o = 0.0_KP
                 same = .true.
                 do l = 2, MT
                     if (zlo(mm(l)) /= zlo(mm(1)) .or. zhi(mm(l)) /= zhi(mm(1))) same = .false.
@@ -1751,32 +1762,50 @@ contains
                     zl = zlo(mm(1))
                     zh = zhi(mm(1))
                     do k = 1, nt
-                        b_lo = basis(i, k, zl)
-                        b_hi = basis(i, k, zh)
+                        do p = 1, PT
+                            b_lo(p) = basis(ii(p), k, zl)
+                            b_hi(p) = basis(ii(p), k, zh)
+                        end do
                         do l = 1, MT
-                            bk = (1.0_KP - d(l)) * b_lo + d(l) * b_hi
-                            if (k <= it_tesc(mm(l))) then
-                                y(l) = y(l) + w2(k, mm(l)) * bk
+                            if (k <= it(l)) then
+                                wy = w2flat(oy(l) + k)
+                                do p = 1, PT
+                                    bk = (1.0_KP - d(l)) * b_lo(p) + d(l) * b_hi(p)
+                                    y(p, l) = y(p, l) + wy * bk
+                                end do
                             else
-                                o(l) = o(l) + w2(k, n_mod + mm(l)) * bk
+                                wy = w2flat(oo(l) + k)
+                                do p = 1, PT
+                                    bk = (1.0_KP - d(l)) * b_lo(p) + d(l) * b_hi(p)
+                                    o(p, l) = o(p, l) + wy * bk
+                                end do
                             end if
                         end do
                     end do
                 else
                     do k = 1, nt
                         do l = 1, MT
-                            bk = (1.0_KP - d(l)) * basis(i, k, zlo(mm(l))) + d(l) * basis(i, k, zhi(mm(l)))
-                            if (k <= it_tesc(mm(l))) then
-                                y(l) = y(l) + w2(k, mm(l)) * bk
+                            if (k <= it(l)) then
+                                wy = w2flat(oy(l) + k)
+                                do p = 1, PT
+                                    bk = (1.0_KP - d(l)) * basis(ii(p), k, zlo(mm(l))) + d(l) * basis(ii(p), k, zhi(mm(l)))
+                                    y(p, l) = y(p, l) + wy * bk
+                                end do
                             else
-                                o(l) = o(l) + w2(k, n_mod + mm(l)) * bk
+                                wy = w2flat(oo(l) + k)
+                                do p = 1, PT
+                                    bk = (1.0_KP - d(l)) * basis(ii(p), k, zlo(mm(l))) + d(l) * basis(ii(p), k, zhi(mm(l)))
+                                    o(p, l) = o(p, l) + wy * bk
+                                end do
                             end if
                         end do
                     end do
                 end if
                 do l = 1, MT
-                    yo(i, mm(l)) = y(l)
-                    yo(i, n_mod + mm(l)) = o(l)
+                    do p = 1, PT
+                        yo(ii(p), mm(l)) = y(p, l)
+                        yo(ii(p), n_mod + mm(l)) = o(p, l)
+                    end do
                 end do
             end do
         end do
