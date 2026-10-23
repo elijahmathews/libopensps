@@ -1988,6 +1988,48 @@ contains
 
         integer  :: m, i
         real(KP) :: sa, sn, se, ca, cn, ce
+#if defined(OMP_TARGET) && defined(__flang__)
+        !> Partial sums per model: each takes every NCH-th pixel (consecutive threads, consecutive pixels)
+        integer, parameter :: NCH = 64
+        real(KP), allocatable :: part(:,:,:)
+        integer  :: c
+
+        ! LLVM flang rewrites the inner loop of a teams loop to a serial loop: one thread summed all
+        ! pixels of a model (33 us per model on the 780M, ~10x its memory time). Here (model, chunk)
+        ! pairs are threads and a second kernel adds the NCH partial sums
+        allocate(part(3, NCH, n_mod))
+        !$omp target data map(alloc: part)
+        !$omp target teams distribute parallel do collapse(2) private(sa, sn, se, i)
+        do m = 1, n_mod
+            do c = 1, NCH
+                sa = 0.0_KP; sn = 0.0_KP; se = 0.0_KP
+                if (emis(m)) then
+                    do i = c, nspec - 1, NCH
+                        sa = sa + wt(i) * (absorbed(i, m) + absorbed(i + 1, m))
+                        sn = sn + wt(i) * (yo(i, n_mod + m) + yo(i + 1, n_mod + m))
+                        se = se + wt(i) * (yo(i, n_mod + m) * yo(i, m) + yo(i + 1, n_mod + m) * yo(i + 1, m))
+                    end do
+                end if
+                part(1, c, m) = sa
+                part(2, c, m) = sn
+                part(3, c, m) = se
+            end do
+        end do
+        !$omp target teams distribute parallel do private(sa, sn, se, c)
+        do m = 1, n_mod
+            sa = 0.0_KP; sn = 0.0_KP; se = 0.0_KP
+            do c = 1, NCH
+                sa = sa + part(1, c, m)
+                sn = sn + part(2, c, m)
+                se = se + part(3, c, m)
+            end do
+            s_abs(m) = real(sa, WP)
+            s_norm(m) = real(sn, WP)
+            s_esc(m) = real(se, WP)
+        end do
+        !$omp end target data
+        return
+#endif
 
 #ifdef OMP_TARGET
         ! (teams loop + loop reduction: as fast as the former OpenACC gang / vector reduction with
