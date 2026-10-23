@@ -72,7 +72,6 @@ contains
         real(WP), pointer, contiguous :: zc(:), dist(:)
         logical  :: zvar
         real(KP), allocatable :: fobs(:,:)
-        real(KP), allocatable :: fobs_n(:,:)
         real(WP) :: flux
         logical  :: done
 #ifdef FSPS_CUBLAS
@@ -132,19 +131,6 @@ contains
 #ifdef OMP_TARGET
             !$omp end target data
 #endif
-            done = .true.
-        end if
-#endif
-#if defined(OMP_TARGET) && defined(__flang__)
-        if (.not. zvar) then
-            ! LLVM flang / AMD: the observed-frame spectrum in its natural layout (pixels, models), the band
-            ! fluxes as partial sums over interleaved pixels (see observed_frame_n, band_fluxes_n)
-            allocate(fobs_n(nspec, n_col))
-            !$omp target data map(to: do_band, zd) map(alloc: fobs_n, fband) map(from: mags_l)
-            call observed_frame_n(n_col, nspec, g%i_lo, g%t_obs, g%wl, spec, fobs_n)
-            call band_fluxes_n(n_col, nspec, nbands, g%bands_t, g%j_lo, g%j_hi, do_band, g%wtl, fobs_n, fband)
-            call magnitudes_from_fluxes(ctx, n_col, nbands, do_band, dist, fband, mags_l)
-            !$omp end target data
             done = .true.
         end if
 #endif
@@ -642,86 +628,6 @@ contains
         end select
         blas_ready = .true.
     end subroutine blas_init
-#endif
-
-#if defined(OMP_TARGET) && defined(__flang__)
-    !> observed_frame_t with the spectrum in its natural layout (pixels, models): consecutive threads
-    !> take consecutive pixels, so the reads of total and the writes are coalesced (the transposed
-    !> layout read total with a stride of one spectrum per thread). Explicit-shape arguments.
-    subroutine observed_frame_n(n_mod, nspec, i_lo, t_obs, wl, total, fobs)
-        integer, intent(in)     :: n_mod, nspec, i_lo(nspec)
-        real(WP), intent(in)    :: t_obs(nspec)
-        real(KP), intent(in)    :: wl(nspec), total(nspec, n_mod)
-        real(KP), intent(out)   :: fobs(nspec, n_mod)
-
-        integer  :: m, j, il
-        real(WP) :: v
-
-        !$omp target teams distribute parallel do collapse(2) private(il, v)
-        do m = 1, n_mod
-            do j = 1, nspec
-                il = i_lo(j)
-                if (t_obs(j) == 0.0_wp) then
-                    v = real(total(il, m), WP)
-                else
-                    v = real(total(il, m), WP) + t_obs(j) * (real(total(il + 1, m), WP) - real(total(il, m), WP))
-                end if
-                if (v /= v) v = 0.0_wp
-                fobs(j, m) = real(max(v, 0.0_wp), KP) * wl(j)
-            end do
-        end do
-    end subroutine observed_frame_n
-
-    !> band_fluxes for fobs in its natural layout: one thread per (chunk, band, model), chunk
-    !> fastest, takes every NCH-th trapezoid interval of the band's support (consecutive threads,
-    !> consecutive pixels: coalesced), compensated at kernel precision as band_fluxes; a second
-    !> kernel adds the NCH partial sums. Same terms as band_fluxes, summed in a different order.
-    subroutine band_fluxes_n(n_mod, nspec, nbands, bands_t, j_lo, j_hi, do_band, wt, fobs, fband)
-        integer, intent(in)     :: n_mod, nspec, nbands, j_lo(nbands), j_hi(nbands), do_band(nbands)
-        real(KP), intent(in)    :: bands_t(nbands, nspec), wt(nspec), fobs(nspec, n_mod)
-        real(WP), intent(out)   :: fband(nbands, n_mod)
-
-        integer, parameter :: NCH = 8
-        real(KP), allocatable :: part(:,:,:)
-        integer  :: m, j, b, c
-        real(KP) :: s, cc, term, tsum
-
-        allocate(part(NCH, nbands, n_mod))
-        !$omp target data map(alloc: part)
-        !$omp target teams distribute parallel do collapse(3) private(j, s, cc, term, tsum)
-        do m = 1, n_mod
-            do b = 1, nbands
-                do c = 1, NCH
-                    s = 0.0_KP
-                    cc = 0.0_KP
-                    if (do_band(b) /= 0) then
-                        do j = j_lo(b) + c - 1, j_hi(b), NCH
-                            if (KP == WP) then
-                                s = s + wt(j) * (fobs(j, m) * bands_t(b, j) + fobs(j + 1, m) * bands_t(b, j + 1))
-                            else
-                                term = wt(j) * (fobs(j, m) * bands_t(b, j) + fobs(j + 1, m) * bands_t(b, j + 1)) - cc
-                                tsum = s + term
-                                cc = (tsum - s) - term
-                                s = tsum
-                            end if
-                        end do
-                    end if
-                    part(c, b, m) = s
-                end do
-            end do
-        end do
-        !$omp target teams distribute parallel do collapse(2) private(c, s)
-        do m = 1, n_mod
-            do b = 1, nbands
-                s = 0.0_KP
-                do c = 1, NCH
-                    s = s + part(c, b, m)
-                end do
-                fband(b, m) = real(s, WP)
-            end do
-        end do
-        !$omp end target data
-    end subroutine band_fluxes_n
 #endif
 
     !> Band fluxes: the trapezoid filter integral of fobs over each band's support, compensated at
