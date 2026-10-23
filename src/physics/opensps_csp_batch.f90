@@ -651,8 +651,8 @@ contains
                                     ssp_op%n_pts, ssp_op%n_eff, pm, wsfh, it_tesc, ssp_op%pt_ptr, ssp_op%pt_mini, &
                                     ssp_op%pt_m1, ssp_op%pt_m2, ssp_op%pt_first, ssp_op%pt_cm, ssp_op%pt_cl, &
                                     ssp_op%pt_q, ssp_op%age_mmax, ssp_op%pt_age, ssp_op%eff_ptr, ssp_op%eff_pt, &
-                                    ssp_op%eff_val, ssp_op%k_age, ssp_op%etpl, nb%nt_neb, nb%whlylim, nb%fesc, yo, &
-                                    smass, slum, nb%q0)
+                                    ssp_op%eff_val, ssp_op%k_age, ssp_op%n_seg, ssp_op%seg_ptr, ssp_op%seg_first, &
+                                    ssp_op%etpl, nb%nt_neb, nb%whlylim, nb%fesc, yo, smass, slum, nb%q0)
         end if
 
         associate (bas_mass => ctx%state%ssp_basis_mass, bas_lbol => ctx%state%ssp_basis_lbol)

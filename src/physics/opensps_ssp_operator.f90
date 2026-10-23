@@ -103,6 +103,9 @@ module opensps_ssp_operator
     public :: ssp_operator_to_device, ssp_operator_from_device, ssp_op_mod_signature, N_MOD_SIG
 
     !> Row kinds (the order of the rows within an age)
+    !> Entries per segment of an effective template's list (ssp_operator_t: seg_ptr)
+    integer, parameter :: SEG_LEN = 256
+
     integer, parameter, public :: ROW_MAIN = 1, ROW_SMALL = 2, ROW_DUSTY = 3, ROW_DIRECT = 4, &
                                   ROW_MASS = 5, ROW_LBOL = 6
 
@@ -157,6 +160,12 @@ module opensps_ssp_operator
         !> k_age(t) = the number of effective templates first used at ages <= t (the columns the
         !> ages up to t use)
         integer,  allocatable :: eff_ptr(:), eff_pt(:), pt_age(:), k_age(:)
+        !> The lists of the effective templates cut into segments of about SEG_LEN entries at age
+        !> boundaries (the fold of small batches has one thread per segment instead of one per
+        !> template, whose longest list has ~10^4 entries): segment s holds the entries
+        !> seg_ptr(s) .. seg_ptr(s + 1) - 1, template e the segments seg_first(e) .. seg_first(e + 1) - 1
+        integer :: n_seg = 0
+        integer,  allocatable :: seg_ptr(:), seg_first(:)
         real(WP), allocatable :: eff_val(:), pt_cm(:), pt_cl(:), pt_q(:)
         !> The batch form and the point and template arrays are mapped to the device
         !> (ssp_operator_to_device)
@@ -706,6 +715,11 @@ contains
             end do
         end do
 
+        ! Segments of the template lists, cut at age boundaries once a segment holds SEG_LEN entries
+        call count_or_fill_segments(op, .false.)
+        allocate(op%seg_ptr(op%n_seg + 1), op%seg_first(op%n_eff + 1))
+        call count_or_fill_segments(op, .true.)
+
         ! Ionizing photons of each effective template (the batch's integral over the pixels below
         ! the Lyman limit)
         whl = ctx%state%whlylim
@@ -737,6 +751,37 @@ contains
         end do
     end subroutine build_batch_form
 
+    !> The segments of the effective templates' point lists (ssp_operator_t): counts them, or with
+    !> fill sets seg_ptr and seg_first.
+    subroutine count_or_fill_segments(op, fill)
+        type(ssp_operator_t), intent(inout) :: op
+        logical, intent(in) :: fill
+        integer :: e, k, t, tp, len, ns
+
+        ns = 0
+        do e = 1, op%n_eff
+            if (fill) op%seg_first(e) = ns + 1
+            len = 0
+            tp = -1
+            do k = op%eff_ptr(e), op%eff_ptr(e + 1) - 1
+                t = op%pt_age(op%eff_pt(k))
+                if (len == 0 .or. (t /= tp .and. len >= SEG_LEN)) then
+                    ns = ns + 1
+                    len = 0
+                    if (fill) op%seg_ptr(ns) = k
+                end if
+                len = len + 1
+                tp = t
+            end do
+        end do
+        if (fill) then
+            op%seg_first(op%n_eff + 1) = ns + 1
+            op%seg_ptr(ns + 1) = op%eff_ptr(op%n_eff + 1)
+        else
+            op%n_seg = ns
+        end if
+    end subroutine count_or_fill_segments
+
     !> Maps op's batch form, point arrays and effective templates to the device (OpenMP target
     !> builds; no-op otherwise), once: compute_csp_batch reads them there.
     subroutine ssp_operator_to_device(op)
@@ -744,7 +789,8 @@ contains
 #ifdef OMP_TARGET
         if (op%on_device) return
         !$omp target enter data map(to: op%etpl, op%eff_ptr, op%eff_pt, op%eff_val, op%pt_age, op%pt_cm, &
-        !$omp     op%pt_cl, op%pt_q, op%pt_mini, op%pt_m1, op%pt_m2, op%pt_first, op%age_mmax, op%k_age, op%pt_ptr)
+        !$omp     op%pt_cl, op%pt_q, op%pt_mini, op%pt_m1, op%pt_m2, op%pt_first, op%age_mmax, op%k_age, op%pt_ptr, &
+        !$omp     op%seg_ptr, op%seg_first)
         op%on_device = .true.
 #endif
     end subroutine ssp_operator_to_device
@@ -755,7 +801,8 @@ contains
 #ifdef OMP_TARGET
         if (.not. op%on_device) return
         !$omp target exit data map(delete: op%etpl, op%eff_ptr, op%eff_pt, op%eff_val, op%pt_age, op%pt_cm, &
-        !$omp     op%pt_cl, op%pt_q, op%pt_mini, op%pt_m1, op%pt_m2, op%pt_first, op%age_mmax, op%k_age, op%pt_ptr)
+        !$omp     op%pt_cl, op%pt_q, op%pt_mini, op%pt_m1, op%pt_m2, op%pt_first, op%age_mmax, op%k_age, op%pt_ptr, &
+        !$omp     op%seg_ptr, op%seg_first)
         op%on_device = .false.
 #endif
     end subroutine ssp_operator_from_device
@@ -947,6 +994,9 @@ contains
         if (allocated(op%eff_age0)) deallocate(op%eff_age0)
         if (allocated(op%etpl)) deallocate(op%etpl)
         if (allocated(op%k_age)) deallocate(op%k_age)
+        if (allocated(op%seg_ptr)) deallocate(op%seg_ptr)
+        if (allocated(op%seg_first)) deallocate(op%seg_first)
+        op%n_seg = 0
         if (allocated(op%eff_ptr)) deallocate(op%eff_ptr)
         if (allocated(op%eff_pt)) deallocate(op%eff_pt)
         if (allocated(op%eff_val)) deallocate(op%eff_val)

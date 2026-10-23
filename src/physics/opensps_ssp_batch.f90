@@ -44,12 +44,12 @@ contains
     !> nebular ages (0: none), fesc: their escaping EUV fraction per model, whl: EUV pixels.
     subroutine ssp_batch_age_sums(dev, imf_type, remnants, n_mod, nt, nspec, n_pts, n_eff, pm, wsfh, it_tesc, &
                                   pt_ptr, pt_mini, pt_m1, pt_m2, pt_first, pt_cm, pt_cl, pt_q, age_mmax, &
-                                  pt_age, eff_ptr, eff_pt, eff_val, k_age, etpl, nt_neb, whl, fesc, yo, &
-                                  smass, slum, q0)
+                                  pt_age, eff_ptr, eff_pt, eff_val, k_age, n_seg, seg_ptr, seg_first, etpl, nt_neb, whl, fesc, &
+                                  yo, smass, slum, q0)
         logical, intent(in)  :: dev, remnants
-        integer, intent(in)  :: imf_type, n_mod, nt, nspec, n_pts, n_eff, nt_neb, whl
+        integer, intent(in)  :: imf_type, n_mod, nt, nspec, n_pts, n_eff, nt_neb, whl, n_seg
         real(WP), intent(in), contiguous :: pm(:,:), wsfh(:,:), fesc(:)
-        integer, intent(in), contiguous  :: it_tesc(:), pt_ptr(:), pt_first(:), k_age(:)
+        integer, intent(in), contiguous  :: it_tesc(:), pt_ptr(:), pt_first(:), k_age(:), seg_ptr(:), seg_first(:)
         integer, intent(in), contiguous  :: pt_age(:), eff_ptr(:), eff_pt(:)
         real(WP), intent(in), contiguous :: pt_mini(:), pt_m1(:), pt_m2(:), pt_cm(:), pt_cl(:), pt_q(:), age_mmax(:)
         real(WP), intent(in), contiguous :: eff_val(:)
@@ -60,9 +60,10 @@ contains
         !> Models per chunk: bounded by the IMF weights (n_pts x chunk FP64, ~1.7 GB at 2048 models
         !> of MIST)
         integer, parameter :: CHUNK = 2048
-        real(WP), allocatable :: w(:,:), tot(:)
+        real(WP), allocatable :: w(:,:), tot(:), vp(:,:,:)
         real(KP), allocatable :: wk(:,:), v(:,:), veuv(:,:)
         integer :: m0, nc, ky, neb_cols
+        logical :: useg
 
         neb_cols = 0
         if (nt_neb > 0 .and. whl > 0) neb_cols = 1
@@ -71,15 +72,29 @@ contains
         ! The IMF weights at kernel precision for the fold (half the memory traffic with FP32 kernels;
         ! the mass, L_bol and photon sums take the FP64 weights)
         allocate(wk(min(CHUNK, n_mod), n_pts))
+        ! Device: the fold by segments of the template lists (4 x n_seg x chunk FP64 partial sums,
+        ! ~260 MB at 2048 models of MIST); faster than one thread per template at every batch size
+        ! tried on the A100 (N = 1: 15 -> 10 ms, 100: 128 -> 85 us/model, 10^4: 28.0 -> 26.7 us/model)
+        useg = dev
+        if (useg) then
+            allocate(vp(min(CHUNK, n_mod), 4, n_seg))
+        else
+            allocate(vp(1, 1, 1))
+        end if
 #ifdef OMP_TARGET
-        !$omp target data if(dev) map(alloc: w, wk, tot, v, veuv)
+        !$omp target data if(dev) map(alloc: w, wk, tot, v, veuv, vp)
 #endif
         do m0 = 1, n_mod, CHUNK
             nc = min(CHUNK, n_mod - m0 + 1)
             call imf_ages_chunk(dev, imf_type, remnants, m0, nc, nt, nt_neb, pm, pt_ptr, pt_mini, pt_m1, pt_m2, &
                                 pt_first, pt_cm, pt_cl, pt_q, age_mmax, size(w, 1), n_pts, w, wk, tot, smass, slum, q0)
-            call fold_chunk(dev, m0, nc, n_eff, nt_neb, neb_cols, wsfh, it_tesc, fesc, pt_age, eff_ptr, eff_pt, &
-                            eff_val, wk, v, veuv)
+            if (useg) then
+                call fold_segments(m0, nc, n_eff, n_seg, nt_neb, neb_cols, wsfh, it_tesc, fesc, pt_age, eff_pt, eff_val, &
+                                   seg_ptr, seg_first, wk, vp, v, veuv)
+            else
+                call fold_chunk(dev, m0, nc, n_eff, nt_neb, neb_cols, wsfh, it_tesc, fesc, pt_age, eff_ptr, eff_pt, &
+                                eff_val, wk, v, veuv)
+            end if
             ! Young sums: only the templates of the ages up to the chunk's last young age
             ky = k_age(max(1, min(nt, maxval(it_tesc(m0:m0 + nc - 1)))))
             call template_columns(dev, nspec, nspec, n_eff, ky, nc, etpl, v, 0, yo, m0 - 1)
@@ -219,6 +234,86 @@ contains
             end do
         end do
     end subroutine fold_chunk
+
+    !> fold_chunk with the lists of the templates cut into segments (ssp_operator_t: seg_ptr,
+    !> seg_first), for small batches on the device: one thread per (segment, model) sums its ages
+    !> (the segments end at age boundaries) into vp(model, 1:4, segment) = young, old, young and old
+    !> with the escaping fraction; then one thread per (template, model) adds its segments in
+    !> order. The same sums as fold_chunk with the ages grouped differently (FP64 rounding only).
+    subroutine fold_segments(m0, nc, n_eff, n_seg, nt_neb, neb_cols, wsfh, it_tesc, fesc, pt_age, eff_pt, eff_val, &
+                             seg_ptr, seg_first, w, vp, v, veuv)
+        integer, intent(in) :: m0, nc, n_eff, n_seg, nt_neb, neb_cols
+        real(WP), intent(in), contiguous :: wsfh(:,:), fesc(:), eff_val(:)
+        real(KP), intent(in), contiguous :: w(:,:)
+        integer, intent(in), contiguous  :: it_tesc(:), pt_age(:), eff_pt(:), seg_ptr(:), seg_first(:)
+        real(WP), intent(inout), contiguous :: vp(:,:,:)
+        real(KP), intent(inout), contiguous :: v(:,:), veuv(:,:)
+        integer  :: s, e, j, k, t, m, tesc, tc
+        real(WP) :: x, y, o, ye, oe, f, a, ae
+
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(k, t, m, tesc, tc, x, y, o, ye, oe, f, a, ae) &
+        !$omp map(to: fesc)
+#endif
+        do s = 1, n_seg
+            do j = 1, nc
+                m = m0 + j - 1
+                tesc = it_tesc(m)
+                f = fesc(m)
+                y = 0.0_wp; o = 0.0_wp; ye = 0.0_wp; oe = 0.0_wp
+                tc = 0
+                a = 0.0_wp
+                do k = seg_ptr(s), seg_ptr(s + 1)   ! (one past the end: flushes the last age)
+                    if (k < seg_ptr(s + 1)) then
+                        t = pt_age(eff_pt(k))
+                    else
+                        t = -1
+                    end if
+                    if (t /= tc) then
+                        if (tc > 0) then
+                            x = a * wsfh(m, tc)
+                            ae = x
+                            if (tc <= nt_neb) ae = f * x
+                            if (tc <= tesc) then
+                                y = y + x
+                                ye = ye + ae
+                            else
+                                o = o + x
+                                oe = oe + ae
+                            end if
+                        end if
+                        tc = t
+                        a = 0.0_wp
+                    end if
+                    if (t > 0) a = a + eff_val(k) * real(w(j, eff_pt(k)), WP)
+                end do
+                vp(j, 1, s) = y
+                vp(j, 2, s) = o
+                vp(j, 3, s) = ye
+                vp(j, 4, s) = oe
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(s, y, o, ye, oe)
+#endif
+        do e = 1, n_eff
+            do j = 1, nc
+                y = 0.0_wp; o = 0.0_wp; ye = 0.0_wp; oe = 0.0_wp
+                do s = seg_first(e), seg_first(e + 1) - 1
+                    y = y + vp(j, 1, s)
+                    o = o + vp(j, 2, s)
+                    ye = ye + vp(j, 3, s)
+                    oe = oe + vp(j, 4, s)
+                end do
+                v(e, j) = real(y, KP)
+                v(e, nc + j) = real(o, KP)
+                if (neb_cols > 0) then
+                    veuv(e, j) = real(ye, KP)
+                    veuv(e, nc + j) = real(oe, KP)
+                end if
+            end do
+        end do
+    end subroutine fold_segments
 
     !> yo(1:np, c0 + j) = etpl(1:np, 1:k) . v(1:k, v0 + j), j = 1 .. nc: the age sums from the
     !> template weights, compensated (Kahan) with FP32 kernels.
