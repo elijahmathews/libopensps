@@ -15,7 +15,7 @@ IMF-independent operator of `src/physics/opensps_ssp_operator.f90` (built once p
 the IMF weights of every isochrone point computed per model, then the shared batch. Code:
 `src/physics/opensps_ssp_batch.f90` (kernels, `ssp_opset_t`), `opensps_ssp_operator.f90` (the
 operator and its batch form), `opensps_imf.f90` (`imf_bin_weights`), the plumbing in
-`opensps_csp_batch.f90` (optional `ssp_op`, `ssp_ops`). Tests: `tests/test_csp_batch.f90`
+`opensps_csp_batch.f90` (optional `ssp_ops`, an `ssp_opset_t`; on `v2` also `ssp_op`). Tests: `tests/test_csp_batch.f90`
 (`check_imf_per_model`, `check_imf_unsupported`, `check_imf_z`) and `tests/physics/
 test_opensps_imf.f90`; benchmark: `tests/benchmark_csp_batch.f90` (configs `*_imf`, `*_z_imf`).
 
@@ -27,13 +27,19 @@ test_opensps_imf.f90`; benchmark: `tests/benchmark_csp_batch.f90` (configs `*_im
 | `feat/ssp-batch-v2` @ 9ee300a | the draft rebased on `main` (PR #31) + fixes: effective templates restored, Gauss-Legendre for narrow lognormal bins, status 2 for modifications / per-model metallicity, oracle tests for every IMF type, the A100 N = 1 fix and piece / segment kernels, the zin = 0 test fix | **verified**, PR candidate 1 (IMF free, one metallicity) |
 | `feat/ssp-batch-v2-a100-perf`, `-a100-kernels` | steps of the above (ancestors of v2) | merged into v2 |
 | `feat/ssp-batch-v2-780m-weights` @ a31e56e | `exp(e ln m2)` instead of a power in the device weights kernel (`imf_bin_weights_ln`) | optional, not in v2 (accuracy 4.6e-11 -> 6.9e-11 FP64 Salpeter, FP32 N = 1000 -17% on the 780M; the A100 agent was asked to measure) |
-| `feat/ssp-batch-v2-a100-zvar` @ fdd08cd | IMF and metallicity free per model: `ssp_ops`, `ssp_opset_t`, multi-metallicity kernels, batched cuBLAS product, `check_imf_z`, `*_z_imf` benchmark | experimental; device only (nvfortran offload verified) |
-| `feat/ssp-batch-v2-a100-zvar-flang` @ bc9b391 | one commit on zvar: host loops for the multi kernels, `ssp_ops` on every build | CPU compilers and 780M verified (362/362) |
+| `feat/ssp-batch-v2-a100-zvar` @ fdd08cd (+ 9f11157) | IMF and metallicity free per model: `ssp_ops`, `ssp_opset_t`, multi-metallicity kernels, batched cuBLAS product, `check_imf_z`, `*_z_imf` benchmark; 9f11157 adds the one code path | superseded by `zvar2` (not rebased: the laptop agent had pulled it) |
+| `feat/ssp-batch-v2-a100-zvar-flang` @ bc9b391 | one commit on fdd08cd: host loops for the multi kernels, `ssp_ops` on every build | superseded by `zvar2` (its host loops are in the unified kernels); 362/362 on CPU compilers and the 780M at that commit |
+| `feat/ssp-batch-v2-a100-zvar2` @ 2468916 | zvar rebased on v2 9ee300a, **one code path** (`ssp_op`, `ssp_batch_age_sums`, `imf_*_chunk`, `fold_chunk` / `fold_segments` deleted; one metallicity = a set of one operator, one pass, products straight into `yo`), host loops in the multi kernels, one second-context block in the test | A100 verified (offload FP64, FP32, FP64 + cuBLAS 38 / 38, FP32 + cuBLAS `test_csp_batch` 362 / 362; gfortran and nvfortran host threads verified before the rebase); **flang / 780M, ifx and the host sweep on this tip still to do** |
 
-zvar (and zvar-flang) are based on v2 at 89eaa28; v2 has since gained 9ee300a (a test-only fix
-that also exists, in another form, in the zvar branch): rebasing meets that conflict in
-`tests/test_csp_batch.f90` and `tests/benchmark_csp_batch.f90`; keep zvar's `check_imf_z`, take
-v2's second-context block.
+`zvar2` is the one to continue from. The A100 agent measured `feat/ssp-batch-v2-780m-weights`
+(a31e56e) on the A100: 6% faster (FP32 N = 10^4 16.6 -> 15.5 us/model), but the FP64 oracle fails
+by a hair in the cuBLAS build (Kroupa spectrum 1.05e-10 to 1.15e-10 against the 1e-10 tolerance;
+3 of 350 checks), because `exp(e ln m)` has ~|e ln m| ulp of error and `phi - plo` over
+narrow bins amplifies it by the inverse relative width, as with the erf: do not merge it as is;
+the proposed form is `val = c plo expm1(e dl) / d`, `plo = exp(e ln m1)`,
+`dl = log1p((m2 - m1) / m1)` with `ln m1` and `dl` computed once per call. When the weights
+variant is final (in v2), rebase `zvar2` and add its per-point arrays to `ssp_opset_t`
+(`ssp_opset_build` concatenates the per-point arrays with the offsets `pt_off`).
 
 ## Verified (matrix to repeat at any new tip)
 
@@ -61,14 +67,66 @@ Recipes (laptop; `unset HSA_OVERRIDE_GFX_VERSION` in every shell; data from `ope
     OMP_TARGET_OFFLOAD=MANDATORY b-amd/test_csp_batch
 
 The 780M also drives the display: ask the user before GPU runs (CLAUDE.md, "Machines").
-A100: `module load nvhpc/25.1`, `-Daccel=omp_gpu -Dgpu_arch=cc80`, `-Dcublas=true` is 35-40%
-faster at every size on NVIDIA (recommend for NVIDIA builds). Case matrix against another build:
+A100 (ICDS, `module load nvhpc/25.1`; the data root is an unpack of the `opensps-data` release, no C3K,
+so the matrix is run without the C3K case; `unset SPS_HOME`; build directories must be named `build*` or
+untracked; never edit sources while a background build or test of the same worktree runs):
+
+    export FC=nvfortran CC=nvc
+    meson setup b_a64 --buildtype=release -Daccel=omp_gpu -Dgpu_arch=cc80 -Ddata_home=$DATA   # FP64 tile
+    meson setup b_a32c ... -Dkernel_precision=single -Dcublas=true                              # FP32 + cuBLAS
+    OMP_TARGET_OFFLOAD=MANDATORY meson test -C b_a64 --suite unit --suite regression --num-processes 1
+    compute-sanitizer --tool racecheck --kernel-name regex=ssp_batch b_a32c/test_csp_batch  # (not regex:)
+    nsys profile ./b_a32c/benchmark_csp_batch 10000 0 full_smooth_z_imf  # kernel table: nsys stats -r cuda_gpu_kern_sum
+
+Nsight Compute is blocked on the node; check `nvidia-smi --query-compute-apps` before timing (a shared
+GPU slows kernels ~30%). `-Dcublas=true` is 35-40% faster at every size on NVIDIA (recommend for
+NVIDIA builds; FP64 + cuBLAS uses the double tensor cores and is as fast as FP32 + cuBLAS). Case matrix against another build:
 `tools/compare_builds` (`run_cases.sh BUILD OUT CASES.psv`, `compare_builds.py`); the batched
 IMF dump: `tools/compare_builds/imf_batch_dump.f90`, `compare_imf_dump.py`.
 
 Benchmark protocol: `benchmark_csp_batch 10000 0 full_smooth` against `full_smooth_imf` (and
 `full_smooth_z` against `full_smooth_z_imf`), alternating runs, >= 6, medians; the 780M varies by
 up to 30% run to run (N = 1 especially), the A100 by a few %. Baselines: `doc/GPU_RESULTS.md`.
+
+## A100 numbers (nvfortran 25.1, FP32 + cuBLAS unless noted, us/model, magnitudes only)
+
+Baselines, resident basis: `full_smooth` N = 10^4 7.3 (N = 1: 1090); `full_smooth_z` (metallicity
+varying, real bases) 10^4: 7.9, 1000: 9.3, 100: 25.9, 1: 1137.
+
+IMF free per model, one metallicity (`basic_imf`; the basic resident-basis batch is 3.0 at 10^4):
+tile kernels at v2 N = 1 / 100 / 1000 / 10^4: 4300 / 60 / 26 / 25; with cuBLAS 1800 / 38 / 17.8 /
+16.5 (FP64 + cuBLAS 1500 / 33.4 / 16.7 / 15.8); the draft was 15100 / 128 / 32.6 / 28.0. Where the
+time goes at 10^4 (nsys): the segment fold ~26%, the IMF weights ~26%, GEMMs ~14%, the rest of the
+batch ~25%; the remaining batch kernels are 0.02 to 0.6 us/model each (nothing to win there).
+`generate_ssp_grid` per IMF would cost 134 ms (FP32) to 167 ms (FP64) per model here.
+
+IMF and metallicity free (`full_smooth_z_imf`, 12 metallicities, 1.25 s to build the operators once)
+N = 1 / 100 / 1000 / 10^4: 3263 / 98.8 / 41.4 / 34.5 (first version 3656 / 217.7 / 48.9 / 33.9); the
+IMF part costs twice the one-metallicity part at large N (two operators per model). One launch for
+all metallicities and the strided batched FP32 cuBLAS product (`gemm_columns_batched`, <= 512 columns)
+fixed the launch-bound N = 100. The one-metallicity case through the unified kernels: N = 10^4
+17.5 vs 16.6 (+5%, open), N = 100 36.0 vs 37.6.
+
+Accuracy against the per-IMF `generate_ssp_grid` oracle: FP64 1e-11 to 6e-11 (Chabrier 2e-11 and van
+Dokkum 6e-11 after the Gauss-Legendre fix), FP32 5e-7 (3.5e-7 typical). Against gfortran FP64 the
+A100 FP64 matrix passes with 4.7e-10 to 1.4e-9 in every SSP case, and an nvfortran *host* build gives
+the same numbers (offload vs host 4e-16): not FMA (`-Mnofma` gives the same), not the IMF code.
+
+Existing paths vs `main`, alternating, median of 6: all ratios 0.92 to 1.03 (N = 1 and 10^4; basic,
+`full_smooth`, `full_smooth_z`, FP32; FP64 basic).
+
+## Isochrone modifications per model: the design (not built)
+
+`fbhb`, `sbss`, `agb`, `pagb`, `redgb` and the TP-AGB normalisation are per-point factors on a fixed
+structure of S (`ssp_operator.f90`: w_j = f_j w_IMF(j); blue HB stars w_i = f_i w_IMF(j); blue
+stragglers w_i = g_i sum over HB points of w_IMF, g_i = sbss / 20), so with the points in groups
+(normal, phase 5, phase 6, HB, blue HB, stragglers) the fold takes x(p, m) = c_group(p)(m) w_IMF
+w_sfh, the same work as today; the stragglers use one per-age HB sum per model. `delt` and `dell`
+change which templates the TP-AGB stars use (a few % of the points; the dust-shell corners of C-rich
+stars are slot-keyed: the hard part): rebuild only those rows per model on the device (needs the
+templates reachable under the shifts in `etpl`, so n_eff grows), or group models by (delt, dell)
+and build one operator set per pair (no new hot-path code; the usual case, they are rarely free).
+A full operator rebuild per model costs 0.12 s (as `generate_ssp_grid`): never the batch path.
 
 ## Decisions taken (by the user, 2026-10-23)
 
@@ -87,11 +145,10 @@ up to 30% run to run (N = 1 especially), the A100 by a few %. Baselines: `doc/GP
 2. **Public API** (the user's decision, before `include/` or the C header changes): how `ssp_op` /
    `ssp_ops` appear in `compute_csp_batch` and whether the single-operator form becomes a wrapper
    over a set of one. The C API does not expose either yet.
-3. **One code path** (A100 agent, in progress on the zvar branch): delete `imf_pieces_chunk`,
-   `fold_segments`, `ssp_batch_age_sums` once the one-metallicity case costs the same (A100
-   targets: 16.5 / 15.8 us per model at N = 10^4 with cuBLAS, FP32 / FP64) and gives the same
-   results; the host paths (`imf_ages_chunk`, `fold_chunk`) stay until the multi kernels have host
-   loops everywhere (zvar-flang has them). Re-run the whole matrix above afterwards.
+3. **One code path**: done on `zvar2` (old kernels deleted, host loops in the multi kernels); open: the
+   +5% at N = 10^4 for one metallicity (permutation indirection and accumulators; A100 16.6 -> 17.5
+   us/model), the whole matrix at the new tip on flang / the 780M, ifx and the host thread sweep,
+   sanitizers and the alternating timing against `main` on the final commit.
 4. **Per-model metallicity timing on the 780M** (`full_smooth_z` vs `full_smooth_z_imf`) and the
    weak spot at N = 100 (launch bound: about 12 metallicity runs of ~8 models each).
 5. **Isochrone modifications per model**: per-point group factors in the same tables (A100 design
@@ -103,8 +160,12 @@ up to 30% run to run (N = 1 especially), the A100 by a few %. Baselines: `doc/GP
 7. The ~6000 racecheck hazards in `band_fluxes` (`opensps_batch_photometry.f90:658-674`), on `main`
    too and numerically benign: worth their own issue.
 8. The nvfortran-vs-gfortran 5e-10 in every FP64 SSP case (A100 and nvfortran host alike; flang
-   matches gfortran to 5e-14): not bisected; dumping `buf%weights` and the template weights from
-   both compilers for `ssp_salpeter` would show where it enters.
+   matches gfortran to 5e-14; not FMA; dlogL 1.4e-13 on the same cases so it enters before the
+   spectrum sums and is amplified ~10^3): not bisected; dumping `buf%weights` and the template weights
+   from both compilers for `ssp_salpeter` would show where it enters.
+9. The weights change (see Branches: `expm1` form) and, after it, the opset tables.
+10. Per-point group factors for the isochrone modifications (design above), and `PT_PIECE` /
+   `SEG_LEN` per device.
 
 ## Pull request plan
 
