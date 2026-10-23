@@ -583,9 +583,11 @@ contains
         !$omp target data map(to: psets, ipk, rpk, lpk) &
 #endif
         !$omp map(alloc: w2, wz, weights, tmp1, tmp2, yo, absorbed, tdiff) &
-        !$omp map(from: rout, eml) map(to: pm, nobasis) map(alloc: smass, slum, wsfh)
+        !$omp map(from: rout, eml)
 #endif
 #ifdef OMP_TARGET
+        ! The IMF-per-model arrays are mapped only then (the mappings cost ~10 us each per call)
+        !$omp target data if(imf) map(to: pm, nobasis) map(alloc: smass, slum, wsfh)
         !$omp target data if(neb) map(to: nb%ipk, nb%rpk, nb%lpk) map(alloc: nb%q0, nb%lum, nb%cy, nb%co)
 #endif
 
@@ -689,6 +691,39 @@ contains
                     end do
                 end do
             end do
+        else if (imf) then
+            ! The model's own SSPs (IMF per model): the surviving mass and L_bol per age and model
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do private(k, w, mk, lk) if(target: dev)
+#elif defined(_OPENMP)
+            !$omp parallel do private(k, w, mk, lk)
+#endif
+            do m = 1, n_mod
+                msum(m) = 0.0_wp
+                lsum(m) = 0.0_wp
+                msy(m) = 0.0_wp; mso(m) = 0.0_wp; lsy(m) = 0.0_wp; lso(m) = 0.0_wp
+                do k = 1, nt
+                    w = weights(k, 1, m)
+                    if (w > SAFE_FLOOR) then
+                        mk = w * smass(k, m)
+                        lk = w * slum(k, m)
+                        msum(m) = msum(m) + mk
+                        lsum(m) = lsum(m) + lk
+                        if (k <= it_tesc(m)) then
+                            msy(m) = msy(m) + mk; lsy(m) = lsy(m) + lk
+                        else
+                            mso(m) = mso(m) + mk; lso(m) = lso(m) + lk
+                        end if
+                    else
+                        w = 0.0_wp
+                    end if
+                    if (k <= it_tesc(m)) then
+                        w2(k, m) = real(w, KP); w2(k, n_mod + m) = 0.0_KP
+                    else
+                        w2(k, m) = 0.0_KP; w2(k, n_mod + m) = real(w, KP)
+                    end if
+                end do
+            end do
         else
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do private(k, w, mk, lk) if(target: .not. host_m) &
@@ -703,11 +738,7 @@ contains
                 do k = 1, nt
                     w = weights(k, 1, m)
                     if (w > SAFE_FLOOR) then
-                        if (imf) then
-                            ! The model's own SSPs (IMF per model)
-                            mk = w * smass(k, m)
-                            lk = w * slum(k, m)
-                        else if (zmode) then
+                        if (zmode) then
                             ! The interpolated SSP's mass and L_bol (compute_interpolated_ssp)
                             mk = w * ((1.0_wp - dz(m)) * bas_mass(k, zlo(m)) + &
                                       dz(m) * bas_mass(k, zhi(m)))
@@ -828,6 +859,9 @@ contains
         end associate
         ctx%state%batch_out%n = n_mod
         if (present(spec)) call spectra_to_host(ctx%state%batch_out%spec, nspec, n_mod, spec, ctx%state%batch_out%pinned)
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
 #ifdef OMP_TARGET
         !$omp end target data
 #endif
