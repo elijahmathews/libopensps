@@ -16,7 +16,7 @@ module opensps_imf
     public :: compute_imf_weights
     public :: get_imf_value
     public :: integrate_imf_interval_analytic, imf_integral, imf_integral_p, imf_pack_params
-    public :: imf_bin_weights
+    public :: imf_bin_weights, imf_bin_weights_ln
     public :: IMF_NPAR, IMF_P_SALP, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE, IMF_P_LOWER_LIMIT, &
               IMF_P_UPPER_LIMIT, IMF_P_LOWER_BOUND, IMF_P_MLIM_BH, IMF_P_MLIM_NS, IMF_P_NUSER, IMF_P_USER
     public :: CHAB_MC, CHAB_SIGMA2, CHAB_IND
@@ -337,6 +337,36 @@ contains
         real(WP), intent(in) :: mini(n), m1(n), m2(n)
         integer, intent(in)  :: first(n)
         real(WP), intent(inout) :: w(ldw, n)
+        call imf_bin_weights_core(imf_type, p, total_mass, n, mini, m1, m2, m2, first, w, ldw, .false.)
+    end subroutine imf_bin_weights
+
+    !> imf_bin_weights with the upper bin edges' logarithms given (ln_m2 = log(m2), formed once for
+    !> all models): each power-law bin edge is exp(e ln m2) instead of a power, one FP64 exponential
+    !> instead of a logarithm and an exponential. The same values to rounding (~|e ln m| epsilon
+    !> relative in an edge's power, so a few 1e-16 of the weight times the inverse relative bin
+    !> width), not bit for bit.
+    pure subroutine imf_bin_weights_ln(imf_type, p, total_mass, n, mini, m1, m2, ln_m2, first, w, ldw)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        integer, intent(in)  :: imf_type, n, ldw
+        real(WP), intent(in) :: p(IMF_NPAR), total_mass
+        real(WP), intent(in) :: mini(n), m1(n), m2(n), ln_m2(n)
+        integer, intent(in)  :: first(n)
+        real(WP), intent(inout) :: w(ldw, n)
+        call imf_bin_weights_core(imf_type, p, total_mass, n, mini, m1, m2, ln_m2, first, w, ldw, .true.)
+    end subroutine imf_bin_weights_ln
+
+    pure subroutine imf_bin_weights_core(imf_type, p, total_mass, n, mini, m1, m2, ln_m2, first, w, ldw, use_ln)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        integer, intent(in)  :: imf_type, n, ldw
+        real(WP), intent(in) :: p(IMF_NPAR), total_mass
+        real(WP), intent(in) :: mini(n), m1(n), m2(n), ln_m2(n)
+        integer, intent(in)  :: first(n)
+        real(WP), intent(inout) :: w(ldw, n)
+        logical, intent(in)  :: use_ln
         integer  :: k, t, seg, cur
         real(WP) :: lo, hi, val, plo, phi, alpha, coeff, e, c, d, prev_hi, prev_phi, lim_lo, lim_hi
 
@@ -413,7 +443,11 @@ contains
                 else
                     plo = lo**e
                 end if
-                phi = hi**e
+                if (use_ln) then
+                    phi = exp(e * ln_m2(k))
+                else
+                    phi = hi**e
+                end if
                 val = c * (phi - plo) / d
                 prev_hi = hi
                 prev_phi = phi
@@ -425,7 +459,7 @@ contains
             if (total_mass > 0.0_wp) val = val / total_mass
             w(1, k) = val
         end do
-    end subroutine imf_bin_weights
+    end subroutine imf_bin_weights_core
 
     !> Integral of a lognormal IMF segment, exp(-(log10 m - log_mc)^2 / (2 sigma2)) / m, over
     !> [m1, m2], or of m times it when mass_weighted (Chabrier and van Dokkum below their break).

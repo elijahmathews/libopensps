@@ -25,7 +25,7 @@ module opensps_ssp_batch
 
     use opensps_precision, only: WP, KP
     use opensps_constants, only: SAFE_FLOOR
-    use opensps_imf, only: imf_integral_p, imf_bin_weights, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT
+    use opensps_imf, only: imf_integral_p, imf_bin_weights, imf_bin_weights_ln, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT
     use opensps_stellar_modifications, only: add_remnant_mass_p
     implicit none
     private
@@ -62,7 +62,8 @@ contains
         !> Models per chunk: bounded by the IMF weights (n_pts x chunk FP64, ~1.7 GB at 2048 models
         !> of MIST)
         integer, parameter :: CHUNK = 2048
-        real(WP), allocatable :: w(:,:), tot(:), vp(:,:,:), pps(:,:,:)
+        real(WP), allocatable :: w(:,:), tot(:), vp(:,:,:), pps(:,:,:), lnm2(:)
+        integer :: k
         real(KP), allocatable :: wk(:,:), v(:,:), veuv(:,:)
         integer :: m0, nc, ky, neb_cols
         logical :: useg
@@ -79,18 +80,25 @@ contains
         ! tried on the A100 (N = 1: 15 -> 10 ms, 100: 128 -> 85 us/model, 10^4: 28.0 -> 26.7 us/model)
         useg = dev
         if (useg) then
-            allocate(vp(min(CHUNK, n_mod), 4, n_seg), pps(min(CHUNK, n_mod), 3, n_pc))
+            allocate(vp(min(CHUNK, n_mod), 4, n_seg), pps(min(CHUNK, n_mod), 3, n_pc), lnm2(n_pts))
         else
-            allocate(vp(1, 1, 1), pps(1, 1, 1))
+            allocate(vp(1, 1, 1), pps(1, 1, 1), lnm2(1))
         end if
 #ifdef OMP_TARGET
-        !$omp target data if(dev) map(alloc: w, wk, tot, v, veuv, vp, pps)
+        !$omp target data if(dev) map(alloc: w, wk, tot, v, veuv, vp, pps, lnm2)
 #endif
+        if (useg) then
+            ! log(m2) of every point once for all models (the power-law bin edges are exp(e ln m2))
+            !$omp target teams distribute parallel do
+            do k = 1, n_pts
+                lnm2(k) = log(pt_m2(k))
+            end do
+        end if
         do m0 = 1, n_mod, CHUNK
             nc = min(CHUNK, n_mod - m0 + 1)
             if (useg) then
                 call imf_pieces_chunk(imf_type, remnants, m0, nc, nt, n_pc, nt_neb, pm, pt_ptr, pc_ptr, age_pc, pt_mini, &
-                                      pt_m1, pt_m2, pt_first, pt_cm, pt_cl, pt_q, age_mmax, size(w, 1), n_pts, w, wk, &
+                                      pt_m1, pt_m2, lnm2, pt_first, pt_cm, pt_cl, pt_q, age_mmax, size(w, 1), n_pts, w, wk, &
                                       tot, pps, smass, slum, q0)
             else
                 call imf_ages_chunk(dev, imf_type, remnants, m0, nc, nt, nt_neb, pm, pt_ptr, pt_mini, pt_m1, pt_m2, &
@@ -185,12 +193,12 @@ contains
     !> both edges' powers computed, which are the values the previous bin would have handed over);
     !> the sums differ in FP64 rounding only.
     subroutine imf_pieces_chunk(imf_type, remnants, m0, nc, nt, n_pc, nt_neb, pm, pt_ptr, pc_ptr, age_pc, pt_mini, &
-                                pt_m1, pt_m2, pt_first, pt_cm, pt_cl, pt_q, age_mmax, ldw, n_pts, w, wk, tot, pps, &
-                                smass, slum, q0)
+                                pt_m1, pt_m2, ln_m2, pt_first, pt_cm, pt_cl, pt_q, age_mmax, ldw, n_pts, w, wk, tot, &
+                                pps, smass, slum, q0)
         logical, intent(in) :: remnants
         integer, intent(in) :: imf_type, m0, nc, nt, n_pc, nt_neb
-        real(WP), intent(in), contiguous :: pm(:,:), pt_mini(:), pt_m1(:), pt_m2(:), pt_cm(:), pt_cl(:), pt_q(:), &
-                                            age_mmax(:)
+        real(WP), intent(in), contiguous :: pm(:,:), pt_mini(:), pt_m1(:), pt_m2(:), ln_m2(:), pt_cm(:), pt_cl(:), &
+                                            pt_q(:), age_mmax(:)
         integer, intent(in), contiguous  :: pt_ptr(:), pc_ptr(:), age_pc(:), pt_first(:)
         integer, intent(in) :: ldw, n_pts
         real(WP), intent(inout) :: w(ldw, n_pts)
@@ -213,9 +221,10 @@ contains
                 sq = 0.0_wp
                 k0 = pc_ptr(q)
                 n = pc_ptr(q + 1) - k0
-                call imf_bin_weights(imf_type, pm(:, m), tot(j), n, pt_mini(k0:k0 + n - 1), &
-                                     pt_m1(k0:k0 + n - 1), pt_m2(k0:k0 + n - 1), pt_first(k0:k0 + n - 1), &
-                                     w(j, k0), ldw)
+                call imf_bin_weights_ln(imf_type, pm(:, m), tot(j), n, pt_mini(k0:k0 + n - 1), &
+                                     pt_m1(k0:k0 + n - 1), pt_m2(k0:k0 + n - 1), ln_m2(k0:k0 + n - 1), &
+                                        pt_first(k0:k0 + n - 1), &
+                                        w(j, k0), ldw)
                 do k = k0, k0 + n - 1
                     sm = sm + pt_cm(k) * w(j, k)
                     sl = sl + pt_cl(k) * w(j, k)
