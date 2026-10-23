@@ -99,7 +99,7 @@ module opensps_csp_batch
     use opensps_ssp, only: configure_imf_parameters
     use opensps_imf, only: imf_pack_params, IMF_NPAR, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_to_device, ssp_op_mod_signature
-    use opensps_ssp_batch, only: ssp_batch_age_sums, ssp_batch_age_sums_z
+    use opensps_ssp_batch, only: ssp_batch_age_sums, ssp_batch_age_sums_z, ssp_opset_t
 #ifdef FSPS_CUBLAS
     use opensps_batch_photometry, only: blas, blas_init
     use cublas
@@ -228,7 +228,7 @@ contains
         real(WP), intent(in), optional      :: zred_mags(:)
         real(WP), intent(in), optional      :: ssp_weights_z(:,:,:)
         type(ssp_operator_t), intent(inout), optional :: ssp_op
-        type(ssp_operator_t), intent(inout), optional :: ssp_ops(:)
+        type(ssp_opset_t), intent(inout), optional :: ssp_ops
 
         integer :: n_mod, nt, nspec, nbands, m, k
         real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk
@@ -315,17 +315,17 @@ contains
         end if
         if (zimf) then
             ! The metallicity free per model: one operator per metallicity of the context, device builds
-            if (size(ssp_ops) /= ctx%state%nz) then
+            if (ssp_ops%nz /= ctx%state%nz .or. .not. allocated(ssp_ops%ops)) then
                 status = 3; return
             end if
-            do m = 1, size(ssp_ops)
-                if (ssp_ops(m)%n_pts == 0 .or. .not. allocated(ssp_ops(m)%pt_q)) then
+            do m = 1, ssp_ops%nz
+                if (ssp_ops%ops(m)%n_pts == 0 .or. .not. allocated(ssp_ops%ops(m)%pt_q)) then
                     status = 1; return
                 end if
-                if (ssp_ops(m)%nspec /= nspec .or. ssp_ops(m)%n_ages /= nt .or. ssp_ops(m)%zmet /= m) then
+                if (ssp_ops%ops(m)%nspec /= nspec .or. ssp_ops%ops(m)%n_ages /= nt .or. ssp_ops%ops(m)%zmet /= m) then
                     status = 3; return
                 end if
-                if (.not. all(ssp_ops(m)%age_on)) then
+                if (.not. all(ssp_ops%ops(m)%age_on)) then
                     status = 2; return
                 end if
             end do
@@ -384,7 +384,7 @@ contains
         end if
         ! Weights over ages and metallicities: every resident basis summed with its own weights
         nzb = 1
-        if (zimf) nzb = size(ssp_ops)
+        if (zimf) nzb = ssp_ops%nz
         if (.not. imf) nzb = size(ctx%state%ssp_basis_spec, 3)
         zw = present(ssp_weights_z)
         nzw = 1
@@ -427,7 +427,7 @@ contains
                 ! Isochrone modifications change which templates the stars use, so S is rebuilt for
                 ! them: not supported per model (status 2), and not different from the build either
                 if (zimf) then
-                    if (any(ssp_op_mod_signature(psets(m)) /= ssp_ops(1)%mod_sig)) then
+                    if (any(ssp_op_mod_signature(psets(m)) /= ssp_ops%ops(1)%mod_sig)) then
                         status = 2; return
                     end if
                 else
@@ -691,7 +691,7 @@ contains
             end do
             if (zimf) then
                 call ssp_batch_age_sums_z(ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &
-                                          ssp_ops, size(ssp_ops), zlo, zhi, dz, pm, wsfh, it_tesc, nb%nt_neb, &
+                                          ssp_ops, zlo, zhi, dz, pm, wsfh, it_tesc, nb%nt_neb, &
                                           nb%whlylim, nb%fesc, yo, smass, slum, nb%q0)
             else
                 call ssp_batch_age_sums(dev, ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &

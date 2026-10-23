@@ -27,6 +27,7 @@ program test_csp_batch
 #endif
     use opensps_ssp, only: generate_ssp_grid
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_free
+    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                             opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
                             opensps_context_set_param_int, opensps_context_set_param_float, &
@@ -589,6 +590,7 @@ contains
                                               0.0_wp, 0.1_wp, 0.18_wp, -0.75_wp, -1.4_wp, -0.2_wp]
         type(PARAMS) :: pset, psets(N_MOD)
         type(ssp_operator_t), allocatable :: ops(:)
+        type(ssp_opset_t) :: opset
         real(WP), allocatable :: spec(:, :), mags(:, :), ref_spec(:, :), ref_mags(:, :), eml(:, :), ref_eml(:, :)
         real(WP), allocatable :: s1(:, :), g1(:, :), e1(:, :), spec_z(:, :, :), mass_z(:, :), lbol_z(:, :)
         real(WP) :: mass(N_MOD), lbol(N_MOD), mdust(N_MOD), ref_mass(N_MOD), ref_lbol(N_MOD), ref_mdust(N_MOD)
@@ -622,6 +624,7 @@ contains
             call ssp_operator_build(ctx, pset, ops(z))
         end do
         call set_int('zmet', 10)
+        call ssp_opset_build(ops, opset)
         do m = 1, N_MOD
             call set_model(m, 0.5_wp)
             call set_float('logzsol', logz(m))
@@ -630,7 +633,7 @@ contains
             call opensps_context_get_pset(ctx, psets(m))
         end do
         call compute_csp_batch(ctx, psets, mags, status, spec=spec, mass=mass, lbol=lbol, mdust=mdust, emlines=eml, &
-                               ssp_ops=ops)
+                               ssp_ops=opset)
         if (status /= 0) write(*, '(A,I0)') "# status = ", status
         call assert_true(status == 0, label // ": status 0", total_tests, total_failures)
         if (status /= 0) return
@@ -671,9 +674,7 @@ contains
         call assert_true(maxval(abs(mdust / ref_mdust - 1.0_wp)) <= SPEC_RTOL, label // ": dust mass", total_tests, total_failures)
         call assert_true(d_line <= SPEC_RTOL, label // ": emission lines", total_tests, total_failures)
 
-        do z = 1, nz
-            call ssp_operator_free(ops(z))
-        end do
+        call ssp_opset_free(opset)
         call set_int('imf_type', 1)
         call set_float('imf1', 1.3_wp); call set_float('imf2', 2.3_wp); call set_float('imf3', 2.3_wp)
         call set_float('logzsol', 0.0_wp)
