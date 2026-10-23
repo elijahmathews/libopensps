@@ -174,6 +174,7 @@ lib_sources = files(
     'src/physics/opensps_sfh.f90',
     'src/physics/opensps_ssp.f90',
     'src/physics/opensps_ssp_operator.f90',
+    'src/physics/opensps_ssp_batch.f90',
     'src/physics/opensps_stellar_modifications.f90',
 
     # Spectra Modules

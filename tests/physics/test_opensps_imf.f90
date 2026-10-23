@@ -32,6 +32,7 @@ contains
         call test_analytic_integrals_match_quadrature()
         call test_weights_match_quadrature()
         call test_runtime_imf_limits_are_honoured()
+        call test_bin_integral_equals_imf_integral()
 
         call print_summary_line("Module Summary", total_tests - total_failures, total_tests)
 
@@ -278,6 +279,54 @@ contains
     !> integrate_imf_interval_analytic must equal the integral of get_imf_value, for number and
     !> mass weighting, on intervals inside single segments and straddling the 0.5 / 1.0 Msun
     !> (Kroupa) and mdave (Dave) breakpoints. This pins the segment continuity constants.
+    !> imf_bin_weights (the SSP operator's IMF weights, each shared edge's power computed once)
+    !> equals imf_integral_p per bin, bit for bit: every analytic IMF type, consecutive bins from
+    !> 0.07 to 150 M_sun (narrow and wide, across every segment boundary), in several runs.
+    subroutine test_bin_integral_equals_imf_integral()
+        integer, parameter :: NB = 4000
+        integer, parameter :: RUNS(5) = [1, 777, 1554, 2331, 3108]
+        real(WP) :: p(IMF_NPAR), edge(0:NB), mini(NB), m1(NB), m2(NB), w(NB), ref
+        integer  :: first(NB), t, k, r, k0, k1, n_diff
+        character(len=64) :: label
+
+        call print_group("IMF bin weights with shared edges equal imf_integral")
+        do k = 0, NB
+            ! Log-spaced edges, with a few exact segment boundaries and a cluster of narrow bins
+            edge(k) = 0.07_wp * (150.0_wp / 0.07_wp)**(real(k, WP) / NB)
+        end do
+        edge(1000) = 0.5_wp; edge(1300) = 1.0_wp; edge(2000) = 0.08_wp * 25.0_wp
+        do k = 2500, 2600
+            edge(k) = edge(2499) * (1.0_wp + 1.0e-7_wp * (k - 2499))
+        end do
+        do k = 1, NB
+            m1(k) = edge(k - 1); m2(k) = edge(k); mini(k) = 0.5_wp * (edge(k - 1) + edge(k))
+        end do
+        first = 0
+        do t = 0, 4
+            p = 0.0_wp
+            p(IMF_P_SALP) = 2.35_wp
+            p(IMF_P_ALPHA:IMF_P_ALPHA + 2) = [1.1_wp, 2.1_wp, 2.6_wp]
+            p(IMF_P_VDMC) = 0.08_wp
+            p(IMF_P_MDAVE) = 0.7_wp
+            p(IMF_P_LOWER_LIMIT) = 0.0_wp
+            p(IMF_P_UPPER_LIMIT) = 1.0e3_wp
+            do r = 1, size(RUNS)
+                k0 = RUNS(r)
+                k1 = NB
+                if (r < size(RUNS)) k1 = RUNS(r + 1) - 1
+                call imf_bin_weights(t, p, 1.0_wp, k1 - k0 + 1, mini(k0), m1(k0), m2(k0), first(k0), w(k0), 1)
+            end do
+            n_diff = 0
+            do k = 1, NB
+                ref = 0.0_wp
+                if (edge(k) > edge(k - 1)) ref = imf_integral_p(t, p, edge(k - 1), edge(k), .false.)
+                if (w(k) /= ref) n_diff = n_diff + 1
+            end do
+            write(label, '(A,I0)') "IMF type ", t
+            call assert_true(n_diff == 0, trim(label), total_tests, total_failures)
+        end do
+    end subroutine test_bin_integral_equals_imf_integral
+
     subroutine test_analytic_integrals_match_quadrature()
         type(opensps_context_t), allocatable :: ctx
         integer, parameter :: types(3) = [0, 2, 4]

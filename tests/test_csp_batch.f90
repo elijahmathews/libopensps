@@ -7,6 +7,8 @@ program test_csp_batch
     !>   redshifts 0, 0.5 (with IGM absorption) and 1.2, per-model redshift and metallicity, every
     !>   smoothing mode; also the SFH weights given as a matrix, and 24 models (the many-spectra
     !>   kernels and cuBLAS products);
+    !> - the IMF free per model (the template operator, ssp_op) against the basis batch with each
+    !>   model's own SSP basis, with full physics;
     !> - identities: without dust, nebular emission, IGM and AGN a CSP is the SFH-weighted sum of
     !>   its SSP basis; the all-ages output divided by the mass formed equals the single-age call at
     !>   that age (in every mode, redshifted colours included); weights over ages and metallicities
@@ -24,6 +26,7 @@ program test_csp_batch
     use omp_lib, only: omp_target_memcpy, omp_get_initial_device, omp_get_default_device
 #endif
     use opensps_ssp, only: generate_ssp_grid
+    use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_free
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                             opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
                             opensps_context_set_param_int, opensps_context_set_param_float, &
@@ -93,6 +96,8 @@ program test_csp_batch
     zred_per_model = .false.
     ! Per-model metallicity: all bases resident, logzsol varied
     call check_batch_z()
+    ! The IMF per model (template operator) against each model's own basis
+    call check_imf_per_model()
     ! compute_csp_scenario: all-ages outputs against single-age calls, in each mode, on the
     ! one-metallicity basis
     call build_basis()
@@ -366,6 +371,74 @@ contains
 
 
 
+
+    !> The IMF free per model: a batch with the template operator (Kroupa slopes varied per model)
+    !> against, model by model, the basis batch with the SSP basis generated for that model's IMF;
+    !> z = 0.5, IGM, nebular emission, AGN, dust emission.
+    subroutine check_imf_per_model()
+        type(PARAMS) :: pset, psets(N_MOD)
+        type(ssp_operator_t) :: op
+        real(WP), allocatable :: spec(:, :), mags(:, :), ref_spec(:, :), ref_mags(:, :), eml(:, :), ref_eml(:, :)
+        real(WP), allocatable :: s1(:, :), g1(:, :), e1(:, :)
+        real(WP) :: mass(N_MOD), lbol(N_MOD), mdust(N_MOD), ref_mass(N_MOD), ref_lbol(N_MOD), ref_mdust(N_MOD)
+        real(WP) :: d_spec, d_mag, d_scal, d_line, imf(3, N_MOD)
+        integer  :: m, status, nspec, nbands
+
+        call print_group("Batched CSP: IMF per model (template operator), Kroupa slopes varied")
+        nspec = ctx%state%nspec
+        nbands = ctx%state%nbands
+        allocate(spec(nspec, N_MOD), mags(nbands, N_MOD), ref_spec(nspec, N_MOD), ref_mags(nbands, N_MOD), &
+                 eml(NEMLINE, N_MOD), ref_eml(NEMLINE, N_MOD), s1(nspec, 1), g1(nbands, 1), e1(NEMLINE, 1))
+        call set_int('dust_type', 2)
+        call set_int('add_igm_absorption', 1)
+        call set_int('add_neb_emission', 1)
+        call set_int('add_agn_dust', 1)
+        call set_int('imf_type', 2)
+        do m = 1, N_MOD
+            imf(:, m) = [0.5_wp + 0.1_wp * m, 1.6_wp + 0.08_wp * m, 1.9_wp + 0.1_wp * mod(7 * m, N_MOD)]
+        end do
+
+        ! The operator (built with the default slopes; S does not depend on them)
+        call set_model(1, 0.5_wp)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        call ssp_operator_build(ctx, pset, op)
+        do m = 1, N_MOD
+            call set_model(m, 0.5_wp)
+            call set_float('imf1', imf(1, m)); call set_float('imf2', imf(2, m)); call set_float('imf3', imf(3, m))
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
+        end do
+        call compute_csp_batch(ctx, psets, mags, status, spec=spec, mass=mass, lbol=lbol, mdust=mdust, emlines=eml, &
+                               ssp_op=op)
+        call assert_true(status == 0, "status 0", total_tests, total_failures)
+
+        ! Reference: each model with its own basis
+        do m = 1, N_MOD
+            call set_float('imf1', imf(1, m)); call set_float('imf2', imf(2, m)); call set_float('imf3', imf(3, m))
+            call build_basis()
+            call compute_csp_batch(ctx, psets(m:m), g1, status, spec=s1, mass=ref_mass(m:m), lbol=ref_lbol(m:m), &
+                                   mdust=ref_mdust(m:m), emlines=e1)
+            ref_spec(:, m) = s1(:, 1)
+            ref_mags(:, m) = g1(:, 1)
+            ref_eml(:, m) = e1(:, 1)
+        end do
+        call max_differences(spec, mags, ref_spec, ref_mags, d_spec, d_mag)
+        d_scal = max(maxval(abs(mass / ref_mass - 1.0_wp)), maxval(abs(lbol - ref_lbol)))
+        d_line = maxval(abs(eml / ref_eml - 1.0_wp), mask=ref_eml > 1.0e-3_wp * maxval(ref_eml))
+        write(*, '(A,5ES10.2)') "# max difference (spectrum, mag, mass/lbol, mdust, lines): ", d_spec, d_mag, &
+            d_scal, maxval(abs(mdust / ref_mdust - 1.0_wp)), d_line
+        write(*, '(A,2F9.5)') "# the IMF matters: mass of models 1 and 12: ", ref_mass(1), ref_mass(N_MOD)
+        call assert_true(d_spec <= SPEC_RTOL, "spectra", total_tests, total_failures)
+        call assert_true(d_mag <= MAG_TOL, "magnitudes", total_tests, total_failures)
+        call assert_true(d_scal <= 1.0e-12_wp, "mass, L_bol", total_tests, total_failures)
+        call assert_true(maxval(abs(mdust / ref_mdust - 1.0_wp)) <= SPEC_RTOL, "dust mass", total_tests, total_failures)
+        call assert_true(d_line <= SPEC_RTOL, "emission lines", total_tests, total_failures)
+
+        call ssp_operator_free(op)
+        call set_int('imf_type', 1)
+        call set_float('imf1', 1.3_wp); call set_float('imf2', 2.3_wp); call set_float('imf3', 2.3_wp)
+    end subroutine check_imf_per_model
 
     !> Largest relative spectrum difference (pixels above 1e-6 of each peak) and magnitude
     !> difference (bands within 30 mag of the brightest) over the columns.

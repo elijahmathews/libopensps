@@ -81,15 +81,16 @@ module opensps_ssp_operator
     !> (direct spectra); C3K none.
 
     use opensps_precision, only: WP, KP
-    use opensps_constants, only: NM, SAFE_FLOOR, TIME_RES_INCR
+    use opensps_constants, only: NM, SAFE_FLOOR, TIME_RES_INCR, C_LIGHT, H_PLANCK, L_SOL
     use opensps_types, only: params
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings
-    use opensps_imf, only: imf_integral_p, IMF_NPAR, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT, IMF_P_LOWER_BOUND
+    use opensps_imf, only: imf_integral_p, IMF_NPAR, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT, IMF_P_LOWER_BOUND, &
+                        imf_bin_weights
     use opensps_stellar_modifications, only: add_remnant_mass_p
     use opensps_ssp, only: isochrone_buffer_t, init_isochrone_buffer, free_isochrone_buffer, load_timestep_data, &
                         apply_isochrone_modifications, add_main_library_templates, finish_ssp_grid, &
                         add_column, dusty_defer_t, dusty_push_slot, dusty_push_entry, L_MAIN, L_CAR, &
-                        L_AGBO, L_AGBC
+                        L_AGBO, L_AGBC, small_template_index, L_WMB, L_PAGB, L_WRN, L_WRC
     use opensps_spectral_library, only: get_stellar_spectrum, get_stellar_terms, SRC_MAIN_LIB, SRC_WMBASIC, &
                                      SRC_AGB_O, SRC_AGB_C, SRC_PAGB, SRC_WRN, SRC_WRC, SRC_AGB_CAR
     use opensps_dust, only: get_agb_dust_terms
@@ -98,7 +99,8 @@ module opensps_ssp_operator
     private
 
     public :: ssp_operator_t, ssp_operator_build, ssp_operator_evaluate, ssp_operator_free
-    public :: ssp_op_model_weights, ssp_op_imf_weights, ssp_op_spmv
+    public :: ssp_op_model_weights, ssp_op_imf_weights, ssp_op_spmv, ssp_template_product
+    public :: ssp_operator_to_device, ssp_operator_from_device
 
     !> Row kinds (the order of the rows within an age)
     integer, parameter, public :: ROW_MAIN = 1, ROW_SMALL = 2, ROW_DUSTY = 3, ROW_DIRECT = 4, &
@@ -133,6 +135,25 @@ module opensps_ssp_operator
         !> Library sizes (to unpack the small-library and dust-corner rows)
         integer :: n_wmb(2) = 0, n_pagb(2) = 0, n_wrn = 0, n_wrc = 0, n_car = 0, n_agbo = 0, n_agbc = 0
         integer :: ng_lib = 0
+        !> Effective templates: the distinct spectra the template rows of all ages weight (a library
+        !> template, a direct star, or a template times a dust-shell transfer function), as the
+        !> columns of etpl, ordered by the first age that uses them (then by row kind and index).
+        !> row_eff maps each row to its column (0: the mass and L_bol rows).
+        integer :: n_eff = 0
+        integer,  allocatable :: row_eff(:), eff_age0(:)
+        real(KP), allocatable :: etpl(:,:)
+        !> Batch form (compute_csp_batch with the IMF per model, opensps_ssp_batch): the template
+        !> rows of S by effective template, over the points in age order (CSR: eff_ptr, eff_pt,
+        !> eff_val); per point its age and its coefficients of the age's surviving mass (pt_cm),
+        !> linear L_bol (pt_cl) and ionizing photon rate (pt_q, photons/s per unit IMF weight,
+        !> from the effective templates as the batch integrates a basis spectrum); per age t,
+        !> k_age(t) = the number of effective templates first used at ages <= t (the columns the
+        !> ages up to t use)
+        integer,  allocatable :: eff_ptr(:), eff_pt(:), pt_age(:), k_age(:)
+        real(WP), allocatable :: eff_val(:), pt_cm(:), pt_cl(:), pt_q(:)
+        !> The batch form and the point and template arrays are mapped to the device
+        !> (ssp_operator_to_device)
+        logical :: on_device = .false.
     end type ssp_operator_t
 
 contains
@@ -230,7 +251,9 @@ contains
                 if (j == 1) then
                     g_m1(k) = 0.0_wp
                 else
-                    g_m1(k) = buf%initial_mass(j) - 0.5_wp * (buf%initial_mass(j) - buf%initial_mass(j-1))
+                    ! The previous bin's upper edge (the same mass as compute_imf_weights' lower
+                    ! edge, to rounding), so consecutive bins share it exactly (imf_bin_weights)
+                    g_m1(k) = g_m2(k - 1)
                 end if
                 if (j == n_nat) then
                     g_m2(k) = buf%initial_mass(j)
@@ -484,6 +507,313 @@ contains
 
     end subroutine ssp_operator_build
 
+    !> The effective templates of op (n_eff, row_eff, eff_age0, etpl) from its rows: one column per
+    !> distinct (row kind, index), dust-shell rows per distinct (transfer function, template)
+    !> over all ages. Columns, as the template sum of each age adds them:
+    !>   - main library, WMBasic, post-AGB, WN, WC, carbon stars: the template;
+    !>   - O- and C-rich AGB: lambda^2 times the template;
+    !>   - direct stars: their spectrum;
+    !>   - dust-shell corners: the template (O/C-rich: lambda^2 times it) below the smoothed
+    !>     range, the smoothed template (O/C-rich: c times it) in it, times the corner's transfer
+    !>     function flux_dagb.
+    !> Formed in FP64, stored at kernel precision.
+    subroutine build_effective_templates(ctx, op)
+        type(opensps_context_t), intent(in) :: ctx
+        type(ssp_operator_t), intent(inout) :: op
+
+        integer(int64), allocatable :: key(:), age_key(:)
+        integer, allocatable :: age_of_row(:), perm(:), eff_of_sorted(:), rep(:), order(:), new_id(:)
+        integer  :: r, t, n, e, sl, q, i, a, b, lib, nk_t, nk_tau, corner, i0, nspec, z
+        integer(int64) :: prev
+        real(WP), allocatable :: col(:)
+
+        nspec = op%nspec
+        z = op%zmet
+        allocate(key(op%n_rows), age_of_row(op%n_rows), op%row_eff(op%n_rows))
+        do t = 1, op%n_ages
+            age_of_row(op%age_row_ptr(t):op%age_row_ptr(t + 1) - 1) = t
+        end do
+        nk_t = 1; nk_tau = 1
+        if (associated(ctx%state%flux_dagb)) then
+            nk_t = size(ctx%state%flux_dagb, 3)
+            nk_tau = size(ctx%state%flux_dagb, 4)
+        end if
+        do r = 1, op%n_rows
+            select case (op%row_kind(r))
+            case (ROW_MAIN, ROW_SMALL, ROW_DIRECT)
+                key(r) = ior(ishft(int(op%row_kind(r), int64), 56), int(op%row_idx(r), int64))
+            case (ROW_DUSTY)
+                sl = (op%row_idx(r) - 1) / op%n_dtpl + 1
+                q = mod(op%row_idx(r) - 1, op%n_dtpl) + 1
+                corner = ((op%slot_key(1, sl) - 1) * nk_t + op%slot_key(2, sl) - 1) * nk_tau + op%slot_key(3, sl) - 1
+                key(r) = ior(ishft(int(ROW_DUSTY, int64), 56), int(corner, int64) * op%n_dtpl + q)
+            case default
+                key(r) = huge(1_int64)   ! mass and L_bol rows: sorted last, no column
+            end select
+        end do
+
+        ! Distinct keys in key order, each with its first row (the rows are in age order)
+        allocate(perm(op%n_rows), eff_of_sorted(op%n_rows), rep(op%n_rows))
+        call sort_keys(key, perm)
+        n = 0
+        prev = -1_int64
+        do i = 1, op%n_rows
+            r = perm(i)
+            if (key(r) == huge(1_int64)) exit
+            if (key(r) /= prev) then
+                n = n + 1
+                rep(n) = r
+                prev = key(r)
+            end if
+            op%row_eff(r) = n
+        end do
+        do i = 1, op%n_rows
+            if (key(perm(i)) == huge(1_int64)) op%row_eff(perm(i)) = 0
+        end do
+
+        ! Order the columns by the first age using them (stable: key order within an age), so
+        ! that the columns of the ages up to t are among the first ones
+        allocate(age_key(n), order(n), new_id(n))
+        do e = 1, n
+            age_key(e) = int(op%n_ages + 1, int64)
+        end do
+        do r = 1, op%n_rows
+            e = op%row_eff(r)
+            if (e > 0) age_key(e) = min(age_key(e), int(age_of_row(r), int64))
+        end do
+        call sort_keys(age_key, order)
+        do e = 1, n
+            new_id(order(e)) = e
+        end do
+        do r = 1, op%n_rows
+            if (op%row_eff(r) > 0) op%row_eff(r) = new_id(op%row_eff(r))
+        end do
+        op%n_eff = n
+        allocate(op%eff_age0(max(n, 1)), op%etpl(nspec, max(n, 1)))
+        op%eff_age0 = 0
+        op%etpl = 0.0_KP
+
+        i0 = nspec + 1
+        if (associated(ctx%state%speclib_agb_smooth)) i0 = nspec - size(ctx%state%speclib_agb_smooth, 1) + 1
+        !$omp parallel do schedule(dynamic, 16) private(r, a, b, lib, sl, q, col)
+        do e = 1, n
+            if (.not. allocated(col)) allocate(col(nspec))
+            r = rep(order(e))
+            op%eff_age0(e) = int(age_key(order(e)))
+            select case (op%row_kind(r))
+            case (ROW_MAIN)
+                a = mod(op%row_idx(r) - 1, op%nt_lib) + 1
+                b = (op%row_idx(r) - 1) / op%nt_lib + 1
+                col = real(ctx%state%speclib(1:nspec, z, a, b), WP)
+            case (ROW_SMALL)
+                call small_template_index(ctx, op%row_idx(r), lib, a, b)
+                select case (lib)
+                case (L_WMB);  col = real(ctx%state%wmb_spec(1:nspec, z, a, b), WP)
+                case (L_PAGB); col = real(ctx%state%pagb_spec(1:nspec, a, b), WP)
+                case (L_WRN);  col = real(ctx%state%wrn_spec(1:nspec, a, z), WP)
+                case (L_WRC);  col = real(ctx%state%wrc_spec(1:nspec, a, z), WP)
+                case (L_CAR);  col = real(ctx%state%agb_spec_car(1:nspec, a), WP)
+                case (L_AGBO); col = ctx%state%spec_lambda(1:nspec)**2 * real(ctx%state%agb_spec_o(1:nspec, a), WP)
+                case default;  col = ctx%state%spec_lambda(1:nspec)**2 * real(ctx%state%agb_spec_c(1:nspec, a), WP)
+                end select
+            case (ROW_DIRECT)
+                col = real(op%direct_spec(:, op%row_idx(r)), WP)
+            case default
+                ! Dust-shell corner sl, template q (main library, carbon stars, O-rich, C-rich):
+                ! the template below i0, the smoothed template from i0 on
+                sl = (op%row_idx(r) - 1) / op%n_dtpl + 1
+                q = mod(op%row_idx(r) - 1, op%n_dtpl) + 1
+                if (q <= op%n_main) then
+                    a = mod(q - 1, op%nt_lib) + 1
+                    b = (q - 1) / op%nt_lib + 1
+                    col(1:i0 - 1) = real(ctx%state%speclib(1:i0 - 1, z, a, b), WP)
+                    col(i0:nspec) = real(ctx%state%speclib_agb_smooth(1:nspec - i0 + 1, z, a, b), WP)
+                else if (q <= op%n_main + op%n_car) then
+                    a = q - op%n_main
+                    col(1:i0 - 1) = real(ctx%state%agb_spec_car(1:i0 - 1, a), WP)
+                    col(i0:nspec) = real(ctx%state%agb_spec_car_smooth(1:nspec - i0 + 1, a), WP)
+                else if (q <= op%n_main + op%n_car + op%n_agbo) then
+                    a = q - op%n_main - op%n_car
+                    col(1:i0 - 1) = ctx%state%spec_lambda(1:i0 - 1)**2 * real(ctx%state%agb_spec_o(1:i0 - 1, a), WP)
+                    col(i0:nspec) = C_LIGHT * real(ctx%state%agb_spec_o_smooth(1:nspec - i0 + 1, a), WP)
+                else
+                    a = q - op%n_main - op%n_car - op%n_agbo
+                    col(1:i0 - 1) = ctx%state%spec_lambda(1:i0 - 1)**2 * real(ctx%state%agb_spec_c(1:i0 - 1, a), WP)
+                    col(i0:nspec) = C_LIGHT * real(ctx%state%agb_spec_c_smooth(1:nspec - i0 + 1, a), WP)
+                end if
+                col = col * real(ctx%state%flux_dagb(1:nspec, op%slot_key(1, sl), op%slot_key(2, sl), &
+                                                     op%slot_key(3, sl)), WP)
+            end select
+            op%etpl(:, e) = real(col, KP)
+        end do
+        call build_batch_form(ctx, op)
+    end subroutine build_effective_templates
+
+    !> The batch form of op (see ssp_operator_t) from its rows and effective templates.
+    subroutine build_batch_form(ctx, op)
+        type(opensps_context_t), intent(in) :: ctx
+        type(ssp_operator_t), intent(inout) :: op
+        integer  :: t, r, e, k, i, whl
+        real(WP) :: s, wt
+        real(WP), allocatable :: q_eff(:)
+        integer, allocatable :: cnt(:)
+
+        allocate(op%k_age(op%n_ages), op%pt_cm(op%n_pts), op%pt_cl(op%n_pts), op%pt_q(op%n_pts), op%pt_age(op%n_pts))
+        allocate(op%eff_ptr(op%n_eff + 1), cnt(op%n_eff + 1))
+        op%pt_cm = 0.0_wp; op%pt_cl = 0.0_wp; op%pt_q = 0.0_wp
+        do t = 1, op%n_ages
+            op%pt_age(op%pt_ptr(t):op%pt_ptr(t + 1) - 1) = t
+            op%k_age(t) = count(op%eff_age0(1:op%n_eff) <= t)
+        end do
+        ! Entries per effective template, then filled in row order (ages ascending, and within a
+        ! row the points ascending: each template's points in age order)
+        cnt = 0
+        do r = 1, op%n_rows
+            e = op%row_eff(r)
+            if (e > 0) cnt(e) = cnt(e) + op%row_ptr(r + 1) - op%row_ptr(r)
+        end do
+        op%eff_ptr(1) = 1
+        do e = 1, op%n_eff
+            op%eff_ptr(e + 1) = op%eff_ptr(e) + cnt(e)
+        end do
+        allocate(op%eff_pt(max(op%eff_ptr(op%n_eff + 1) - 1, 1)), op%eff_val(max(op%eff_ptr(op%n_eff + 1) - 1, 1)))
+        cnt = 0
+        do r = 1, op%n_rows
+            e = op%row_eff(r)
+            if (e < 1) cycle
+            do k = op%row_ptr(r), op%row_ptr(r + 1) - 1
+                op%eff_pt(op%eff_ptr(e) + cnt(e)) = op%col(k)
+                op%eff_val(op%eff_ptr(e) + cnt(e)) = op%val(k)
+                cnt(e) = cnt(e) + 1
+            end do
+        end do
+
+        ! Ionizing photons of each effective template (the batch's integral over the pixels below
+        ! the Lyman limit)
+        whl = ctx%state%whlylim
+        allocate(q_eff(max(op%n_eff, 1)))
+        q_eff = 0.0_wp
+        if (whl >= 2) then
+            do e = 1, op%n_eff
+                s = 0.0_wp
+                do i = 1, whl - 1
+                    wt = 0.5_wp * abs(ctx%state%spec_nu(i + 1) - ctx%state%spec_nu(i))
+                    s = s + wt * (real(op%etpl(i, e), WP) / ctx%state%spec_nu(i) + &
+                                  real(op%etpl(i + 1, e), WP) / ctx%state%spec_nu(i + 1))
+                end do
+                q_eff(e) = s / H_PLANCK * L_SOL
+            end do
+        end if
+        ! Per point through S (rows in order), and the mass and L_bol rows' coefficients
+        do r = 1, op%n_rows
+            e = op%row_eff(r)
+            do k = op%row_ptr(r), op%row_ptr(r + 1) - 1
+                if (e > 0) then
+                    op%pt_q(op%col(k)) = op%pt_q(op%col(k)) + op%val(k) * q_eff(e)
+                else if (op%row_kind(r) == ROW_MASS) then
+                    op%pt_cm(op%col(k)) = op%val(k)
+                else if (op%row_kind(r) == ROW_LBOL) then
+                    op%pt_cl(op%col(k)) = op%val(k)
+                end if
+            end do
+        end do
+    end subroutine build_batch_form
+
+    !> Maps op's batch form, point arrays and effective templates to the device (OpenMP target
+    !> builds; no-op otherwise), once: compute_csp_batch reads them there.
+    subroutine ssp_operator_to_device(op)
+        type(ssp_operator_t), intent(inout) :: op
+#ifdef OMP_TARGET
+        if (op%on_device) return
+        !$omp target enter data map(to: op%etpl, op%eff_ptr, op%eff_pt, op%eff_val, op%pt_age, op%pt_cm, &
+        !$omp     op%pt_cl, op%pt_q, op%pt_mini, op%pt_m1, op%pt_m2, op%pt_first, op%age_mmax, op%k_age, op%pt_ptr)
+        op%on_device = .true.
+#endif
+    end subroutine ssp_operator_to_device
+
+    !> Releases the device copies of ssp_operator_to_device.
+    subroutine ssp_operator_from_device(op)
+        type(ssp_operator_t), intent(inout) :: op
+#ifdef OMP_TARGET
+        if (.not. op%on_device) return
+        !$omp target exit data map(delete: op%etpl, op%eff_ptr, op%eff_pt, op%eff_val, op%pt_age, op%pt_cm, &
+        !$omp     op%pt_cl, op%pt_q, op%pt_mini, op%pt_m1, op%pt_m2, op%pt_first, op%age_mmax, op%k_age, op%pt_ptr)
+        op%on_device = .false.
+#endif
+    end subroutine ssp_operator_from_device
+
+    !> y = etpl . b (pixels x columns), the template product of the SSP: each (pixel, column)
+    !> sums the effective templates in column order, skipping zero weights; compensated (Kahan)
+    !> with FP32 kernels. On the device (dev, OpenMP target builds) one thread per (pixel,
+    !> column); on the host a block of pixels at a time (each template block read once for all
+    !> columns), in the same order.
+    subroutine ssp_template_product(nspec, n_eff, ncol, etpl, b, y, dev)
+        integer, intent(in)   :: nspec, n_eff, ncol
+        real(KP), intent(in)  :: etpl(nspec, n_eff), b(n_eff, ncol)
+        real(KP), intent(out) :: y(nspec, ncol)
+        logical, intent(in)   :: dev
+
+        integer, parameter :: PIX_BLOCK = 512
+        integer  :: i, c, k, p0, p1, nb, q
+        real(KP) :: acc, comp, wk, term, tsum
+        real(KP), allocatable :: va(:,:), vc(:,:)
+
+        if (dev) then
+#ifdef OMP_TARGET
+            !$omp target teams distribute parallel do collapse(2) private(acc, comp, wk, term, tsum, k) &
+            !$omp map(to: etpl, b) map(from: y)
+#endif
+            do c = 1, ncol
+                do i = 1, nspec
+                    acc = 0.0_KP
+                    comp = 0.0_KP
+                    do k = 1, n_eff
+                        wk = b(k, c)
+                        if (wk == 0.0_KP) cycle
+                        if (KP == WP) then
+                            acc = acc + wk * etpl(i, k)
+                        else
+                            term = wk * etpl(i, k) - comp
+                            tsum = acc + term
+                            comp = (tsum - acc) - term
+                            acc = tsum
+                        end if
+                    end do
+                    y(i, c) = acc
+                end do
+            end do
+            return
+        end if
+
+        !$omp parallel do schedule(dynamic) private(p0, p1, nb, q, k, c, wk, term, tsum, va, vc)
+        do p0 = 1, nspec, PIX_BLOCK
+            p1 = min(p0 + PIX_BLOCK - 1, nspec)
+            nb = p1 - p0 + 1
+            allocate(va(PIX_BLOCK, ncol), vc(PIX_BLOCK, ncol))
+            va = 0.0_KP; vc = 0.0_KP
+            do k = 1, n_eff
+                do c = 1, ncol
+                    wk = b(k, c)
+                    if (wk == 0.0_KP) cycle
+                    if (KP == WP) then
+                        do q = 1, nb
+                            va(q, c) = va(q, c) + wk * etpl(p0 + q - 1, k)
+                        end do
+                    else
+                        do q = 1, nb
+                            term = wk * etpl(p0 + q - 1, k) - vc(q, c)
+                            tsum = va(q, c) + term
+                            vc(q, c) = (tsum - va(q, c)) - term
+                            va(q, c) = tsum
+                        end do
+                    end if
+                end do
+            end do
+            y(p0:p1, 1:ncol) = va(1:nb, 1:ncol)
+            deallocate(va, vc)
+        end do
+    end subroutine ssp_template_product
+
     ! ------------------------------------------------------------------------
     ! Growing arrays (module procedures: with nvfortran 26.1 -acc, move_alloc on host-associated
     ! allocatables inside internal procedures corrupted the heap)
@@ -575,7 +905,9 @@ contains
 
     subroutine ssp_operator_free(op)
         type(ssp_operator_t), intent(inout) :: op
-        ! Component by component (no derived-type assignment: plain for every compiler)
+        ! Component by component (no derived-type assignment: plain for every compiler), after
+        ! the device copies
+        call ssp_operator_from_device(op)
         if (allocated(op%pt_ptr)) deallocate(op%pt_ptr)
         if (allocated(op%pt_mini)) deallocate(op%pt_mini)
         if (allocated(op%pt_m1)) deallocate(op%pt_m1)
@@ -593,6 +925,18 @@ contains
         if (allocated(op%val)) deallocate(op%val)
         if (allocated(op%slot_key)) deallocate(op%slot_key)
         if (allocated(op%direct_spec)) deallocate(op%direct_spec)
+        if (allocated(op%row_eff)) deallocate(op%row_eff)
+        if (allocated(op%eff_age0)) deallocate(op%eff_age0)
+        if (allocated(op%etpl)) deallocate(op%etpl)
+        if (allocated(op%k_age)) deallocate(op%k_age)
+        if (allocated(op%eff_ptr)) deallocate(op%eff_ptr)
+        if (allocated(op%eff_pt)) deallocate(op%eff_pt)
+        if (allocated(op%eff_val)) deallocate(op%eff_val)
+        if (allocated(op%pt_age)) deallocate(op%pt_age)
+        if (allocated(op%pt_cm)) deallocate(op%pt_cm)
+        if (allocated(op%pt_cl)) deallocate(op%pt_cl)
+        if (allocated(op%pt_q)) deallocate(op%pt_q)
+        op%n_eff = 0
         op%n_pts = 0; op%n_rows = 0; op%nnz = 0; op%n_slots = 0; op%n_direct = 0
     end subroutine ssp_operator_free
 
@@ -601,32 +945,19 @@ contains
     ! ------------------------------------------------------------------------
 
     !> IMF weights of all native isochrone points (compute_imf_weights for every age): number of
-    !> stars per bin per unit initial stellar mass. imf_type and p(IMF_NPAR) as in opensps_imf.
+    !> stars per bin per unit initial stellar mass. imf_type and p(IMF_NPAR) as in opensps_imf;
+    !> imf_bin_weights, as the batch (opensps_ssp_batch) computes them.
     subroutine ssp_op_imf_weights(imf_type, p, n_pts, pt_mini, pt_m1, pt_m2, pt_first, w)
         integer, intent(in)  :: imf_type, n_pts
         real(WP), intent(in) :: p(IMF_NPAR)
         real(WP), intent(in) :: pt_mini(n_pts), pt_m1(n_pts), pt_m2(n_pts)
         integer, intent(in)  :: pt_first(n_pts)
         real(WP), intent(out) :: w(n_pts)
-        real(WP) :: m1, m2, total_mass, lo, hi
-        integer :: k
+        real(WP) :: total_mass
 
-        lo = p(IMF_P_LOWER_LIMIT)
-        hi = p(IMF_P_UPPER_LIMIT)
-        total_mass = imf_integral_p(imf_type, p, lo, hi, .true.)
-        do k = 1, n_pts
-            w(k) = 0.0_wp
-            if (pt_mini(k) < lo .or. pt_mini(k) > hi) cycle
-            if (pt_first(k) == 1) then
-                m1 = p(IMF_P_LOWER_BOUND)
-            else
-                m1 = pt_m1(k)
-            end if
-            m2 = pt_m2(k)
-            if (m2 <= m1) cycle      ! empty or inverted bin: no stars (compute_imf_weights)
-            w(k) = imf_integral_p(imf_type, p, m1, m2, .false.)
-            if (total_mass > 0.0_wp) w(k) = w(k) / total_mass
-        end do
+        total_mass = imf_integral_p(imf_type, p, p(IMF_P_LOWER_LIMIT), p(IMF_P_UPPER_LIMIT), .true.)
+        ! (one run: the first point of each age starts a new one)
+        call imf_bin_weights(imf_type, p, total_mass, n_pts, pt_mini, pt_m1, pt_m2, pt_first, w, 1)
     end subroutine ssp_op_imf_weights
 
     !> wrow = S . w (one row per CSR row).
