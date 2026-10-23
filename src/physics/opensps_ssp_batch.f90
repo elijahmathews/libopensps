@@ -44,12 +44,14 @@ contains
     !> nebular ages (0: none), fesc: their escaping EUV fraction per model, whl: EUV pixels.
     subroutine ssp_batch_age_sums(dev, imf_type, remnants, n_mod, nt, nspec, n_pts, n_eff, pm, wsfh, it_tesc, &
                                   pt_ptr, pt_mini, pt_m1, pt_m2, pt_first, pt_cm, pt_cl, pt_q, age_mmax, &
-                                  pt_age, eff_ptr, eff_pt, eff_val, k_age, n_seg, seg_ptr, seg_first, etpl, nt_neb, whl, fesc, &
+                                  pt_age, eff_ptr, eff_pt, eff_val, k_age, n_seg, seg_ptr, seg_first, n_pc, pc_ptr, age_pc, etpl, &
+                                  nt_neb, whl, fesc, &
                                   yo, smass, slum, q0)
         logical, intent(in)  :: dev, remnants
-        integer, intent(in)  :: imf_type, n_mod, nt, nspec, n_pts, n_eff, nt_neb, whl, n_seg
+        integer, intent(in)  :: imf_type, n_mod, nt, nspec, n_pts, n_eff, nt_neb, whl, n_seg, n_pc
         real(WP), intent(in), contiguous :: pm(:,:), wsfh(:,:), fesc(:)
         integer, intent(in), contiguous  :: it_tesc(:), pt_ptr(:), pt_first(:), k_age(:), seg_ptr(:), seg_first(:)
+        integer, intent(in), contiguous  :: pc_ptr(:), age_pc(:)
         integer, intent(in), contiguous  :: pt_age(:), eff_ptr(:), eff_pt(:)
         real(WP), intent(in), contiguous :: pt_mini(:), pt_m1(:), pt_m2(:), pt_cm(:), pt_cl(:), pt_q(:), age_mmax(:)
         real(WP), intent(in), contiguous :: eff_val(:)
@@ -60,7 +62,7 @@ contains
         !> Models per chunk: bounded by the IMF weights (n_pts x chunk FP64, ~1.7 GB at 2048 models
         !> of MIST)
         integer, parameter :: CHUNK = 2048
-        real(WP), allocatable :: w(:,:), tot(:), vp(:,:,:)
+        real(WP), allocatable :: w(:,:), tot(:), vp(:,:,:), pps(:,:,:)
         real(KP), allocatable :: wk(:,:), v(:,:), veuv(:,:)
         integer :: m0, nc, ky, neb_cols
         logical :: useg
@@ -77,17 +79,23 @@ contains
         ! tried on the A100 (N = 1: 15 -> 10 ms, 100: 128 -> 85 us/model, 10^4: 28.0 -> 26.7 us/model)
         useg = dev
         if (useg) then
-            allocate(vp(min(CHUNK, n_mod), 4, n_seg))
+            allocate(vp(min(CHUNK, n_mod), 4, n_seg), pps(min(CHUNK, n_mod), 3, n_pc))
         else
-            allocate(vp(1, 1, 1))
+            allocate(vp(1, 1, 1), pps(1, 1, 1))
         end if
 #ifdef OMP_TARGET
-        !$omp target data if(dev) map(alloc: w, wk, tot, v, veuv, vp)
+        !$omp target data if(dev) map(alloc: w, wk, tot, v, veuv, vp, pps)
 #endif
         do m0 = 1, n_mod, CHUNK
             nc = min(CHUNK, n_mod - m0 + 1)
-            call imf_ages_chunk(dev, imf_type, remnants, m0, nc, nt, nt_neb, pm, pt_ptr, pt_mini, pt_m1, pt_m2, &
-                                pt_first, pt_cm, pt_cl, pt_q, age_mmax, size(w, 1), n_pts, w, wk, tot, smass, slum, q0)
+            if (useg) then
+                call imf_pieces_chunk(imf_type, remnants, m0, nc, nt, n_pc, nt_neb, pm, pt_ptr, pc_ptr, age_pc, pt_mini, &
+                                      pt_m1, pt_m2, pt_first, pt_cm, pt_cl, pt_q, age_mmax, size(w, 1), n_pts, w, wk, &
+                                      tot, pps, smass, slum, q0)
+            else
+                call imf_ages_chunk(dev, imf_type, remnants, m0, nc, nt, nt_neb, pm, pt_ptr, pt_mini, pt_m1, pt_m2, &
+                                    pt_first, pt_cm, pt_cl, pt_q, age_mmax, size(w, 1), n_pts, w, wk, tot, smass, slum, q0)
+            end if
             if (useg) then
                 call fold_segments(m0, nc, n_eff, n_seg, nt_neb, neb_cols, wsfh, it_tesc, fesc, pt_age, eff_pt, eff_val, &
                                    seg_ptr, seg_first, wk, vp, v, veuv)
@@ -169,6 +177,76 @@ contains
             end do
         end do
     end subroutine imf_ages_chunk
+
+    !> imf_ages_chunk on the device with the points of each age cut into pieces (ssp_operator_t:
+    !> pc_ptr, age_pc): one thread per (piece, model) makes the IMF weights of its points and their
+    !> partial sums of mass, L_bol and photons, then one thread per (age, model) adds the pieces in
+    !> order (and the remnants). The weights are the same as imf_ages_chunk's (a piece starts with
+    !> both edges' powers computed, which are the values the previous bin would have handed over);
+    !> the sums differ in FP64 rounding only.
+    subroutine imf_pieces_chunk(imf_type, remnants, m0, nc, nt, n_pc, nt_neb, pm, pt_ptr, pc_ptr, age_pc, pt_mini, &
+                                pt_m1, pt_m2, pt_first, pt_cm, pt_cl, pt_q, age_mmax, ldw, n_pts, w, wk, tot, pps, &
+                                smass, slum, q0)
+        logical, intent(in) :: remnants
+        integer, intent(in) :: imf_type, m0, nc, nt, n_pc, nt_neb
+        real(WP), intent(in), contiguous :: pm(:,:), pt_mini(:), pt_m1(:), pt_m2(:), pt_cm(:), pt_cl(:), pt_q(:), &
+                                            age_mmax(:)
+        integer, intent(in), contiguous  :: pt_ptr(:), pc_ptr(:), age_pc(:), pt_first(:)
+        integer, intent(in) :: ldw, n_pts
+        real(WP), intent(inout) :: w(ldw, n_pts)
+        real(KP), intent(inout) :: wk(ldw, n_pts)
+        real(WP), intent(inout), contiguous :: tot(:), pps(:,:,:), smass(:,:), slum(:,:), q0(:,:)
+        integer  :: j, t, k, m, q, k0, n
+        real(WP) :: sm, sl, sq
+
+        !$omp target teams distribute parallel do
+        do j = 1, nc
+            tot(j) = imf_integral_p(imf_type, pm(:, m0 + j - 1), pm(IMF_P_LOWER_LIMIT, m0 + j - 1), &
+                                    pm(IMF_P_UPPER_LIMIT, m0 + j - 1), .true.)
+        end do
+        !$omp target teams distribute parallel do collapse(2) private(k, m, k0, n, sm, sl, sq)
+        do q = 1, n_pc
+            do j = 1, nc
+                m = m0 + j - 1
+                sm = 0.0_wp
+                sl = 0.0_wp
+                sq = 0.0_wp
+                k0 = pc_ptr(q)
+                n = pc_ptr(q + 1) - k0
+                call imf_bin_weights(imf_type, pm(:, m), tot(j), n, pt_mini(k0:k0 + n - 1), &
+                                     pt_m1(k0:k0 + n - 1), pt_m2(k0:k0 + n - 1), pt_first(k0:k0 + n - 1), &
+                                     w(j, k0), ldw)
+                do k = k0, k0 + n - 1
+                    sm = sm + pt_cm(k) * w(j, k)
+                    sl = sl + pt_cl(k) * w(j, k)
+                    sq = sq + pt_q(k) * w(j, k)
+                    wk(j, k) = real(w(j, k), KP)
+                end do
+                pps(j, 1, q) = sm
+                pps(j, 2, q) = sl
+                pps(j, 3, q) = sq
+            end do
+        end do
+        !$omp target teams distribute parallel do collapse(2) private(q, sm, sl, sq)
+        do t = 1, nt
+            do j = 1, nc
+                m = m0 + j - 1
+                sm = 0.0_wp
+                sl = 0.0_wp
+                sq = 0.0_wp
+                do q = age_pc(t), age_pc(t + 1) - 1
+                    sm = sm + pps(j, 1, q)
+                    sl = sl + pps(j, 2, q)
+                    sq = sq + pps(j, 3, q)
+                end do
+                ! An empty isochrone has no mass (and no remnants), as ssp_operator_evaluate
+                if (remnants .and. pt_ptr(t + 1) > pt_ptr(t)) call add_remnant_mass_p(imf_type, pm(:, m), sm, age_mmax(t))
+                smass(t, m) = sm
+                slum(t, m) = sl
+                if (t <= nt_neb) q0(t, m) = sq
+            end do
+        end do
+    end subroutine imf_pieces_chunk
 
     !> Template weights of the chunk's models, the SFH folded in: v(e, j) young and v(e, nc + j)
     !> old sums over the points of template e of S(e, p) w(j, p) w_sfh(age(p), m); with nebular

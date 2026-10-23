@@ -105,6 +105,8 @@ module opensps_ssp_operator
     !> Row kinds (the order of the rows within an age)
     !> Entries per segment of an effective template's list (ssp_operator_t: seg_ptr)
     integer, parameter :: SEG_LEN = 256
+    !> Points per piece of an age's points (ssp_operator_t: pc_ptr)
+    integer, parameter :: PT_PIECE = 32
 
     integer, parameter, public :: ROW_MAIN = 1, ROW_SMALL = 2, ROW_DUSTY = 3, ROW_DIRECT = 4, &
                                   ROW_MASS = 5, ROW_LBOL = 6
@@ -166,6 +168,11 @@ module opensps_ssp_operator
         !> seg_ptr(s) .. seg_ptr(s + 1) - 1, template e the segments seg_first(e) .. seg_first(e + 1) - 1
         integer :: n_seg = 0
         integer,  allocatable :: seg_ptr(:), seg_first(:)
+        !> The points of each age cut into pieces of at most PT_PIECE points (the IMF weights of
+        !> small batches have one thread per piece): piece q holds the points pc_ptr(q) ..
+        !> pc_ptr(q + 1) - 1, age t the pieces age_pc(t) .. age_pc(t + 1) - 1
+        integer :: n_pc = 0
+        integer,  allocatable :: pc_ptr(:), age_pc(:)
         real(WP), allocatable :: eff_val(:), pt_cm(:), pt_cl(:), pt_q(:)
         !> The batch form and the point and template arrays are mapped to the device
         !> (ssp_operator_to_device)
@@ -715,6 +722,23 @@ contains
             end do
         end do
 
+        ! Pieces of the ages' points
+        op%n_pc = 0
+        do t = 1, op%n_ages
+            op%n_pc = op%n_pc + (op%pt_ptr(t + 1) - op%pt_ptr(t) + PT_PIECE - 1) / PT_PIECE
+        end do
+        allocate(op%pc_ptr(op%n_pc + 1), op%age_pc(op%n_ages + 1))
+        r = 0
+        do t = 1, op%n_ages
+            op%age_pc(t) = r + 1
+            do k = op%pt_ptr(t), op%pt_ptr(t + 1) - 1, PT_PIECE
+                r = r + 1
+                op%pc_ptr(r) = k
+            end do
+        end do
+        op%age_pc(op%n_ages + 1) = r + 1
+        op%pc_ptr(r + 1) = op%pt_ptr(op%n_ages + 1)
+
         ! Segments of the template lists, cut at age boundaries once a segment holds SEG_LEN entries
         call count_or_fill_segments(op, .false.)
         allocate(op%seg_ptr(op%n_seg + 1), op%seg_first(op%n_eff + 1))
@@ -790,7 +814,7 @@ contains
         if (op%on_device) return
         !$omp target enter data map(to: op%etpl, op%eff_ptr, op%eff_pt, op%eff_val, op%pt_age, op%pt_cm, &
         !$omp     op%pt_cl, op%pt_q, op%pt_mini, op%pt_m1, op%pt_m2, op%pt_first, op%age_mmax, op%k_age, op%pt_ptr, &
-        !$omp     op%seg_ptr, op%seg_first)
+        !$omp     op%seg_ptr, op%seg_first, op%pc_ptr, op%age_pc)
         op%on_device = .true.
 #endif
     end subroutine ssp_operator_to_device
@@ -802,7 +826,7 @@ contains
         if (.not. op%on_device) return
         !$omp target exit data map(delete: op%etpl, op%eff_ptr, op%eff_pt, op%eff_val, op%pt_age, op%pt_cm, &
         !$omp     op%pt_cl, op%pt_q, op%pt_mini, op%pt_m1, op%pt_m2, op%pt_first, op%age_mmax, op%k_age, op%pt_ptr, &
-        !$omp     op%seg_ptr, op%seg_first)
+        !$omp     op%seg_ptr, op%seg_first, op%pc_ptr, op%age_pc)
         op%on_device = .false.
 #endif
     end subroutine ssp_operator_from_device
@@ -995,6 +1019,9 @@ contains
         if (allocated(op%etpl)) deallocate(op%etpl)
         if (allocated(op%k_age)) deallocate(op%k_age)
         if (allocated(op%seg_ptr)) deallocate(op%seg_ptr)
+        if (allocated(op%pc_ptr)) deallocate(op%pc_ptr)
+        if (allocated(op%age_pc)) deallocate(op%age_pc)
+        op%n_pc = 0
         if (allocated(op%seg_first)) deallocate(op%seg_first)
         op%n_seg = 0
         if (allocated(op%eff_ptr)) deallocate(op%eff_ptr)
