@@ -34,6 +34,15 @@ module opensps_ssp_batch
     public :: ssp_batch_age_sums, ssp_batch_age_sums_z
     public :: ssp_opset_t, ssp_opset_build, ssp_opset_free
 
+#ifdef FSPS_CUBLAS
+#ifdef KERNEL_SINGLE_PRECISION
+    !> Column counts up to which the FP32 cuBLAS product uses the batched form (gemm_columns_batched),
+    !> and its work array (pixels x NC_BATCHED x blocks, on the device once allocated)
+    integer, parameter :: NC_BATCHED = 512
+    real(KP), allocatable, save :: gtmp(:,:,:)
+#endif
+#endif
+
     !> The operators of all metallicities of a context (ssp_operator_build with pset%zmet = 1 ..
     !> nz), their point, piece, segment and template tables concatenated (offsets per
     !> metallicity) so that one kernel launch serves models of every metallicity. Built once
@@ -994,6 +1003,74 @@ contains
     end subroutine template_columns
 
 #ifdef FSPS_CUBLAS
+#ifdef KERNEL_SINGLE_PRECISION
+    !> gemm_columns for few columns (FP32 kernels): the full blocks of KB templates in one strided
+    !> batched GEMM into a work array, the remainder block in one more, then each (pixel, column)
+    !> adds the blocks in order with compensation (the arithmetic of gemm_columns).
+    subroutine gemm_columns_batched(np, nspec, n_eff, k, nc, etpl, v, v0, yo, c0)
+        use opensps_batch_photometry, only: blas
+        use cublas
+        use, intrinsic :: iso_c_binding, only: c_long_long
+        integer, intent(in) :: np, nspec, n_eff, k, nc, v0, c0
+        real(KP), intent(in), contiguous, target :: etpl(:,:), v(:,:)
+        real(KP), intent(inout), contiguous, target :: yo(:,:)
+        integer, parameter :: KB = 256
+        integer :: istat, nfull, rem, nb, i, j, b
+        real(KP) :: term, tsum, acc, cmp
+
+        nfull = k / KB
+        rem = k - nfull * KB
+        nb = nfull + merge(1, 0, rem > 0)
+        if (.not. allocated(gtmp)) then
+            allocate(gtmp(1, 1, 1))
+        end if
+        if (size(gtmp, 1) < np .or. size(gtmp, 2) < NC_BATCHED .or. size(gtmp, 3) < nb) then
+            call free_gtmp()
+            allocate(gtmp(max(np, size(gtmp, 1)), NC_BATCHED, max(nb, size(gtmp, 3))))
+            !$omp target enter data map(alloc: gtmp)
+        end if
+        if (nfull > 0) then
+            !$omp target data use_device_addr(etpl, v, gtmp)
+            istat = cublasSgemmStridedBatched(blas, CUBLAS_OP_N, CUBLAS_OP_N, np, nc, KB, 1.0_KP, etpl, nspec, &
+                                              int(KB, c_long_long) * nspec, v(1, v0 + 1), n_eff, int(KB, c_long_long), &
+                                              0.0_KP, gtmp, size(gtmp, 1), int(size(gtmp, 1), c_long_long) * size(gtmp, 2), &
+                                              nfull)
+            !$omp end target data
+            if (istat /= 0) error stop 'ssp batch: cuBLAS batched GEMM failed'
+        end if
+        if (rem > 0) then
+            !$omp target data use_device_addr(etpl, v, gtmp)
+            istat = cublasSgemm_v2(blas, CUBLAS_OP_N, CUBLAS_OP_N, np, nc, rem, 1.0_KP, etpl(1, nfull * KB + 1), nspec, &
+                                   v(nfull * KB + 1, v0 + 1), n_eff, 0.0_KP, gtmp(1, 1, nb), size(gtmp, 1))
+            !$omp end target data
+            if (istat /= 0) error stop 'ssp batch: cuBLAS GEMM failed'
+        end if
+        !$omp target teams distribute parallel do collapse(2) private(acc, cmp, term, tsum, b)
+        do j = 1, nc
+            do i = 1, np
+                acc = 0.0_KP
+                cmp = 0.0_KP
+                do b = 1, nb
+                    term = gtmp(i, j, b) - cmp
+                    tsum = acc + term
+                    cmp = (tsum - acc) - term
+                    acc = tsum
+                end do
+                yo(i, c0 + j) = acc
+            end do
+        end do
+    end subroutine gemm_columns_batched
+
+    subroutine free_gtmp()
+        if (allocated(gtmp)) then
+            if (size(gtmp) > 1) then
+                !$omp target exit data map(delete: gtmp)
+            end if
+            deallocate(gtmp)
+        end if
+    end subroutine free_gtmp
+#endif
+
     !> template_columns with cuBLAS (arrays on the device). FP64: one GEMM. FP32: a GEMM per
     !> block of KB templates into a work array, each added to yo with a compensation term.
     subroutine gemm_columns(np, nspec, n_eff, k, nc, etpl, v, v0, yo, c0)
@@ -1009,6 +1086,13 @@ contains
 
         call blas_init()
 #ifdef KERNEL_SINGLE_PRECISION
+        if (nc <= NC_BATCHED .and. k > KB) then
+            ! Small column counts (the runs of one metallicity in a small batch): the blocks of KB
+            ! templates as one strided batched GEMM and one compensated sum over the blocks, instead of
+            ! a GEMM and an add per block (launch bound: ~20 launches per product)
+            call gemm_columns_batched(np, nspec, n_eff, k, nc, etpl, v, v0, yo, c0)
+            return
+        end if
         allocate(tmp(np, nc), cmp(np, nc))
         !$omp target data map(alloc: tmp, cmp)
         !$omp target teams distribute parallel do collapse(2)
