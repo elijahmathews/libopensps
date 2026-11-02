@@ -2,7 +2,9 @@ program benchmark_csp_batch
     !> Per-model cost of the batched CSP (compute_csp_batch) against one compute_csp_scenario
     !> call per model, on the benchmark_phases setup (MIST + MILES + DL07, tau model with dust and
     !> dust emission). Tau, age and the dust parameters vary across the batch.
-    !> Usage: benchmark_csp_batch [n_max [n_single [config]]]. config = "full": the real-world
+    !> Usage: benchmark_csp_batch [n_max [n_single [config [n_min]]]] (batch sizes 1, 100, 1000,
+    !> 10^4 from n_min to n_max; n_min = 10^4 with n_single = 0 times one size, e.g. for profiling).
+    !> config = "full": the real-world
     !> fitting configuration (dust1 = 0.5, dust2 = 0.3, DL07 dust emission, nebular emission,
     !> IGM at zred = 0.5, AGN with fagn = 0.1, spectral indices; tau, age, U_min and gas_logu vary);
     !> "full_smooth": the same with velocity smoothing, sigma_smooth = 150 km/s; "full_z" and
@@ -41,7 +43,7 @@ program benchmark_csp_batch
     integer :: z
     real(WP), allocatable :: indx(:, :)
     integer(8) :: t0, t1, rate
-    integer :: n_max = 10000, n_single = 200, status, nspec, ntfull, i, n, rep, n_rep, k
+    integer :: n_max = 10000, n_single = 200, n_min = 1, status, nspec, ntfull, i, n, rep, n_rep, k
     integer, parameter :: sizes(4) = [1, 100, 1000, 10000]
     real(WP) :: dt, total
     type(c_ptr) :: dptr
@@ -53,7 +55,9 @@ program benchmark_csp_batch
     if (len_trim(arg) > 0) read(arg, *) n_single
     call get_command_argument(3, arg)
     if (len_trim(arg) > 0) config = arg
-    full = index(config, 'full') == 1
+    call get_command_argument(4, arg)
+    if (len_trim(arg) > 0) read(arg, *) n_min
+    full =index(config, 'full') == 1
     zvar = index(config, '_z') > 0
     imf = index(config, '_imf') > 0
     call system_clock(count_rate=rate)
@@ -180,6 +184,7 @@ program benchmark_csp_batch
     do k = 1, size(sizes)
         n = sizes(k)
         if (n > n_max) exit
+        if (n < n_min) cycle
         n_rep = max(3, min(200, 20000 / n))
         call batch(n, .false.)   ! warm-up
         if (status /= 0) stop 2
