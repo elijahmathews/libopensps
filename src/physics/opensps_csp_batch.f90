@@ -2326,18 +2326,18 @@ contains
         real(WP), intent(out) :: ltab(nspec)
         real(WP), parameter :: R_BIG = 1.0e30_wp   ! 1/R_V = 1e-30: the terms without 1/R_V
         integer :: i, dt
+        type(params_core) :: pc
+        real(WP) :: lam, f00, f10, f01, f11
 
         dt = ctx%dust_type_val
+        ! No BLOCK construct in the loop: nvfortran rejects it inside a parallel directive
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do &
+        !$omp target teams distribute parallel do private(pc, lam, f00, f10, f01, f11) &
         !$omp& map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ttab, ltab)
 #elif defined(_OPENMP)
-        !$omp parallel do
+        !$omp parallel do private(pc, lam, f00, f10, f01, f11)
 #endif
         do i = 1, nspec
-          block
-            type(params_core) :: pc
-            real(WP) :: lam, f00, f10, f01, f11
             lam = ctx%state%spec_lambda(i)
             ltab(i) = log(lam / V_BAND_ANGSTROMS)
             ttab(i, :) = 0.0_KP
@@ -2367,7 +2367,6 @@ contains
                 ttab(i, 0) = real(f00, KP)
                 ttab(i, 1) = real(f10 - f00, KP)
             end select
-          end block
         end do
     end subroutine attenuation_tables
 
