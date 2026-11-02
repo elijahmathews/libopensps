@@ -2,8 +2,8 @@
 
 Written 2026-10-23 for whoever continues the batched SSP (ROADMAP priority 3) after the two
 agents of that day (a laptop agent: CPU compilers, LLVM flang, AMD Radeon 780M; an A100 agent:
-nvfortran offload). The discussion, with every measurement, is GitHub issue #32 ("Batched SSP:
-coordination"). **Delete this file when the work has merged**; what should stay is in
+nvfortran offload), extended 2026-11-02 by a desktop agent (AMD Radeon AI PRO R9700). The
+discussion, with every measurement, is GitHub issue #32 ("Batched SSP: coordination"). **Delete this file when the work has merged**; what should stay is in
 `doc/GPU_PLAN.md` ("Rules learned so far"), `doc/GPU_RESULTS.md` (2026-10-23 entry),
 `doc/ROADMAP.md` (priority 3) and `tools/legacy_parity/README.md`.
 
@@ -30,6 +30,7 @@ test_opensps_imf.f90`; benchmark: `tests/benchmark_csp_batch.f90` (configs `*_im
 | `feat/ssp-batch-v2-a100-zvar` @ fdd08cd (+ 9f11157) | IMF and metallicity free per model: `ssp_ops`, `ssp_opset_t`, multi-metallicity kernels, batched cuBLAS product, `check_imf_z`, `*_z_imf` benchmark; 9f11157 adds the one code path | superseded by `zvar2` (not rebased: the laptop agent had pulled it) |
 | `feat/ssp-batch-v2-a100-zvar-flang` @ bc9b391 | one commit on fdd08cd: host loops for the multi kernels, `ssp_ops` on every build | superseded by `zvar2` (its host loops are in the unified kernels); 362/362 on CPU compilers and the 780M at that commit |
 | `feat/ssp-batch-v2-a100-zvar2` @ 2468916 | zvar rebased on v2 9ee300a, **one code path** (`ssp_op`, `ssp_batch_age_sums`, `imf_*_chunk`, `fold_chunk` / `fold_segments` deleted; one metallicity = a set of one operator, one pass, products straight into `yo`), host loops in the multi kernels, one second-context block in the test | A100 verified (offload FP64, FP32, FP64 + cuBLAS 38 / 38, FP32 + cuBLAS `test_csp_batch` 362 / 362; gfortran and nvfortran host threads verified before the rebase); laptop agent verified the tip 2468916 (2026-10-23): unit + regression 39 / 39 on gfortran FP64 and FP32, gfortran and nvfortran 26.1 host threads (362 / 362 at 1, 2, 4, 8, 16 threads), flang CPU, ifx, and on the 780M with flang offload in FP64 and FP32 (suites 39 / 39, `test_csp_batch` 362 / 362): **no flang-specific change needed**; still to do: the alternating timing on the A100 against `main`, sanitizers on the final tip, the +5% of the one-metallicity case, the PR |
+| `feat/ssp-batch-v2-r9700` | = `zvar2` @ 2468916, no commits yet; the desktop agent's branch for R9700 work | 2468916 verified on the R9700 desktop (2026-11-02): see "R9700 verification and numbers" |
 
 `zvar2` is the one to continue from. The A100 agent measured `feat/ssp-batch-v2-780m-weights`
 (a31e56e) on the A100: 6% faster (FP32 N = 10^4 16.6 -> 15.5 us/model), but the FP64 oracle fails
@@ -84,6 +85,19 @@ NVIDIA builds; FP64 + cuBLAS uses the double tensor cores and is as fast as FP32
 `tools/compare_builds` (`run_cases.sh BUILD OUT CASES.psv`, `compare_builds.py`); the batched
 IMF dump: `tools/compare_builds/imf_batch_dump.f90`, `compare_imf_dump.py`.
 
+R9700 desktop (Fedora 44; LLVM flang 22.1.8 + Fedora ROCm 7.1.1; needs the packages `flang`,
+`libomp-devel`, `rocm-device-libs`, `llvm`, `clang-tools-extra` and `lld`; 32 GB RAM; the R9700
+drives the display, so ask the user before GPU runs of code that has not passed on the host):
+
+    export ROCR_VISIBLE_DEVICES=GPU-1788065730744145   # the R9700 by UUID; hides the 610M iGPU (gfx1036)
+    D=--rocm-device-lib-path=/usr/lib64/rocm/llvm/lib/clang/20/lib/amdgcn/bitcode
+    LA="['$D','-Xoffload-linker','--library-path=/usr/lib64/amdgcn-amd-amdhsa']"  # a meson list: a
+                                         # comma-separated string reaches the linker as one argument
+    FC=flang CC=clang meson setup b-r9700-64 --buildtype=release -Daccel=omp_gpu -Dgpu_arch=gfx1201 \
+        -Dfortran_args=$D -Dc_args=$D -Dfortran_link_args="$LA" -Dc_link_args="$LA"  # + -Dkernel_precision=single
+    systemd-run --user --scope -q -p MemoryMax=16G -p MemorySwapMax=0 \
+        meson test -C b-r9700-64 --suite unit --suite regression --num-processes 1   # OMP_TARGET_OFFLOAD=MANDATORY
+
 Benchmark protocol: `benchmark_csp_batch 10000 0 full_smooth` against `full_smooth_imf` (and
 `full_smooth_z` against `full_smooth_z_imf`), alternating runs, >= 6, medians; the 780M varies by
 up to 30% run to run (N = 1 especially), the A100 by a few %. Baselines: `doc/GPU_RESULTS.md`.
@@ -135,6 +149,47 @@ nvfortran 25.1 host threads passed 38 / 38. **Not done by the A100 side:** flang
 tip (the laptop agent is validating), the legacy parity matrix, the CPU case matrix against gfortran on
 this tip (done earlier at cb5ff34: PASS), the `a31e56e` weights change settled.
 
+## R9700 verification and numbers (`zvar2` @ 2468916, 2026-11-02)
+
+Desktop: AMD Radeon AI PRO R9700 (gfx1201, 64 CUs, 32 GB GDDR6, PCIe 5 x16), Ryzen 9 9950X;
+LLVM flang 22.1.8 + Fedora ROCm 7.1.1, gfortran 16.2. Not available there: nvfortran, ifx, cuBLAS.
+
+Verification (all with the C3K case skipped: no C3K data in the release): unit + regression 38 / 38
+(1789 TAP checks) and `test_csp_batch` 362 / 362 on flang CPU, gfortran FP64, gfortran FP32, gfortran
+OpenMP host threads (`test_csp_batch` at 1, 2, 4, 8, 16, 32 threads; suites at 16), and **R9700 flang
+offload FP64 and FP32** (`OMP_TARGET_OFFLOAD=MANDATORY`, one test at a time); no GPU fault in the
+kernel log. `check_imf_z` spectrum, Kroupa / Chabrier: R9700 FP64 1.2e-10 / 1.3e-11, FP32 4.9e-7 /
+4.2e-7 (as on the 780M); gfortran FP64 7.7e-15 / 7.1e-15, FP32 4.6e-7 / 4.2e-7.
+
+Timing by the protocol above (6 alternating rounds of the four configs in FP32 and FP64; us/model,
+magnitudes only, median [min-max]; the last column with spectra copied to the host):
+
+| FP32 | N = 1 | N = 100 | N = 1000 | N = 10^4 | N = 10^4, spectra |
+|---|---|---|---|---|---|
+| `full_smooth` | 5821 [5228-6468] | 59.5 [59.0-61.9] | 29.5 [29.3-29.9] | **28.1** [27.9-28.5] | 32.9 |
+| `full_smooth_imf` | 7941 [7796-8038] | 163.7 [163.0-166.6] | 113.4 [112.4-113.7] | **105.9** [105.2-106.0] | 110.3 |
+| `full_smooth_z` | 5834 [5225-6288] | 66.5 [63.6-67.5] | 30.4 [30.3-30.9] | **28.8** [28.7-28.8] | 33.5 |
+| `full_smooth_z_imf` | 9923 [9896-10002] | 564.2 [564.1-566.9] | 194.7 [193.1-196.7] | **175.1** [174.7-176.3] | 179.4 |
+
+| FP64 | N = 1 | N = 100 | N = 1000 | N = 10^4 | N = 10^4, spectra |
+|---|---|---|---|---|---|
+| `full_smooth` | 5909 [5706-6390] | 64.5 [62.4-66.6] | 32.9 [32.6-34.8] | **33.4** [33.1-34.0] | 41.4 |
+| `full_smooth_imf` | 8863 [7935-9049] | 207.5 [205.7-210.9] | 147.9 [147.3-148.3] | **140.2** [139.2-141.6] | 149.4 |
+| `full_smooth_z` | 6110 [4441-7127] | 73.9 [70.3-75.1] | 36.3 [36.1-38.5] | **36.9** [36.5-37.3] | 44.1 |
+| `full_smooth_z_imf` | 11225 [11204-11293] | 733.5 [726.8-734.6] | 261.1 [260.8-261.5] | **231.3** [230.8-231.7] | 239.3 |
+
+- Cost of the free parameters, N = 1 / 100 / 1000 / 10^4: IMF free / resident basis 1.36 / 2.75 /
+  3.85 / 3.76 (FP32; 780M 3.6 at large N); IMF and metallicity free / metallicity free 1.70 / 8.48 /
+  6.41 / 6.09 (FP32; 780M ~5.9, A100 4.4). N = 100 is the weak spot here too.
+- Against the other GPUs at N = 10^4 (FP32): ~8x faster than the 780M in every config; slower than
+  the A100 by 3.3-3.9x (resident basis; the A100 has ~2.5-3x the memory bandwidth) and 5.1x
+  (`full_smooth_z_imf`, 34.5 on the A100, cuBLAS).
+- FP64 costs only 1.02-1.34x FP32, so the batch is bound by memory traffic and fixed costs, not by
+  arithmetic. The IMF weights are FP64 (`WP`) in both builds, so this does not measure their cost:
+  that needs per-kernel times (LLVM offload time trace or the ROCm profiler; not done yet).
+- Run-to-run spread is < 4% at N >= 100 (N = 1 up to ~25%). Junction temperature 62-86 C, edge
+  ~20 C lower; no sign of throttling.
+
 ## Isochrone modifications per model: the design (not built)
 
 `fbhb`, `sbss`, `agb`, `pagb`, `redgb` and the TP-AGB normalisation are per-point factors on a fixed
@@ -170,7 +225,8 @@ A full operator rebuild per model costs 0.12 s (as `generate_ssp_grid`): never t
    us/model), the whole matrix at the new tip on flang / the 780M, ifx and the host thread sweep,
    sanitizers and the alternating timing against `main` on the final commit.
 4. **Per-model metallicity timing on the 780M** (`full_smooth_z` vs `full_smooth_z_imf`) and the
-   weak spot at N = 100 (launch bound: about 12 metallicity runs of ~8 models each).
+   weak spot at N = 100 (launch bound: about 12 metallicity runs of ~8 models each). Measured on
+   the R9700 (2026-11-02, section above): N = 100 is the weak spot there too (8.5x vs 6.1x at 10^4).
 5. **Isochrone modifications per model**: per-point group factors in the same tables (A100 design
    note in the issue).
 6. 780M: the template product is the largest piece at N = 1 (5 ms of 10), the IMF weights at
@@ -204,5 +260,10 @@ has pulled; `opensps_setup(ctx, 10, ...)` loads one metallicity (use 0 for all);
 arrays of derived type (`ssp_ops%ops(iz)` maps only its `etpl` component per element and works);
 nvfortran 25.1 rejects `c_f_pointer` in device code and the `present` map modifier
 (`OMP_MAP_PRESENT_ALLOC`); a reduction nested in a teams loop behaves differently per compiler;
-never `pkill -f` / `pgrep -f` with a pattern that occurs in your own command. More:
+never `pkill -f` / `pgrep -f` with a pattern that occurs in your own command. On a 32 GB machine
+three suites at 8 processes each ran out of memory (`test_csp_batch` peaks at 2.6 GB with every
+metallicity loaded, `benchmark_csp_batch ... *_z_imf` at 2.9 GB) and the OOM kill took the agent's
+terminal with it: one suite at a time, <= 4 processes, under `systemd-run --user --scope -p
+MemoryMax=...`. A desktop can suspend in the middle of a timing run (the run's times then include the
+sleep): run long jobs under `systemd-inhibit --what=sleep`. More:
 `doc/GPU_PLAN.md`.
