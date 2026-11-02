@@ -1,5 +1,5 @@
 module test_opensps_imf_mod
-    use opensps_precision, only: WP
+    use opensps_precision, only: WP, KP
     use opensps_context_types, only: opensps_context_t
     use opensps_imf
     use opensps_types, only: params
@@ -518,11 +518,17 @@ contains
     !> rounded ratio), slopes 0.3 to 5 at 0.08 to 300 M_sun, bins up to a factor 10 wide, and either
     !> side of the switch between the series and exp(y) - 1 in imf_bin_weights_tab.
     !> imf_bin_weights_tab (the batched SSP's weights) must be within 1e-14 of the reference in
-    !> every category. imf_bin_weights (the difference of powers, the single SSP's weights) is run
-    !> on the same bins and its worst error printed beside it: the failure modes the table form
-    !> removes, measured.
+    !> every category; built with -Dfp32_imf_weights=true (FP32 kernels) its power-law bins are FP32
+    !> arithmetic (exponents reduced in FP64), within 16 ulp of FP32 (1.9e-6; 2.8e-7 on MIST).
+    !> imf_bin_weights (the difference of powers, the single SSP's weights) is run on the same
+    !> bins and its worst error printed beside it: the failure modes the table form removes,
+    !> measured.
     subroutine test_powerlaw_bin_worst_cases()
+#if defined(OPENSPS_FP32_IMF_WEIGHTS)
+        real(WP), parameter :: TOL = 16.0_wp * real(epsilon(1.0_KP), WP)   ! FP32 IMF weights (opt-in)
+#else
         real(WP), parameter :: TOL = 1.0e-14_wp
+#endif
         integer, parameter :: NCAT = 6
         character(len=*), parameter :: CAT_NAME(NCAT) = [character(len=40) :: &
             "relative width 1e-14 to 1e-12", "relative width 1e-9 to 1e-6", "relative width 1e-3 to 0.1", &
@@ -575,7 +581,8 @@ contains
             write(line, '(A,A,A,I0,A,ES8.1,A,ES8.1)') '# ', trim(CAT_NAME(cat)), ' (', cnt(cat), ' bins): table form ', &
                 worst_new(cat), ', difference form ', worst_old(cat)
             write(*, '(A)') trim(line)
-            call assert_true(worst_new(cat) <= TOL .and. cnt(cat) > 0, trim(CAT_NAME(cat)) // ": table form within 1e-14", &
+            write(line, '(A,ES8.1)') ": table form within ", TOL
+            call assert_true(worst_new(cat) <= TOL .and. cnt(cat) > 0, trim(CAT_NAME(cat)) // trim(line), &
                              total_tests, total_failures)
         end do
     end subroutine test_powerlaw_bin_worst_cases
@@ -643,6 +650,9 @@ contains
                     ref = 0.0_wp
                     if (m2(k) > lo) ref = imf_integral_p(t, p, lo, m2(k), .false.)
                     tol = 1.0e-13_wp + 40.0_wp * epsilon(1.0_wp) * lo / (m2(k) - lo)
+#if defined(OPENSPS_FP32_IMF_WEIGHTS)
+                    tol = tol + 16.0_wp * real(epsilon(1.0_KP), WP)   ! FP32 IMF weights (opt-in)
+#endif
                     if (ref == 0.0_wp) then
                         if (w(k) /= 0.0_wp) n_bad = n_bad + 1
                     else

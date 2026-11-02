@@ -58,6 +58,13 @@ program test_csp_batch
     ! than 1e-6, ~7e-10 in the spectra (measured against quad precision, 2026-11). The FP64
     ! tolerance covers that oracle error; test_opensps_imf tests the weights themselves.
     real(WP), parameter :: IMF_SPEC_RTOL = merge(1.0e-9_wp, SPEC_RTOL, KP == WP)
+    ! Mass and L_bol with the IMF per model: FP64 weights, unless built with -Dfp32_imf_weights=true
+    ! (FP32 kernels; per age ~3e-8 measured on MIST against quad precision)
+#if defined(OPENSPS_FP32_IMF_WEIGHTS)
+    real(WP), parameter :: IMF_SCAL_TOL = 1.0e-6_wp
+#else
+    real(WP), parameter :: IMF_SCAL_TOL = 1.0e-12_wp
+#endif
     real(WP), parameter :: MAG_TOL = merge(1.0e-9_wp, 1.0e-5_wp, KP == WP)
     ! Spectral indices (absolute, as tools/compare_builds)
     real(WP), parameter :: INDX_TOL = merge(1.0e-8_wp, 1.0e-4_wp, KP == WP)
@@ -564,7 +571,7 @@ contains
         write(*, '(A,2F9.5)') "# mass of models 1 and 12: ", ref_mass(1), ref_mass(N_MOD)
         call assert_true(d_spec <= IMF_SPEC_RTOL, label // ": spectra", total_tests, total_failures)
         call assert_true(d_mag <= MAG_TOL, label // ": magnitudes", total_tests, total_failures)
-        call assert_true(d_scal <= 1.0e-12_wp, label // ": mass, L_bol", total_tests, total_failures)
+        call assert_true(d_scal <= IMF_SCAL_TOL, label // ": mass, L_bol", total_tests, total_failures)
         call assert_true(maxval(abs(mdust / ref_mdust - 1.0_wp)) <= IMF_SPEC_RTOL, label // ": dust mass", &
                          total_tests, total_failures)
         call assert_true(d_line <= IMF_SPEC_RTOL, label // ": emission lines", total_tests, total_failures)
@@ -671,7 +678,7 @@ contains
             d_scal, maxval(abs(mdust / ref_mdust - 1.0_wp)), d_line
         call assert_true(d_spec <= IMF_SPEC_RTOL, label // ": spectra", total_tests, total_failures)
         call assert_true(d_mag <= MAG_TOL, label // ": magnitudes", total_tests, total_failures)
-        call assert_true(d_scal <= 1.0e-12_wp, label // ": mass, L_bol", total_tests, total_failures)
+        call assert_true(d_scal <= IMF_SCAL_TOL, label // ": mass, L_bol", total_tests, total_failures)
         call assert_true(maxval(abs(mdust / ref_mdust - 1.0_wp)) <= IMF_SPEC_RTOL, label // ": dust mass", &
                          total_tests, total_failures)
         call assert_true(d_line <= IMF_SPEC_RTOL, label // ": emission lines", total_tests, total_failures)

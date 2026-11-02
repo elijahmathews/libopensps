@@ -111,6 +111,10 @@ endif
 kernel_precision = get_option('kernel_precision')
 if kernel_precision == 'single'
     add_project_arguments('-DKERNEL_SINGLE_PRECISION', language: 'fortran')
+    if get_option('fp32_imf_weights')
+        # The batched SSP's IMF weights in FP32 arithmetic (imf_bin_weights_tab; opt-in)
+        add_project_arguments('-DOPENSPS_FP32_IMF_WEIGHTS', language: 'fortran')
+    endif
 endif
 
 cpu_baseline = get_option('cpu_baseline')

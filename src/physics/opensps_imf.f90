@@ -7,7 +7,7 @@ module opensps_imf
     !> parameterizations (Salpeter, Chabrier, Kroupa, etc.) and to compute
     !> the mass weights for SSP generation.
     
-    use opensps_precision, only: WP
+    use opensps_precision, only: WP, KP
     use opensps_context_types, only: opensps_context_t
     implicit none
 
@@ -525,7 +525,14 @@ contains
                     ! c (hi**e - lo**e) / e = c lo**e expm1(e dl) / e: smooth through e = 0 (no
                     ! special case for slopes near 1, where the difference form divides a
                     ! cancellation by a small e)
+#if defined(OPENSPS_FP32_IMF_WEIGHTS)
+                    ! -Dfp32_imf_weights=true (FP32 kernels only): the exponentials in kernel
+                    ! precision, the exponent e ln lo (up to ~25) formed and reduced in FP64
+                    ! (doc/MIXED_PRECISION.md, rule 7); mass and L_bol then good to ~3e-8
+                    val = real(real(ce, KP) * exp_reduced_kp(e * llo(k)) * expm1_kp(real(e * dl(k), KP)), WP)
+#else
                     val = ce * exp(e * llo(k)) * expm1_series(e * dl(k))
+#endif
                 end if
             else
                 val = imf_integral_p(imf_type, p, lo, hi, .false.)
@@ -554,6 +561,62 @@ contains
             dl = log(u) * x / (u - 1.0_wp)
         end if
     end subroutine imf_bin_logs
+
+    !> exp(x) in kernel precision for an FP64 argument: x = n ln 2 + r reduced in FP64, exp(r) in
+    !> KP times 2**n by binary exponentiation (exact; `scale` and `transfer` are Fortran-runtime
+    !> calls in LLVM flang device code). ~1 ulp of KP, where rounding x to FP32 would cost |x| eps.
+    !> Results below the smallest normal KP flush to 0.
+    pure function exp_reduced_kp(x) result(e)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(WP), intent(in) :: x
+        real(KP) :: e, b, p2
+        real(WP), parameter :: LN2 = log(2.0_wp), LOG2E = 1.0_wp / log(2.0_wp)
+        real(WP) :: xc
+        integer :: n, k
+
+        xc = max(-1.0e4_wp, min(1.0e4_wp, x))
+        n = nint(xc * LOG2E)
+        if (n < minexponent(1.0_KP)) then
+            e = 0.0_KP
+        else if (n >= maxexponent(1.0_KP)) then
+            e = huge(1.0_KP)
+        else
+            b = merge(0.5_KP, 2.0_KP, n < 0)
+            k = abs(n)
+            p2 = 1.0_KP
+            do while (k > 0)
+                if (iand(k, 1) == 1) p2 = p2 * b
+                b = b * b
+                k = ishft(k, -1)
+            end do
+            e = exp(real(xc - n * LN2, KP)) * p2
+        end if
+    end function exp_reduced_kp
+
+    !> exp(y) - 1 in kernel precision without cancellation: the series to y**7 for |y| < 1/4
+    !> (truncation < 5e-10 relative, below FP32's 6e-8), constant reciprocals; exp(y) - 1 above.
+    pure function expm1_kp(y) result(r)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(KP), intent(in) :: y
+        real(KP) :: r
+        real(KP), parameter :: I2 = 1.0_KP / 2, I3 = 1.0_KP / 3, I4 = 1.0_KP / 4, I5 = 1.0_KP / 5, &
+                               I6 = 1.0_KP / 6, I7 = 1.0_KP / 7
+        if (abs(y) < 0.25_KP) then
+            r = 1.0_KP + y * I7
+            r = 1.0_KP + y * I6 * r
+            r = 1.0_KP + y * I5 * r
+            r = 1.0_KP + y * I4 * r
+            r = 1.0_KP + y * I3 * r
+            r = 1.0_KP + y * I2 * r
+            r = y * r
+        else
+            r = exp(y) - 1.0_KP
+        end if
+    end function expm1_kp
 
     !> exp(y) - 1 without cancellation: Taylor series to y**13 for |y| < 1/4 (truncation < 3e-18
     !> relative), exp(y) - 1 above (cancellation at most a factor 4). The series is nested
