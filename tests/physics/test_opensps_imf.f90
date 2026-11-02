@@ -32,6 +32,7 @@ contains
         call test_analytic_integrals_match_quadrature()
         call test_weights_match_quadrature()
         call test_runtime_imf_limits_are_honoured()
+        call test_powerlaw_bin_worst_cases()
 
         call print_summary_line("Module Summary", total_tests - total_failures, total_tests)
 
@@ -423,5 +424,71 @@ contains
 
         deallocate(ctx)
     end subroutine test_runtime_imf_limits_are_honoured
+
+    !> Power-law IMF integrals where a difference of powers breaks, against 60-digit references
+    !> (tests/data/imf_powerlaw_bins.txt, from tools/reference/imf_powerlaw_bins.py: Python decimal):
+    !> bins down to a relative width of 1e-14, slopes within 1e-6 of 1 and exactly 1, slopes 0.3 to 5
+    !> at 0.08 to 300 M_sun, bins up to a factor 10 wide, and either side of the series switch.
+    !> imf_integral_p (integrate_powerlaw, issue #37) must be within 1e-14 in every category; the
+    !> difference form it replaced is evaluated beside it and its worst error printed.
+    subroutine test_powerlaw_bin_worst_cases()
+        real(WP), parameter :: TOL = 1.0e-14_wp
+        integer, parameter :: NCAT = 6
+        character(len=*), parameter :: CAT_NAME(NCAT) = [character(len=40) :: &
+            "relative width 1e-14 to 1e-12", "relative width 1e-9 to 1e-6", "relative width 1e-3 to 0.1", &
+            "wide bins (factor 2 to 10)", "slope within 1e-6 of 1 (or exactly 1)", "either side of the series switch"]
+        character(len=4096) :: root
+        character(len=256) :: line
+        real(WP) :: p(IMF_NPAR), alpha, lo, hi, ref, w_new, w_old, rw, e, worst_new(NCAT), worst_old(NCAT)
+        integer :: u, n, i, ios, cat, cnt(NCAT)
+
+        call print_group("Power-law IMF integrals: worst cases against 60-digit references")
+        call get_environment_variable('FSPS_TEST_SOURCE_ROOT', root)
+        open(newunit=u, file=trim(root)//'/tests/data/imf_powerlaw_bins.txt', status='old', action='read', iostat=ios)
+        call assert_true(ios == 0, "reference table tests/data/imf_powerlaw_bins.txt", total_tests, total_failures)
+        if (ios /= 0) return
+        read(u, '(A)') line
+        read(u, *) n
+        worst_new = 0.0_wp; worst_old = 0.0_wp; cnt = 0
+        do i = 1, n
+            read(u, *) alpha, lo, hi, ref
+            rw = (hi - lo) / lo
+            if (i > n - 12) then
+                cat = 6
+            else if (abs(1.0_wp - alpha) < 1.0e-5_wp) then
+                cat = 5
+            else if (rw < 1.0e-11_wp) then
+                cat = 1
+            else if (rw < 1.0e-5_wp) then
+                cat = 2
+            else if (rw < 0.5_wp) then
+                cat = 3
+            else
+                cat = 4
+            end if
+            p = 0.0_wp
+            p(IMF_P_SALP) = alpha
+            p(IMF_P_LOWER_LIMIT) = 0.0_wp
+            p(IMF_P_UPPER_LIMIT) = 1.0e5_wp
+            w_new = imf_integral_p(0, p, lo, hi, .false.)
+            e = 1.0_wp - alpha
+            if (abs(e) > 1.0e-12_wp) then
+                w_old = (hi**e - lo**e) / e        ! the difference form replaced in #37
+            else
+                w_old = log(hi / lo)
+            end if
+            worst_new(cat) = max(worst_new(cat), abs(w_new / ref - 1.0_wp))
+            worst_old(cat) = max(worst_old(cat), abs(w_old / ref - 1.0_wp))
+            cnt(cat) = cnt(cat) + 1
+        end do
+        close(u)
+        do cat = 1, NCAT
+            write(line, '(A,A,A,I0,A,ES8.1,A,ES8.1)') '# ', trim(CAT_NAME(cat)), ' (', cnt(cat), ' bins): expm1 form ', &
+                worst_new(cat), ', difference form ', worst_old(cat)
+            write(*, '(A)') trim(line)
+            call assert_true(worst_new(cat) <= TOL .and. cnt(cat) > 0, trim(CAT_NAME(cat)) // ": within 1e-14", &
+                             total_tests, total_failures)
+        end do
+    end subroutine test_powerlaw_bin_worst_cases
 
 end module test_opensps_imf_mod
