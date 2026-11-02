@@ -31,14 +31,14 @@ move by at most 2e-14 (the more accurate absorbed-luminosity integral below).
 | AGB circumstellar dust screen | `flux_dagb`, spectrum | |
 | SSP sum over stars | `ssp_temp_grid`, weights | compensated sum |
 | CSP sum over ages | SSP basis, `spec_young/old`, emission-line grids | weights cast once per age |
-| Dust attenuation and emission | transmission, work spectra, Draine & Li shape | absorbed luminosity integrated directly |
-| Nebular emission | line profiles (`gaussnebarr`), spectra | ionizing integral compensated |
+| Dust attenuation and emission | curve tables, transmission, work spectra, Draine & Li shape | curve from grid-only tables (formed in FP64 per call), power laws via `exp_kp`, absorbed luminosity integrated directly (1 - T in Kahan's form) |
+| Nebular emission | line profiles (`gaussnebarr`), spectra, continuum weights | ionizing integral compensated; continuum per age in KP, the CLOUDY log grid interpolated and the exponents reduced in FP64 (`exp_kp`) |
 | IGM, AGN torus emission | transmission, spectra | |
 | Magnitudes | filter integrals | compensated sum |
 
 Still computed in WP from the FP32 spectrum (element-wise or cheap; candidates for later):
 velocity smoothing, spectral indices, the redshift interpolation before the filter integrals,
-and the per-pixel attenuation-curve evaluation.
+and the Draine & Li template interpolation.
 
 The main stellar library (`speclib`, the largest array) was already stored in FP32.
 
@@ -71,6 +71,22 @@ lines 3.4e-7, indices 8e-8 relative. The only exception is magnitudes of bands m
 mag (a factor 1e16) fainter than the brightest band, behind the z = 10 Lyman break, where the
 flux is numerically zero in either precision.
 
+**Nebular continuum and attenuation in KP (2026-11).** The batch's nebular continuum and dust
+attenuation, FP64 until then, moved to KP (rule 7, curve tables). Measured with gfortran 16 FP32
+against FP64, data release `data-v2`, without C3K:
+
+| | Before | After |
+|---|---|---|
+| Matrix (34 cases): spectrum per pixel, 912 A - 2.5 um / all | 3.4e-7 / 3.5e-7 | 3.7e-7 / 4.0e-7 |
+| Matrix: magnitudes | 1.7e-7 mag | 1.8e-7 mag |
+| Stress (25 cases, `tools/compare_builds/stress_cases.psv`): spectrum | 7.7e-7 | 7.7e-7 |
+| Stress: dust2 = 6 / 5 Myr behind dust1 = 3 | 2.3e-7 / 2.2e-7 | 7.5e-7 / 6.2e-7 |
+| Stress: magnitudes | 3.1e-7 mag | 3.1e-7 mag |
+
+The FP64 build moves by at most 5e-15. The stress table is a reconstruction of the 23 cases
+above, which were not kept, plus young populations behind dust; its worst case before and after
+(7.7e-7, a late burst of half the mass) does not involve this change.
+
 **Naive FP32 everywhere fails.** Building all of FSPS in FP32 (`FORCE_SINGLE_PRECISION`) gives
 errors up to 50% in old far-UV spectra, 0.5 mag in UV bands, and NaNs in the nebular and BPASS
 paths. The causes are in the cheap parts (isochrone handling and IMF weights, which difference
@@ -102,6 +118,13 @@ These came out of the measurements; a GPU port must follow them.
 6. **Floors are tiny(1.0_KP)**, not `SAFE_FLOOR` (which underflows to 0 in FP32). Values below
    1.2e-38 flush to zero on GPUs with flush-to-zero; only pixels and bands many decades below
    the peak are affected.
+7. **Exponentials of large arguments: reduce in FP64, exponentiate in KP.** exp(x) with |x| ~ 100
+   (nebular continuum: a log grid of ~1e-44 times a weight of ~1e50) loses |x| eps if x is rounded
+   to FP32. `exp_kp` (`opensps_csp_batch.f90`) forms x in FP64, splits x = n ln 2 + r there, and
+   takes exp(r) in KP times 2**n: ~1 ulp of KP for three FP64 operations instead of an FP64
+   exponential. Weights that leave the FP32 range (rule 5) are divided by their largest value
+   per model, whose logarithm joins x. The result is still a KP exponential: where the argument
+   itself is a large optical depth, e**(-tau) keeps a relative error of ~tau eps (see Caveats).
 
 ## What this means for a GPU port
 
@@ -137,8 +160,15 @@ or models it is a dense matrix product.
   depends on scheduling, so repeated calls differ by a few ulps of the kernel precision: ~1e-16
   with FP64 kernels, ~1e-7 with FP32. Bitwise-reproducible FP32 output would need fixed-order
   (e.g. blocked, then sequential) reductions.
-- **Coverage.** The evidence is the 36 matrix cases and 23 stress cases above; new physics
-  must be checked the same way before it runs in an FP32 kernel.
+- **Large optical depths.** A transmission e**(-tau) computed in FP32 carries a relative error of
+  ~tau eps (tau itself is rounded at KP). Since the attenuation runs in KP (2026-11), pixels behind
+  optical depths of several differ from FP64 by up to ~7e-7 (stress cases: dust2 = 6, a 5 Myr
+  population behind dust1 = 3), and GPU and CPU FP32 builds by as much; magnitudes stay within
+  3e-7 mag. Such pixels are suppressed by e**-5 or more, so this is far below any observational
+  uncertainty; forming tau in FP64 would bring back the FP64 power laws the change removed.
+- **Coverage.** The evidence is the matrix cases and the stress cases above
+  (`tools/compare_builds/stress_cases.psv`); new physics must be checked the same way before it
+  runs in an FP32 kernel.
 - **Tests.** In FP32 builds, unit-test tolerances that assumed FP64 use `KP_RTOL`
   (100 eps of KP), and the regression suite compares against the FP64 references with
   `FSPS_TEST_RTOL = 1e-4` and an absolute floor of 1e-4 for spectral indices (weak indices near
