@@ -58,6 +58,31 @@ Session 3 (2026-10-21), new questions:
     parameter) or optionally fitted analytically. Grid, units and the amplitude treatment to be
     agreed before the code.
 
+## AMD Radeon AI PRO R9700 desktop (2026-11-02)
+
+Fedora 44, LLVM flang 22.1.8 + Fedora ROCm 7.1.1 (recipe: `doc/GPU_PLAN.md`, "On the R9700
+desktop"); gfx1201, 64 CUs, 32 GB, PCIe 5 x16; it also drives the display.
+
+- **`main` @ ab08100:** unit + regression 38 / 38 with `OMP_TARGET_OFFLOAD=MANDATORY`, FP64 and
+  FP32 (C3K case skipped: not in `data-v2`). `tools/compare_builds`, GPU against the same binary
+  on the host: FP64 PASS at 1e-10 (worst 2.9e-11 per pixel 912 A - 2.5 um; 3.6e-10 at 151 A,
+  4e-6 of the peak, on the batch path, in a delayed-tau case: SFH weights on the device), FP32
+  PASS at 5e-7 (2.9e-7).
+- **Speed** (`benchmark_csp_batch 10000 200 full_smooth_z`, FP32 / FP64, us per model, median of
+  3; `main`, whose `*_z` configs left the other metallicities' bases empty, ~10% optimistic):
+  single call 5976 / 6256, N = 100 65.1 / 70.6, N = 1000 29.0 / 34.3, N = 10^4 26.4 / 34.2. FP64
+  costs only 1.02-1.34x FP32 in every config: the batch is bound by memory traffic and fixed
+  costs, not by arithmetic. With every metallicity loaded (`zvar2`, median of 6): 28.8 / 36.9.
+- **`benchmark_phases 5 200`** (FP32): setup 1.18 s, SSP grid 44 ms, CSP call 4.0 ms; with
+  nebular emission 57 / 4.4 ms (one CPU core: 107 / 29 ms).
+- **Where the time goes** (`rocprofv3`, ROCm 7.2.4 container, `full_smooth`, FP32, N = 10^4):
+  nebular continuum 44%, attenuation 22%, nebular lines 12%, smoothing and filters 13%, the SSP
+  age sums 1%. All but the last were FP64 arithmetic in the FP32 build (PR #36). IMF free
+  (`full_smooth_imf`): the IMF weights kernel 51% (FP64 powers; `feat/ssp-batch-v2-r9700`).
+- **Open:** `benchmark_phases` stalled twice in ~28 runs, after its last kernel (in program
+  shutdown?), with the GPU busy until killed; no fault, not reproduced since. Next time: a host
+  stack (`eu-stack -p`) while it hangs.
+
 ## One code path, step 7: OpenACC removed (2026-10-21)
 
 Branch `refactor/remove-openacc`. Every `!$acc` directive and the `_OPENACC` / `ACC_MULTICORE`
