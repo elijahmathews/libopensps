@@ -126,6 +126,8 @@ program test_csp_batch
     call check_weights_z_nebular()
     ! Weights over ages and metallicities (several metallicities; tabular SFHs with Z per bin)
     call check_weights_z()
+    ! Nebular emission requested for an isochrone set without a nebular grid (Geneva)
+    call check_nebular_without_grid()
 
     call opensps_destroy(ctx)
     deallocate(ctx)
@@ -199,6 +201,50 @@ contains
         call assert_true(status == 2, "one resident basis: status 2", total_tests, total_failures)
         call set_int('add_neb_emission', 0)
     end subroutine check_weights_z_nebular
+
+    !> Isochrone sets without a nebular grid (here Geneva + BaSeL; also BaSTI) get no nebular
+    !> emission with add_neb_emission = 1, as in legacy FSPS, whose tables stay zero there: every
+    !> line luminosity is zero, and spectra and magnitudes equal those of add_neb_emission = 0 bit
+    !> for bit. Runs on a context of its own (the test's context is parked meanwhile).
+    subroutine check_nebular_without_grid()
+        type(opensps_context_t), allocatable :: saved
+        type(PARAMS) :: psets(N_MOD)
+        real(WP), allocatable :: mags(:, :, :), spec(:, :, :), eml(:, :)
+        integer :: status(0:1), neb, m
+
+        call print_group("Nebular emission without a nebular grid (Geneva + BaSeL)")
+        call move_alloc(ctx, saved)
+        allocate(ctx)
+        call opensps_create(ctx)
+        call opensps_setup(ctx, -1, isoc_type_in='gnva', spec_type_in='basel', dust_type_in='DL07')
+        call opensps_context_move_to_device(ctx)
+        call set_int('zmet', 4)
+        call set_int('imf_type', 1)
+        call set_int('add_dust_emission', 1)
+        call build_basis()
+        allocate(mags(ctx%state%nbands, N_MOD, 0:1), spec(ctx%state%nspec, N_MOD, 0:1), &
+                 eml(NEMLINE, N_MOD))
+        do neb = 0, 1
+            call set_int('add_neb_emission', neb)
+            do m = 1, N_MOD
+                call set_model(m, 0.0_wp)
+                call opensps_context_prepare_pset(ctx)
+                call opensps_context_get_pset(ctx, psets(m))
+            end do
+            eml = -1.0_wp
+            call compute_csp_batch(ctx, psets, mags(:, :, neb), status(neb), spec=spec(:, :, neb), &
+                                   emlines=eml)
+        end do
+        call assert_true(all(status == 0), "status 0", total_tests, total_failures)
+        call assert_true(all(eml == 0.0_wp), "every line luminosity is zero", total_tests, total_failures)
+        call assert_true(all(spec(:, :, 1) == spec(:, :, 0)), "spectra = add_neb_emission 0, bit for bit", &
+                         total_tests, total_failures)
+        call assert_true(all(mags(:, :, 1) == mags(:, :, 0)), "magnitudes = add_neb_emission 0, bit for bit", &
+                         total_tests, total_failures)
+        call opensps_destroy(ctx)
+        deallocate(ctx)
+        call move_alloc(saved, ctx)
+    end subroutine check_nebular_without_grid
 
     !> SSP basis for the default (Chabrier, solar) parameters; the batch varies only CSP parameters.
     subroutine build_basis()
