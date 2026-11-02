@@ -357,17 +357,54 @@ contains
             denom = 1.0_wp - alpha
         end if
 
-        if (abs(denom) > 1.0e-12_wp) then
-            if (mass_weighted) then
-                val = coeff * (hi**(2.0_wp - alpha) - lo**(2.0_wp - alpha)) / denom
-            else
-                val = coeff * (hi**(1.0_wp - alpha) - lo**(1.0_wp - alpha)) / denom
-            end if
-        else
-            ! log integral limit when exponent is -1
-            val = coeff * log(hi / lo)
-        end if
+        ! (hi**e - lo**e) / e as lo**e expm1(e ln(hi/lo)) / e: no difference of nearly equal powers
+        ! for narrow bins, and smooth through e = 0 (exactly 0: ln(hi/lo)) (issue #37)
+        val = coeff * powerlaw_bin(lo**denom, lo, hi, denom)
     end function integrate_powerlaw
+
+    !> int_lo^hi m**(e - 1) dm = (hi**e - lo**e) / e, given plo = lo**e, as plo expm1(e dl) / e with
+    !> dl = ln(hi / lo) by log1p: no cancellation for narrow bins (the difference form loses
+    !> eps / (|e| w) for relative width w: 2e-7 at w = 1e-9, up to 100% for e within 1e-6 of 0), and
+    !> smooth through e = 0 (dl).
+    pure function powerlaw_bin(plo, lo, hi, e) result(val)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(WP), intent(in) :: plo, lo, hi, e
+        real(WP) :: val, x, u, dl, y, r
+        real(WP), parameter :: I2 = 1.0_wp / 2, I3 = 1.0_wp / 3, I4 = 1.0_wp / 4, I5 = 1.0_wp / 5, &
+                               I6 = 1.0_wp / 6, I7 = 1.0_wp / 7, I8 = 1.0_wp / 8, I9 = 1.0_wp / 9, &
+                               I10 = 1.0_wp / 10, I11 = 1.0_wp / 11, I12 = 1.0_wp / 12, I13 = 1.0_wp / 13
+        x = (hi - lo) / lo            ! dl = log1p(x), Kahan's form
+        u = 1.0_wp + x
+        if (u == 1.0_wp) then
+            dl = x
+        else
+            dl = log(u) * x / (u - 1.0_wp)
+        end if
+        if (e == 0.0_wp) then
+            val = plo * dl
+            return
+        end if
+        y = e * dl                    ! expm1(y) / e: series below |y| = 1/4, exp above
+        if (abs(y) < 0.25_wp) then
+            r = 1.0_wp + y * I13
+            r = 1.0_wp + y * I12 * r
+            r = 1.0_wp + y * I11 * r
+            r = 1.0_wp + y * I10 * r
+            r = 1.0_wp + y * I9 * r
+            r = 1.0_wp + y * I8 * r
+            r = 1.0_wp + y * I7 * r
+            r = 1.0_wp + y * I6 * r
+            r = 1.0_wp + y * I5 * r
+            r = 1.0_wp + y * I4 * r
+            r = 1.0_wp + y * I3 * r
+            r = 1.0_wp + y * I2 * r
+            val = plo * dl * r
+        else
+            val = plo * (exp(y) - 1.0_wp) / e
+        end if
+    end function powerlaw_bin
 
     ! ------------------------------------------------------------------------
     ! CORE IMF LOGIC
