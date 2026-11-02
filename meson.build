@@ -282,6 +282,8 @@ unit_env = environment()
 unit_env.set('FSPS_TEST_TAP', '1')
 # Unit tests that read real data use the small standard-format test library, never data/
 unit_env.set('FSPS_TEST_LIBRARY', join_paths(meson.project_source_root(), 'tests/data/opensps-test-data'))
+# Reference tables committed in the repository (tests/data), e.g. tests/data/imf_powerlaw_bins.txt
+unit_env.set('FSPS_TEST_SOURCE_ROOT', meson.project_source_root())
 unit_modules = [
     'opensps_cache', 'opensps_context', 'opensps_context_types', 'opensps_strings', 'opensps_types', 'opensps_io',
     'opensps_integration', 'opensps_interpolation', 'opensps_special_functions', 'opensps_cosmology', 'opensps_csp',

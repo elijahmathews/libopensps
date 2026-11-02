@@ -52,6 +52,12 @@ program test_csp_batch
 #else
     real(WP), parameter :: SPEC_RTOL = merge(1.0e-10_wp, 100.0_wp * real(epsilon(1.0_KP), WP), KP == WP)
 #endif
+    ! IMF per model against SSPs generated per IMF: the batch's weights (imf_bin_weights_tab) are
+    ! accurate to ~1e-15 per isochrone bin, the generated SSPs' (a difference of powers) lose
+    ! ~eps / (|e| w) in a bin of relative width w: up to 1.7e-7 in the 30% of MIST bins narrower
+    ! than 1e-6, ~7e-10 in the spectra (measured against quad precision, 2026-11). The FP64
+    ! tolerance covers that oracle error; test_opensps_imf tests the weights themselves.
+    real(WP), parameter :: IMF_SPEC_RTOL = merge(1.0e-9_wp, SPEC_RTOL, KP == WP)
     real(WP), parameter :: MAG_TOL = merge(1.0e-9_wp, 1.0e-5_wp, KP == WP)
     ! Spectral indices (absolute, as tools/compare_builds)
     real(WP), parameter :: INDX_TOL = merge(1.0e-8_wp, 1.0e-4_wp, KP == WP)
@@ -556,11 +562,12 @@ contains
         write(*, '(A,5ES10.2)') "# max difference (spectrum, mag, mass/lbol, mdust, lines): ", d_spec, d_mag, &
             d_scal, maxval(abs(mdust / ref_mdust - 1.0_wp)), d_line
         write(*, '(A,2F9.5)') "# mass of models 1 and 12: ", ref_mass(1), ref_mass(N_MOD)
-        call assert_true(d_spec <= SPEC_RTOL, label // ": spectra", total_tests, total_failures)
+        call assert_true(d_spec <= IMF_SPEC_RTOL, label // ": spectra", total_tests, total_failures)
         call assert_true(d_mag <= MAG_TOL, label // ": magnitudes", total_tests, total_failures)
         call assert_true(d_scal <= 1.0e-12_wp, label // ": mass, L_bol", total_tests, total_failures)
-        call assert_true(maxval(abs(mdust / ref_mdust - 1.0_wp)) <= SPEC_RTOL, label // ": dust mass", total_tests, total_failures)
-        call assert_true(d_line <= SPEC_RTOL, label // ": emission lines", total_tests, total_failures)
+        call assert_true(maxval(abs(mdust / ref_mdust - 1.0_wp)) <= IMF_SPEC_RTOL, label // ": dust mass", &
+                         total_tests, total_failures)
+        call assert_true(d_line <= IMF_SPEC_RTOL, label // ": emission lines", total_tests, total_failures)
 
         call ssp_opset_free(op)
         call set_int('imf_type', 1)
@@ -662,11 +669,12 @@ contains
         d_line = maxval(abs(eml / ref_eml - 1.0_wp), mask=ref_eml > max(1.0e-3_wp * maxval(ref_eml), 1.0e-100_wp))
         write(*, '(A,5ES10.2)') "# max difference (spectrum, mag, mass/lbol, mdust, lines): ", d_spec, d_mag, &
             d_scal, maxval(abs(mdust / ref_mdust - 1.0_wp)), d_line
-        call assert_true(d_spec <= SPEC_RTOL, label // ": spectra", total_tests, total_failures)
+        call assert_true(d_spec <= IMF_SPEC_RTOL, label // ": spectra", total_tests, total_failures)
         call assert_true(d_mag <= MAG_TOL, label // ": magnitudes", total_tests, total_failures)
         call assert_true(d_scal <= 1.0e-12_wp, label // ": mass, L_bol", total_tests, total_failures)
-        call assert_true(maxval(abs(mdust / ref_mdust - 1.0_wp)) <= SPEC_RTOL, label // ": dust mass", total_tests, total_failures)
-        call assert_true(d_line <= SPEC_RTOL, label // ": emission lines", total_tests, total_failures)
+        call assert_true(maxval(abs(mdust / ref_mdust - 1.0_wp)) <= IMF_SPEC_RTOL, label // ": dust mass", &
+                         total_tests, total_failures)
+        call assert_true(d_line <= IMF_SPEC_RTOL, label // ": emission lines", total_tests, total_failures)
 
         call ssp_opset_free(opset)
         call set_int('imf_type', 1)

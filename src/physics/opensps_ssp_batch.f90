@@ -25,7 +25,7 @@ module opensps_ssp_batch
 
     use opensps_precision, only: WP, KP
     use opensps_constants, only: SAFE_FLOOR
-    use opensps_imf, only: imf_integral_p, imf_bin_weights, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT
+    use opensps_imf, only: imf_integral_p, imf_bin_weights_tab, imf_bin_logs, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT
     use opensps_stellar_modifications, only: add_remnant_mass_p
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_to_device, ssp_operator_from_device
     implicit none
@@ -67,6 +67,9 @@ module opensps_ssp_batch
         !> template entries (local point indices)
         integer, allocatable :: pt_first(:), pt_age(:), pc_ptr(:), age_pc(:), pt_ptr(:), seg_ptr(:), seg_first(:), eff_pt(:)
         real(WP), allocatable :: pt_mini(:), pt_m1(:), pt_m2(:), pt_cm(:), pt_cl(:), pt_q(:), age_mmax(:), eff_val(:)
+        !> Per point: ln m1 and ln(m2 / m1) (model-independent; imf_bin_weights_tab takes the power-law
+        !> bins from them, one exponential per bin instead of a power)
+        real(WP), allocatable :: pt_llo(:), pt_dl(:)
         logical :: on_device = .false.
     end type ssp_opset_t
 
@@ -102,7 +105,8 @@ contains
             set%n_pc_max = max(set%n_pc_max, ops(iz)%n_pc)
         end do
         allocate(set%pt_first(max(np, 1)), set%pt_age(max(np, 1)), set%pt_mini(max(np, 1)), set%pt_m1(max(np, 1)), &
-                 set%pt_m2(max(np, 1)), set%pt_cm(max(np, 1)), set%pt_cl(max(np, 1)), set%pt_q(max(np, 1)))
+                 set%pt_m2(max(np, 1)), set%pt_cm(max(np, 1)), set%pt_cl(max(np, 1)), set%pt_q(max(np, 1)), &
+                 set%pt_llo(max(np, 1)), set%pt_dl(max(np, 1)))
         allocate(set%pc_ptr(npc), set%seg_ptr(nsg), set%seg_first(nef), set%eff_pt(max(nen, 1)), set%eff_val(max(nen, 1)))
         allocate(set%age_pc(nz * (nt + 1)), set%pt_ptr(nz * (nt + 1)), set%age_mmax(nz * nt))
         do iz = 1, nz
@@ -127,6 +131,7 @@ contains
                 set%age_mmax((iz - 1) * nt + 1:iz * nt) = o%age_mmax(1:nt)
             end associate
         end do
+        call imf_bin_logs(set%pt_m1, set%pt_m2, set%pt_llo, set%pt_dl)
         call move_alloc(ops, set%ops)
     end subroutine ssp_opset_build
 
@@ -138,7 +143,7 @@ contains
             !$omp target exit data map(delete: set%n_pc, set%n_seg, set%n_eff, set%pt_off, set%pc_off, set%seg_off, &
             !$omp     set%ent_off, set%eff_off, set%pt_first, set%pt_age, set%pc_ptr, set%age_pc, set%pt_ptr, set%seg_ptr, &
             !$omp     set%seg_first, set%eff_pt, set%pt_mini, set%pt_m1, set%pt_m2, set%pt_cm, set%pt_cl, set%pt_q, &
-            !$omp     set%age_mmax, set%eff_val)
+            !$omp     set%age_mmax, set%eff_val, set%pt_llo, set%pt_dl)
             set%on_device = .false.
         end if
 #endif
@@ -152,7 +157,7 @@ contains
                                             set%ent_off, set%eff_off)
         if (allocated(set%pt_first)) deallocate(set%pt_first, set%pt_age, set%pt_mini, set%pt_m1, set%pt_m2, set%pt_cm, &
                                                 set%pt_cl, set%pt_q, set%pc_ptr, set%seg_ptr, set%seg_first, set%eff_pt, &
-                                                set%eff_val, set%age_pc, set%pt_ptr, set%age_mmax)
+                                                set%eff_val, set%age_pc, set%pt_ptr, set%age_mmax, set%pt_llo, set%pt_dl)
         set%nz = 0; set%nt = 0; set%n_pts_max = 0; set%n_eff_max = 0; set%n_seg_max = 0; set%n_pc_max = 0
     end subroutine ssp_opset_free
 
@@ -165,7 +170,7 @@ contains
         !$omp target enter data map(to: set%n_pc, set%n_seg, set%n_eff, set%pt_off, set%pc_off, set%seg_off, &
         !$omp     set%ent_off, set%eff_off, set%pt_first, set%pt_age, set%pc_ptr, set%age_pc, set%pt_ptr, set%seg_ptr, &
         !$omp     set%seg_first, set%eff_pt, set%pt_mini, set%pt_m1, set%pt_m2, set%pt_cm, set%pt_cl, set%pt_q, &
-        !$omp     set%age_mmax, set%eff_val)
+        !$omp     set%age_mmax, set%eff_val, set%pt_llo, set%pt_dl)
         do iz = 1, set%nz
             call ssp_operator_to_device(set%ops(iz))   ! (the template matrices)
         end do
@@ -303,8 +308,8 @@ contains
                 nc = min(CHUNK, np - m0 + 1)
                 call imf_pieces_multi(imf_type, remnants, m0, nc, nt, set%n_pc_max, nt_neb, pm, set%n_pc, set%pt_off, &
                                       set%pc_off, set%pc_ptr, set%age_pc, set%pt_ptr, set%pt_mini, set%pt_m1, set%pt_m2, &
-                                      set%pt_first, set%pt_cm, set%pt_cl, set%pt_q, set%age_mmax, size(w, 1), &
-                                      set%n_pts_max, w, wk, tot, pps, perm, viz, cz, smass, slum, q0)
+                                      set%pt_llo, set%pt_dl, set%pt_first, set%pt_cm, set%pt_cl, set%pt_q, set%age_mmax, &
+                                      size(w, 1), set%n_pts_max, w, wk, tot, pps, perm, viz, cz, smass, slum, q0)
                 call fold_multi(m0, nc, set%n_eff_max, set%n_seg_max, nt_neb, neb_cols, wsfh, it_tesc, fesc, &
                                 set%n_seg, set%n_eff, set%pt_off, set%seg_off, set%eff_off, set%ent_off, set%pt_age, &
                                 set%eff_pt, set%eff_val, set%seg_ptr, set%seg_first, perm, viz, cz, wk, vp, v, veuv)
@@ -361,11 +366,12 @@ contains
     !> and the points of its metallicity's table (offsets pt_off, pc_off) and skips it if the
     !> metallicity has fewer pieces; the sums accumulate (cz(m)) into smass, slum (logarithm) and q0.
     subroutine imf_pieces_multi(imf_type, remnants, m0, nc, nt, n_pc_max, nt_neb, pm, n_pc, pt_off, pc_off, pc_ptr, &
-                                age_pc, pt_ptr, pt_mini, pt_m1, pt_m2, pt_first, pt_cm, pt_cl, pt_q, age_mmax, ldw, &
+                                age_pc, pt_ptr, pt_mini, pt_m1, pt_m2, pt_llo, pt_dl, pt_first, pt_cm, pt_cl, pt_q, age_mmax, ldw, &
                                 n_pts_max, w, wk, tot, pps, perm, viz, cz, smass, slum, q0)
         logical, intent(in) :: remnants
         integer, intent(in) :: imf_type, m0, nc, nt, n_pc_max, nt_neb, ldw, n_pts_max
-        real(WP), intent(in), contiguous :: pm(:,:), pt_mini(:), pt_m1(:), pt_m2(:), pt_cm(:), pt_cl(:), pt_q(:), &
+        real(WP), intent(in), contiguous :: pm(:,:), pt_mini(:), pt_m1(:), pt_m2(:), pt_llo(:), pt_dl(:), pt_cm(:), &
+                                            pt_cl(:), pt_q(:), &
                                             age_mmax(:), cz(:)
         integer, intent(in), contiguous  :: n_pc(:), pt_off(:), pc_off(:), pc_ptr(:), age_pc(:), pt_ptr(:), pt_first(:), &
                                             perm(:), viz(:)
@@ -400,8 +406,9 @@ contains
                 sm = 0.0_wp
                 sl = 0.0_wp
                 sq = 0.0_wp
-                call imf_bin_weights(imf_type, pm(:, m), tot(j), n, pt_mini(k0:k0 + n - 1), &
-                                     pt_m1(k0:k0 + n - 1), pt_m2(k0:k0 + n - 1), pt_first(k0:k0 + n - 1), &
+                call imf_bin_weights_tab(imf_type, pm(:, m), tot(j), n, pt_mini(k0:k0 + n - 1), &
+                                     pt_m1(k0:k0 + n - 1), pt_m2(k0:k0 + n - 1), pt_llo(k0:k0 + n - 1), &
+                                     pt_dl(k0:k0 + n - 1), pt_first(k0:k0 + n - 1), &
                                      w(j, k0 - o), ldw)
                 do k = k0, k0 + n - 1
                     kl = k - o

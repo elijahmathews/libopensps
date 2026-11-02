@@ -16,7 +16,7 @@ module opensps_imf
     public :: compute_imf_weights
     public :: get_imf_value
     public :: integrate_imf_interval_analytic, imf_integral, imf_integral_p, imf_pack_params
-    public :: imf_bin_weights
+    public :: imf_bin_weights, imf_bin_weights_tab, imf_bin_logs
     public :: IMF_NPAR, IMF_P_SALP, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE, IMF_P_LOWER_LIMIT, &
               IMF_P_UPPER_LIMIT, IMF_P_LOWER_BOUND, IMF_P_MLIM_BH, IMF_P_MLIM_NS, IMF_P_NUSER, IMF_P_USER
     public :: CHAB_MC, CHAB_SIGMA2, CHAB_IND
@@ -426,6 +426,151 @@ contains
             w(1, k) = val
         end do
     end subroutine imf_bin_weights
+
+    !> @brief imf_bin_weights with the bins' logarithms given (the batched SSP's operator set): a bin
+    !> [m1, m2] inside one power-law segment is c m1**e expm1(e ln(m2/m1)) / d, from llo = ln m1 and
+    !> dl = ln(m2/m1) (model-independent, computed once per operator set): one FP64 exponential and a
+    !> short series per bin instead of a power, and no difference of nearly equal powers for narrow
+    !> bins, and none of e / e for slopes near 1 either (exactly 1: c dl). The first bin of an age
+    !> (lower edge from the IMF's lower bound), bins across segment boundaries, the lognormal parts
+    !> and tabulated IMFs are as imf_bin_weights.
+    pure subroutine imf_bin_weights_tab(imf_type, p, total_mass, n, mini, m1, m2, llo, dl, first, w, ldw)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        integer, intent(in)  :: imf_type, n, ldw
+        real(WP), intent(in) :: p(IMF_NPAR), total_mass
+        real(WP), intent(in) :: mini(n), m1(n), m2(n), llo(n), dl(n)
+        integer, intent(in)  :: first(n)
+        real(WP), intent(inout) :: w(ldw, n)
+        integer  :: k, t, seg, cur
+        real(WP) :: lo, hi, val, alpha, coeff, e, c, d, lim_lo, lim_hi
+
+        t = mod(imf_type, 10)
+        lim_lo = p(IMF_P_LOWER_LIMIT)
+        lim_hi = p(IMF_P_UPPER_LIMIT)
+        cur = 0
+        e = 0.0_wp; c = 0.0_wp; d = 1.0_wp
+        do k = 1, n
+            w(1, k) = 0.0_wp
+            if (mini(k) < lim_lo .or. mini(k) > lim_hi) cycle
+            if (first(k) == 1) then
+                lo = p(IMF_P_LOWER_BOUND)
+            else
+                lo = m1(k)
+            end if
+            hi = m2(k)
+            if (hi <= lo) cycle      ! empty or inverted bin: no stars
+
+            ! The power-law segment containing the bin, if any (as imf_bin_weights)
+            seg = 0
+            select case (t)
+            case (0)
+                seg = 1
+            case (1)
+                if (lo >= 1.0_wp) seg = 2
+            case (3)
+                if (lo >= VD_NC * p(IMF_P_VDMC)) seg = 2
+            case (2)
+                if (lo >= 0.08_wp .and. hi <= 0.5_wp) then
+                    seg = 1
+                else if (lo >= 0.5_wp .and. hi <= 1.0_wp) then
+                    seg = 2
+                else if (lo >= 1.0_wp) then
+                    seg = 3
+                end if
+            case (4)
+                if (lo >= 0.08_wp .and. hi <= p(IMF_P_MDAVE)) then
+                    seg = 1
+                else if (lo >= p(IMF_P_MDAVE)) then
+                    seg = 2
+                end if
+            end select
+            if (seg > 0 .and. seg /= cur) then
+                select case (t)
+                case (0)
+                    alpha = p(IMF_P_SALP); coeff = 1.0_wp
+                case (1)
+                    alpha = CHAB_IND + 1.0_wp; coeff = CHAB_HIGH_NORM
+                case (3)
+                    alpha = VD_IND + 1.0_wp; coeff = VD_AH
+                case (2)
+                    alpha = p(IMF_P_ALPHA + seg - 1)
+                    coeff = 1.0_wp
+                    if (seg > 1) coeff = 0.5_wp**(-p(IMF_P_ALPHA) + p(IMF_P_ALPHA + 1))
+                case default
+                    alpha = p(IMF_P_ALPHA + seg - 1)
+                    coeff = 1.0_wp
+                    if (seg > 1) coeff = p(IMF_P_MDAVE)**(-p(IMF_P_ALPHA) + p(IMF_P_ALPHA + 1))
+                end select
+                e = 1.0_wp - alpha
+                c = coeff
+                d = 1.0_wp - alpha
+                cur = seg
+            end if
+            if (seg > 0 .and. cur == seg) then
+                if (first(k) == 1) then
+                    if (abs(d) <= 1.0e-12_wp) then
+                        val = c * log(hi / lo)
+                    else
+                        val = c * (hi**e - lo**e) / d
+                    end if
+                else if (e == 0.0_wp) then
+                    val = c * dl(k)
+                else
+                    ! c (hi**e - lo**e) / e = c lo**e expm1(e dl) / e: smooth through e = 0 (no
+                    ! special case for slopes near 1, where the difference form divides a
+                    ! cancellation by a small e)
+                    val = c * exp(e * llo(k)) * (expm1_series(e * dl(k)) / e)
+                end if
+            else
+                val = imf_integral_p(imf_type, p, lo, hi, .false.)
+                if (seg == 0) cur = 0
+            end if
+            if (total_mass > 0.0_wp) val = val / total_mass
+            w(1, k) = val
+        end do
+    end subroutine imf_bin_weights_tab
+
+    !> The logarithms imf_bin_weights_tab takes for a bin [m1, m2]: llo = ln m1 and dl = ln(m2 / m1),
+    !> the latter as log1p((m2 - m1) / m1) in Kahan's form (no cancellation for narrow bins); zero for
+    !> an empty or invalid bin.
+    elemental subroutine imf_bin_logs(m1, m2, llo, dl)
+        real(WP), intent(in)  :: m1, m2
+        real(WP), intent(out) :: llo, dl
+        real(WP) :: x, u
+        llo = 0.0_wp
+        dl = 0.0_wp
+        if (m1 <= 0.0_wp .or. m2 <= m1) return
+        llo = log(m1)
+        x = (m2 - m1) / m1
+        u = 1.0_wp + x
+        if (u == 1.0_wp) then
+            dl = x
+        else
+            dl = log(u) * x / (u - 1.0_wp)
+        end if
+    end subroutine imf_bin_logs
+
+    !> exp(y) - 1 without cancellation: Taylor series to y**13 for |y| < 1/4 (truncation < 3e-18
+    !> relative), exp(y) - 1 above (cancellation at most a factor 4).
+    pure function expm1_series(y) result(r)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(WP), intent(in) :: y
+        real(WP) :: r
+        integer :: i
+        if (abs(y) < 0.25_wp) then
+            r = 1.0_wp
+            do i = 13, 2, -1
+                r = 1.0_wp + y / real(i, WP) * r
+            end do
+            r = y * r
+        else
+            r = exp(y) - 1.0_wp
+        end if
+    end function expm1_series
 
     !> Integral of a lognormal IMF segment, exp(-(log10 m - log_mc)^2 / (2 sigma2)) / m, over
     !> [m1, m2], or of m times it when mass_weighted (Chabrier and van Dokkum below their break).
