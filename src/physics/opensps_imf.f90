@@ -444,13 +444,15 @@ contains
         integer, intent(in)  :: first(n)
         real(WP), intent(inout) :: w(ldw, n)
         integer  :: k, t, seg, cur
-        real(WP) :: lo, hi, val, alpha, coeff, e, c, d, lim_lo, lim_hi
+        real(WP) :: lo, hi, val, alpha, coeff, e, c, d, ce, lim_lo, lim_hi, inv_total
 
         t = mod(imf_type, 10)
         lim_lo = p(IMF_P_LOWER_LIMIT)
         lim_hi = p(IMF_P_UPPER_LIMIT)
         cur = 0
-        e = 0.0_wp; c = 0.0_wp; d = 1.0_wp
+        e = 0.0_wp; c = 0.0_wp; d = 1.0_wp; ce = 0.0_wp
+        inv_total = 1.0_wp
+        if (total_mass > 0.0_wp) inv_total = 1.0_wp / total_mass   ! once per call
         do k = 1, n
             w(1, k) = 0.0_wp
             if (mini(k) < lim_lo .or. mini(k) > lim_hi) cycle
@@ -506,6 +508,8 @@ contains
                 e = 1.0_wp - alpha
                 c = coeff
                 d = 1.0_wp - alpha
+                ce = 0.0_wp
+                if (e /= 0.0_wp) ce = c / e     ! once per segment: no division per bin
                 cur = seg
             end if
             if (seg > 0 .and. cur == seg) then
@@ -521,14 +525,13 @@ contains
                     ! c (hi**e - lo**e) / e = c lo**e expm1(e dl) / e: smooth through e = 0 (no
                     ! special case for slopes near 1, where the difference form divides a
                     ! cancellation by a small e)
-                    val = c * exp(e * llo(k)) * (expm1_series(e * dl(k)) / e)
+                    val = ce * exp(e * llo(k)) * expm1_series(e * dl(k))
                 end if
             else
                 val = imf_integral_p(imf_type, p, lo, hi, .false.)
                 if (seg == 0) cur = 0
             end if
-            if (total_mass > 0.0_wp) val = val / total_mass
-            w(1, k) = val
+            w(1, k) = val * inv_total
         end do
     end subroutine imf_bin_weights_tab
 
@@ -553,19 +556,31 @@ contains
     end subroutine imf_bin_logs
 
     !> exp(y) - 1 without cancellation: Taylor series to y**13 for |y| < 1/4 (truncation < 3e-18
-    !> relative), exp(y) - 1 above (cancellation at most a factor 4).
+    !> relative), exp(y) - 1 above (cancellation at most a factor 4). The series is nested
+    !> multiply-adds with the constants 1/k: no divisions (an FP64 division is a long instruction
+    !> sequence on a GPU, at the FP64 rate).
     pure function expm1_series(y) result(r)
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
         real(WP), intent(in) :: y
         real(WP) :: r
-        integer :: i
+        real(WP), parameter :: I2 = 1.0_wp / 2, I3 = 1.0_wp / 3, I4 = 1.0_wp / 4, I5 = 1.0_wp / 5, &
+                               I6 = 1.0_wp / 6, I7 = 1.0_wp / 7, I8 = 1.0_wp / 8, I9 = 1.0_wp / 9, &
+                               I10 = 1.0_wp / 10, I11 = 1.0_wp / 11, I12 = 1.0_wp / 12, I13 = 1.0_wp / 13
         if (abs(y) < 0.25_wp) then
-            r = 1.0_wp
-            do i = 13, 2, -1
-                r = 1.0_wp + y / real(i, WP) * r
-            end do
+            r = 1.0_wp + y * I13
+            r = 1.0_wp + y * I12 * r
+            r = 1.0_wp + y * I11 * r
+            r = 1.0_wp + y * I10 * r
+            r = 1.0_wp + y * I9 * r
+            r = 1.0_wp + y * I8 * r
+            r = 1.0_wp + y * I7 * r
+            r = 1.0_wp + y * I6 * r
+            r = 1.0_wp + y * I5 * r
+            r = 1.0_wp + y * I4 * r
+            r = 1.0_wp + y * I3 * r
+            r = 1.0_wp + y * I2 * r
             r = y * r
         else
             r = exp(y) - 1.0_wp
