@@ -12,8 +12,15 @@ Both scripts need:
   (`isoc_z*.dat`); upstream master has moved to `isoc_feh_*_afe_*`, so use a legacy checkout
   from before that change (the numbers below are from upstream 82a8735).
 - `LEGACY_SPS_HOME`: a legacy-layout data tree (`SPECTRA/`, `ISOCHRONES/`, ...) whose files are
-  byte-identical to the fork's `data/` tree. Check with `diff -rq`.
-- gfortran, Python 3 with NumPy, and the fork configured in `build/` (or `BUILD=<dir>`).
+  byte-identical to the data the fork reads. Upstream FSPS at 82a8735 is one: its `SPECTRA/`,
+  `ISOCHRONES/`, `dust/` and `data/` are byte-identical to `data/spectra/`, `data/isochrones/`,
+  `data/dust/` and `data/` of `elijahmathews/fsps` at `fsps-final`, the tree the `opensps-data`
+  release was converted from, and its `nebular/` differs only in the six line tables below.
+- `DATA_HOME` (default `OPENSPS_DATA_HOME`): the fork's data root, e.g. the unpacked
+  `opensps-data` release (`tools/fetch_data.py`). `test_data_parity LEGACY_ROOT STANDARD_ROOT`
+  (built with the tests) checks that it matches a legacy tree bit for bit.
+- gfortran, Python 3 with NumPy, and the fork configured in `build/` (or `BUILD=<dir>`, relative
+  to the repository root).
 
 Legacy FSPS is built in double precision (`SP = KIND(1.d0)` in `sps_vars.f90`), so the two codes
 agree to about 1e-6 wherever they compute the same thing.
@@ -38,9 +45,12 @@ To compare code rather than constants, legacy is built with two patches (`patche
 - `agn_dust.sed`: upstream d9a387a, which scales the AGN torus attenuation by `dust2`
   (cconroy20/fsps#81).
 
-The data tree is the legacy one with the corrected nebular line tables of upstream fc7db5a
-(shipped in the fork's `data/nebular/`): legacy's own `ZAU_{ND,WD}_{mist,pdva,prsc}.lines` carry
-wrong metallicity and age labels.
+The data tree is the legacy one with the corrected nebular line tables that the fork's data
+holds, taken from `LEGACY_NEBULAR` (e.g. `data/nebular/` of `elijahmathews/fsps` at
+`fsps-final`): legacy's own `ZAU_{ND,WD}_{mist,pdva,prsc}.lines` carry wrong metallicity and age
+labels. They are upstream fc7db5a's tables, with the header and wavelength row of the three `WD`
+tables made consistent with their 166 lines (`elijahmathews/fsps` d5ebb2d; upstream's `WD` headers
+still list 128).
 
 ### Results
 
