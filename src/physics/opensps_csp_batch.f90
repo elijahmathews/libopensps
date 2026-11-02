@@ -456,7 +456,10 @@ contains
         end do
         any_emis = any(emis)
         agn = any(agn_on)
-        neb = ctx%add_neb_emission_val == 1
+        ! Only with a nebular grid: isochrone sets without one (BaSTI, Geneva) get no nebular
+        ! emission and zero lines, as in legacy FSPS (whose tables stay zero there). The setup
+        ! leaves the grid's age axis at zero when it loads no grid (reset_setup_tables)
+        neb = ctx%add_neb_emission_val == 1 .and. ctx%state%nebem_age(NEBNAGE) > 0.0_wp
         call nebular_setup(ctx, psets, neb, nzb, nb)
         if (neb) then
             allocate(eml(NEMLINE, n_mod))
