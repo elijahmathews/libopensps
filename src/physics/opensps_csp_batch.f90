@@ -149,7 +149,10 @@ module opensps_csp_batch
         real(WP), pointer, contiguous :: wa(:) => null()
         real(WP), pointer, contiguous :: dwa(:) => null()    !< per age: wa(t) - wa(t-1) within an interval
         logical,  pointer, contiguous :: newr(:) => null()   !< per age: the step dwa differs from the previous one
-        real(WP), allocatable :: cy(:,:), co(:,:) !< (ages, N): SFH weight * Q, young and old (continuum)
+        !> (ages, N): SFH weight * Q, young and old (continuum), divided by the model's largest one,
+        !> whose logarithm is lns (per model): Q reaches ~1e53, out of the FP32 range (rule 5)
+        real(KP), allocatable :: cy(:,:), co(:,:)
+        real(WP), allocatable :: lns(:)
         real(WP), allocatable :: q0(:,:)        !< per age and basis: ionizing photons (frac_obrun = 0)
         integer,  pointer, contiguous :: iz(:) => null(), iu(:) => null()  !< per model: gas_logz and gas_logu intervals and weights
         real(WP), pointer, contiguous :: wz(:) => null(), wu(:) => null()
@@ -507,7 +510,7 @@ contains
         !$omp map(from: rout, eml)
 #endif
 #ifdef OMP_TARGET
-        !$omp target data if(neb) map(to: nb%ipk, nb%rpk, nb%lpk) map(alloc: nb%q0, nb%lum, nb%cy, nb%co)
+        !$omp target data if(neb) map(to: nb%ipk, nb%rpk, nb%lpk) map(alloc: nb%q0, nb%lum, nb%cy, nb%co, nb%lns)
 #endif
 
         ! SFH weights (FP64), mass and L_bol per model, one thread per model; the weights are split
@@ -950,7 +953,7 @@ contains
             nb%dwa(t) = nb%wa(t) - nb%wa(t - 1)
             nb%newr(t) = nb%ia(t - 1) /= nb%ia(max(1, t - 2)) .or. t == 2 .or. nb%dwa(t) /= nb%dwa(t - 1)
         end do
-        allocate(nb%cy(n, n_mod), nb%co(n, n_mod))
+        allocate(nb%cy(n, n_mod), nb%co(n, n_mod), nb%lns(n_mod))
         do m = 1, n_mod
             nb%iz(m) = 1; nb%wz(m) = 0.0_wp; nb%iu(m) = 1; nb%wu(m) = 0.0_wp
             if (neb) then
@@ -1169,15 +1172,15 @@ contains
         ! by component, or implicitly through a dummy, conflicts in LLVM's offload runtime)
         call nebular_kernels(ctx, n_mod, nspec, nt, nzb, basis, w2, it_tesc, zlo, zhi, dz, &
                              nb%nt_neb, nb%whlylim, nb%cont, nb%lines_in_spec, nb%xrb, nb%ia, nb%wa, nb%dwa, &
-                             nb%newr, nb%q0, nb%iz, nb%wz, nb%iu, nb%wu, nb%fesc, nb%fabs, nb%cy, nb%co, nb%lum, &
-                             nb%lptr, nb%lid, yo, eml)
+                             nb%newr, nb%q0, nb%iz, nb%wz, nb%iu, nb%wu, nb%fesc, nb%fabs, nb%cy, nb%co, nb%lns, &
+                             nb%lum, nb%lptr, nb%lid, yo, eml)
     end subroutine add_nebular_batch
 
     !> The kernels of add_nebular_batch, on the components of its nebular_setup_t.
     subroutine nebular_kernels(ctx, n_mod, nspec, nt, nzb, basis, w2, it_tesc, zlo, zhi, dz, &
                                nb_nt_neb, nb_whlylim, nb_cont, nb_lines_in_spec, nb_xrb, nb_ia, nb_wa, nb_dwa, &
-                               nb_newr, nb_q0, nb_iz, nb_wz, nb_iu, nb_wu, nb_fesc, nb_fabs, nb_cy, nb_co, nb_lum, &
-                               nb_lptr, nb_lid, yo, eml)
+                               nb_newr, nb_q0, nb_iz, nb_wz, nb_iu, nb_wu, nb_fesc, nb_fabs, nb_cy, nb_co, nb_lns, &
+                               nb_lum, nb_lptr, nb_lid, yo, eml)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)              :: n_mod, nspec, nt, nzb, nb_nt_neb, nb_whlylim
         ! Explicit-shape arguments (no descriptors to map per launch), except nb_lid, whose size is not
@@ -1192,14 +1195,15 @@ contains
         real(WP), intent(in)             :: nb_wu(n_mod), nb_fesc(n_mod), nb_fabs(n_mod)
         logical, intent(in)              :: nb_newr(max(1, nb_nt_neb))
         real(WP), intent(inout)          :: nb_q0(max(1, nb_nt_neb), nzb)
-        real(WP), intent(inout)          :: nb_cy(max(1, nb_nt_neb), n_mod), nb_co(max(1, nb_nt_neb), n_mod)
+        real(KP), intent(inout)          :: nb_cy(max(1, nb_nt_neb), n_mod), nb_co(max(1, nb_nt_neb), n_mod)
+        real(WP), intent(inout)          :: nb_lns(n_mod)
         real(KP), intent(inout)          :: nb_lum(NEMLINE, 2 * n_mod)
         real(KP), intent(inout)          :: yo(nspec, 2 * n_mod)
         real(KP), intent(out)            :: eml(NEMLINE, n_mod)
 
         integer  :: m, i, j, k, t, nt_neb, whlylim, a, a_prev, p, iz, iu
-        real(KP) :: s, c, wt, bk, y, o, wk, v, dzk
-        real(WP) :: q, lg, ra, rb, dl, f, r, sy, so, c00, c01, c10, c11
+        real(KP) :: s, c, wt, bk, y, o, wk, v, dzk, f, r, sy, so
+        real(WP) :: q, lg, ra, rb, dl, c00, c01, c10, c11, cq, cmax
         real(WP), parameter :: LN10 = log(10.0_wp)
         logical  :: xrb
 
@@ -1307,22 +1311,27 @@ contains
         end if
 
         ! 3. Continuum: per (pixel, model), sum over the nebular ages t of C(t) 10**lg(t), with
-        !    C = SFH weight * Q (per model, young or old; FP64) and lg the log grid interpolated
-        !    in Z, U (FP64) and age. Within one CLOUDY age interval [ra, rb], lg = ra + wa (rb - ra)
-        !    and on the uniform log-age grid wa advances by a constant step, so 10**lg is a
-        !    geometric progression: per interval two FP64 exponentials (the first age's value and
-        !    the ratio), per age one multiply and one add, all in FP64 (each interval's sum is cast
-        !    once). The FP64 exponentials are the cost of this kernel. Hardware note: measured on
-        !    the A100 (FP64 at half the FP32 rate); on GPUs with slow FP64 (1/32-1/64 of FP32, most
-        !    consumer cards) these exponentials weigh much more, and the next step there would be
-        !    the progression's ratio in FP32 with the argument reduced in FP64.
+        !    C = SFH weight * Q (per model, young or old) and lg the log grid interpolated in Z, U
+        !    (FP64) and age. Within one CLOUDY age interval [ra, rb], lg = ra + wa (rb - ra) and on
+        !    the uniform log-age grid wa advances by a constant step, so 10**lg is a geometric
+        !    progression: per interval the first age's value and the ratio, per age one multiply
+        !    and two adds. Kernel precision for the per-age work, with the rules of
+        !    doc/MIXED_PRECISION.md: C (up to ~1e53, rule 5) is stored divided by its largest value
+        !    S per model, and ln S joins the exponent; the exponents (~100, rule 3) are formed in
+        !    FP64 and reduced there before the exponential (exp_kp). FP64 remains in the grid
+        !    interpolation and the argument reduction, a few operations per interval; on GPUs with
+        !    slow FP64 (1/32-1/64 of FP32, most consumer and workstation cards) the FP64
+        !    exponentials this replaces were most of the batch's time (R9700: 44%).
         if (nb_cont) then
+            ! C = SFH weight * Q per (age, model), stored as C / max_t C in KP with ln(max_t C) in
+            ! nb_lns: one model per thread, the first pass for the maximum
 #if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do collapse(2) private(q, wk)
+            !$omp target teams distribute parallel do private(t, q, wk, cq, cmax)
 #elif defined(_OPENMP)
-            !$omp parallel do collapse(2) private(q, wk)
+            !$omp parallel do private(t, q, wk, cq, cmax)
 #endif
             do m = 1, n_mod
+                cmax = 0.0_wp
                 do t = 1, nt_neb
                     q = abs(((1.0_wp - dz(m)) * nb_q0(t, zlo(m)) + dz(m) * nb_q0(t, zhi(m))) * nb_fabs(m))
                     if (t <= it_tesc(m)) then
@@ -1330,13 +1339,25 @@ contains
                     else
                         wk = w2(t, n_mod + m)
                     end if
-                    nb_cy(t, m) = 0.0_wp
-                    nb_co(t, m) = 0.0_wp
+                    if (wk /= 0.0_KP .and. q > SAFE_FLOOR) cmax = max(cmax, abs(real(wk, WP) * q))
+                end do
+                nb_lns(m) = 0.0_wp
+                if (cmax > 0.0_wp) nb_lns(m) = log(cmax)
+                do t = 1, nt_neb
+                    q = abs(((1.0_wp - dz(m)) * nb_q0(t, zlo(m)) + dz(m) * nb_q0(t, zhi(m))) * nb_fabs(m))
+                    if (t <= it_tesc(m)) then
+                        wk = w2(t, m)
+                    else
+                        wk = w2(t, n_mod + m)
+                    end if
+                    nb_cy(t, m) = 0.0_KP
+                    nb_co(t, m) = 0.0_KP
                     if (wk /= 0.0_KP .and. q > SAFE_FLOOR) then
+                        cq = real(wk, WP) * q / cmax
                         if (t <= it_tesc(m)) then
-                            nb_cy(t, m) = real(wk, WP) * q
+                            nb_cy(t, m) = real(cq, KP)
                         else
-                            nb_co(t, m) = real(wk, WP) * q
+                            nb_co(t, m) = real(cq, KP)
                         end if
                     end if
                 end do
@@ -1346,11 +1367,11 @@ contains
             if (xrb) then
                 call nebular_continuum_tiled(n_mod, nspec, size(ctx%state%xnebem_cont, 1), nt_neb, &
                                              ctx%state%xnebem_cont, nb_ia, nb_wa, nb_dwa, nb_newr, &
-                                             nb_cy, nb_co, nb_iz, nb_wz, nb_iu, nb_wu, yo)
+                                             nb_cy, nb_co, nb_lns, nb_iz, nb_wz, nb_iu, nb_wu, yo)
             else
                 call nebular_continuum_tiled(n_mod, nspec, size(ctx%state%nebem_cont, 1), nt_neb, &
                                              ctx%state%nebem_cont, nb_ia, nb_wa, nb_dwa, nb_newr, &
-                                             nb_cy, nb_co, nb_iz, nb_wz, nb_iu, nb_wu, yo)
+                                             nb_cy, nb_co, nb_lns, nb_iz, nb_wz, nb_iu, nb_wu, yo)
             end if
 #else
             associate (a_nebem_cont => ctx%state%nebem_cont, a_xnebem_cont => ctx%state%xnebem_cont)
@@ -1366,11 +1387,11 @@ contains
                 do j = 1, nspec
                     y = 0.0_KP
                     o = 0.0_KP
-                    sy = 0.0_wp
-                    so = 0.0_wp
+                    sy = 0.0_KP
+                    so = 0.0_KP
                     a_prev = -1
                     ra = 0.0_wp; rb = 0.0_wp
-                    dl = 0.0_wp; f = 0.0_wp; r = 1.0_wp
+                    dl = 0.0_wp; f = 0.0_KP; r = 1.0_KP
                     iz = nb_iz(m)
                     iu = nb_iu(m)
                     ! As interpolate_zu_slice_point, written out: with nvfortran 25.1 (A100) a call
@@ -1384,10 +1405,10 @@ contains
                         a = nb_ia(t)
                         if (a /= a_prev) then
                             ! Close the previous interval
-                            y = y + real(sy, KP)
-                            o = o + real(so, KP)
-                            sy = 0.0_wp
-                            so = 0.0_wp
+                            y = y + sy
+                            o = o + so
+                            sy = 0.0_KP
+                            so = 0.0_KP
                             ! The interval only advances: its lower end is the previous upper end
                             if (a == a_prev + 1) then
                                 ra = rb
@@ -1417,16 +1438,16 @@ contains
                             end if
                             a_prev = a
                             dl = (rb - ra) * LN10
-                            f = exp(ra * LN10 + nb_wa(t) * dl)
+                            f = exp_kp(ra * LN10 + nb_wa(t) * dl + nb_lns(m))
                         else
-                            if (nb_newr(t)) r = exp(nb_dwa(t) * dl)
+                            if (nb_newr(t)) r = exp_kp(nb_dwa(t) * dl)
                             f = f * r
                         end if
                         sy = sy + nb_cy(t, m) * f
                         so = so + nb_co(t, m) * f
                     end do
-                    y = y + real(sy, KP)
-                    o = o + real(so, KP)
+                    y = y + sy
+                    o = o + so
                     yo(j, m) = yo(j, m) + y
                     yo(j, n_mod + m) = yo(j, n_mod + m) + o
                 end do
@@ -1509,10 +1530,11 @@ contains
     !> flags, SFH weight * Q) among them: with one pixel per thread the loop was ~90% address
     !> arithmetic and loads. The arithmetic per pixel is the one of the generic kernel, in the same
     !> order, so the results are identical bit for bit.
-    subroutine nebular_continuum_tiled(n_mod, nspec, ntab, nt_neb, tab, ia, wa, dwa, newr, cy, co, iz, wz, iu, wu, yo)
+    subroutine nebular_continuum_tiled(n_mod, nspec, ntab, nt_neb, tab, ia, wa, dwa, newr, cy, co, lns, iz, wz, iu, wu, yo)
         integer, intent(in)     :: n_mod, nspec, ntab, nt_neb, ia(nt_neb), iz(n_mod), iu(n_mod)
         real(WP), intent(in)    :: tab(ntab, NEBNZ, NEBNAGE, NEBNIP), wa(nt_neb), dwa(nt_neb)
-        real(WP), intent(in)    :: cy(nt_neb, n_mod), co(nt_neb, n_mod), wz(n_mod), wu(n_mod)
+        real(KP), intent(in)    :: cy(nt_neb, n_mod), co(nt_neb, n_mod)
+        real(WP), intent(in)    :: lns(n_mod), wz(n_mod), wu(n_mod)
         logical, intent(in)     :: newr(nt_neb)
         real(KP), intent(inout) :: yo(nspec, 2 * n_mod)
 
@@ -1529,22 +1551,23 @@ contains
             do ip = 1, npt
               block
                 integer  :: p, t, a, a_prev, jz, ju, jj(PT)
-                real(KP) :: y(PT), o(PT)
-                real(WP) :: sy(PT), so(PT), ra(PT), rb(PT), dl(PT), f(PT), r(PT), c00, c01, c10, c11, wat, cyt, cot
+                real(KP) :: y(PT), o(PT), sy(PT), so(PT), f(PT), r(PT), cyt, cot
+                real(WP) :: ra(PT), rb(PT), dl(PT), c00, c01, c10, c11, wat, lsm
                 logical  :: valid(PT)
                 do p = 1, PT
                     jj(p) = min(ip + (p - 1) * npt, nspec)
                     valid(p) = ip + (p - 1) * npt <= nspec
                     y(p) = 0.0_KP
                     o(p) = 0.0_KP
-                    sy(p) = 0.0_wp
-                    so(p) = 0.0_wp
+                    sy(p) = 0.0_KP
+                    so(p) = 0.0_KP
                     ra(p) = 0.0_wp
                     rb(p) = 0.0_wp
                     dl(p) = 0.0_wp
-                    f(p) = 0.0_wp
-                    r(p) = 1.0_wp
+                    f(p) = 0.0_KP
+                    r(p) = 1.0_KP
                 end do
+                lsm = lns(m)
                 a_prev = -1
                 jz = iz(m)
                 ju = iu(m)
@@ -1560,10 +1583,10 @@ contains
                     if (a /= a_prev) then
                         do p = 1, PT
                             ! Close the previous interval
-                            y(p) = y(p) + real(sy(p), KP)
-                            o(p) = o(p) + real(so(p), KP)
-                            sy(p) = 0.0_wp
-                            so(p) = 0.0_wp
+                            y(p) = y(p) + sy(p)
+                            o(p) = o(p) + so(p)
+                            sy(p) = 0.0_KP
+                            so(p) = 0.0_KP
                             ! The interval only advances: its lower end is the previous upper end
                             if (a == a_prev + 1) then
                                 ra(p) = rb(p)
@@ -1574,12 +1597,12 @@ contains
                             rb(p) = c00 * tab(jj(p), jz, a + 1, ju) + c01 * tab(jj(p), jz, a + 1, ju + 1) + &
                                     c10 * tab(jj(p), jz + 1, a + 1, ju) + c11 * tab(jj(p), jz + 1, a + 1, ju + 1)
                             dl(p) = (rb(p) - ra(p)) * LN10
-                            f(p) = exp(ra(p) * LN10 + wat * dl(p))
+                            f(p) = exp_kp(ra(p) * LN10 + wat * dl(p) + lsm)
                         end do
                         a_prev = a
                     else
                         do p = 1, PT
-                            if (newr(t)) r(p) = exp(dwa(t) * dl(p))
+                            if (newr(t)) r(p) = exp_kp(dwa(t) * dl(p))
                             f(p) = f(p) * r(p)
                         end do
                     end if
@@ -1589,8 +1612,8 @@ contains
                     end do
                 end do
                 do p = 1, PT
-                    y(p) = y(p) + real(sy(p), KP)
-                    o(p) = o(p) + real(so(p), KP)
+                    y(p) = y(p) + sy(p)
+                    o(p) = o(p) + so(p)
                     if (valid(p)) then
                         yo(jj(p), m) = yo(jj(p), m) + y(p)
                         yo(jj(p), n_mod + m) = yo(jj(p), n_mod + m) + o(p)
@@ -1676,6 +1699,44 @@ contains
             s_line(m) = si - sa
         end do
     end subroutine attenuate_lines
+
+    !> exp(x) in kernel precision for an FP64 argument of any size. x = n ln 2 + r (|r| <= ln 2 / 2)
+    !> is reduced in FP64, so r keeps its digits; exp(r) is taken in KP and scaled by 2**n. The
+    !> result is good to ~1 ulp of KP, where rounding x itself to FP32 would cost |x| eps (rule 3
+    !> of doc/MIXED_PRECISION.md: the nebular exponents are ~100). The FP64 work is three
+    !> operations instead of an FP64 exponential. Results below the smallest normal KP flush to 0.
+    !> 2**n by binary exponentiation (exact for powers of two; |n| < 2**10, at most ten
+    !> squarings): `scale`, `ieee_scalb` and `transfer` are calls into the Fortran runtime with LLVM
+    !> flang, which device code cannot make, and `2.0**n` inlines a general integer-power routine.
+    pure function exp_kp(x) result(e)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(WP), intent(in) :: x
+        real(KP) :: e
+        real(WP), parameter :: LN2 = log(2.0_wp), LOG2E = 1.0_wp / log(2.0_wp)
+        real(WP) :: xc
+        real(KP) :: b, p2
+        integer  :: n, k
+
+        xc = max(-1.0e4_wp, min(1.0e4_wp, x))
+        n = nint(xc * LOG2E)
+        if (n < minexponent(1.0_KP)) then
+            e = 0.0_KP
+        else if (n >= maxexponent(1.0_KP)) then
+            e = huge(1.0_KP)
+        else
+            b = merge(0.5_KP, 2.0_KP, n < 0)
+            k = abs(n)
+            p2 = 1.0_KP
+            do while (k > 0)
+                if (iand(k, 1) == 1) p2 = p2 * b
+                b = b * b
+                k = ishft(k, -1)
+            end do
+            e = exp(real(xc - n * LN2, KP)) * p2
+        end if
+    end function exp_kp
 
     !> CLOUDY grid value at (i, age a) bilinear in (Z, U), as interpolate_zu_slice_point.
     pure function zu_point(grid, i, a, iz, iu, wz, wu) result(val)
