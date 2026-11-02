@@ -214,9 +214,14 @@ A full operator rebuild per model costs 0.12 s (as `generate_ssp_grid`): never t
 
 ## Open
 
-1. **Legacy parity** for the lognormal bin change: `tools/legacy_parity/run_matrix.sh`, Chabrier
-   and van Dokkum; needs legacy FSPS src at 82a8735 and a legacy-layout data tree (the A100 agent
-   was checking what exists on ICDS). Record the numbers in `tools/legacy_parity/README.md`.
+1. ~~**Legacy parity** for the lognormal bin change~~: **done 2026-11-02** on the R9700 desktop
+   (`main` and v2 9ee300a both PASS, 34 cases without C3K; v2 moves the fork's Chabrier / van
+   Dokkum outputs by <= 3.0e-9; numbers in `tools/legacy_parity/README.md`). Legacy source:
+   upstream 82a8735 (`git archive 82a8735 src`); legacy data tree: the upstream checkout at
+   82a8735 itself (byte-identical to `elijahmathews/fsps` `data/` at `fsps-final` except six
+   nebular line tables); corrected tables from `elijahmathews/fsps` `data/nebular/`. The scripts
+   needed the data roots as inputs (`DATA_HOME`, `LEGACY_NEBULAR`): branch
+   `fix/legacy-parity-data-roots`, its own PR against `main`.
 2. **Public API** (the user's decision, before `include/` or the C header changes): how `ssp_op` /
    `ssp_ops` appear in `compute_csp_batch` and whether the single-operator form becomes a wrapper
    over a set of one. The C API does not expose either yet.
