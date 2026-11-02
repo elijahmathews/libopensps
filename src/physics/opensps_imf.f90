@@ -444,13 +444,14 @@ contains
         integer, intent(in)  :: first(n)
         real(WP), intent(inout) :: w(ldw, n)
         integer  :: k, t, seg, cur
-        real(WP) :: lo, hi, val, alpha, coeff, e, c, d, ce, lim_lo, lim_hi, inv_total
+        real(WP) :: lo, hi, val, alpha, coeff, e, c, d, ce, lim_lo, lim_hi, inv_total, plo, em1, prev_hi, prev_phi
 
         t = mod(imf_type, 10)
         lim_lo = p(IMF_P_LOWER_LIMIT)
         lim_hi = p(IMF_P_UPPER_LIMIT)
         cur = 0
         e = 0.0_wp; c = 0.0_wp; d = 1.0_wp; ce = 0.0_wp
+        prev_hi = -1.0_wp; prev_phi = 0.0_wp
         inv_total = 1.0_wp
         if (total_mass > 0.0_wp) inv_total = 1.0_wp / total_mass   ! once per call
         do k = 1, n
@@ -511,6 +512,7 @@ contains
                 ce = 0.0_wp
                 if (e /= 0.0_wp) ce = c / e     ! once per segment: no division per bin
                 cur = seg
+                prev_hi = -1.0_wp               ! the chain of shared edges restarts
             end if
             if (seg > 0 .and. cur == seg) then
                 if (first(k) == 1) then
@@ -531,11 +533,23 @@ contains
                     ! (doc/MIXED_PRECISION.md, rule 7); mass and L_bol then good to ~3e-8
                     val = real(real(ce, KP) * exp_reduced_kp(e * llo(k)) * expm1_kp(real(e * dl(k), KP)), WP)
 #else
-                    val = ce * exp(e * llo(k)) * expm1_series(e * dl(k))
+                    ! lo**e: from the previous bin when it ends where this one starts (consecutive
+                    ! bins of an age share their edges): hi**e = lo**e (1 + expm1(e dl)), so one
+                    ! FP64 exponential per run of bins instead of per bin (~2 ulp per chained step)
+                    if (lo == prev_hi) then
+                        plo = prev_phi
+                    else
+                        plo = exp(e * llo(k))
+                    end if
+                    em1 = expm1_series(e * dl(k))
+                    val = ce * plo * em1
+                    prev_hi = hi
+                    prev_phi = plo + plo * em1
 #endif
                 end if
             else
                 val = imf_integral_p(imf_type, p, lo, hi, .false.)
+                prev_hi = -1.0_wp
                 if (seg == 0) cur = 0
             end if
             w(1, k) = val * inv_total
