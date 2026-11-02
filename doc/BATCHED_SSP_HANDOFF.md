@@ -30,7 +30,7 @@ test_opensps_imf.f90`; benchmark: `tests/benchmark_csp_batch.f90` (configs `*_im
 | `feat/ssp-batch-v2-a100-zvar` @ fdd08cd (+ 9f11157) | IMF and metallicity free per model: `ssp_ops`, `ssp_opset_t`, multi-metallicity kernels, batched cuBLAS product, `check_imf_z`, `*_z_imf` benchmark; 9f11157 adds the one code path | superseded by `zvar2` (not rebased: the laptop agent had pulled it) |
 | `feat/ssp-batch-v2-a100-zvar-flang` @ bc9b391 | one commit on fdd08cd: host loops for the multi kernels, `ssp_ops` on every build | superseded by `zvar2` (its host loops are in the unified kernels); 362/362 on CPU compilers and the 780M at that commit |
 | `feat/ssp-batch-v2-a100-zvar2` @ 2468916 | zvar rebased on v2 9ee300a, **one code path** (`ssp_op`, `ssp_batch_age_sums`, `imf_*_chunk`, `fold_chunk` / `fold_segments` deleted; one metallicity = a set of one operator, one pass, products straight into `yo`), host loops in the multi kernels, one second-context block in the test | A100 verified (offload FP64, FP32, FP64 + cuBLAS 38 / 38, FP32 + cuBLAS `test_csp_batch` 362 / 362; gfortran and nvfortran host threads verified before the rebase); laptop agent verified the tip 2468916 (2026-10-23): unit + regression 39 / 39 on gfortran FP64 and FP32, gfortran and nvfortran 26.1 host threads (362 / 362 at 1, 2, 4, 8, 16 threads), flang CPU, ifx, and on the 780M with flang offload in FP64 and FP32 (suites 39 / 39, `test_csp_batch` 362 / 362): **no flang-specific change needed**; still to do: the alternating timing on the A100 against `main`, sanitizers on the final tip, the +5% of the one-metallicity case, the PR |
-| `feat/ssp-batch-v2-r9700` | = `zvar2` @ 2468916, no commits yet; the desktop agent's branch for R9700 work | 2468916 verified on the R9700 desktop (2026-11-02): see "R9700 verification and numbers" |
+| `feat/ssp-batch-v2-r9700` @ ddf2a2d | `zvar2` + 11db183 (benchmark `n_min`) + afa456e/92fca37 (IMF weights from precomputed logs, "design A": FP64, no cancellation) + ddf2a2d (`-Dfp32_imf_weights`, "design B", opt-in) | verified 2026-11-02 on gfortran FP64/FP32, flang CPU, host threads, R9700 offload FP64/FP32, with and without the option; **not yet nvfortran** (briefing in #32) |
 
 `zvar2` is the one to continue from. The A100 agent measured `feat/ssp-batch-v2-780m-weights`
 (a31e56e) on the A100: 6% faster (FP32 N = 10^4 16.6 -> 15.5 us/model), but the FP64 oracle fails
@@ -189,6 +189,26 @@ magnitudes only, median [min-max]; the last column with spectra copied to the ho
   that needs per-kernel times (LLVM offload time trace or the ROCm profiler; not done yet).
 - Run-to-run spread is < 4% at N >= 100 (N = 1 up to ~25%). Junction temperature 62-86 C, edge
   ~20 C lower; no sign of throttling.
+
+## IMF weights without cancellation (2026-11-02, `feat/ssp-batch-v2-r9700`)
+
+- **Design A (default):** `imf_bin_weights_tab` takes a power-law bin as (c/e) lo^e expm1(e dl)
+  from `ssp_opset_t%pt_llo` = ln m1 and `pt_dl` = ln(m2/m1) (`imf_bin_logs`, log1p; once per
+  operator set). It's FP64, one exp plus a 13-term series per bin with constant reciprocals,
+  and no FP64 divisions per bin: a first version with divisions was 6-8% *slower*.
+  - Accuracy ≤ 2.1e-15 per bin against 60-digit references (`tests/data/imf_powerlaw_bins.txt`,
+    `tools/reference/imf_powerlaw_bins.py`). The difference form loses 3.6e-2 at relative width
+    1e-14, 2e-7 at 1e-9 to 1e-6, and up to 100% within 1e-6 of slope 1.
+  - 30% of MIST's bins are narrower than 1e-6.
+  - R9700 FP32 / FP64 at N = 10^4: `full_smooth_imf` 104.6 / 141.4 -> 74.5 / 111.7 us,
+    `full_smooth_z_imf` 176.4 / 233.0 -> 118.4 / 176.4.
+- **Design B (`-Dfp32_imf_weights=true`, FP32 kernels only, off by default):** FP32 exponentials,
+  exponent reduced in FP64. A further -8 to -9% (69.1, 106.9 us). Mass and L_bol go to ~3e-8 per
+  age (measured on MIST vs quad precision); spectra and magnitudes are unchanged.
+- **The oracles:** `test_csp_batch`'s IMF oracles use SSPs from the difference form, whose own
+  error is ~7e-10 in spectra; their FP64 tolerance is 1e-9 (`IMF_SPEC_RTOL`). Issue #37 is the
+  fix for the single-SSP path; after it the tolerance can return to 1e-10.
+- **Not yet:** nvfortran / A100 (brief in #32), ifx, the 780M.
 
 ## Isochrone modifications per model: the design (not built)
 
