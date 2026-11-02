@@ -223,6 +223,16 @@ templates reachable under the shifts in `etpl`, so n_eff grows), or group models
 and build one operator set per pair (no new hot-path code; the usual case, they are rarely free).
 A full operator rebuild per model costs 0.12 s (as `generate_ssp_grid`): never the batch path.
 
+## Decisions taken (by the user, 2026-11-02)
+
+- Public API, first PR: option (a). `compute_csp_batch` takes the operator set as an optional
+  argument (as on the branches); the C API is unchanged for now, and a C entry point is a follow-up.
+- #32 closes on **merge**, not on "fully optimized": the PR sequence merged once it runs correctly on
+  CPU only (gfortran, flang, ...) and on the 780M, the R9700 and the A100. The remaining tuning and
+  open threads move to new focused issues.
+- FP32 GPU-vs-CPU allowance on the stress cases: ~9e-7 (A100 measured 8.4e-7, R9700 6.9e-7).
+- -Dfp32_imf_weights (design B) stays in, off by default.
+
 ## Decisions taken (by the user, 2026-10-23)
 
 - Isochrone modifications and per-model metallicity may be deferred with a documented status
