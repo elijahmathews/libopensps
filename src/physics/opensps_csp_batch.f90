@@ -1719,6 +1719,11 @@ contains
         real(KP) :: b, p2
         integer  :: n, k
 
+        if (kind(1.0_KP) == kind(1.0_wp)) then
+            ! FP64 kernels: the plain exponential (the reduction serves FP32 only)
+            e = real(exp(x), KP)
+            return
+        end if
         xc = max(-1.0e4_wp, min(1.0e4_wp, x))
         n = nint(xc * LOG2E)
         if (n < minexponent(1.0_KP)) then
@@ -1737,6 +1742,26 @@ contains
             e = exp(real(xc - n * LN2, KP)) * p2
         end if
     end function exp_kp
+
+    !> 1 - t for t = exp(-x) in kernel precision without cancellation (rule 2 of
+    !> doc/MIXED_PRECISION.md): for |x| < 1, Kahan's form (1 - t) x / (-ln t), good to a few ulp,
+    !> where 1 - t alone loses eps / |x| (6e-5 at x = 1e-3 in FP32). x may be negative (curves
+    !> that dip below zero, e.g. Reddy et al. in the near-IR).
+    pure function one_minus_trans_kp(x, t) result(y)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(KP), intent(in) :: x, t
+        real(KP) :: y
+
+        if (t == 1.0_KP) then
+            y = x
+        else if (abs(x) < 1.0_KP) then
+            y = (1.0_KP - t) * x / (-log(t))
+        else
+            y = 1.0_KP - t
+        end if
+    end function one_minus_trans_kp
 
     !> CLOUDY grid value at (i, age a) bilinear in (Z, U), as interpolate_zu_slice_point.
     pure function zu_point(grid, i, a, iz, iu, wz, wu) result(val)
@@ -2284,9 +2309,76 @@ contains
 #endif
     end subroutine age_sums
 
+    !> Grid-only factors of the diffuse attenuation curve, per pixel (rule 4 of
+    !> doc/MIXED_PRECISION.md: formed in FP64 once per call, stored in kernel precision). Every
+    !> dust type with a closed form is, per model m,
+    !>     curve(i, m) = (T0(i) + s1 T1(i) + s2 T2(i) + s3 T3(i)) * exp(e L(i)),  L = ln(lambda / lambda_V)
+    !> with model scalars (s1, s2, s3, e): power law (0): T0 = 1, e = dust_index; Cardelli et al. (1):
+    !> bilinear in 1/R_V and the bump strength uvb (the NUV continuity term too), s = (1/R_V, uvb,
+    !> uvb/R_V); Calzetti (2), Reddy (6): T0; Kriek & Conroy (4): linear in delta once the power law
+    !> is factored out, s1 = e = delta. The tables come from the curve functions themselves at a few
+    !> parameter values (no second copy of their constants). Types 3 and 5 are table lookups and are
+    !> read directly. L stays in FP64 (it is exponentiated, rule 3).
+    subroutine attenuation_tables(ctx, nspec, ttab, ltab)
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)   :: nspec
+        real(KP), intent(out) :: ttab(nspec, 0:3)
+        real(WP), intent(out) :: ltab(nspec)
+        real(WP), parameter :: R_BIG = 1.0e30_wp   ! 1/R_V = 1e-30: the terms without 1/R_V
+        integer :: i, dt
+
+        dt = ctx%dust_type_val
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do &
+        !$omp& map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ttab, ltab)
+#elif defined(_OPENMP)
+        !$omp parallel do
+#endif
+        do i = 1, nspec
+          block
+            type(params_core) :: pc
+            real(WP) :: lam, f00, f10, f01, f11
+            lam = ctx%state%spec_lambda(i)
+            ltab(i) = log(lam / V_BAND_ANGSTROMS)
+            ttab(i, :) = 0.0_KP
+            select case (dt)
+            case (0)
+                ttab(i, 0) = 1.0_KP
+            case (1)
+                pc%mwr = R_BIG; pc%uvb = 0.0_wp
+                f00 = compute_attenuation_curve_point(lam, i, dt, pc, ctx)
+                pc%mwr = 1.0_wp
+                f10 = compute_attenuation_curve_point(lam, i, dt, pc, ctx)
+                pc%mwr = R_BIG; pc%uvb = 1.0_wp
+                f01 = compute_attenuation_curve_point(lam, i, dt, pc, ctx)
+                pc%mwr = 1.0_wp
+                f11 = compute_attenuation_curve_point(lam, i, dt, pc, ctx)
+                ttab(i, 0) = real(f00, KP)
+                ttab(i, 1) = real(f10 - f00, KP)
+                ttab(i, 2) = real(f01 - f00, KP)
+                ttab(i, 3) = real(f11 - f10 - f01 + f00, KP)
+            case (2, 6)
+                ttab(i, 0) = real(compute_attenuation_curve_point(lam, i, dt, pc, ctx), KP)
+            case (4)
+                pc%dust_index = 0.0_wp
+                f00 = compute_attenuation_curve_point(lam, i, dt, pc, ctx)
+                pc%dust_index = 1.0_wp
+                f10 = compute_attenuation_curve_point(lam, i, dt, pc, ctx) * (V_BAND_ANGSTROMS / lam)
+                ttab(i, 0) = real(f00, KP)
+                ttab(i, 1) = real(f10 - f00, KP)
+            end select
+          end block
+        end do
+    end subroutine attenuation_tables
+
     !> Attenuation and absorbed light per (pixel, model). For models with dust emission the age
     !> sums are then replaced by what the emission stages need: yo(:, m) = diffuse transmission
     !> (stored at KP, as opensps_dust stores it), yo(:, N + m) = Draine & Li template.
+    !> Kernel precision throughout (doc/MIXED_PRECISION.md): the curve from the grid-only tables of
+    !> attenuation_tables, the power laws (lambda / lambda_V)**e as exp_kp(e L) with e L formed in
+    !> FP64, the transmissions as KP exponentials, and the absorbed light from 1 - T without
+    !> cancellation (one_minus_trans_kp). On GPUs with slow FP64 the FP64 form of this kernel was
+    !> a fifth of the batch's time (R9700).
     subroutine attenuate_batch(ctx, pbuf, n_mod, nspec, iq, iu, wq, wu, gam, emis, agn_on, yo, total, absorbed, tdiff)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)              :: n_mod, nspec
@@ -2304,21 +2396,29 @@ contains
         real(KP), intent(out)            :: total(nspec, n_mod), absorbed(nspec, n_mod)
         real(KP), intent(inout)          :: tdiff(:,:)   ! diffuse transmission of AGN models
 
-        integer  :: m, i
-        real(KP) :: young, old
-        real(WP) :: curve, tau_b, tau_o, tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust
-        real(WP) :: one_m_tb, one_m_to, one_m_td, a_young, spec_sum
+        integer  :: m, i, dt
+        real(KP) :: young, old, curve, tau_b, tau_o, tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust
+        real(KP) :: one_m_tb, one_m_to, one_m_td, a_young, spec_sum, s1, s2, s3
+        real(WP) :: ed
+        real(KP), allocatable :: ttab(:,:)
+        real(WP), allocatable :: ltab(:)
         type(params_core), pointer :: pl
 
+        dt = ctx%dust_type_val
+        allocate(ttab(nspec, 0:3), ltab(nspec))
+#if defined(OMP_TARGET)
+        !$omp target data map(alloc: ttab, ltab)
+#endif
+        call attenuation_tables(ctx, nspec, ttab, ltab)
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(young, old, curve, tau_b, tau_o, &
         !$omp& tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust, one_m_tb, one_m_to, &
-        !$omp& one_m_td, a_young, spec_sum, pl) &
-        !$omp& map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%dustem2_dustem)
+        !$omp& one_m_td, a_young, spec_sum, s1, s2, s3, ed, pl) &
+        !$omp& map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%dustem2_dustem, ttab, ltab)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(young, old, curve, tau_b, tau_o, &
         !$omp& tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust, one_m_tb, one_m_to, &
-        !$omp& one_m_td, a_young, spec_sum, pl)
+        !$omp& one_m_td, a_young, spec_sum, s1, s2, s3, ed, pl)
 #endif
         do m = 1, n_mod
             do i = 1, nspec
@@ -2330,50 +2430,77 @@ contains
 #else
                 call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
-                frac_obrun = pl%frac_obrun
-                frac_nodust = pl%frac_nodust
-                call diffuse_transmission(ctx, pl, i, curve, tau_d, trans_d)
-                if (agn_on(m)) tdiff(i, m) = real(trans_d, KP)
-                if (pl%dust1 <= SAFE_FLOOR .or. 1.0_wp - frac_obrun <= SAFE_FLOOR) then
-                    tau_b = 0.0_wp
-                    trans_birth = 1.0_wp
+                frac_obrun = real(pl%frac_obrun, KP)
+                frac_nodust = real(pl%frac_nodust, KP)
+                ! Diffuse curve and optical depth (as diffuse_transmission)
+                if (dt == 3 .or. dt == 5) then
+                    curve = real(compute_attenuation_curve_point(ctx%state%spec_lambda(i), i, dt, pl, ctx), KP)
                 else
-                    tau_b = pl%dust1 * (ctx%state%spec_lambda(i) / V_BAND_ANGSTROMS)**pl%dust1_index
+                    s1 = 0.0_KP; s2 = 0.0_KP; s3 = 0.0_KP; ed = 0.0_wp
+                    if (dt == 0) then
+                        ed = pl%dust_index
+                    else if (dt == 1) then
+                        s1 = 1.0_KP / real(pl%mwr, KP)
+                        s2 = real(pl%uvb, KP)
+                        s3 = s2 * s1
+                    else if (dt == 4) then
+                        ed = pl%dust_index
+                        s1 = real(ed, KP)
+                    end if
+                    curve = ttab(i, 0) + s1 * ttab(i, 1) + s2 * ttab(i, 2) + s3 * ttab(i, 3)
+                    if (ed /= 0.0_wp) curve = curve * exp_kp(ed * ltab(i))
+                end if
+                if (dt == 3) then
+                    tau_d = curve
+                else
+                    tau_d = real(pl%dust2, KP) * curve
+                end if
+                trans_d = exp(-tau_d)
+                if (agn_on(m)) tdiff(i, m) = trans_d
+                if (pl%dust1 <= SAFE_FLOOR .or. 1.0_wp - pl%frac_obrun <= SAFE_FLOOR) then
+                    tau_b = 0.0_KP
+                    trans_birth = 1.0_KP
+                else
+                    tau_b = real(pl%dust1, KP) * exp_kp(pl%dust1_index * ltab(i))
                     trans_birth = exp(-tau_b)
                 end if
                 if (abs(pl%dust3) <= SAFE_FLOOR) then
-                    tau_o = 0.0_wp
-                    trans_old = 1.0_wp
+                    tau_o = 0.0_KP
+                    trans_old = 1.0_KP
                 else
-                    tau_o = pl%dust3 * curve
+                    tau_o = real(pl%dust3, KP) * curve
                     trans_old = exp(-tau_o)
                 end if
 
-                spec_sum = (young * trans_birth * (1.0_wp - frac_obrun) + young * frac_obrun) + old * trans_old
-                if (1.0_wp - frac_nodust <= SAFE_FLOOR) then
-                    total(i, m) = real(spec_sum, KP)
+                spec_sum = (young * trans_birth * (1.0_KP - frac_obrun) + young * frac_obrun) + old * trans_old
+                if (1.0_wp - pl%frac_nodust <= SAFE_FLOOR) then
+                    total(i, m) = spec_sum
                 else
-                    total(i, m) = real(spec_sum * (trans_d * (1.0_wp - frac_nodust) + frac_nodust), KP)
+                    total(i, m) = spec_sum * (trans_d * (1.0_KP - frac_nodust) + frac_nodust)
                 end if
 
                 if (emis(m)) then
-                    one_m_tb = one_minus_trans(tau_b, trans_birth)
-                    one_m_to = one_minus_trans(tau_o, trans_old)
-                    if (1.0_wp - frac_nodust <= SAFE_FLOOR) then
-                        one_m_td = 0.0_wp
+                    one_m_tb = one_minus_trans_kp(tau_b, trans_birth)
+                    one_m_to = one_minus_trans_kp(tau_o, trans_old)
+                    if (1.0_wp - pl%frac_nodust <= SAFE_FLOOR) then
+                        one_m_td = 0.0_KP
                     else
-                        one_m_td = (1.0_wp - frac_nodust) * one_minus_trans(tau_d, trans_d)
+                        one_m_td = (1.0_KP - frac_nodust) * one_minus_trans_kp(tau_d, trans_d)
                     end if
-                    a_young = trans_birth * (1.0_wp - frac_obrun) + frac_obrun
-                    absorbed(i, m) = young * real((1.0_wp - frac_obrun) * one_m_tb + a_young * one_m_td, KP) + &
-                                     old * real(one_m_to + trans_old * one_m_td, KP)
-                    yo(i, m) = real(trans_d, KP)
+                    a_young = trans_birth * (1.0_KP - frac_obrun) + frac_obrun
+                    absorbed(i, m) = young * ((1.0_KP - frac_obrun) * one_m_tb + a_young * one_m_td) + &
+                                     old * (one_m_to + trans_old * one_m_td)
+                    yo(i, m) = trans_d
                     yo(i, n_mod + m) = dl07_shape(ctx, i, iq(m), wq(m), iu(m), wu(m), gam(m))
                 else
                     absorbed(i, m) = 0.0_KP
                 end if
             end do
         end do
+#if defined(OMP_TARGET)
+        !$omp end target data
+#endif
+        deallocate(ttab, ltab)
     end subroutine attenuate_batch
 
     !> Per model: absorbed luminosity, template normalization and escaped template fraction.
