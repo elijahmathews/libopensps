@@ -1,0 +1,30 @@
+# Stress cases for comparing builds (FP32 against FP64, GPU against CPU; doc/MIXED_PRECISION.md,
+# "Evidence"): extreme configurations, not regression references. Same format as
+# tests/data/param_cases.psv (name|isoc|spec|dust|flags|overrides); run with
+#   tools/compare_builds/run_cases.sh BUILD OUT tools/compare_builds/stress_cases.psv
+# Not here: C3K (not in the default data release; add the case where the library is installed).
+str_dust2_6|mist|miles|DL07|csp|imf_type=1 sfh=1 tau=1.0 tage=1.0 dust2=6.0 dust_type=2
+str_dust2_low|mist|miles|DL07|csp|imf_type=1 sfh=1 tau=1.0 tage=10.0 dust2=0.001 dust_type=2
+str_witt_gordon|mist|miles|DL07|csp|imf_type=1 sfh=1 tau=1.0 tage=3.0 dust_type=3 wgp1=18 wgp2=1 wgp3=1
+str_hot_dust|mist|miles|DL07|csp|imf_type=1 sfh=1 tau=0.3 tage=1.0 dust2=1.0 dust_type=2 duste_umin=25.0 duste_gamma=1.0 duste_qpah=0.1
+str_birth_cloud|mist|miles|DL07|csp|imf_type=1 sfh=1 tau=1.0 tage=2.0 dust1=2.0 dust2=0.5 dust_tesc=8.0 frac_obrun=0.5 frac_nodust=0.3
+str_young08_logu1|mist|miles|DL07|csp|imf_type=1 sfh=0 tage=0.0008 add_neb_emission=1 gas_logu=-1.0 gas_logz=0.0
+str_young08_logu4|mist|miles|DL07|csp|imf_type=1 sfh=0 tage=0.0008 add_neb_emission=1 gas_logu=-4.0 gas_logz=0.0
+str_young5_logu1|mist|miles|DL07|csp|imf_type=1 sfh=0 tage=0.005 add_neb_emission=1 gas_logu=-1.0 gas_logz=0.3
+str_young5|mist|miles|DL07|csp|imf_type=1 sfh=4 tau=0.002 tage=0.005 add_neb_emission=1 gas_logu=-2.0 gas_logz=0.0
+str_young5_dust|mist|miles|DL07|csp|imf_type=1 sfh=4 tau=0.002 tage=0.005 add_neb_emission=1 gas_logu=-3.5 gas_logz=-1.0 dust1=1.0 dust2=0.3
+str_young5_dust_heavy|mist|miles|DL07|csp|imf_type=1 sfh=4 tau=0.002 tage=0.005 add_neb_emission=1 gas_logu=-2.5 gas_logz=0.0 dust1=3.0 dust2=1.0 dust1_index=-1.3
+str_young30|mist|miles|DL07|csp|imf_type=1 sfh=1 tau=0.01 tage=0.03 add_neb_emission=1 gas_logu=-1.0 gas_logz=0.3
+str_young30_lowz|mist|miles|DL07|csp|imf_type=1 sfh=1 tau=0.01 tage=0.03 add_neb_emission=1 gas_logu=-2.5 gas_logz=-1.5 logzsol=-1.0 dust2=0.1
+str_igm_z6|mist|miles|DL07|csp|imf_type=1 sfh=1 tau=0.5 tage=0.5 zred=6.0 add_igm_absorption=1
+str_igm_z10|mist|miles|DL07|csp|imf_type=1 sfh=1 tau=0.1 tage=0.2 zred=10.0 add_igm_absorption=1
+str_agn_strong|mist|miles|DL07|csp|imf_type=1 sfh=1 tau=1.0 tage=10.0 add_agn_dust=1 fagn=1.0 agn_tau=5.0 dust2=0.3
+str_sigma1000|mist|miles|DL07|csp|imf_type=1 sfh=1 tau=1.0 tage=10.0 sigma_smooth=1000.0 smooth_velocity=1
+str_late_burst|mist|miles|DL07|csp|imf_type=1 sfh=1 tau=5.0 tage=10.0 fburst=0.5 tburst=9.95 dust2=0.3
+str_zmin|mist|miles|DL07|csp|imf_type=1 zmet=1 sfh=1 tau=1.0 tage=10.0 dust2=0.3
+str_zmax|mist|miles|DL07|csp|imf_type=1 zmet=12 sfh=1 tau=1.0 tage=10.0 dust2=0.3
+str_imf_steep|mist|miles|DL07|csp|imf_type=2 imf1=0.3 imf2=1.0 imf3=3.5 sfh=1 tau=1.0 tage=10.0
+str_imf_shallow|mist|miles|DL07|csp|imf_type=2 imf1=1.3 imf2=2.3 imf3=1.5 sfh=1 tau=1.0 tage=1.0
+str_agb_dust_max|mist|miles|DL07|csp|imf_type=1 sfh=1 tau=1.0 tage=1.0 agb_dust=10.0
+str_bpass|bpss|bpass|DL07|csp|imf_type=1 sfh=1 tau=0.1 tage=0.1 add_neb_emission=1 dust2=0.5
+str_basel_young|pdva|basel|DL07|csp|imf_type=1 zmet=20 sfh=0 tage=0.01 dust1=1.0 dust2=0.5

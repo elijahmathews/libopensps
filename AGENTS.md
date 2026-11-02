@@ -60,8 +60,9 @@ format, conversion, packing; format and workflows in `doc/DATA_FORMAT.md`).
   and its cause in the pull request. Publishing the new references is the user's step.
 - Physics changes are checked against legacy FSPS (`tools/legacy_parity/run_matrix.sh`); every
   deliberate difference is listed with its cause in `tools/legacy_parity/README.md`.
-- GPU builds match the CPU build: FP64 to ~1e-10 per pixel, FP32 to ~5e-7
-  (`tools/compare_builds`).
+- GPU builds match the CPU build: FP64 to ~1e-10 per pixel, FP32 to ~5e-7 (`tools/compare_builds`
+  over `tests/data/param_cases.psv`; up to ~7e-7 in pixels behind optical depths of several, as in
+  `tools/compare_builds/stress_cases.psv`: `doc/MIXED_PRECISION.md`, Caveats).
 - Data format changes keep reading the previous format (a documented transition alias) and
   keep the parity suite bit-identical.
 - Never claim a test passed without having run it; report failures with their output, and
@@ -80,7 +81,9 @@ format, conversion, packing; format and workflows in `doc/DATA_FORMAT.md`).
   `tiny(1.0_KP)`. Test tolerances in FP32 builds use `KP` (e.g. 100 eps of `KP`).
 - Device code (OpenMP target):
   - `!$omp declare target` on every routine called from device code;
-  - no libm calls (e.g. `log_gamma`) without a device-safe fallback;
+  - no libm calls (e.g. `log_gamma`) without a device-safe fallback, and no intrinsics that
+    LLVM flang implements in its Fortran runtime (`scale`, `ieee_scalb`, `transfer`: the
+    device link fails on `_FortranA...`);
   - `contiguous` dummies (no runtime copy-in/out);
   - no array constructors or other temporaries (LLVM flang mallocs them on the device);
   - map a derived type either whole or by component, never both;
