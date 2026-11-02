@@ -126,3 +126,11 @@ format, conversion, packing; format and workflows in `doc/DATA_FORMAT.md`).
   run GPU offload tests on it without the user's go-ahead; debug with host runs
   (`OMP_TARGET_OFFLOAD=DISABLED`) and by reading the device IR first. Unset
   `HSA_OVERRIDE_GFX_VERSION` for gfx1103 builds.
+- User `elijahmathews`'s desktop (Fedora 44, Ryzen 9 9950X, 32 GB): AMD Radeon AI PRO R9700
+  (gfx1201, 32 GB) with LLVM flang 22 + Fedora's ROCm 7.1.1; it also drives the display, so the
+  laptop's rules apply (host runs first; ask before GPU runs of code that has not passed there).
+  The 610M iGPU (gfx1036) is visible to ROCm: set `ROCR_VISIBLE_DEVICES` to the R9700's UUID;
+  `rocprofv3 --pmc` aborts on the iGPU (kernel traces work). 32 GB of RAM: run one suite at a time
+  with `--num-processes 4` or fewer under `systemd-run --user --scope -p MemoryMax=16G` (parallel
+  suites have OOM-killed the session), and long runs under `systemd-inhibit --what=sleep`.
+  Recipe: `doc/GPU_PLAN.md`, "On the R9700 desktop".
