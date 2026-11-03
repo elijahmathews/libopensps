@@ -90,7 +90,7 @@ module opensps_csp_batch
     use opensps_sfh, only: sfh_weights_core
     use opensps_sfh, only: get_sfh_properties_at_age
     use opensps_dust, only: compute_attenuation_curve_point, one_minus_trans
-    use opensps_interpolation, only: find_interval
+    use opensps_interpolation, only: find_interval, find_interval_with_hint
     use opensps_cosmology, only: igm_tau, igm_tau_dz
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
     use opensps_gas, only: get_grid_indices_weights, prepare_line_gaussians
@@ -235,7 +235,9 @@ module opensps_csp_batch
         integer,  pointer, contiguous :: llo(:) => null()    !< per line: pixel interval of its wavelength
     end type nebular_setup_t
 
+
 contains
+
 
     !> @brief Evaluates a batch of single-age CSPs.
     !>
@@ -1043,7 +1045,6 @@ contains
             call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, fband_out=fbk)
         end if
         if (present(indx)) call compute_spectral_indices_columns(ctx, ctx%state%spec_lambda, total, n_mod, indx)
-
         ! ------------------------------------------------------------------
         ! 9. Gradients: the reverse pass
         ! ------------------------------------------------------------------
@@ -1190,7 +1191,6 @@ contains
                 end do
             end if
         end if
-
         end associate
         ctx%state%batch_out%n = n_mod
         if (present(spec)) call spectra_to_host(ctx%state%batch_out%spec, nspec, n_mod, spec, ctx%state%batch_out%pinned)
@@ -3581,22 +3581,53 @@ contains
         logical, intent(in)     :: dzon
         real(WP), intent(out)   :: dzo(n_mod)
 
-        integer  :: m, j, b, il
+        integer, parameter :: NZC = 32
+        integer  :: m, j, b, il, k, nnz, c, j0, j1, nbz, i, jlo, jhi, jm
         real(WP) :: gv, cw, v, t, sz
+        real(KP) :: vk
+        real(WP), allocatable :: zp(:,:)
+        ! The band integrals' transpose as a sparse matrix by pixel (each band covers a few hundred of
+        ! the pixels): bp(j) .. bp(j + 1) - 1 index the bands of pixel j (in band order, as the dense
+        ! loop summed them), bands_t(b, j) and the pixel's weight wtl(j) [j in band] + wtl(j - 1)
+        ! [j - 1 in band], multiplied as the dense loop did (the same sums, bit for bit)
+        integer, allocatable  :: bp(:), bi(:)
+        real(WP), allocatable :: bv(:), bc(:)
+
+        allocate(bp(nspec + 1))
+        nnz = 0
+        do j = 1, nspec
+            bp(j) = nnz + 1
+            do b = 1, nbands
+                if ((j >= j_lo(b) .and. j <= j_hi(b)) .or. (j - 1 >= j_lo(b) .and. j - 1 <= j_hi(b))) nnz = nnz + 1
+            end do
+        end do
+        bp(nspec + 1) = nnz + 1
+        allocate(bi(max(nnz, 1)), bv(max(nnz, 1)), bc(max(nnz, 1)))
+        k = 0
+        do j = 1, nspec
+            do b = 1, nbands
+                cw = 0.0_wp
+                if (j >= j_lo(b) .and. j <= j_hi(b)) cw = cw + real(wtl(j), WP)
+                if (j - 1 >= j_lo(b) .and. j - 1 <= j_hi(b)) cw = cw + real(wtl(j - 1), WP)
+                if ((j >= j_lo(b) .and. j <= j_hi(b)) .or. (j - 1 >= j_lo(b) .and. j - 1 <= j_hi(b))) then
+                    k = k + 1
+                    bi(k) = b
+                    bv(k) = real(bands_t(b, j), WP)
+                    bc(k) = cw
+                end if
+            end do
+        end do
 
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(gv, cw, v, t, il, b)
+        !$omp target teams distribute parallel do collapse(2) private(gv, v, t, il, k) map(to: bp, bi, bv, bc)
 #elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(gv, cw, v, t, il, b)
+        !$omp parallel do collapse(2) private(gv, v, t, il, k)
 #endif
         do m = 1, n_mod
             do j = 1, nspec
                 gv = 0.0_wp
-                do b = 1, nbands
-                    cw = 0.0_wp
-                    if (j >= j_lo(b) .and. j <= j_hi(b)) cw = cw + real(wtl(j), WP)
-                    if (j - 1 >= j_lo(b) .and. j - 1 <= j_hi(b)) cw = cw + real(wtl(j - 1), WP)
-                    gv = gv + fb_bar(b, m) * real(bands_t(b, j), WP) * cw
+                do k = bp(j), bp(j + 1) - 1
+                    gv = gv + fb_bar(bi(k), m) * bv(k) * bc(k)
                 end do
                 ! The clamp of the forward (max(v, 0), NaN -> 0): no gradient where it acts
                 call frame_point(nspec, lam, zcm(m), j, il, t)
@@ -3607,22 +3638,95 @@ contains
             end do
         end do
 
+        ! d L / d z of the resampling (t = (lambda_j / (1 + z) - lambda_il) / (lambda_il+1 - lambda_il)):
+        ! per model, partial sums over NZC contiguous blocks of pixels (one thread each), then the
+        ! blocks in order
+        nbz = (nspec + NZC - 1) / NZC
+        allocate(zp(NZC, n_mod))
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do private(j, il, t, sz)
+        !$omp target data map(alloc: zp)
+        !$omp target teams distribute parallel do collapse(2) private(j, j0, j1, il, t, sz)
 #elif defined(_OPENMP)
-        !$omp parallel do private(j, il, t, sz)
+        !$omp parallel do collapse(2) private(j, j0, j1, il, t, sz)
 #endif
         do m = 1, n_mod
-            ! d L / d z of the resampling (t = (lambda_j / (1 + z) - lambda_il) / (lambda_il+1 - lambda_il))
+            do c = 1, NZC
+                sz = 0.0_wp
+                if (dzon .and. abs(zcm(m)) > SAFE_FLOOR) then
+                    j0 = (c - 1) * nbz + 1
+                    j1 = min(c * nbz, nspec)
+                    il = 1
+                    do j = j0, j1
+                        call frame_point_h(nspec, lam, zcm(m), j, il, t)
+                        sz = sz + real(gw(j, m), WP) * (real(total(il + 1, m), WP) - real(total(il, m), WP)) * &
+                                  (-lam(j) / (1.0_wp + zcm(m))**2) / (lam(il + 1) - lam(il))
+                    end do
+                end if
+                zp(c, m) = sz
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(c, sz)
+#elif defined(_OPENMP)
+        !$omp parallel do private(c, sz)
+#endif
+        do m = 1, n_mod
             sz = 0.0_wp
-            if (dzon .and. abs(zcm(m)) > SAFE_FLOOR) then
-                do j = 1, nspec
-                    call frame_point(nspec, lam, zcm(m), j, il, t)
-                    sz = sz + real(gw(j, m), WP) * (real(total(il + 1, m), WP) - real(total(il, m), WP)) * &
-                              (-lam(j) / (1.0_wp + zcm(m))**2) / (lam(il + 1) - lam(il))
-                end do
-            end if
+            do c = 1, NZC
+                sz = sz + zp(c, m)
+            end do
             dzo(m) = sz
+        end do
+#if defined(OMP_TARGET)
+        !$omp end target data
+#endif
+
+        ! The resampling's transpose into the rest frame (the old column, which also takes the
+        ! spectrum's own cotangent): S_bar(il) += (1 - t) fobs_bar(j), S_bar(il + 1) += t fobs_bar(j)
+#if defined(OMP_TARGET)
+        ! GPUs: a gather, one thread per (rest pixel i, model). The interval il(j) does not decrease
+        ! with j, so the observed pixels that reach i (il = i - 1 with t /= 0, then il = i) are one run,
+        ! from the first with il >= i - 1 (a bisection over j): the same additions, in the same order,
+        ! as the scatter below (bit for bit), without a serial pass per model
+        !$omp target teams distribute parallel do collapse(2) private(j, jlo, jhi, jm, il, t, vk)
+        do m = 1, n_mod
+            do i = 1, nspec
+                if (have_s) then
+                    vk = sbar(i, m)
+                else
+                    vk = 0.0_KP
+                end if
+                ! (first j with il(j) >= i - 1)
+                jlo = 1
+                jhi = nspec + 1
+                do while (jlo < jhi)
+                    jm = (jlo + jhi) / 2
+                    call frame_point(nspec, lam, zcm(m), jm, il, t)
+                    if (il >= i - 1) then
+                        jhi = jm
+                    else
+                        jlo = jm + 1
+                    end if
+                end do
+                il = 1
+                do j = jlo, nspec
+                    call frame_point(nspec, lam, zcm(m), j, il, t)
+                    if (il > i) exit
+                    if (il == i - 1) then
+                        if (t /= 0.0_wp) vk = vk + real(t * real(gw(j, m), WP), KP)
+                    else if (il == i) then
+                        vk = vk + real((1.0_wp - t) * real(gw(j, m), WP), KP)
+                    end if
+                end do
+                gw(i, n_mod + m) = vk
+            end do
+        end do
+#else
+        ! (CPU builds: the scatter, one model per thread, the pixels' intervals found from the previous one)
+#if defined(_OPENMP)
+        !$omp parallel do private(j, il, t)
+#endif
+        do m = 1, n_mod
             do j = 1, nspec
                 if (have_s) then
                     gw(j, n_mod + m) = sbar(j, m)
@@ -3630,12 +3734,14 @@ contains
                     gw(j, n_mod + m) = 0.0_KP
                 end if
             end do
+            il = 1
             do j = 1, nspec
-                call frame_point(nspec, lam, zcm(m), j, il, t)
+                call frame_point_h(nspec, lam, zcm(m), j, il, t)
                 gw(il, n_mod + m) = gw(il, n_mod + m) + real((1.0_wp - t) * real(gw(j, m), WP), KP)
                 if (t /= 0.0_wp) gw(il + 1, n_mod + m) = gw(il + 1, n_mod + m) + real(t * real(gw(j, m), WP), KP)
             end do
         end do
+#endif
     end subroutine backward_observed_frame
 
     !> Rest-frame interval il and position t of observed-frame pixel j at redshift z, as
@@ -3660,6 +3766,28 @@ contains
         end if
     end subroutine frame_point
 
+    !> frame_point with the previous pixel's interval as a hint (il: in, the hint; out, the
+    !> interval): the pixels of one model in increasing order find theirs in a step or two.
+    subroutine frame_point_h(nspec, lam, z, j, il, t)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        integer, intent(in)    :: nspec, j
+        real(WP), intent(in)   :: lam(nspec), z
+        integer, intent(inout) :: il
+        real(WP), intent(out)  :: t
+        real(WP) :: target
+
+        if (abs(z) > SAFE_FLOOR) then
+            target = lam(j) / (1.0_wp + z)
+            il = max(1, min(find_interval_with_hint(lam, target, il), nspec - 1))
+            t = (target - lam(il)) / (lam(il + 1) - lam(il))
+        else
+            il = j
+            t = 0.0_wp
+        end if
+    end subroutine frame_point_h
+
     !> Per model, the pixel whose IGM optical depth caps the bluer pixels (apply_igm_z,
     !> compute_igm_transmission: the first maximum; 1 without a cap).
     subroutine igm_cap_pixels(n_mod, nspec, pbuf, lam, jmx)
@@ -3671,33 +3799,72 @@ contains
 #endif
         real(WP), intent(in)             :: lam(nspec)
         integer, intent(out)             :: jmx(n_mod)
-        integer  :: m, j
+        integer, parameter :: NCK = 32
+        integer  :: m, j, c, jl, nb, j0, j1
         real(WP) :: tmax, tj
+        real(WP), allocatable :: cmx(:,:)
+        integer, allocatable  :: cjx(:,:)
         type(params_core), pointer :: pl
 
+        ! The optical depth is zero at and above Ly-alpha whatever the redshift (it depends on the rest
+        ! wavelength only through the lines' and the limit's thresholds), and the maximum is the first
+        ! strict one: only the pixels below jl can hold it (the same pixel as a scan of all)
+        jl = nspec
+        do while (jl > 1)
+            if (igm_tau(lam(jl), 2.0_wp) > 0.0_wp) exit
+            jl = jl - 1
+        end do
+        ! Per model the first maximum over NCK contiguous blocks (one thread per block and model),
+        ! then over the blocks in order
+        nb = (jl + NCK - 1) / NCK
+        allocate(cmx(NCK, n_mod), cjx(NCK, n_mod))
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do private(j, tmax, tj, pl)
+        !$omp target data map(alloc: cmx, cjx)
+        !$omp target teams distribute parallel do collapse(2) private(j, j0, j1, tmax, tj, pl)
 #elif defined(_OPENMP)
-        !$omp parallel do private(j, tmax, tj, pl)
+        !$omp parallel do collapse(2) private(j, j0, j1, tmax, tj, pl)
 #endif
         do m = 1, n_mod
+            do c = 1, NCK
 #if !defined(__flang__)
-            pl => pbuf(m)%params_core
+                pl => pbuf(m)%params_core
 #else
-            call c_f_pointer(c_loc(pbuf(1, m)), pl)
+                call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
-            jmx(m) = 1
-            if (pl%zred > SAFE_FLOOR) then
                 tmax = 0.0_wp
-                do j = 1, nspec
-                    tj = igm_tau(lam(j), 1.0_wp + pl%zred)
-                    if (tj > tmax) then
-                        tmax = tj
-                        jmx(m) = j
-                    end if
-                end do
-            end if
+                cjx(c, m) = 0
+                if (pl%zred > SAFE_FLOOR) then
+                    j0 = (c - 1) * nb + 1
+                    j1 = min(c * nb, jl)
+                    do j = j0, j1
+                        tj = igm_tau(lam(j), 1.0_wp + pl%zred)
+                        if (tj > tmax) then
+                            tmax = tj
+                            cjx(c, m) = j
+                        end if
+                    end do
+                end if
+                cmx(c, m) = tmax
+            end do
         end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(c, tmax)
+#elif defined(_OPENMP)
+        !$omp parallel do private(c, tmax)
+#endif
+        do m = 1, n_mod
+            jmx(m) = 1
+            tmax = 0.0_wp
+            do c = 1, NCK
+                if (cmx(c, m) > tmax) then
+                    tmax = cmx(c, m)
+                    jmx(m) = cjx(c, m)
+                end if
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp end target data
+#endif
     end subroutine igm_cap_pixels
 
     !> Adjoint of add_agn_batch: per model, s = sum over pixels of S_bar tmpl T_diff (compensated

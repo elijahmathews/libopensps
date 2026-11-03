@@ -18,7 +18,7 @@ module opensps_interpolation
     private
     
     ! Publicly expose the generic name and the utility
-    public :: find_interval, interpolate_linear
+    public :: find_interval, find_interval_with_hint, interpolate_linear
     
     !> @brief
     !> Abstract interface for a generic linear interpolation function.
