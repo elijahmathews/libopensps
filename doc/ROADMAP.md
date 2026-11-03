@@ -280,6 +280,7 @@ parameters; forward / with gradients, per model):
 | | forward | with gradients |
 |---|---|---|
 | gfortran FP64, one CPU thread, N = 100 | 1.35 ms | 3.50 ms (2.6x) |
+| gfortran FP64, one CPU thread, IMF free (Kroupa, `ssp_ops`), N = 100 | 5.9 ms | 15.6 ms (2.6x) |
 | R9700 FP32 (LLVM flang 22), N = 100 | 49 us | 181 us (3.7x) |
 | R9700 FP32, N = 1000 | 24 us | 85 us (3.5x; 95 with amdflang 7.2.4 before the last change) |
 | R9700 FP32, IMF free (Kroupa, `ssp_ops`), N = 1000 | 73 us | 417 us (5.7x) |
