@@ -263,8 +263,8 @@ Cotangents of the outputs `mass` and `lbol` are taken too (`mass_bar`, `lbol_bar
 `ssp_ops`, which would need the remnant masses' IMF derivatives). SSP-level nebular emission
 (`add_neb_emission = 2`) is in the basis, so its gas parameters do not act in the batch (rows zero).
 
-Not yet (status 2 with gradients): lines outside the spectrum with dust emission, the host smoothing
-modes, `ssp_weights_z`, `mass_bar` with `ssp_ops`; not differentiated: `emlines`, `mdust`, indices as
+Not yet (status 2 with gradients): the host smoothing modes, `ssp_weights_z`, `mass_bar` with
+`ssp_ops`; not differentiated: `emlines`, `mdust`, indices as
 outputs.
 
 Cost (2026-11-02, full physics: nebular, dust emission, AGN, IGM, SFH parameters; forward / with

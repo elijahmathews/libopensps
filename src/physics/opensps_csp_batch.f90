@@ -279,8 +279,7 @@ contains
     !>                       tburst, sf_start, sf_trunc and sf_slope for sfh = 0, 1, 4, 5.
     !> @param[in]    mass_bar, lbol_bar Optional dL / d(mass), dL / d(lbol) (N): cotangents of those
     !>                       outputs (mass_bar not with ssp_ops: status 2).
-    !>                       Gradients are not yet available (status 2) with lines outside the
-    !>                       spectrum and dust emission (nebemlineinspec = 0), the host smoothing modes
+    !>                       Gradients are not yet available (status 2) with the host smoothing modes
     !>                       (smooth_velocity = 0 or smoothspec_fast = 0) or ssp_weights_z. With
     !>                       ssp_ops, params_bar includes the IMF's imf1, imf2, imf3, vdmc and mdave.
     subroutine compute_csp_batch(ctx, psets, mags, status, spec, mass, lbol, mdust, sfr, emlines, indx, ssp_weights, &
@@ -473,12 +472,9 @@ contains
                 end if
             end if
             ! Stages whose adjoints are not written yet
-            ! (nebular emission: not lines outside the spectrum with dust emission, whose absorbed part
-            ! joins the energy balance; SSP-level nebular emission, add_neb_emission = 2, is in the basis.
-            ! The mass's cotangent with ssp_ops would need the remnants' IMF derivatives)
+            ! (SSP-level nebular emission, add_neb_emission = 2, is in the basis. The mass's cotangent
+            ! with ssp_ops would need the remnants' IMF derivatives)
             if (present(ssp_weights_z) .or. (present(mass_bar) .and. imf) .or. &
-                (ctx%add_neb_emission_val == 1 .and. ctx%nebemlineinspec_val == 0 .and. &
-                 ctx%add_dust_emission_val == 1) .or. &
                 (psets(1)%sigma_smooth > SAFE_FLOOR .and. .not. smoothing_on_device(ctx))) then
                 status = 2; return
             end if
@@ -3230,6 +3226,7 @@ contains
         ! The IMF's reverse pass: dL / dQ per nebular age, the SFH weights' cotangent, the IMF rows,
         ! fesc's and dz's cotangents
         real(WP), allocatable :: qb(:,:), wbi(:,:), imfb(:,:), fescb(:), zbi(:)
+        logical :: lgiven
         integer, allocatable  :: jmx(:)
         real(WP) :: msum_bar
         real(KP), allocatable :: sbar(:,:), gw(:,:), part(:,:,:)
@@ -3262,7 +3259,10 @@ contains
                  fescb(n_mod), zbi(n_mod))
         qb = 0.0_wp
         imfb = 0.0_wp
-        if (neb .and. nb%lines_in_spec) then
+        ! (the lines' cotangents: from their profiles in the spectrum, or from their absorbed part in the
+        ! dust emission's energy balance when outside it)
+        lgiven = neb .and. .not. nb%lines_in_spec .and. any(emis)
+        if (neb .and. (nb%lines_in_spec .or. lgiven)) then
             allocate(lbar(NEMLINE, 2 * n_mod))
         else
             allocate(lbar(1, 1))
@@ -3362,6 +3362,8 @@ contains
             call backward_attenuation(ctx, pbuf, n_mod, nspec, 1, igm, zvar, g%igm_t, tau, yo, agn_on, ita, wta, &
                                       lsum, noagn, g%wt, emis, iq, iu, wq, wu, gam, eb, jmx, gw, part, dpar)
         end if
+        ! Lines outside the spectrum with dust emission: their absorbed part joins s_abs
+        if (lgiven) call backward_line_absorption(ctx, pbuf, n_mod, nspec, nb%lum, nb%llo, emis, eb, lbar, dpar)
         ! Nebular emission: the continuum and the lines (the weights, gas_logz, gas_logu and the
         ! absorbed fraction), before the age sums' adjoint, which takes the escaping EUV fraction
         if (neb) then
@@ -3371,23 +3373,23 @@ contains
                                       zmode .and. .not. imf, &
                                       nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, nb%lptr, nb%lid, w2, &
                                       ctx%state%xnebem_cont, ctx%state%xnebem_line, ctx%state%gaussnebarr, gw, lbar, nwb, gneb, &
-                                      imf, qb)
+                                      imf, qb, lgiven)
             else if (nb%xrb) then
-                call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, .false., it_tesc, zlo, zhi, dz, &
+                call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, lgiven, it_tesc, zlo, zhi, dz, &
                                       zmode .and. .not. imf, &
                                       nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, nb%lptr, nb%lid, w2, &
-                                      ctx%state%xnebem_cont, ctx%state%xnebem_line, lbar, gw, lbar, nwb, gneb, imf, qb)
+                                      ctx%state%xnebem_cont, ctx%state%xnebem_line, lbar, gw, lbar, nwb, gneb, imf, qb, lgiven)
             else if (nb%lines_in_spec) then
                 call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, .true., it_tesc, zlo, zhi, dz, &
                                       zmode .and. .not. imf, &
                                       nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, nb%lptr, nb%lid, w2, &
                                       ctx%state%nebem_cont, ctx%state%nebem_line, ctx%state%gaussnebarr, gw, lbar, nwb, gneb, &
-                                      imf, qb)
+                                      imf, qb, lgiven)
             else
-                call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, .false., it_tesc, zlo, zhi, dz, &
+                call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, lgiven, it_tesc, zlo, zhi, dz, &
                                       zmode .and. .not. imf, &
                                       nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, nb%lptr, nb%lid, w2, &
-                                      ctx%state%nebem_cont, ctx%state%nebem_line, lbar, gw, lbar, nwb, gneb, imf, qb)
+                                      ctx%state%nebem_cont, ctx%state%nebem_line, lbar, gw, lbar, nwb, gneb, imf, qb, lgiven)
             end if
             if (.not. imf) call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, &
                                                   ctx%state%ssp_basis_lbol, zmode, it_tesc, zlo, zhi, dz, lum_linear, &
@@ -3728,6 +3730,140 @@ contains
             end if
         end do
     end subroutine backward_emission_sums
+
+    !> Adjoint of attenuate_lines' absorbed part (lines outside the spectrum with dust emission: s_abs
+    !> += s_line, s_line = sum over lines of (L_y + L_o) - (L_y A_y D + L_o D), A_y = T_birth (1 -
+    !> frac_obrun) + frac_obrun, D = T_d (1 - frac_nodust) + frac_nodust at the line's wavelength, T_d
+    !> interpolated between its pixels): with s_line_bar = s_abs_bar (eb(1, m)), the lines'
+    !> cotangents lbar (young: s_line_bar (1 - A_y D), old: s_line_bar (1 - D)) and the dust rows'
+    !> parts added to dpar (T_d through the curve tables' derivatives, as atten_adjoint_chunk). One
+    !> thread per model.
+    subroutine backward_line_absorption(ctx, pbuf, n_mod, nspec, nb_lum, nb_llo, emis, eb, lbar, dpar)
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)              :: n_mod, nspec
+#if !defined(__flang__)
+        type(params), intent(in), target :: pbuf(n_mod)
+#else
+        integer(int64), intent(in), target :: pbuf(NPW, n_mod)
+#endif
+        real(KP), intent(in)             :: nb_lum(NEMLINE, 2 * n_mod)
+        integer, intent(in)              :: nb_llo(NEMLINE)
+        logical, intent(in)              :: emis(n_mod)
+        real(WP), intent(in)             :: eb(3, n_mod)
+        real(KP), intent(out)            :: lbar(NEMLINE, 2 * n_mod)
+        real(WP), intent(inout)          :: dpar(NDP, n_mod)
+
+        integer  :: m, i, lo, k, dt
+        real(WP) :: sb, pos, fob, fnd, fr, tpix(2), dtp(2, 4), td, dtd(4), birth, pb, ay, dfac, ly, lo_, lk
+        real(WP) :: curve, tau_d, trans, c, dc(3), d1, d2, d4, d5, d6, d7, d8, d9, s1
+        type(params_core), pointer :: pl
+
+        dt = ctx%dust_type_val
+        associate (ttab => ctx%state%att_tab, ltab => ctx%state%att_ltab)
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(i, lo, k, sb, pos, fob, fnd, fr, tpix, dtp, td, dtd, birth, &
+        !$omp& pb, ay, dfac, ly, lo_, lk, curve, tau_d, trans, c, dc, d1, d2, d4, d5, d6, d7, d8, d9, s1, pl) &
+        !$omp& map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%nebem_line_pos, ttab, ltab)
+#elif defined(_OPENMP)
+        !$omp parallel do private(i, lo, k, sb, pos, fob, fnd, fr, tpix, dtp, td, dtd, birth, pb, ay, dfac, ly, lo_, &
+        !$omp& lk, curve, tau_d, trans, c, dc, d1, d2, d4, d5, d6, d7, d8, d9, s1, pl)
+#endif
+        do m = 1, n_mod
+            do i = 1, NEMLINE
+                lbar(i, m) = 0.0_KP
+                lbar(i, n_mod + m) = 0.0_KP
+            end do
+            if (.not. emis(m)) cycle
+            sb = eb(1, m)
+            if (sb == 0.0_wp) cycle
+#if !defined(__flang__)
+            pl => pbuf(m)%params_core
+#else
+            call c_f_pointer(c_loc(pbuf(1, m)), pl)
+#endif
+            fob = pl%frac_obrun
+            fnd = pl%frac_nodust
+            d1 = 0.0_wp; d2 = 0.0_wp; d4 = 0.0_wp; d5 = 0.0_wp; d6 = 0.0_wp; d7 = 0.0_wp; d8 = 0.0_wp; d9 = 0.0_wp
+            do i = 1, NEMLINE
+                pos = ctx%state%nebem_line_pos(i)
+                ! T_d at the line (and its derivatives in dust2, dust_index, R_V, uvb: dtd(1:4))
+                td = 1.0_wp
+                dtd = 0.0_wp
+                if (1.0_wp - fnd > SAFE_FLOOR) then
+                    lo = nb_llo(i)
+                    do k = 1, 2
+                        call diffuse_transmission(ctx, pl, lo + k - 1, curve, tau_d, trans)
+                        tpix(k) = real(real(trans, KP), WP)
+                        ! The curve's derivatives from its tables (as atten_adjoint_chunk)
+                        c = real(ttab(lo + k - 1, 0), WP)
+                        dc = 0.0_wp
+                        lk = ltab(lo + k - 1)
+                        if (dt == 0) then
+                            dc(1) = curve * lk
+                        else if (dt == 4) then
+                            dc(1) = real(ttab(lo + k - 1, 1), WP) * exp(pl%dust_index * lk) + curve * lk
+                        else if (dt == 1) then
+                            s1 = 1.0_wp / pl%mwr
+                            dc(3) = real(ttab(lo + k - 1, 2), WP) + s1 * real(ttab(lo + k - 1, 3), WP)
+                            dc(2) = -(real(ttab(lo + k - 1, 1), WP) + pl%uvb * real(ttab(lo + k - 1, 3), WP)) * s1 * s1
+                        end if
+                        if (dt /= 3) then
+                            dtp(k, 1) = -tpix(k) * curve
+                            dtp(k, 2) = -tpix(k) * pl%dust2 * dc(1)
+                            dtp(k, 3) = -tpix(k) * pl%dust2 * dc(2)
+                            dtp(k, 4) = -tpix(k) * pl%dust2 * dc(3)
+                        else
+                            dtp(k, :) = 0.0_wp
+                        end if
+                    end do
+                    fr = (pos - ctx%state%spec_lambda(lo)) / (ctx%state%spec_lambda(lo + 1) - ctx%state%spec_lambda(lo))
+                    td = tpix(1) + (tpix(2) - tpix(1)) * fr
+                    dtd(:) = dtp(1, :) * (1.0_wp - fr) + dtp(2, :) * fr
+                end if
+                if (td /= td) then
+                    td = 1.0_wp
+                    dtd = 0.0_wp
+                end if
+                pb = (pos / V_BAND_ANGSTROMS)**pl%dust1_index
+                if (pl%dust1 <= SAFE_FLOOR .or. 1.0_wp - fob <= SAFE_FLOOR) then
+                    birth = 1.0_wp
+                else
+                    birth = exp(-pl%dust1 * pb)
+                end if
+                ay = birth * (1.0_wp - fob) + fob
+                dfac = 1.0_wp
+                if (1.0_wp - fnd > SAFE_FLOOR) dfac = td * (1.0_wp - fnd) + fnd
+                ly = real(nb_lum(i, m), WP)
+                lo_ = real(nb_lum(i, n_mod + m), WP)
+                lbar(i, m) = real(sb * (1.0_wp - ay * dfac), KP)
+                lbar(i, n_mod + m) = real(sb * (1.0_wp - dfac), KP)
+                ! s_line's dust derivatives (minus the attenuated lines')
+                if (1.0_wp - fnd > SAFE_FLOOR) then
+                    d2 = d2 - sb * (ly * ay + lo_) * (1.0_wp - fnd) * dtd(1)
+                    d4 = d4 - sb * (ly * ay + lo_) * (1.0_wp - fnd) * dtd(2)
+                    d8 = d8 - sb * (ly * ay + lo_) * (1.0_wp - fnd) * dtd(3)
+                    d9 = d9 - sb * (ly * ay + lo_) * (1.0_wp - fnd) * dtd(4)
+                    d7 = d7 - sb * (ly * ay + lo_) * (1.0_wp - td)
+                end if
+                d6 = d6 - sb * ly * (1.0_wp - birth) * dfac
+                if (pl%dust1 <= SAFE_FLOOR .or. 1.0_wp - fob <= SAFE_FLOOR) then
+                    d1 = d1 + sb * ly * (1.0_wp - fob) * pb * dfac
+                else
+                    d1 = d1 + sb * ly * (1.0_wp - fob) * pb * birth * dfac
+                    d5 = d5 + sb * ly * (1.0_wp - fob) * pl%dust1 * pb * log(pos / V_BAND_ANGSTROMS) * birth * dfac
+                end if
+            end do
+            dpar(1, m) = dpar(1, m) + d1
+            dpar(2, m) = dpar(2, m) + d2
+            dpar(4, m) = dpar(4, m) + d4
+            dpar(5, m) = dpar(5, m) + d5
+            dpar(6, m) = dpar(6, m) + d6
+            dpar(7, m) = dpar(7, m) + d7
+            dpar(8, m) = dpar(8, m) + d8
+            dpar(9, m) = dpar(9, m) + d9
+        end do
+        end associate
+    end subroutine backward_line_absorption
 
     !> Adjoint of the IGM transmission and of attenuate_batch (with the dust emission's second pass): from S_bar in
     !> gw(:, N + m), young_bar = S_bar T_IGM a_young D into gw(:, m) and old_bar = S_bar T_IGM T_old D
@@ -4096,7 +4232,7 @@ contains
     !> One thread per (model, nebular age), serial over pixels and lines, sums compensated at FP32
     !> kernel precision; 10^lg q as exp_kp(lg ln 10 + ln q) (exponent formed in FP64, rule 3).
     subroutine backward_nebular(n_mod, nspec, nt, nzb, ntn, cont, lines, it_tesc, zlo, zhi, dz, zmode, ia, wa, iz, wz, &
-                                iu, wu, fabs, q0, lptr, lid, w2, ctab, ltab, gauss, gw, lbar, nwb, gneb, qmod, qb)
+                                iu, wu, fabs, q0, lptr, lid, w2, ctab, ltab, gauss, gw, lbar, nwb, gneb, qmod, qb, lgiven)
         integer, intent(in)     :: n_mod, nspec, nt, nzb, ntn, it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
         logical, intent(in)     :: cont, lines, zmode
         integer, intent(in)     :: ia(max(1, ntn)), iz(n_mod), iu(n_mod), lptr(nspec + 1)
@@ -4111,6 +4247,8 @@ contains
         !> The IMF per model: Q per (age, model), q0(t, m); qb = d L / d Q (the operator's reverse pass)
         logical, intent(in)     :: qmod
         real(WP), intent(inout) :: qb(max(1, ntn), n_mod)
+        !> lbar given (the lines' absorbed part, backward_line_absorption), not from the profiles
+        logical, intent(in)     :: lgiven
 
         integer  :: m, t, j, i, p, c, col, a, z0, u0
         real(KP) :: sw, sz, su, cw, cz, cu, term, tsum, val, gv
@@ -4124,7 +4262,7 @@ contains
         !$omp target data map(alloc: tz, tu, tf, tq)
 #endif
         ! The lines' cotangents (profiles transposed: one thread per young / old column)
-        if (lines) then
+        if (lines .and. .not. lgiven) then
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do private(j, p, i)
 #elif defined(_OPENMP)

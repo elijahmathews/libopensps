@@ -69,7 +69,8 @@ program test_csp_batch_grad
     !> plain FP32 trees, whose rounding dominated at 1e-3), relative to the larger of |g_fd| and 1e-2
     !> of the model's largest gradient; the bounds are validated in FP64
     real(WP), parameter :: H_DUST = 1.0e-5_wp, H_DUST32 = 1.0e-2_wp
-    real(WP), parameter :: DUST_RTOL = 1.0e-5_wp, DUST_RTOL32 = 2.0e-2_wp
+    !> (FP64: 3e-5, the central differences' rounding being ~1e-6 absolute against the floor of 0.1)
+    real(WP), parameter :: DUST_RTOL = 3.0e-5_wp, DUST_RTOL32 = 2.0e-2_wp
     !> Per-model redshifts, off round values: at z = 0.5 (or 2, 3) many observed pixels fall exactly on
     !> rest-frame pixels, where the resampled spectrum has a kink in z (the gradient there is
     !> one-sided, central differences average the two sides)
@@ -125,6 +126,17 @@ program test_csp_batch_grad
     call set_int('add_dust_emission', 0)
     call set_int('add_neb_emission', 0)
     call check_unsupported()
+    ! Nebular lines outside the spectrum with dust emission: their absorbed part joins the energy balance
+    call set_int('add_neb_emission', 1)
+    call set_int('add_dust_emission', 1)
+    call set_int('nebemlineinspec', 0)
+    call check_grad(4, 0.513_wp, 1, 1, .false., "Kriek & Conroy, z = 0.513, IGM, nebular lines outside the spectrum, " // &
+                    "dust emission, AGN, SFH")
+    call check_grad(1, 0.0_wp, 0, 0, .true., "Cardelli et al., z = 0, nebular lines outside the spectrum, dust emission, " // &
+                    "weight matrix")
+    call set_int('nebemlineinspec', 1)
+    call set_int('add_dust_emission', 0)
+    call set_int('add_neb_emission', 0)
     ! SSP-level nebular emission (in the basis: the batch adds none; gas_logz, gas_logu do not act)
     call set_int('add_neb_emission', 2)
     call build_basis()
@@ -574,9 +586,9 @@ contains
                 ! the spectrum part, smooth in z (the IGM))
                 if (q == 22) h = merge(1.0e-4_wp, 1.0e-9_wp, LINEAR_ONLY) * (1.0_wp + x)
                 if (bound) then
-                    ! (h / 3: at dust2 = 0 the curvature of the UV screen leaves the third-order formula a
-                    ! truncation of ~4e-5 at h = 1e-5; the rounding floor is far below)
-                    h = h / 3.0_wp
+                    ! (h / 10: at dust2 or dust3 = 0 the curvature of the UV screen leaves the third-order
+                    ! formula a truncation of up to ~2e-4 at h = 1e-5 (as h^3); the rounding floor is below)
+                    h = h / 10.0_wp
                     ! One-sided, third order: (-11 L0 + 18 L1 - 9 L2 + 2 L3) / 6h (at dust2 = 0 the UV
                     ! curve makes L strongly curved; second order needed h ~ 1e-6, below the
                     ! rounding floor of the smaller gradients)
@@ -748,18 +760,6 @@ contains
         call print_group("Gradients: unsupported stages")
         allocate(mags(ctx%state%nbands, 1), wbar(ctx%state%ntfull, 1))
         call set_model(1, 0.0_wp)
-        ! Lines outside the spectrum with dust emission (their absorbed part joins the energy balance)
-        call set_int('add_neb_emission', 1)
-        call set_int('add_dust_emission', 1)
-        call set_int('nebemlineinspec', 0)
-        call opensps_context_prepare_pset(ctx)
-        call opensps_context_get_pset(ctx, psets(1))
-        call compute_csp_batch(ctx, psets, mags, status, mags_bar=mags, weights_bar=wbar)
-        call assert_true(status == 2, "nebular lines outside the spectrum, dust emission: status 2", total_tests, &
-                         total_failures)
-        call set_int('nebemlineinspec', 1)
-        call set_int('add_dust_emission', 0)
-        call set_int('add_neb_emission', 0)
         ! Smoothing at constant width in wavelength (on the host): not yet
         call set_int('smooth_velocity', 0)
         call set_float('sigma_smooth', 5.0_wp)
