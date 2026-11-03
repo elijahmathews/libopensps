@@ -7,7 +7,8 @@ program test_csp_batch_grad
     !> - d L / d fagn per model (central differences; one-sided at fagn = 0, where the AGN stage of
     !>   the forward model switches on);
     !> - d L / d (dust1, dust2, dust3, dust_index, dust1_index, frac_obrun, frac_nodust, mwr, uvb) per
-    !>   model (one-sided, second order, where a parameter sits at its bound 0);
+    !>   model (one-sided, second order, where a parameter sits at its bound 0), and with dust emission
+    !>   (energy balance) also duste_qpah, duste_umin, duste_gamma;
     !> - d L / d(SSP weights) along a random direction (relative perturbations of the weights, so
     !>   they stay positive), and for single ages, including an age whose weight is zero;
     !> - the weights' gradient of a parametric SFH equals that of the same weights given as a matrix;
@@ -23,7 +24,7 @@ program test_csp_batch_grad
     use opensps_csp, only: sfh_weights_core
     use opensps_csp_batch, only: compute_csp_batch, BGRAD_FAGN, BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, &
                                  BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, &
-                                 BGRAD_MWR, BGRAD_UVB, NBGRAD
+                                 BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, NBGRAD
     use opensps_ssp, only: generate_ssp_grid
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                                opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
@@ -82,6 +83,11 @@ program test_csp_batch_grad
     zred_per_model = .true.
     call check_grad(4, 0.0_wp, 1, 1, .true., "Kriek & Conroy, per-model zred 0-3, IGM, AGN, weight matrix")
     zred_per_model = .false.
+    ! Dust emission (energy balance), with AGN and IGM
+    call set_int('add_dust_emission', 1)
+    call check_grad(2, 0.0_wp, 0, 1, .true., "Calzetti, z = 0, dust emission, AGN, weight matrix")
+    call check_grad(1, 0.5_wp, 1, 0, .false., "Cardelli et al., z = 0.5, IGM, dust emission, SFH parameters")
+    call set_int('add_dust_emission', 0)
     call check_unsupported()
 
     call print_summary_line("Batched CSP gradients", total_tests - total_failures, total_tests)
@@ -115,6 +121,11 @@ contains
         real(WP), parameter :: dust2(N_MOD) = [0.3_wp, 0.0_wp, 0.5_wp, 2.0_wp, 0.1_wp, 0.2_wp]
         real(WP), parameter :: dindex(N_MOD) = [-0.7_wp, -0.3_wp, -1.2_wp, -0.7_wp, 0.2_wp, -0.4_wp]
         real(WP), parameter :: fagn(N_MOD) = [0.05_wp, 0.2_wp, 0.01_wp, 0.5_wp, 0.1_wp, 0.0_wp]
+        ! Inside the Draine & Li grid intervals (the derivative of the linear interpolation; at a
+        ! node it is one-sided and differences straddle the kink)
+        real(WP), parameter :: umin(N_MOD) = [1.1_wp, 4.3_wp, 13.0_wp, 0.55_wp, 2.2_wp, 0.9_wp]
+        real(WP), parameter :: qpah(N_MOD) = [3.3_wp, 0.6_wp, 4.4_wp, 2.1_wp, 1.2_wp, 3.0_wp]
+        real(WP), parameter :: gam(N_MOD) = [0.01_wp, 0.1_wp, 0.05_wp, 0.3_wp, 0.02_wp, 0.5_wp]
 
         call set_int('sfh', sfh(m))
         call set_float('tage', tage(m))
@@ -133,6 +144,9 @@ contains
         call set_float('mwr', merge(4.0_wp, 3.1_wp, mod(m, 2) == 1))
         call set_float('uvb', merge(0.5_wp, 1.0_wp, mod(m, 3) == 2))
         call set_float('fagn', fagn(m))
+        call set_float('duste_umin', umin(m))
+        call set_float('duste_qpah', qpah(m))
+        call set_float('duste_gamma', gam(m))
         call set_float('agn_tau', 5.0_wp + 15.0_wp * mod(m, 8))
         call set_float('zred', zred)
     end subroutine set_model
@@ -286,7 +300,13 @@ contains
                     k0 = findloc(w(:, m) > 0.0_wp, .false., 1, back=.true.)
                 end select
                 if (k0 < 1) cycle
-                h = merge(H_LIN, 1.0e-5_wp, LINEAR_ONLY) * maxval(w(:, m))
+                ! (relative to the age's own weight: a young age that dominates a UV band makes its
+                ! magnitude strongly curved in that weight)
+                if (w(k0, m) > 0.0_wp) then
+                    h = merge(H_LIN, 1.0e-5_wp, LINEAR_ONLY) * w(k0, m)
+                else
+                    h = merge(H_LIN, 1.0e-5_wp, LINEAR_ONLY) * maxval(w(:, m))
+                end if
                 wp_ = w
                 wp_(k0, m) = w(k0, m) + h
                 call loss(psets, wp_, .true., lp)
@@ -305,7 +325,10 @@ contains
                 worst = max(worst, abs(wbar(k0, m) - g_fd) / max(abs(g_fd), tiny(1.0_wp)))
             end do
             write(*, '(A,ES10.2)') "# single ages: worst relative difference ", worst
-            call assert_true(worst <= merge(GRAD_RTOL, 1.0e-5_wp, LINEAR_ONLY), "d L / d weight, single ages", &
+            ! (FP64: the step is relative to the age's own weight, so for the smallest weights the
+            ! differences' rounding reaches ~1e-5: 5e-5. FP32: L changes by one age's share, ~1e-4 of L
+            ! for a young age, whose FP32 rounding, ~1e-7 of L, is ~1e-3 of the difference: 5e-3)
+            call assert_true(worst <= merge(5.0e-3_wp, 5.0e-5_wp, LINEAR_ONLY), "d L / d weight, single ages", &
                              total_tests, total_failures)
         end if
     end subroutine check_grad
@@ -315,16 +338,19 @@ contains
         type(PARAMS), intent(in) :: psets(:)
         real(WP), intent(in) :: w(:, :), pbar(:, :)
         logical, intent(in) :: given_w
-        integer, parameter :: ROWS(9) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
-                                         BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB]
-        character(len=12), parameter :: NAMES(9) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
-                                                    'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb']
+        integer, parameter :: NQ = 12
+        integer, parameter :: ROWS(NQ) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
+                                          BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, &
+                                          BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA]
+        character(len=12), parameter :: NAMES(NQ) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
+                                                     'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb', &
+                                                     'duste_qpah', 'duste_umin', 'duste_gamma']
         type(PARAMS) :: pp(size(psets))
-        real(WP) :: g_fd(9, size(psets)), lp, lm, l0, x, h, worst(9), gmax
-        integer :: q, m, worst_m(9)
+        real(WP) :: g_fd(NQ, size(psets)), lp, lm, l0, l3, x, h, worst(NQ), gmax
+        integer :: q, m, worst_m(NQ)
         logical :: bound
 
-        do q = 1, 9
+        do q = 1, NQ
             do m = 1, size(psets)
                 pp = psets
                 x = get_par(pp(m), q)
@@ -334,14 +360,21 @@ contains
                     g_fd(q, m) = pbar(ROWS(q), m)   ! (FP32: not checked at a bound)
                     cycle
                 end if
+                ! (the template's parameters: steps inside their grid interval)
                 h = merge(H_DUST32, H_DUST, LINEAR_ONLY) * max(abs(x), 1.0_wp)
+                if (q >= 10) h = merge(H_DUST32, H_DUST, LINEAR_ONLY) * max(abs(x), 0.01_wp)
                 if (bound) then
+                    ! One-sided, third order: (-11 L0 + 18 L1 - 9 L2 + 2 L3) / 6h (at dust2 = 0 the UV
+                    ! curve makes L strongly curved; second order needed h ~ 1e-6, below the
+                    ! rounding floor of the smaller gradients)
                     call loss(pp, w, given_w, l0)
                     call set_par(pp(m), q, x + h)
                     call loss(pp, w, given_w, lp)
                     call set_par(pp(m), q, x + 2.0_wp * h)
                     call loss(pp, w, given_w, lm)
-                    g_fd(q, m) = (-3.0_wp * l0 + 4.0_wp * lp - lm) / (2.0_wp * h)
+                    call set_par(pp(m), q, x + 3.0_wp * h)
+                    call loss(pp, w, given_w, l3)
+                    g_fd(q, m) = (-11.0_wp * l0 + 18.0_wp * lp - 9.0_wp * lm + 2.0_wp * l3) / (6.0_wp * h)
                 else
                     call set_par(pp(m), q, x + h)
                     call loss(pp, w, given_w, lp)
@@ -358,7 +391,7 @@ contains
         worst_m = 0
         do m = 1, size(psets)
             gmax = maxval(abs(g_fd(:, m)))
-            do q = 1, 9
+            do q = 1, NQ
                 x = abs(pbar(ROWS(q), m) - g_fd(q, m)) / max(abs(g_fd(q, m)), &
                                                                merge(1.0e-2_wp, 1.0e-3_wp, LINEAR_ONLY) * gmax, tiny(1.0_wp))
                 if (x > worst(q)) then
@@ -367,7 +400,7 @@ contains
                 end if
             end do
         end do
-        do q = 1, 9
+        do q = 1, NQ
             write(*, '(A,A12,A,ES10.2,A,I0,A,2ES14.6)') "# ", NAMES(q), ": worst relative difference ", worst(q), &
                 " (model ", worst_m(q), "): ", pbar(ROWS(q), max(worst_m(q), 1)), g_fd(q, max(worst_m(q), 1))
         end do
@@ -387,7 +420,10 @@ contains
         case (6); get_par = p%frac_obrun
         case (7); get_par = p%frac_nodust
         case (8); get_par = p%mwr
-        case default; get_par = p%uvb
+        case (9); get_par = p%uvb
+        case (10); get_par = p%duste_qpah
+        case (11); get_par = p%duste_umin
+        case default; get_par = p%duste_gamma
         end select
     end function get_par
 
@@ -404,7 +440,10 @@ contains
         case (6); p%frac_obrun = x
         case (7); p%frac_nodust = x
         case (8); p%mwr = x
-        case default; p%uvb = x
+        case (9); p%uvb = x
+        case (10); p%duste_qpah = x
+        case (11); p%duste_umin = x
+        case default; p%duste_gamma = x
         end select
     end subroutine set_par
 
@@ -456,12 +495,12 @@ contains
         call print_group("Gradients: unsupported stages")
         allocate(mags(ctx%state%nbands, 1), wbar(ctx%state%ntfull, 1))
         call set_model(1, 0.0_wp)
-        call set_int('add_dust_emission', 1)
+        call set_int('add_neb_emission', 1)
         call opensps_context_prepare_pset(ctx)
         call opensps_context_get_pset(ctx, psets(1))
         call compute_csp_batch(ctx, psets, mags, status, mags_bar=mags, weights_bar=wbar)
-        call assert_true(status == 2, "dust emission: status 2", total_tests, total_failures)
-        call set_int('add_dust_emission', 0)
+        call assert_true(status == 2, "nebular emission: status 2", total_tests, total_failures)
+        call set_int('add_neb_emission', 0)
     end subroutine check_unsupported
 
     subroutine set_int(key, value)

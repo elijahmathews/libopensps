@@ -112,7 +112,8 @@ module opensps_csp_batch
 
     public :: compute_csp_batch, batch_spectra_device, batch_spectra_host
     public :: BGRAD_FAGN, BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
-              BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, NBGRAD
+              BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, &
+              BGRAD_DUSTE_GAMMA, NBGRAD
 
     !> Rows of params_bar (compute_csp_batch's gradients): the derivative of the caller's loss with
     !> respect to each parameter of the model. The list grows as the adjoints of more stages are
@@ -123,9 +124,13 @@ module opensps_csp_batch
     integer, parameter :: BGRAD_DUST1 = 2, BGRAD_DUST2 = 3, BGRAD_DUST3 = 4, BGRAD_DUST_INDEX = 5, &
                           BGRAD_DUST1_INDEX = 6, BGRAD_FRAC_OBRUN = 7, BGRAD_FRAC_NODUST = 8, BGRAD_MWR = 9, &
                           BGRAD_UVB = 10
-    integer, parameter :: NBGRAD = 10
-    !> Dust rows (BGRAD_DUST1 .. BGRAD_UVB) summed per model by the attenuation adjoint
-    integer, parameter :: NDP = 9
+    !> Dust emission (Draine & Li template: q_PAH and U_min interpolated linearly in the grid, so
+    !> their derivative is that of the bracketing interval, one-sided at the grid nodes)
+    integer, parameter :: BGRAD_DUSTE_QPAH = 11, BGRAD_DUSTE_UMIN = 12, BGRAD_DUSTE_GAMMA = 13
+    integer, parameter :: NBGRAD = 13
+    !> Rows BGRAD_DUST1 .. BGRAD_DUSTE_GAMMA, summed per model by the attenuation adjoint (the last
+    !> three as derivatives with respect to the template's interpolation weights wq, wu, gamma)
+    integer, parameter :: NDP = 12
     !> Pixel chunks per model of the attenuation adjoint (each thread takes every NCHG-th pixel)
     integer, parameter :: NCHG = 64
 
@@ -242,8 +247,8 @@ contains
     !>                       parameters give), for every age, including ages whose weight is zero (the
     !>                       spectra are linear in the weights). Masses are per solar mass formed, so a
     !>                       mass scale is the caller's: d mag / d log10 M = -2.5.
-    !>                       Gradients are not yet available (status 2) with nebular emission, dust
-    !>                       emission, velocity smoothing, ssp_ops or ssp_weights_z.
+    !>                       Gradients are not yet available (status 2) with nebular emission,
+    !>                       velocity smoothing, ssp_ops or ssp_weights_z.
     subroutine compute_csp_batch(ctx, psets, mags, status, spec, mass, lbol, mdust, sfr, emlines, indx, ssp_weights, &
                                  spec_young, spec_old, mass_young, mass_old, lbol_young, lbol_old, zred_mags, &
                                  ssp_weights_z, ssp_ops, mags_bar, spec_bar, params_bar, weights_bar)
@@ -271,7 +276,9 @@ contains
         real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk
         logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw, host_m, imf, dev, zimf, grad
         ! Gradients: the band fluxes of the magnitudes, and each column's magnitude redshift
-        real(WP), allocatable :: fbk(:,:), zcm(:)
+        real(WP), allocatable :: fbk(:,:), zcm(:), dchain(:,:)
+        ! Gradients with dust emission: the age sums before attenuate_batch replaces them
+        real(KP), allocatable :: ysave(:,:)
         ! IMF per model (ssp_ops): IMF parameters (IMF_NPAR x N), per age and model the surviving mass
         ! and linear L_bol, the SFH weights (FP64, masked as w2), and a placeholder basis
         real(WP), allocatable :: pm(:,:), smass(:,:), slum(:,:), wsfh(:,:)
@@ -428,7 +435,7 @@ contains
             end if
             ! Stages whose adjoints are not written yet
             if (imf .or. present(ssp_weights_z) .or. ctx%add_neb_emission_val /= 0 .or. &
-                ctx%add_dust_emission_val == 1 .or. psets(1)%sigma_smooth > SAFE_FLOOR) then
+                psets(1)%sigma_smooth > SAFE_FLOOR) then
                 status = 2; return
             end if
         end if
@@ -654,6 +661,11 @@ contains
         ! 2-7. Device: age sums, nebular emission, attenuation, dust emission, IGM, AGN, smoothing
         ! ------------------------------------------------------------------
         allocate(yo(nspec, 2 * n_mod), absorbed(nspec, n_mod))
+        if (grad .and. any_emis) then
+            allocate(ysave(nspec, 2 * n_mod))
+        else
+            allocate(ysave(1, 1))
+        end if
         ! The spectra: the context's persistent batch output (on the device; columns 1:n_mod)
         call batch_out_reserve(ctx%state%batch_out, nspec, n_mod, ctx%on_device)
         ! Diffuse-dust transmission kept from the attenuation for the AGN emission
@@ -676,7 +688,7 @@ contains
 #else
         !$omp target data map(to: psets, ipk, rpk, lpk) &
 #endif
-        !$omp map(alloc: w2, wz, weights, tmp1, tmp2, yo, absorbed, tdiff) &
+        !$omp map(alloc: w2, wz, weights, tmp1, tmp2, yo, absorbed, tdiff, ysave) &
         !$omp map(from: rout, eml)
 #endif
 #ifdef OMP_TARGET
@@ -896,6 +908,19 @@ contains
             end do
         end if
         associate(total => ctx%state%batch_out%spec)
+        if (grad .and. any_emis) then
+            ! (the reverse pass reads the age sums, which attenuate_batch replaces for dust emission)
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2)
+#endif
+            do m = 1, 2 * n_mod
+                do k = 1, nspec
+                    ysave(k, m) = yo(k, m)
+                end do
+            end do
+        end if
         call attenuation_tables_cached(ctx, nspec)
         call attenuate_batch(ctx, PBUF_ARG, n_mod, nspec, iq, iu, wq, wu, gam, emis, agn_on, yo, total, absorbed, tdiff)
         if (any_emis) then
@@ -963,10 +988,32 @@ contains
             else
                 zcm = zred
             end if
-            call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
-                                it_tesc, zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
-                                absorbed, yo, total, &
-                                mags_bar, spec_bar, params_bar, weights_bar)
+            ! The template's interpolation weights against q_PAH, U_min and gamma (dl07_indices: linear in
+            ! the bracketing interval, clamped to the grid; one-sided at the nodes)
+            allocate(dchain(3, n_mod))
+            dchain = 0.0_wp
+            if (any_emis) then
+                do m = 1, n_mod
+                    associate (qa => ctx%state%qpaharr, ua => ctx%state%uminarr, p => psets(m))
+                    if (p%duste_qpah >= qa(iq(m)) .and. p%duste_qpah <= qa(iq(m) + 1)) &
+                        dchain(1, m) = 1.0_wp / (qa(iq(m) + 1) - qa(iq(m)))
+                    if (p%duste_umin >= ua(iu(m)) .and. p%duste_umin <= ua(iu(m) + 1)) &
+                        dchain(2, m) = 1.0_wp / (ua(iu(m) + 1) - ua(iu(m)))
+                    if (p%duste_gamma >= 0.0_wp .and. p%duste_gamma <= 1.0_wp) dchain(3, m) = 1.0_wp
+                    end associate
+                end do
+            end if
+            if (any_emis) then
+                call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
+                                    it_tesc, zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
+                                    absorbed, ysave, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, &
+                                    mags_bar, spec_bar, params_bar, weights_bar)
+            else
+                call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
+                                    it_tesc, zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
+                                    absorbed, yo, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, &
+                                    mags_bar, spec_bar, params_bar, weights_bar)
+            end if
         end if
 
         end associate
@@ -1392,6 +1439,39 @@ contains
              (1-wq)*wu     * ctx%state%dustem2_dustem(i, iq,   2*(iu+1))
         shape = max(real((1.0_wp - gam) * lo + gam * hi, KP), tiny(1.0_KP))
     end function dl07_shape
+
+    !> Derivatives of dl07_shape with respect to its interpolation weights wq, wu and the mix gamma
+    !> (zero where the floor acts).
+    subroutine dl07_shape_grad(ctx, i, iq, wq, iu, wu, gam, dsq, dsu, dsg)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)              :: i, iq, iu
+        real(WP), intent(in)             :: wq, wu, gam
+        real(KP), intent(out)            :: dsq, dsu, dsg
+        real(WP) :: lo, hi, lq, hq, lu, hu
+        integer  :: kl, kh
+
+        kl = 2 * iu - 1
+        kh = 2 * (iu + 1) - 1
+        associate (dd => ctx%state%dustem2_dustem)
+        lo = (1-wq)*(1-wu) * dd(i, iq, kl) + wq*(1-wu) * dd(i, iq+1, kl) + wq*wu * dd(i, iq+1, kh) + (1-wq)*wu * dd(i, iq, kh)
+        hi = (1-wq)*(1-wu) * dd(i, iq, kl+1) + wq*(1-wu) * dd(i, iq+1, kl+1) + wq*wu * dd(i, iq+1, kh+1) + &
+             (1-wq)*wu * dd(i, iq, kh+1)
+        lq = (1-wu) * (dd(i, iq+1, kl) - dd(i, iq, kl)) + wu * (dd(i, iq+1, kh) - dd(i, iq, kh))
+        hq = (1-wu) * (dd(i, iq+1, kl+1) - dd(i, iq, kl+1)) + wu * (dd(i, iq+1, kh+1) - dd(i, iq, kh+1))
+        lu = (1-wq) * (dd(i, iq, kh) - dd(i, iq, kl)) + wq * (dd(i, iq+1, kh) - dd(i, iq+1, kl))
+        hu = (1-wq) * (dd(i, iq, kh+1) - dd(i, iq, kl+1)) + wq * (dd(i, iq+1, kh+1) - dd(i, iq+1, kl+1))
+        end associate
+        if ((1.0_wp - gam) * lo + gam * hi > real(tiny(1.0_KP), WP)) then
+            dsq = real((1.0_wp - gam) * lq + gam * hq, KP)
+            dsu = real((1.0_wp - gam) * lu + gam * hu, KP)
+            dsg = real(hi - lo, KP)
+        else
+            dsq = 0.0_KP; dsu = 0.0_KP; dsg = 0.0_KP
+        end if
+    end subroutine dl07_shape_grad
 
     !> Diffuse-dust transmission of model pset at pixel i (and its optical depth).
     subroutine diffuse_transmission(ctx, pset, i, curve, tau_d, trans)
@@ -2954,6 +3034,7 @@ contains
     !> forward's age sums) is read.
     subroutine batch_backward(ctx, pbuf, n_mod, nspec, nt, nbands, zred, igm_factor, mags, fband, zcm, it_tesc, &
                               zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, yo, total, &
+                              emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, &
                               mags_bar, spec_bar, params_bar, weights_bar)
         type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in)              :: n_mod, nspec, nt, nbands
@@ -2969,10 +3050,16 @@ contains
         logical, intent(in)              :: zmode, igm, zvar, agn_on(n_mod)
         real(KP), intent(in)             :: tdiff(:,:), tau(nspec, n_mod), total(nspec, n_mod)
         real(KP), intent(in)             :: yo(nspec, 2 * n_mod)
+        ! Dust emission: per model, the flag, the template's interpolation (dl07_indices), the absorbed
+        ! and escaping sums of the forward (dust_emission_reductions), d(wq, wu, gamma) / d(q_PAH,
+        ! U_min, gamma)
+        logical, intent(in)              :: emis(n_mod)
+        integer, intent(in)              :: iq(n_mod), iu(n_mod)
+        real(WP), intent(in)             :: wq(n_mod), wu(n_mod), gam(n_mod), s_abs(n_mod), s_esc(n_mod), dchain(3, n_mod)
         real(WP), intent(in), optional   :: mags_bar(:,:), spec_bar(:,:)
         real(WP), intent(out), optional  :: params_bar(:,:), weights_bar(:,:)
 
-        real(WP), allocatable :: fb_bar(:,:), fagn_bar(:), lsum_bar(:), w_bar(:,:), cscale(:), dpar(:,:)
+        real(WP), allocatable :: fb_bar(:,:), fagn_bar(:), lsum_bar(:), w_bar(:,:), cscale(:), dpar(:,:), eb(:,:)
         real(KP), allocatable :: sbar(:,:), gw(:,:), part(:,:,:)
         ! (no AGN: a zero template of the right shape, for the explicit-shape dummies of the device
         ! routines; a smaller placeholder made LLVM flang add a runtime copy in device code)
@@ -2983,7 +3070,7 @@ contains
 
         ! Magnitudes -> band fluxes (host: nbands x N values); bands without a magnitude are skipped
         allocate(fb_bar(nbands, n_mod), fagn_bar(n_mod), lsum_bar(n_mod), w_bar(nt, n_mod), cscale(n_mod), &
-                 dpar(NDP, n_mod), gw(nspec, 2 * n_mod), part(NDP, NCHG, n_mod))
+                 dpar(NDP, n_mod), gw(nspec, 2 * n_mod), part(NDP, NCHG, n_mod), eb(3, n_mod))
         fb_bar = 0.0_wp
         if (present(mags_bar)) then
             do m = 1, n_mod
@@ -3028,7 +3115,7 @@ contains
         noagn = 0.0_wp
 
 #ifdef OMP_TARGET
-        !$omp target data map(to: fb_bar, sbar, zcm, noagn) map(alloc: fagn_bar, lsum_bar, gw, part) &
+        !$omp target data map(to: fb_bar, sbar, zcm, noagn) map(alloc: fagn_bar, lsum_bar, gw, part, eb) &
         !$omp& map(from: w_bar, dpar)
 #endif
         associate (g => ctx%state%batch)
@@ -3044,12 +3131,15 @@ contains
             !$omp target update to(fagn_bar, lsum_bar)
 #endif
         end if
+        ! Dust emission: the cotangents of its two sums (eb: s_abs_bar, s_esc_bar, R = s_abs / s_esc)
+        call backward_emission_sums(ctx, pbuf, n_mod, nspec, igm, zvar, g%igm_t, tau, g%wt, emis, iq, iu, wq, wu, gam, &
+                                    s_abs, s_esc, gw, part, eb)
         if (any_agn) then
             call backward_attenuation(ctx, pbuf, n_mod, nspec, ntau, igm, zvar, g%igm_t, tau, yo, agn_on, ita, wta, &
-                                      lsum, ctx%state%agndust_spec, gw, part, dpar)
+                                      lsum, ctx%state%agndust_spec, g%wt, emis, iq, iu, wq, wu, gam, eb, gw, part, dpar)
         else
             call backward_attenuation(ctx, pbuf, n_mod, nspec, 1, igm, zvar, g%igm_t, tau, yo, agn_on, ita, wta, &
-                                      lsum, noagn, gw, part, dpar)
+                                      lsum, noagn, g%wt, emis, iq, iu, wq, wu, gam, eb, gw, part, dpar)
         end if
         call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, ctx%state%ssp_basis_lbol, zmode, &
                                it_tesc, zlo, zhi, dz, lum_linear, lsum_bar, gw, w_bar)
@@ -3064,7 +3154,10 @@ contains
             do m = 1, n_mod
                 params_bar(1:NBGRAD, m) = 0.0_wp
                 params_bar(BGRAD_FAGN, m) = fagn_bar(m) * cscale(m)
-                params_bar(BGRAD_DUST1:BGRAD_DUST1 + NDP - 1, m) = dpar(:, m) * cscale(m)
+                params_bar(BGRAD_DUST1:BGRAD_UVB, m) = dpar(1:9, m) * cscale(m)
+                params_bar(BGRAD_DUSTE_QPAH, m) = dpar(10, m) * dchain(1, m) * cscale(m)
+                params_bar(BGRAD_DUSTE_UMIN, m) = dpar(11, m) * dchain(2, m) * cscale(m)
+                params_bar(BGRAD_DUSTE_GAMMA, m) = dpar(12, m) * dchain(3, m) * cscale(m)
             end do
         end if
         if (present(weights_bar)) then
@@ -3210,13 +3303,97 @@ contains
         end do
     end subroutine backward_agn
 
-    !> Adjoint of the IGM transmission and of attenuate_batch (without dust emission): from S_bar in
+    !> Dust emission, first pass: the emission E = shape T_d R (R = s_abs / s_esc) is linear in R, so
+    !> R_bar = sum over pixels of A_bar shape T_d (per model, NCHG chunks then FP64), and
+    !> s_abs_bar = R_bar / s_esc, s_esc_bar = -R_bar s_abs / s_esc^2 (eb(1:2, m); eb(3, m) = R). Zero
+    !> for models without dust emission (or with s_esc at the floor, where the forward adds none).
+    subroutine backward_emission_sums(ctx, pbuf, n_mod, nspec, igm, zvar, igm_t, tau, wt, emis, iq, iu, wq, wu, gam, &
+                                      s_abs, s_esc, gw, part, eb)
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)              :: n_mod, nspec
+#if !defined(__flang__)
+        type(params), intent(in), target :: pbuf(n_mod)
+#else
+        integer(int64), intent(in), target :: pbuf(NPW, n_mod)
+#endif
+        logical, intent(in)              :: igm, zvar, emis(n_mod)
+        integer, intent(in)              :: iq(n_mod), iu(n_mod)
+        real(WP), intent(in)             :: wq(n_mod), wu(n_mod), gam(n_mod), s_abs(n_mod), s_esc(n_mod)
+        real(KP), intent(in)             :: igm_t(nspec), tau(nspec, n_mod), wt(nspec), gw(nspec, 2 * n_mod)
+        real(KP), intent(out)            :: part(NDP, NCHG, n_mod)
+        real(WP), intent(out)            :: eb(3, n_mod)
+
+        integer  :: m, c, i, dt
+        real(KP) :: sk, ck, term, tsum, ga, tau_d, td, tau_b, tb, tau_o, to, curve
+        real(WP) :: rb
+        type(params_core), pointer :: pl
+
+        dt = ctx%dust_type_val
+        associate (ttab => ctx%state%att_tab, ltab => ctx%state%att_ltab)
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(i, sk, ck, term, tsum, ga, tau_d, td, tau_b, &
+        !$omp& tb, tau_o, to, curve, pl) &
+        !$omp& map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%dustem2_dustem, ttab, ltab)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(i, sk, ck, term, tsum, ga, tau_d, td, tau_b, tb, tau_o, to, curve, pl)
+#endif
+        do m = 1, n_mod
+            do c = 1, NCHG
+                sk = 0.0_KP
+                ck = 0.0_KP
+                if (emis(m) .and. s_esc(m) > SAFE_FLOOR) then
+#if !defined(__flang__)
+                    pl => pbuf(m)%params_core
+#else
+                    call c_f_pointer(c_loc(pbuf(1, m)), pl)
+#endif
+                    do i = c, nspec, NCHG
+                        ga = gw(i, n_mod + m)
+                        if (igm .and. zvar) then
+                            if (pl%zred > SAFE_FLOOR) ga = ga * real(exp(-real(tau(i, m), WP) * pl%igm_factor), KP)
+                        else if (igm) then
+                            ga = ga * igm_t(i)
+                        end if
+                        call pixel_transmissions(ctx, pl, nspec, i, dt, ttab, ltab, tau_d, td, tau_b, tb, tau_o, to, &
+                                                 curve)
+                        term = ga * dl07_shape(ctx, i, iq(m), wq(m), iu(m), wu(m), gam(m)) * td - ck
+                        tsum = sk + term
+                        ck = (tsum - sk) - term
+                        sk = tsum
+                    end do
+                end if
+                part(1, c, m) = sk
+            end do
+        end do
+        end associate
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(c, rb)
+#elif defined(_OPENMP)
+        !$omp parallel do private(c, rb)
+#endif
+        do m = 1, n_mod
+            eb(1, m) = 0.0_wp
+            eb(2, m) = 0.0_wp
+            eb(3, m) = 0.0_wp
+            if (emis(m) .and. s_esc(m) > SAFE_FLOOR) then
+                rb = 0.0_wp
+                do c = 1, NCHG
+                    rb = rb + real(part(1, c, m), WP)
+                end do
+                eb(1, m) = rb / s_esc(m)
+                eb(2, m) = -rb * s_abs(m) / s_esc(m)**2
+                eb(3, m) = s_abs(m) / s_esc(m)
+            end if
+        end do
+    end subroutine backward_emission_sums
+
+    !> Adjoint of the IGM transmission and of attenuate_batch (with the dust emission's second pass): from S_bar in
     !> gw(:, N + m), young_bar = S_bar T_IGM a_young D into gw(:, m) and old_bar = S_bar T_IGM T_old D
     !> into gw(:, N + m), and the dust parameters' gradients dpar (NDP x N), summed per model over
     !> NCHG chunks of pixels (atten_adjoint_chunk; one thread per model and chunk, consecutive
     !> threads on consecutive pixels), then over the chunks in FP64.
     subroutine backward_attenuation(ctx, pbuf, n_mod, nspec, ntau, igm, zvar, igm_t, tau, yo, agn_on, ita, wta, lsum, &
-                                    agndust_spec, gw, part, dpar)
+                                    agndust_spec, wt, emis, iq, iu, wq, wu, gam, eb, gw, part, dpar)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)              :: n_mod, nspec, ntau
 #if !defined(__flang__)
@@ -3227,7 +3404,10 @@ contains
         logical, intent(in)              :: igm, zvar, agn_on(n_mod)
         integer, intent(in)              :: ita(n_mod)
         real(WP), intent(in)             :: wta(n_mod), lsum(n_mod), agndust_spec(nspec, ntau)
-        real(KP), intent(in)             :: igm_t(nspec), tau(nspec, n_mod), yo(nspec, 2 * n_mod)
+        real(KP), intent(in)             :: igm_t(nspec), tau(nspec, n_mod), yo(nspec, 2 * n_mod), wt(nspec)
+        logical, intent(in)              :: emis(n_mod)
+        integer, intent(in)              :: iq(n_mod), iu(n_mod)
+        real(WP), intent(in)             :: wq(n_mod), wu(n_mod), gam(n_mod), eb(3, n_mod)
         real(KP), intent(inout)          :: gw(nspec, 2 * n_mod)
         real(KP), intent(out)            :: part(NDP, NCHG, n_mod)
         real(WP), intent(out)            :: dpar(NDP, n_mod)
@@ -3252,7 +3432,8 @@ contains
                 call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
                 call atten_adjoint_chunk(ctx, pl, n_mod, nspec, ntau, m, c, dt, ttab, ltab, igm, zvar, igm_t, tau, yo, &
-                                         agn_on(m), ita(m), wta(m), lsum(m), agndust_spec, gw, part)
+                                         agn_on(m), ita(m), wta(m), lsum(m), agndust_spec, wt, emis(m), iq(m), iu(m), &
+                                         wq(m), wu(m), gam(m), eb, gw, part)
             end do
         end do
         end associate
@@ -3281,9 +3462,16 @@ contains
     !> curve L (power law), T1 exp(e L) + curve L (Kriek & Conroy); d curve / d uvb = T2 + T3 / R_V
     !> and d curve / d R_V = -(T1 + uvb T3) / R_V^2 (Cardelli et al.); tau_birth = dust1 p,
     !> p = exp(dust1_index L). At dust1 = 0 or dust3 = 0 (where the forward skips the screen) the
-    !> derivative is the one-sided one. Sums compensated at FP32 kernel precision.
+    !> derivative is the one-sided one. With dust emission (eb: s_abs_bar, s_esc_bar, R), the
+    !> emission E = shape T_d R adds T_d_bar += A_bar shape R + s_esc_bar c shape and shape_bar =
+    !> A_bar T_d R + s_esc_bar c T_d (c: the pixel's trapezoid weight in frequency, as
+    !> dust_emission_reductions sums), and the absorbed light (s_abs = sum c absorbed) adds
+    !> absorbed_bar = s_abs_bar c to the young and old spectra, the three transmissions and the two
+    !> fractions; shape_bar is carried to the template's interpolation weights (dl07_shape_grad).
+    !> Sums compensated at FP32 kernel precision.
     subroutine atten_adjoint_chunk(ctx, pl, n_mod, nspec, ntau, m, c, dt, ttab, ltab, igm, zvar, igm_t, tau, yo, &
-                                   agn_m, ita_m, wta_m, lsum_m, agndust_spec, gw, part)
+                                   agn_m, ita_m, wta_m, lsum_m, agndust_spec, wt, emis_m, iq_m, iu_m, wq_m, wu_m, gam_m, &
+                                   eb, gw, part)
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -3293,7 +3481,11 @@ contains
         real(KP), intent(in)             :: ttab(nspec, 0:3)
         real(WP), intent(in)             :: ltab(nspec), wta_m, lsum_m, agndust_spec(nspec, ntau)
         logical, intent(in)              :: igm, zvar, agn_m
-        real(KP), intent(in)             :: igm_t(nspec), tau(nspec, n_mod), yo(nspec, 2 * n_mod)
+        real(KP), intent(in)             :: igm_t(nspec), tau(nspec, n_mod), yo(nspec, 2 * n_mod), wt(nspec)
+        logical, intent(in)              :: emis_m
+        integer, intent(in)              :: iq_m, iu_m
+        real(WP), intent(in)             :: wq_m, wu_m, gam_m
+        real(WP), intent(in)             :: eb(3, n_mod)   ! (whole: a section would be copied at run time)
         real(KP), intent(inout)          :: gw(nspec, 2 * n_mod)
         real(KP), intent(inout)          :: part(NDP, NCHG, n_mod)
 
@@ -3301,8 +3493,9 @@ contains
         real(KP) :: acc(NDP), cmp(NDP), d(NDP)
         real(KP) :: y, o, gs, ga, tau_d, td, tau_b, tb, tau_o, to, curve, fo, fn, dfac, ay, gd, gtd, gtb, gto
         real(KP) :: lk, pb, dc_idx, dc_mwr, dc_uvb, s1, dust2k, dust3k, term, tsum, tmpl, lagn
+        real(KP) :: cwt, shape, gshape, gab, rk, sabk, sesk, omtd, gy, go, dsq, dsu, dsg
         real(WP) :: lb
-        logical  :: nodust
+        logical  :: nodust, em
 
         acc = 0.0_KP
         cmp = 0.0_KP
@@ -3318,6 +3511,10 @@ contains
             if (lsum_m > SAFE_FLOOR) lb = log10(lsum_m)
             lagn = real(10.0_wp**lb * pl%fagn, KP)
         end if
+        em = emis_m .and. (eb(3, m) /= 0.0_wp .or. eb(1, m) /= 0.0_wp .or. eb(2, m) /= 0.0_wp)
+        sabk = real(eb(1, m), KP)
+        sesk = real(eb(2, m), KP)
+        rk = real(eb(3, m), KP)
         do i = c, nspec, NCHG
             y = yo(i, m)
             o = yo(i, n_mod + m)
@@ -3336,8 +3533,8 @@ contains
             end if
             ay = tb * (1.0_KP - fo) + fo
             ! The age sums' gradients
-            gw(i, m) = ga * ay * dfac
-            gw(i, n_mod + m) = ga * to * dfac
+            gy = ga * ay * dfac
+            go = ga * to * dfac
             ! The transmissions' gradients
             gd = ga * (y * ay + o * to)
             gtd = 0.0_KP
@@ -3348,6 +3545,36 @@ contains
             end if
             gtb = ga * y * (1.0_KP - fo) * dfac
             gto = ga * o * dfac
+            d = 0.0_KP
+            if (em) then
+                ! The pixel's weight in s_abs and s_esc (wt(i) (x_i + x_i+1) summed over i)
+                cwt = wt(i)
+                if (i > 1) cwt = cwt + wt(i - 1)
+                shape = dl07_shape(ctx, i, iq_m, wq_m, iu_m, wu_m, gam_m)
+                ! E = shape T_d R, and s_esc = sum c shape T_d
+                gtd = gtd + ga * shape * rk + sesk * cwt * shape
+                gshape = ga * td * rk + sesk * cwt * td
+                call dl07_shape_grad(ctx, i, iq_m, wq_m, iu_m, wu_m, gam_m, dsq, dsu, dsg)
+                d(10) = gshape * dsq
+                d(11) = gshape * dsu
+                d(12) = gshape * dsg
+                ! s_abs = sum c absorbed, absorbed = young ((1 - fo)(1 - T_b) + a_young (1 - fn)(1 - T_d))
+                !                                  + old ((1 - T_o) + T_o (1 - fn)(1 - T_d))
+                gab = sabk * cwt
+                omtd = 0.0_KP
+                if (nodust) omtd = (1.0_KP - fn) * (1.0_KP - td)
+                gy = gy + gab * ((1.0_KP - fo) * (1.0_KP - tb) + ay * omtd)
+                go = go + gab * ((1.0_KP - to) + to * omtd)
+                gtb = gtb - gab * y * (1.0_KP - fo) * (1.0_KP - omtd)
+                gto = gto - gab * o * (1.0_KP - omtd)
+                if (nodust) then
+                    gtd = gtd - gab * (1.0_KP - fn) * (y * ay + o * to)
+                    d(7) = -gab * (1.0_KP - td) * (y * ay + o * to)
+                end if
+                d(6) = -gab * y * (1.0_KP - tb) * (1.0_KP - omtd)
+            end if
+            gw(i, m) = gy
+            gw(i, n_mod + m) = go
             ! The curve's derivatives
             lk = real(ltab(i), KP)
             dc_idx = 0.0_KP; dc_mwr = 0.0_KP; dc_uvb = 0.0_KP
@@ -3360,7 +3587,6 @@ contains
                 dc_uvb = ttab(i, 2) + s1 * ttab(i, 3)
                 dc_mwr = -(ttab(i, 1) + real(pl%uvb, KP) * ttab(i, 3)) * s1 * s1
             end if
-            d = 0.0_KP
             ! dust1 and dust1_index (the birth-cloud screen)
             pb = exp_kp(pl%dust1_index * ltab(i))
             if (pl%dust1 <= SAFE_FLOOR .or. 1.0_wp - pl%frac_obrun <= SAFE_FLOOR) then
@@ -3378,8 +3604,8 @@ contains
             d(8) = -(gtd * td * dust2k + gto * to * dust3k) * dc_mwr
             d(9) = -(gtd * td * dust2k + gto * to * dust3k) * dc_uvb
             ! frac_obrun and frac_nodust
-            d(6) = ga * y * (1.0_KP - tb) * dfac
-            if (nodust) d(7) = gd * (1.0_KP - td)
+            d(6) = d(6) + ga * y * (1.0_KP - tb) * dfac
+            if (nodust) d(7) = d(7) + gd * (1.0_KP - td)
             do q = 1, NDP
                 term = d(q) - cmp(q)
                 tsum = acc(q) + term
