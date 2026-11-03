@@ -74,6 +74,9 @@ module opensps_ssp_batch
         !> Per point: ln m1 and ln(m2 / m1) (model-independent; imf_bin_weights_tab takes the power-law
         !> bins from them, one exponential per bin instead of a power)
         real(WP), allocatable :: pt_llo(:), pt_dl(:)
+        !> The template entries by point (the reverse pass's gathers): point gp (global index) has the
+        !> entries pe_k(pe_ptr(gp) .. pe_ptr(gp + 1) - 1) (global entry indices), of templates pe_e (local)
+        integer, allocatable :: pe_ptr(:), pe_k(:), pe_e(:)
         logical :: on_device = .false.
     end type ssp_opset_t
 
@@ -136,8 +139,51 @@ contains
             end associate
         end do
         call imf_bin_logs(set%pt_m1, set%pt_m2, set%pt_llo, set%pt_dl)
+        call entries_by_point(set, np, max(nen, 1))
         call move_alloc(ops, set%ops)
     end subroutine ssp_opset_build
+
+    !> The template entries of each point (pe_ptr, pe_k, pe_e): counts, then a fill in template order.
+    subroutine entries_by_point(set, np, nen)
+        type(ssp_opset_t), intent(inout) :: set
+        integer, intent(in) :: np, nen
+        integer :: iz, e, s, sg, k, gp, eg
+        integer, allocatable :: fill(:)
+
+        allocate(set%pe_ptr(np + 1), set%pe_k(nen), set%pe_e(nen), fill(np))
+        fill = 0
+        do iz = 1, set%nz
+            do e = 1, set%n_eff(iz)
+                eg = set%eff_off(iz) + e
+                do s = set%seg_first(eg), set%seg_first(eg + 1) - 1
+                    sg = set%seg_off(iz) + s
+                    do k = set%seg_ptr(sg), set%seg_ptr(sg + 1) - 1
+                        gp = set%pt_off(iz) + set%eff_pt(k)
+                        fill(gp) = fill(gp) + 1
+                    end do
+                end do
+            end do
+        end do
+        set%pe_ptr(1) = 1
+        do gp = 1, np
+            set%pe_ptr(gp + 1) = set%pe_ptr(gp) + fill(gp)
+        end do
+        fill = 0
+        do iz = 1, set%nz
+            do e = 1, set%n_eff(iz)
+                eg = set%eff_off(iz) + e
+                do s = set%seg_first(eg), set%seg_first(eg + 1) - 1
+                    sg = set%seg_off(iz) + s
+                    do k = set%seg_ptr(sg), set%seg_ptr(sg + 1) - 1
+                        gp = set%pt_off(iz) + set%eff_pt(k)
+                        set%pe_k(set%pe_ptr(gp) + fill(gp)) = k
+                        set%pe_e(set%pe_ptr(gp) + fill(gp)) = e
+                        fill(gp) = fill(gp) + 1
+                    end do
+                end do
+            end do
+        end do
+    end subroutine entries_by_point
 
     subroutine ssp_opset_free(set)
         type(ssp_opset_t), intent(inout) :: set
@@ -147,7 +193,7 @@ contains
             !$omp target exit data map(delete: set%n_pc, set%n_seg, set%n_eff, set%pt_off, set%pc_off, set%seg_off, &
             !$omp     set%ent_off, set%eff_off, set%pt_first, set%pt_age, set%pc_ptr, set%age_pc, set%pt_ptr, set%seg_ptr, &
             !$omp     set%seg_first, set%eff_pt, set%pt_mini, set%pt_m1, set%pt_m2, set%pt_cm, set%pt_cl, set%pt_q, &
-            !$omp     set%age_mmax, set%eff_val, set%pt_llo, set%pt_dl)
+            !$omp     set%age_mmax, set%eff_val, set%pt_llo, set%pt_dl, set%pe_ptr, set%pe_k, set%pe_e)
             set%on_device = .false.
         end if
 #endif
@@ -162,6 +208,7 @@ contains
         if (allocated(set%pt_first)) deallocate(set%pt_first, set%pt_age, set%pt_mini, set%pt_m1, set%pt_m2, set%pt_cm, &
                                                 set%pt_cl, set%pt_q, set%pc_ptr, set%seg_ptr, set%seg_first, set%eff_pt, &
                                                 set%eff_val, set%age_pc, set%pt_ptr, set%age_mmax, set%pt_llo, set%pt_dl)
+        if (allocated(set%pe_ptr)) deallocate(set%pe_ptr, set%pe_k, set%pe_e)
         set%nz = 0; set%nt = 0; set%n_pts_max = 0; set%n_eff_max = 0; set%n_seg_max = 0; set%n_pc_max = 0
     end subroutine ssp_opset_free
 
@@ -174,7 +221,7 @@ contains
         !$omp target enter data map(to: set%n_pc, set%n_seg, set%n_eff, set%pt_off, set%pc_off, set%seg_off, &
         !$omp     set%ent_off, set%eff_off, set%pt_first, set%pt_age, set%pc_ptr, set%age_pc, set%pt_ptr, set%seg_ptr, &
         !$omp     set%seg_first, set%eff_pt, set%pt_mini, set%pt_m1, set%pt_m2, set%pt_cm, set%pt_cl, set%pt_q, &
-        !$omp     set%age_mmax, set%eff_val, set%pt_llo, set%pt_dl)
+        !$omp     set%age_mmax, set%eff_val, set%pt_llo, set%pt_dl, set%pe_ptr, set%pe_k, set%pe_e)
         do iz = 1, set%nz
             call ssp_operator_to_device(set%ops(iz))   ! (the template matrices)
         end do
@@ -403,7 +450,7 @@ contains
         integer :: nz, pass, m, t, j, i, np, nc_max, neb_cols, ntq, m0, nc, j0, jr, iz, ky, ig, isg
         integer, allocatable :: perm(:), viz(:), ptr(:), cnt(:)
         real(WP), allocatable :: cz(:), ones(:), w(:,:), wm(:,:), tot(:), pps(:,:,:), slz(:,:), sqz(:,:), wpb(:,:), &
-                                 vb(:,:,:), dsm(:,:), dsl(:,:), dsq(:,:), pmp(:,:), part(:,:), zsg(:), dsp(:,:)
+                                 vb(:,:,:), dsm(:,:), dsl(:,:), dsq(:,:), pmp(:,:), part(:,:), zsg(:), dsp(:,:), sxa(:,:), sea(:,:)
         real(KP), allocatable :: wk(:,:)
         real(WP) :: sgn
 
@@ -417,10 +464,10 @@ contains
         allocate(w(nc_max, set%n_pts_max), wm(nc_max, set%n_pts_max), wk(nc_max, set%n_pts_max), tot(nc_max), &
                  pps(nc_max, 3, set%n_pc_max), slz(nt, nc_max), sqz(nt, nc_max), wpb(nc_max, set%n_pts_max), &
                  vb(set%n_eff_max, 4, nc_max), dsm(nt, n_mod), dsl(nt, n_mod), dsq(nt, n_mod), pmp(size(pm, 1), n_mod), &
-                 part(set%n_pc_max, nc_max), dsp(nt, n_mod))
+                 part(set%n_pc_max, nc_max), dsp(nt, n_mod), sxa(nt, nc_max), sea(nt, nc_max))
         ones = 1.0_wp
 #ifdef OMP_TARGET
-        !$omp target data map(alloc: w, wm, wk, tot, pps, slz, sqz, wpb, vb, dsm, dsl, dsq, part, dsp) &
+        !$omp target data map(alloc: w, wm, wk, tot, pps, slz, sqz, wpb, vb, dsm, dsl, dsq, part, dsp, sxa, sea) &
         !$omp& map(to: pm, ones, msum_bar) map(from: wbar, imf_bar, fesc_bar, zbar) map(alloc: perm, viz, cz, zsg, pmp)
 #endif
 #if defined(OMP_TARGET)
@@ -499,9 +546,10 @@ contains
                                           set%ops(iz)%etpl, gw, set%n_eff_max, nc_max, vb)
                     j0 = jr + 1
                 end do
-                call adj_fold(m0, nc, set%n_eff_max, nt_neb, neb_cols, wsfh, it_tesc, fesc, set%n_eff, set%pt_off, &
-                              set%seg_off, set%eff_off, set%pt_age, set%eff_pt, set%eff_val, set%seg_ptr, set%seg_first, &
-                              perm, viz, cz, zsg, wk, vb, wbar, wpb, fesc_bar, zbar)
+                ! (w, wm: free until the IMF rows' differences below)
+                call adj_fold_gather(m0, nc, nt, nt_neb, neb_cols, set%n_pts_max, wsfh, it_tesc, fesc, set%pt_off, &
+                                     set%pt_ptr, set%pt_age, set%eff_val, set%pe_ptr, set%pe_k, set%pe_e, perm, viz, cz, &
+                                     zsg, wk, vb, wbar, wpb, fesc_bar, zbar, w, wm, sxa, sea)
                 call adj_lq(m0, nc, nt, nt_neb, set%n_pc_max, set%n_pc, set%pt_off, set%pc_off, set%pc_ptr, set%pt_age, &
                             set%pt_cl, set%pt_q, perm, viz, cz, zsg, wsfh, slum, lsum_bar, qbar, ntq, slz, sqz, wpb, zbar)
                 ! The IMF parameters: central differences of the point weights
@@ -684,33 +732,196 @@ contains
         integer, intent(in), contiguous :: perm(:)
         real(KP), intent(in) :: etpl(nspec, *), gw(nspec, 2 * n_mod)
         real(WP), intent(inout) :: vb(n_eff_max, 4, nc_max)
-        integer :: e, j, i, m
-        real(WP) :: sy, so, sey, seo
+        ! Register tile: each thread one template and 4 models (the template's pixels read once for all
+        ! of them; models clamped at the end of the run, duplicates written twice with the same value).
+        ! Scalar accumulators (an array tile spilled to scratch memory on the R9700), at kernel
+        ! precision, compensated in FP32 kernels: s* over the non-EUV pixels, e* over the EUV pixels
+        ! (i <= nwhl); *y young, *o old column
+        integer  :: e, jb, nb, i, j1, j2, j3, j4, m1, m2, m3, m4
+        real(KP) :: ev, term, tsum
+        real(KP) :: sy1, sy2, sy3, sy4, so1, so2, so3, so4, ey1, ey2, ey3, ey4, eo1, eo2, eo3, eo4
+        real(KP) :: csy1, csy2, csy3, csy4, cso1, cso2, cso3, cso4, cey1, cey2, cey3, cey4, ceo1, ceo2, ceo3, ceo4
+
+        nb = (jr - j0 + 4) / 4
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(i, m, sy, so, sey, seo)
+        !$omp target teams distribute parallel do collapse(2) private(i, j1, j2, j3, j4, m1, m2, m3, m4, ev, &
+        !$omp& term, tsum, sy1, sy2, sy3, sy4, so1, so2, so3, so4, ey1, ey2, ey3, ey4, eo1, eo2, eo3, eo4, &
+        !$omp& csy1, csy2, csy3, csy4, cso1, cso2, cso3, cso4, cey1, cey2, cey3, cey4, ceo1, ceo2, ceo3, ceo4)
 #elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(i, m, sy, so, sey, seo)
+        !$omp parallel do collapse(2) private(i, j1, j2, j3, j4, m1, m2, m3, m4, ev, term, tsum, sy1, sy2, sy3, &
+        !$omp& sy4, so1, so2, so3, so4, ey1, ey2, ey3, ey4, eo1, eo2, eo3, eo4, csy1, csy2, csy3, csy4, cso1, &
+        !$omp& cso2, cso3, cso4, cey1, cey2, cey3, cey4, ceo1, ceo2, ceo3, ceo4)
 #endif
-        do j = j0, jr
+        do jb = 1, nb
             do e = 1, n_eff
-                m = perm(m0 + j - 1)
-                sy = 0.0_wp; so = 0.0_wp; sey = 0.0_wp; seo = 0.0_wp
+                j1 = min(j0 + (jb - 1) * 4, jr)
+                j2 = min(j0 + (jb - 1) * 4 + 1, jr)
+                j3 = min(j0 + (jb - 1) * 4 + 2, jr)
+                j4 = min(j0 + (jb - 1) * 4 + 3, jr)
+                m1 = perm(m0 + j1 - 1)
+                m2 = perm(m0 + j2 - 1)
+                m3 = perm(m0 + j3 - 1)
+                m4 = perm(m0 + j4 - 1)
+                sy1 = 0.0_KP
+                sy2 = 0.0_KP
+                sy3 = 0.0_KP
+                sy4 = 0.0_KP
+                so1 = 0.0_KP
+                so2 = 0.0_KP
+                so3 = 0.0_KP
+                so4 = 0.0_KP
+                ey1 = 0.0_KP
+                ey2 = 0.0_KP
+                ey3 = 0.0_KP
+                ey4 = 0.0_KP
+                eo1 = 0.0_KP
+                eo2 = 0.0_KP
+                eo3 = 0.0_KP
+                eo4 = 0.0_KP
+                csy1 = 0.0_KP
+                csy2 = 0.0_KP
+                csy3 = 0.0_KP
+                csy4 = 0.0_KP
+                cso1 = 0.0_KP
+                cso2 = 0.0_KP
+                cso3 = 0.0_KP
+                cso4 = 0.0_KP
+                cey1 = 0.0_KP
+                cey2 = 0.0_KP
+                cey3 = 0.0_KP
+                cey4 = 0.0_KP
+                ceo1 = 0.0_KP
+                ceo2 = 0.0_KP
+                ceo3 = 0.0_KP
+                ceo4 = 0.0_KP
                 do i = 1, nwhl
-                    sey = sey + real(etpl(i, e), WP) * real(gw(i, m), WP)
-                    seo = seo + real(etpl(i, e), WP) * real(gw(i, n_mod + m), WP)
+                    ev = etpl(i, e)
+                    if (KP == WP) then
+                        ey1 = ey1 + ev * gw(i, m1)
+                        eo1 = eo1 + ev * gw(i, n_mod + m1)
+                        ey2 = ey2 + ev * gw(i, m2)
+                        eo2 = eo2 + ev * gw(i, n_mod + m2)
+                        ey3 = ey3 + ev * gw(i, m3)
+                        eo3 = eo3 + ev * gw(i, n_mod + m3)
+                        ey4 = ey4 + ev * gw(i, m4)
+                        eo4 = eo4 + ev * gw(i, n_mod + m4)
+                    else
+                        term = ev * gw(i, m1) - cey1
+                        tsum = ey1 + term
+                        cey1 = (tsum - ey1) - term
+                        ey1 = tsum
+                        term = ev * gw(i, n_mod + m1) - ceo1
+                        tsum = eo1 + term
+                        ceo1 = (tsum - eo1) - term
+                        eo1 = tsum
+                        term = ev * gw(i, m2) - cey2
+                        tsum = ey2 + term
+                        cey2 = (tsum - ey2) - term
+                        ey2 = tsum
+                        term = ev * gw(i, n_mod + m2) - ceo2
+                        tsum = eo2 + term
+                        ceo2 = (tsum - eo2) - term
+                        eo2 = tsum
+                        term = ev * gw(i, m3) - cey3
+                        tsum = ey3 + term
+                        cey3 = (tsum - ey3) - term
+                        ey3 = tsum
+                        term = ev * gw(i, n_mod + m3) - ceo3
+                        tsum = eo3 + term
+                        ceo3 = (tsum - eo3) - term
+                        eo3 = tsum
+                        term = ev * gw(i, m4) - cey4
+                        tsum = ey4 + term
+                        cey4 = (tsum - ey4) - term
+                        ey4 = tsum
+                        term = ev * gw(i, n_mod + m4) - ceo4
+                        tsum = eo4 + term
+                        ceo4 = (tsum - eo4) - term
+                        eo4 = tsum
+                    end if
                 end do
                 do i = nwhl + 1, nspec
-                    sy = sy + real(etpl(i, e), WP) * real(gw(i, m), WP)
-                    so = so + real(etpl(i, e), WP) * real(gw(i, n_mod + m), WP)
+                    ev = etpl(i, e)
+                    if (KP == WP) then
+                        sy1 = sy1 + ev * gw(i, m1)
+                        so1 = so1 + ev * gw(i, n_mod + m1)
+                        sy2 = sy2 + ev * gw(i, m2)
+                        so2 = so2 + ev * gw(i, n_mod + m2)
+                        sy3 = sy3 + ev * gw(i, m3)
+                        so3 = so3 + ev * gw(i, n_mod + m3)
+                        sy4 = sy4 + ev * gw(i, m4)
+                        so4 = so4 + ev * gw(i, n_mod + m4)
+                    else
+                        term = ev * gw(i, m1) - csy1
+                        tsum = sy1 + term
+                        csy1 = (tsum - sy1) - term
+                        sy1 = tsum
+                        term = ev * gw(i, n_mod + m1) - cso1
+                        tsum = so1 + term
+                        cso1 = (tsum - so1) - term
+                        so1 = tsum
+                        term = ev * gw(i, m2) - csy2
+                        tsum = sy2 + term
+                        csy2 = (tsum - sy2) - term
+                        sy2 = tsum
+                        term = ev * gw(i, n_mod + m2) - cso2
+                        tsum = so2 + term
+                        cso2 = (tsum - so2) - term
+                        so2 = tsum
+                        term = ev * gw(i, m3) - csy3
+                        tsum = sy3 + term
+                        csy3 = (tsum - sy3) - term
+                        sy3 = tsum
+                        term = ev * gw(i, n_mod + m3) - cso3
+                        tsum = so3 + term
+                        cso3 = (tsum - so3) - term
+                        so3 = tsum
+                        term = ev * gw(i, m4) - csy4
+                        tsum = sy4 + term
+                        csy4 = (tsum - sy4) - term
+                        sy4 = tsum
+                        term = ev * gw(i, n_mod + m4) - cso4
+                        tsum = so4 + term
+                        cso4 = (tsum - so4) - term
+                        so4 = tsum
+                    end if
                 end do
                 if (e > ky) then
-                    sy = 0.0_wp
-                    sey = 0.0_wp
+                    vb(e, 1, j1) = 0.0_wp
+                    vb(e, 3, j1) = 0.0_wp
+                else
+                    vb(e, 1, j1) = real(sy1, WP)
+                    vb(e, 3, j1) = real(ey1, WP)
                 end if
-                vb(e, 1, j) = sy
-                vb(e, 2, j) = so
-                vb(e, 3, j) = sey
-                vb(e, 4, j) = seo
+                vb(e, 2, j1) = real(so1, WP)
+                vb(e, 4, j1) = real(eo1, WP)
+                if (e > ky) then
+                    vb(e, 1, j2) = 0.0_wp
+                    vb(e, 3, j2) = 0.0_wp
+                else
+                    vb(e, 1, j2) = real(sy2, WP)
+                    vb(e, 3, j2) = real(ey2, WP)
+                end if
+                vb(e, 2, j2) = real(so2, WP)
+                vb(e, 4, j2) = real(eo2, WP)
+                if (e > ky) then
+                    vb(e, 1, j3) = 0.0_wp
+                    vb(e, 3, j3) = 0.0_wp
+                else
+                    vb(e, 1, j3) = real(sy3, WP)
+                    vb(e, 3, j3) = real(ey3, WP)
+                end if
+                vb(e, 2, j3) = real(so3, WP)
+                vb(e, 4, j3) = real(eo3, WP)
+                if (e > ky) then
+                    vb(e, 1, j4) = 0.0_wp
+                    vb(e, 3, j4) = 0.0_wp
+                else
+                    vb(e, 1, j4) = real(sy4, WP)
+                    vb(e, 3, j4) = real(ey4, WP)
+                end if
+                vb(e, 2, j4) = real(so4, WP)
+                vb(e, 4, j4) = real(eo4, WP)
             end do
         end do
     end subroutine adj_template_bar
@@ -799,6 +1010,100 @@ contains
         end do
     end subroutine adj_fold
 
+    !> adj_fold as gathers (no atomics: on GPUs the FP64 atomic updates of adj_fold, every template's
+    !> thread adding into its model's w_bar, z_bar and fesc_bar, took ~4 s per call of 100 models on
+    !> the R9700). With G(p) = sum over point p's template entries of val vb(e, young or old) and
+    !> Ge(p) the same with the EUV columns, Gx = G + (fesc for the nebular ages, else 1) Ge:
+    !> 1. per (point, model): wpb += cz wsfh(t_p) Gx, and the point weight times Gx and Ge (px, pq);
+    !> 2. per (age, model): w_bar(t) += cz sum over the age's points of px (sxa, sea: the sums);
+    !> 3. per model: z_bar += zsg sum_t wsfh(t) sxa(t), fesc_bar += cz sum_{t <= nt_neb} wsfh(t) sea(t).
+    !> The same sums as adj_fold, reordered (FP64 rounding).
+    subroutine adj_fold_gather(m0, nc, nt, nt_neb, neb_cols, n_pts_max, wsfh, it_tesc, fesc, pt_off, pt_ptr, pt_age, &
+                               eff_val, pe_ptr, pe_k, pe_e, perm, viz, cz, zsg, wk, vb, wbar, wpb, fesc_bar, zbar, &
+                               px, pq, sxa, sea)
+        integer, intent(in) :: m0, nc, nt, nt_neb, neb_cols, n_pts_max
+        real(WP), intent(in), contiguous :: wsfh(:,:), fesc(:), eff_val(:), cz(:), zsg(:), vb(:,:,:)
+        real(KP), intent(in), contiguous :: wk(:,:)
+        integer, intent(in), contiguous :: it_tesc(:), pt_off(:), pt_ptr(:), pt_age(:), pe_ptr(:), pe_k(:), pe_e(:), &
+                                           perm(:), viz(:)
+        real(WP), intent(inout), contiguous :: wbar(:,:), wpb(:,:), fesc_bar(:), zbar(:), px(:,:), pq(:,:), sxa(:,:), &
+                                               sea(:,:)
+        integer  :: p, j, q, k, e, t, m, iz, gp, np, c1
+        real(WP) :: g, ge, gx, fac, c, sx, se
+
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(q, k, e, t, m, iz, gp, np, c1, g, ge, gx, fac, c)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(q, k, e, t, m, iz, gp, np, c1, g, ge, gx, fac, c)
+#endif
+        do p = 1, n_pts_max
+            do j = 1, nc
+                iz = viz(m0 + j - 1)
+                np = pt_ptr((iz - 1) * (nt + 1) + nt + 1) - 1
+                px(j, p) = 0.0_wp
+                pq(j, p) = 0.0_wp
+                if (p > np) cycle
+                gp = pt_off(iz) + p
+                t = pt_age(gp)
+                if (t <= 0) cycle
+                m = perm(m0 + j - 1)
+                c1 = 2
+                if (t <= it_tesc(m)) c1 = 1
+                g = 0.0_wp
+                ge = 0.0_wp
+                do q = pe_ptr(gp), pe_ptr(gp + 1) - 1
+                    k = pe_k(q)
+                    e = pe_e(q)
+                    g = g + eff_val(k) * vb(e, c1, j)
+                    if (neb_cols > 0) ge = ge + eff_val(k) * vb(e, c1 + 2, j)
+                end do
+                fac = 1.0_wp
+                if (t <= nt_neb) fac = fesc(m)
+                gx = g + fac * ge
+                c = cz(m0 + j - 1)
+                wpb(j, p) = wpb(j, p) + c * wsfh(m, t) * gx
+                px(j, p) = real(wk(j, p), WP) * gx
+                pq(j, p) = real(wk(j, p), WP) * ge
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(p, m, iz, sx, se)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(p, m, iz, sx, se)
+#endif
+        do j = 1, nc
+            do t = 1, nt
+                iz = viz(m0 + j - 1)
+                m = perm(m0 + j - 1)
+                sx = 0.0_wp
+                se = 0.0_wp
+                do p = pt_ptr((iz - 1) * (nt + 1) + t), pt_ptr((iz - 1) * (nt + 1) + t + 1) - 1
+                    sx = sx + px(j, p)
+                    se = se + pq(j, p)
+                end do
+                wbar(t, m) = wbar(t, m) + cz(m0 + j - 1) * sx
+                sxa(t, j) = sx
+                sea(t, j) = se
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(t, m, sx, se)
+#elif defined(_OPENMP)
+        !$omp parallel do private(t, m, sx, se)
+#endif
+        do j = 1, nc
+            m = perm(m0 + j - 1)
+            sx = 0.0_wp
+            se = 0.0_wp
+            do t = 1, nt
+                sx = sx + wsfh(m, t) * sxa(t, j)
+                if (t <= nt_neb) se = se + wsfh(m, t) * sea(t, j)
+            end do
+            zbar(m) = zbar(m) + zsg(m0 + j - 1) * sx
+            if (neb_cols > 0) fesc_bar(m) = fesc_bar(m) + cz(m0 + j - 1) * se
+        end do
+    end subroutine adj_fold_gather
+
     !> L_bol and Q per point: w_p bar += lsum_bar wsfh(t) L(t) cz cl_p / sl_z + qbar(t) cz q_p; and their
     !> d / d dz (zbar: L in log, Q linearly).
     subroutine adj_lq(m0, nc, nt, nt_neb, n_pc_max, n_pc, pt_off, pc_off, pc_ptr, pt_age, pt_cl, pt_q, perm, viz, cz, &
@@ -866,8 +1171,9 @@ contains
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(k, k0, n, iz, o, s)
 #endif
-        do j = 1, nc
-            do q = 1, n_pc_max
+        ! (pieces outer, models inner: consecutive threads read consecutive models of one point)
+        do q = 1, n_pc_max
+            do j = 1, nc
                 iz = viz(m0 + j - 1)
                 s = 0.0_wp
                 if (q <= n_pc(iz)) then
