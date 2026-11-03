@@ -248,6 +248,7 @@ tables and interpolation weights:
 | `logzsol` | the bases (and L_bol, Q) interpolated in log Z, with every metallicity resident |
 | `tage`, `tau`, `const`, `fburst`, `tburst`, `sf_start`, `sf_trunc`, `sf_slope` | the SFH weights' tangents (`opensps_sfh_tangent`; sfh = 0, 1, 4, 5) |
 | `zred` | the resampling, the distance term, the IGM (`igm_tau_dz`) |
+| `imf1`, `imf2`, `imf3`, `vdmc`, `mdave` (with `ssp_ops`) | the SSP operator in reverse (`ssp_batch_age_sums_adjoint`: templates transposed, the fold in reverse, L_bol and Q per point), the point weights' derivatives by central differences of their FP64 closed forms |
 | `sigma_smooth` | the velocity kernel's coefficients (one sigma per batch: per-model sensitivities) |
 
 Kinks are one-sided: interpolation nodes of the dust-emission and nebular grids, grid ages for
@@ -258,7 +259,7 @@ nearly dark band has a gradient of 1 / F), long sums are compensated in FP32 bui
 11 configurations; agreement 1e-8 - 1e-5, limited by the differences), with linear-only checks in
 FP32 builds.
 
-Not yet (status 2 with gradients): the IMF through `ssp_ops`, SSP-level nebular emission
+Not yet (status 2 with gradients): SSP-level nebular emission
 (`add_neb_emission = 2`), lines outside the spectrum with dust emission, the host smoothing modes,
 `ssp_weights_z`; not differentiated: `emlines`, `mass`,
 `lbol`, `mdust`, indices as outputs.

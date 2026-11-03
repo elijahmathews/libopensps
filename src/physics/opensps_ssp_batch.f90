@@ -25,14 +25,18 @@ module opensps_ssp_batch
 
     use opensps_precision, only: WP, KP
     use opensps_constants, only: SAFE_FLOOR
-    use opensps_imf, only: imf_integral_p, imf_bin_weights_tab, imf_bin_logs, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT
+    use opensps_imf, only: imf_integral_p, imf_bin_weights_tab, imf_bin_logs, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT, &
+                           IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE
     use opensps_stellar_modifications, only: add_remnant_mass_p
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_to_device, ssp_operator_from_device
     implicit none
     private
 
-    public :: ssp_batch_age_sums_z
+    public :: ssp_batch_age_sums_z, ssp_batch_age_sums_adjoint, NIMFG
     public :: ssp_opset_t, ssp_opset_build, ssp_opset_free
+
+    !> The IMF parameters of the gradients (imf1, imf2, imf3, vdmc, mdave)
+    integer, parameter :: NIMFG = 5
 
     !> The kernels run on the device in OpenMP target builds and as OpenMP host loops otherwise
 #ifdef OMP_TARGET
@@ -360,6 +364,464 @@ contains
         end subroutine products
 
     end subroutine ssp_batch_age_sums_z
+
+    !> The reverse pass of ssp_batch_age_sums_z (the gradients of compute_csp_batch with ssp_ops).
+    !> The age sums are T v (T: a metallicity's effective templates; v: the fold of the per-point IMF
+    !> weights w_p with the SFH weights, v_e = sum over template e's segments and their ages t of
+    !> cz wsfh(t) sum_p eff_val w_p), the EUV rows of the nebular ages with the escaping fraction f,
+    !> and per age the L_bol (10^(sum_z cz log10 sl_z), sl = sum_p cl_p w_p) and ionizing photons
+    !> (sum_z cz sq_z). From the cotangents of the young and old sums (gw), of L_bol (lsum_bar,
+    !> through sum_t wsfh(t) L(t)) and of Q (qbar):
+    !>   v_bar = T^T y_bar (rows above whl; the EUV rows apart),
+    !>   wbar(t) = sum cz a_t (v_bar + f v_euv_bar) + lsum_bar L(t)   (the SFH weights),
+    !>   w_p bar = eff_val cz wsfh(t) (v_bar + f v_euv_bar) + lsum_bar wsfh(t) L(t) cz cl_p / sl_z
+    !>             + qbar(t) cz q_p,
+    !>   imf_bar(i) = sum_p w_p bar d w_p / d theta_i (theta: imf1, imf2, imf3, vdmc, mdave; d w_p / d
+    !>   theta by central differences of the FP64 closed-form bin integrals, imf_bin_weights_tab,
+    !>   step 1e-6: error ~1e-10 relative),
+    !>   fesc_bar, and zbar = d L / d dz (the two metallicity passes' difference, as the weights
+    !>   blend them: linearly, L_bol in log).
+    !> Chunks of CHG models (the point weights are chunk x points arrays); atomic adds where the
+    !> fold's templates share ages and points.
+    subroutine ssp_batch_age_sums_adjoint(imf_type, remnants, n_mod, nt, nspec, set, zlo, zhi, dz, pm, wsfh, it_tesc, &
+                                          nt_neb, whl, fesc, gw, slum, lsum_bar, qbar, wbar, imf_bar, fesc_bar, zbar)
+        logical, intent(in)  :: remnants
+        integer, intent(in)  :: imf_type, n_mod, nt, nspec, nt_neb, whl
+        type(ssp_opset_t), intent(inout) :: set
+        integer, intent(in), contiguous  :: zlo(:), zhi(:), it_tesc(:)
+        real(WP), intent(in), contiguous :: dz(:), pm(:,:), wsfh(:,:), fesc(:), slum(:,:), lsum_bar(:), qbar(:,:)
+        real(KP), intent(in), contiguous :: gw(:,:)
+        real(WP), intent(out), contiguous :: wbar(:,:), imf_bar(:,:), fesc_bar(:), zbar(:)
+
+        integer, parameter :: CHG = 256
+        integer, parameter :: PROWS(NIMFG) = [IMF_P_ALPHA, IMF_P_ALPHA + 1, IMF_P_ALPHA + 2, IMF_P_VDMC, IMF_P_MDAVE]
+        integer :: nz, pass, m, t, j, i, np, nc_max, neb_cols, ntq, m0, nc, j0, jr, iz, ky, ig, isg
+        integer, allocatable :: perm(:), viz(:), ptr(:), cnt(:)
+        real(WP), allocatable :: cz(:), ones(:), w(:,:), wm(:,:), tot(:), pps(:,:,:), slz(:,:), sqz(:,:), wpb(:,:), &
+                                 vb(:,:,:), dsm(:,:), dsl(:,:), dsq(:,:), pmp(:,:), part(:,:), zsg(:)
+        real(KP), allocatable :: wk(:,:)
+        real(WP) :: sgn
+
+        nz = set%nz
+        call ssp_opset_to_device(set)
+        neb_cols = 0
+        if (nt_neb > 0 .and. whl > 0) neb_cols = 1
+        nc_max = min(CHG, n_mod)
+        ntq = size(qbar, 1)
+        allocate(perm(n_mod), viz(n_mod), ptr(nz + 1), cnt(nz + 1), cz(n_mod), ones(n_mod), zsg(n_mod))
+        allocate(w(nc_max, set%n_pts_max), wm(nc_max, set%n_pts_max), wk(nc_max, set%n_pts_max), tot(nc_max), &
+                 pps(nc_max, 3, set%n_pc_max), slz(nt, nc_max), sqz(nt, nc_max), wpb(nc_max, set%n_pts_max), &
+                 vb(set%n_eff_max, 4, nc_max), dsm(nt, n_mod), dsl(nt, n_mod), dsq(nt, n_mod), pmp(size(pm, 1), n_mod), &
+                 part(set%n_pc_max, nc_max))
+        ones = 1.0_wp
+#ifdef OMP_TARGET
+        !$omp target data map(alloc: w, wm, wk, tot, pps, slz, sqz, wpb, vb, dsm, dsl, dsq, part) &
+        !$omp& map(to: pm, ones) map(from: wbar, imf_bar, fesc_bar, zbar) map(alloc: perm, viz, cz, zsg, pmp)
+#endif
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do
+#elif defined(_OPENMP)
+        !$omp parallel do
+#endif
+        do m = 1, n_mod
+            do t = 1, nt
+                ! (the SFH weights' L_bol term; the fold adds its part)
+                wbar(t, m) = lsum_bar(m) * slum(t, m)
+            end do
+            do i = 1, NIMFG
+                imf_bar(i, m) = 0.0_wp
+            end do
+            fesc_bar(m) = 0.0_wp
+            zbar(m) = 0.0_wp
+        end do
+        do pass = 1, 2
+            ! Every model in both passes (with the metallicity free, d / d dz takes both, whatever cz)
+            if (pass == 1) then
+                cz = 1.0_wp - dz(1:n_mod)
+                zsg = -1.0_wp
+                call group_models(n_mod, nz, zlo, ones, perm, ptr, cnt)
+            else
+                if (nz == 1) exit
+                cz = dz(1:n_mod)
+                zsg = 1.0_wp
+                call group_models(n_mod, nz, zhi, ones, perm, ptr, cnt)
+            end if
+            np = ptr(nz + 1) - 1
+            do j = 1, np
+                if (pass == 1) then
+                    viz(j) = zlo(perm(j))
+                else
+                    viz(j) = zhi(perm(j))
+                end if
+            end do
+            ! (cz, zsg by virtual model)
+            do j = 1, np
+                ones(j) = cz(perm(j))
+            end do
+            cz(1:np) = ones(1:np)
+            zsg(1:np) = zsg(1)
+            ones = 1.0_wp
+#ifdef OMP_TARGET
+            !$omp target update to(perm, viz, cz, zsg)
+#endif
+            do m0 = 1, np, CHG
+                nc = min(CHG, np - m0 + 1)
+                ! The point weights (and per age sl, sq of this metallicity)
+                call imf_pieces_multi(imf_type, remnants, m0, nc, nt, set%n_pc_max, nt_neb, pm, set%n_pc, set%pt_off, &
+                                      set%pc_off, set%pc_ptr, set%age_pc, set%pt_ptr, set%pt_mini, set%pt_m1, set%pt_m2, &
+                                      set%pt_llo, set%pt_dl, set%pt_first, set%pt_cm, set%pt_cl, set%pt_q, set%age_mmax, &
+                                      size(w, 1), set%n_pts_max, w, wk, tot, pps, perm, viz, ones, dsm, dsl, dsq)
+                call adj_age_sums_sl(m0, nc, nt, set%age_pc, viz, pps, slz, sqz)
+                call adj_zero(nc, set%n_pts_max, wpb)
+                ! v_bar per run of one metallicity (the young product used the run's first ky templates)
+                j0 = 1
+                do while (j0 <= nc)
+                    iz = viz(m0 + j0 - 1)
+                    jr = j0
+                    do while (jr < nc)
+                        if (viz(m0 + jr) /= iz) exit
+                        jr = jr + 1
+                    end do
+                    ky = 0
+                    do j = j0, jr
+                        ky = max(ky, it_tesc(perm(m0 + j - 1)))
+                    end do
+                    ky = set%ops(iz)%k_age(max(1, min(nt, ky)))
+                    call adj_template_bar(nspec, set%ops(iz)%n_eff, ky, neb_cols * whl, n_mod, m0, j0, jr, perm, &
+                                          set%ops(iz)%etpl, gw, set%n_eff_max, nc_max, vb)
+                    j0 = jr + 1
+                end do
+                call adj_fold(m0, nc, set%n_eff_max, nt_neb, neb_cols, wsfh, it_tesc, fesc, set%n_eff, set%pt_off, &
+                              set%seg_off, set%eff_off, set%pt_age, set%eff_pt, set%eff_val, set%seg_ptr, set%seg_first, &
+                              perm, viz, cz, zsg, wk, vb, wbar, wpb, fesc_bar, zbar)
+                call adj_lq(m0, nc, nt, nt_neb, set%n_pc_max, set%n_pc, set%pt_off, set%pc_off, set%pc_ptr, set%pt_age, &
+                            set%pt_cl, set%pt_q, perm, viz, cz, zsg, wsfh, slum, lsum_bar, qbar, ntq, slz, sqz, wpb, zbar)
+                ! The IMF parameters: central differences of the point weights
+                do ig = 1, NIMFG
+#if defined(OMP_TARGET)
+                    !$omp target teams distribute parallel do
+#elif defined(_OPENMP)
+                    !$omp parallel do
+#endif
+                    do m = 1, n_mod
+                        do i = 1, size(pm, 1)
+                            pmp(i, m) = pm(i, m)
+                        end do
+                    end do
+                    do isg = 1, 2
+                        sgn = merge(1.0_wp, -1.0_wp, isg == 1)
+                        call adj_perturb(n_mod, size(pm, 1), PROWS(ig), sgn, pm, pmp)
+                        if (sgn > 0.0_wp) then
+                            call imf_pieces_multi(imf_type, remnants, m0, nc, nt, set%n_pc_max, nt_neb, pmp, set%n_pc, &
+                                                  set%pt_off, set%pc_off, set%pc_ptr, set%age_pc, set%pt_ptr, set%pt_mini, &
+                                                  set%pt_m1, set%pt_m2, set%pt_llo, set%pt_dl, set%pt_first, set%pt_cm, &
+                                                  set%pt_cl, set%pt_q, set%age_mmax, size(w, 1), set%n_pts_max, w, wk, &
+                                                  tot, pps, perm, viz, ones, dsm, dsl, dsq)
+                        else
+                            call imf_pieces_multi(imf_type, remnants, m0, nc, nt, set%n_pc_max, nt_neb, pmp, set%n_pc, &
+                                                  set%pt_off, set%pc_off, set%pc_ptr, set%age_pc, set%pt_ptr, set%pt_mini, &
+                                                  set%pt_m1, set%pt_m2, set%pt_llo, set%pt_dl, set%pt_first, set%pt_cm, &
+                                                  set%pt_cl, set%pt_q, set%age_mmax, size(w, 1), set%n_pts_max, wm, wk, &
+                                                  tot, pps, perm, viz, ones, dsm, dsl, dsq)
+                        end if
+                    end do
+                    call adj_imf_dot(m0, nc, set%n_pc_max, set%n_pc, set%pt_off, set%pc_off, set%pc_ptr, perm, viz, &
+                                     size(pm, 1), PROWS(ig), pm, w, wm, wpb, part, ig, imf_bar)
+                end do
+            end do
+        end do
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine ssp_batch_age_sums_adjoint
+
+    !> The step of the IMF parameter's central difference (relative 1e-6, at least 1e-8)
+    pure real(WP) function adj_step(x)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(WP), intent(in) :: x
+        adj_step = 1.0e-6_wp * max(abs(x), 1.0e-2_wp)
+    end function adj_step
+
+    !> pmp(row, :) = pm(row, :) +- the step
+    subroutine adj_perturb(n_mod, npar, row, sgn, pm, pmp)
+        integer, intent(in)     :: n_mod, npar, row
+        real(WP), intent(in)    :: sgn, pm(npar, n_mod)
+        real(WP), intent(inout) :: pmp(npar, n_mod)
+        integer :: m
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do
+#elif defined(_OPENMP)
+        !$omp parallel do
+#endif
+        do m = 1, n_mod
+            pmp(row, m) = pm(row, m) + sgn * adj_step(pm(row, m))
+        end do
+    end subroutine adj_perturb
+
+    subroutine adj_zero(nc, npt, a)
+        integer, intent(in) :: nc, npt
+        real(WP), intent(inout) :: a(:,:)
+        integer :: j, k
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2)
+#endif
+        do k = 1, npt
+            do j = 1, nc
+                a(j, k) = 0.0_wp
+            end do
+        end do
+    end subroutine adj_zero
+
+    !> Per age and chunk model: sl and sq of this metallicity (the pieces' sums, as imf_pieces_multi)
+    subroutine adj_age_sums_sl(m0, nc, nt, age_pc, viz, pps, slz, sqz)
+        integer, intent(in) :: m0, nc, nt
+        integer, intent(in), contiguous :: age_pc(:), viz(:)
+        real(WP), intent(in), contiguous :: pps(:,:,:)
+        real(WP), intent(out) :: slz(:,:), sqz(:,:)
+        integer :: t, j, q, iz
+        real(WP) :: sl, sq
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(q, sl, sq, iz)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(q, sl, sq, iz)
+#endif
+        do j = 1, nc
+            do t = 1, nt
+                iz = viz(m0 + j - 1)
+                sl = 0.0_wp
+                sq = 0.0_wp
+                do q = age_pc((iz - 1) * (nt + 1) + t), age_pc((iz - 1) * (nt + 1) + t + 1) - 1
+                    sl = sl + pps(j, 2, q)
+                    sq = sq + pps(j, 3, q)
+                end do
+                slz(t, j) = sl
+                sqz(t, j) = sq
+            end do
+        end do
+    end subroutine adj_age_sums_sl
+
+    !> v_bar(e, 1:4, j) = T^T of the young, old, young EUV and old EUV cotangents for the run j0..jr
+    !> (rows above nwhl for 1, 2; rows 1..nwhl for 3, 4); the young product used templates <= ky.
+    subroutine adj_template_bar(nspec, n_eff, ky, nwhl, n_mod, m0, j0, jr, perm, etpl, gw, n_eff_max, nc_max, vb)
+        integer, intent(in) :: nspec, n_eff, ky, nwhl, n_mod, m0, j0, jr, n_eff_max, nc_max
+        integer, intent(in), contiguous :: perm(:)
+        real(KP), intent(in) :: etpl(nspec, *), gw(nspec, 2 * n_mod)
+        real(WP), intent(inout) :: vb(n_eff_max, 4, nc_max)
+        integer :: e, j, i, m
+        real(WP) :: sy, so, sey, seo
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(i, m, sy, so, sey, seo)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(i, m, sy, so, sey, seo)
+#endif
+        do j = j0, jr
+            do e = 1, n_eff
+                m = perm(m0 + j - 1)
+                sy = 0.0_wp; so = 0.0_wp; sey = 0.0_wp; seo = 0.0_wp
+                do i = 1, nwhl
+                    sey = sey + real(etpl(i, e), WP) * real(gw(i, m), WP)
+                    seo = seo + real(etpl(i, e), WP) * real(gw(i, n_mod + m), WP)
+                end do
+                do i = nwhl + 1, nspec
+                    sy = sy + real(etpl(i, e), WP) * real(gw(i, m), WP)
+                    so = so + real(etpl(i, e), WP) * real(gw(i, n_mod + m), WP)
+                end do
+                if (e > ky) then
+                    sy = 0.0_wp
+                    sey = 0.0_wp
+                end if
+                vb(e, 1, j) = sy
+                vb(e, 2, j) = so
+                vb(e, 3, j) = sey
+                vb(e, 4, j) = seo
+            end do
+        end do
+    end subroutine adj_template_bar
+
+    !> The fold in reverse: per template e and chunk model, its segments' ages t: a = sum eff_val w_p,
+    !> G = v_bar(young or old) + (f if t <= nt_neb, else 1) v_euv_bar; wbar(t) += cz a G, w_p bar += eff_val cz
+    !> wsfh(t) G, fesc_bar += cz a wsfh v_euv_bar, zbar += sign a wsfh G (atomic: templates share ages
+    !> and points).
+    subroutine adj_fold(m0, nc, n_eff_max, nt_neb, neb_cols, wsfh, it_tesc, fesc, n_eff, pt_off, seg_off, eff_off, &
+                        pt_age, eff_pt, eff_val, seg_ptr, seg_first, perm, viz, cz, zsg, wk, vb, wbar, wpb, fesc_bar, zbar)
+        integer, intent(in) :: m0, nc, n_eff_max, nt_neb, neb_cols
+        real(WP), intent(in), contiguous :: wsfh(:,:), fesc(:), eff_val(:), cz(:), zsg(:), vb(:,:,:)
+        real(KP), intent(in), contiguous :: wk(:,:)
+        integer, intent(in), contiguous :: it_tesc(:), n_eff(:), pt_off(:), seg_off(:), eff_off(:), pt_age(:), eff_pt(:), &
+                                           seg_ptr(:), seg_first(:), perm(:), viz(:)
+        real(WP), intent(inout), contiguous :: wbar(:,:), wpb(:,:), fesc_bar(:), zbar(:)
+        integer :: e, j, s, k, ks, t, tc, m, iz, eg, sg, kk
+        real(WP) :: a, g, ge, x, c, f, xs
+
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(s, k, ks, t, tc, m, iz, eg, sg, kk, a, g, ge, x, c, &
+        !$omp& f, xs)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(s, k, ks, t, tc, m, iz, eg, sg, kk, a, g, ge, x, c, f, xs)
+#endif
+        do j = 1, nc
+            do e = 1, n_eff_max
+                iz = viz(m0 + j - 1)
+                if (e > n_eff(iz)) cycle
+                m = perm(m0 + j - 1)
+                c = cz(m0 + j - 1)
+                f = fesc(m)
+                eg = eff_off(iz) + e
+                do s = seg_first(eg), seg_first(eg + 1) - 1
+                    sg = seg_off(iz) + s
+                    tc = 0
+                    a = 0.0_wp
+                    ks = seg_ptr(sg)
+                    do k = seg_ptr(sg), seg_ptr(sg + 1)
+                        if (k < seg_ptr(sg + 1)) then
+                            t = pt_age(pt_off(iz) + eff_pt(k))
+                        else
+                            t = -1
+                        end if
+                        if (t /= tc) then
+                            if (tc > 0) then
+                                ! The cotangent of this age's coefficient
+                                if (tc <= it_tesc(m)) then
+                                    g = vb(e, 1, j)
+                                    ge = vb(e, 3, j)
+                                else
+                                    g = vb(e, 2, j)
+                                    ge = vb(e, 4, j)
+                                end if
+                                ! (the EUV rows take every age, the nebular ones with the escaping fraction)
+                                if (neb_cols == 0) ge = 0.0_wp
+                                if (tc <= nt_neb) then
+                                    x = g + f * ge
+                                else
+                                    x = g + ge
+                                end if
+                                !$omp atomic update
+                                wbar(tc, m) = wbar(tc, m) + c * a * x
+                                !$omp atomic update
+                                zbar(m) = zbar(m) + zsg(m0 + j - 1) * a * wsfh(m, tc) * x
+                                if (ge /= 0.0_wp .and. tc <= nt_neb) then
+                                    !$omp atomic update
+                                    fesc_bar(m) = fesc_bar(m) + c * a * wsfh(m, tc) * ge
+                                end if
+                                xs = c * wsfh(m, tc) * x
+                                if (xs /= 0.0_wp) then
+                                    do kk = ks, k - 1
+                                        !$omp atomic update
+                                        wpb(j, eff_pt(kk)) = wpb(j, eff_pt(kk)) + eff_val(kk) * xs
+                                    end do
+                                end if
+                            end if
+                            tc = t
+                            a = 0.0_wp
+                            ks = k
+                        end if
+                        if (t > 0) a = a + eff_val(k) * real(wk(j, eff_pt(k)), WP)
+                    end do
+                end do
+            end do
+        end do
+    end subroutine adj_fold
+
+    !> L_bol and Q per point: w_p bar += lsum_bar wsfh(t) L(t) cz cl_p / sl_z + qbar(t) cz q_p; and their
+    !> d / d dz (zbar: L in log, Q linearly).
+    subroutine adj_lq(m0, nc, nt, nt_neb, n_pc_max, n_pc, pt_off, pc_off, pc_ptr, pt_age, pt_cl, pt_q, perm, viz, cz, &
+                      zsg, wsfh, slum, lsum_bar, qbar, ntq, slz, sqz, wpb, zbar)
+        integer, intent(in) :: m0, nc, nt, nt_neb, n_pc_max, ntq
+        integer, intent(in), contiguous :: n_pc(:), pt_off(:), pc_off(:), pc_ptr(:), pt_age(:), perm(:), viz(:)
+        real(WP), intent(in), contiguous :: pt_cl(:), pt_q(:), cz(:), zsg(:), wsfh(:,:), slum(:,:), lsum_bar(:), &
+                                            qbar(:,:), slz(:,:), sqz(:,:)
+        real(WP), intent(inout), contiguous :: wpb(:,:), zbar(:)
+        integer :: q, j, k, k0, n, iz, m, o, t
+        real(WP) :: lf, qf, zs
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(k, k0, n, iz, m, o, t, lf, qf)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(k, k0, n, iz, m, o, t, lf, qf)
+#endif
+        do j = 1, nc
+            do q = 1, n_pc_max
+                iz = viz(m0 + j - 1)
+                if (q > n_pc(iz)) cycle
+                m = perm(m0 + j - 1)
+                o = pt_off(iz)
+                k0 = pc_ptr(pc_off(iz) + q)
+                n = pc_ptr(pc_off(iz) + q + 1) - k0
+                do k = k0, k0 + n - 1
+                    t = pt_age(k)
+                    lf = 0.0_wp
+                    if (slz(t, j) > SAFE_FLOOR) lf = lsum_bar(m) * wsfh(m, t) * slum(t, m) * cz(m0 + j - 1) / slz(t, j)
+                    qf = 0.0_wp
+                    if (t <= nt_neb .and. t <= ntq) qf = qbar(t, m) * cz(m0 + j - 1)
+                    wpb(j, k - o) = wpb(j, k - o) + lf * pt_cl(k) + qf * pt_q(k)
+                end do
+            end do
+        end do
+        ! d / d dz: L(t) = 10^(sum cz log10 sl), Q = sum cz sq
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(t, m, zs)
+#elif defined(_OPENMP)
+        !$omp parallel do private(t, m, zs)
+#endif
+        do j = 1, nc
+            m = perm(m0 + j - 1)
+            zs = 0.0_wp
+            do t = 1, nt
+                if (slz(t, j) > SAFE_FLOOR) zs = zs + lsum_bar(m) * wsfh(m, t) * slum(t, m) * log(10.0_wp) * &
+                                                      log10(slz(t, j))
+                if (t <= nt_neb .and. t <= ntq) zs = zs + qbar(t, m) * sqz(t, j)
+            end do
+            zbar(m) = zbar(m) + zsg(m0 + j - 1) * zs
+        end do
+    end subroutine adj_lq
+
+    !> imf_bar(ig, m) += sum_p w_p bar (w+ - w-) / 2h (per piece, then per model)
+    subroutine adj_imf_dot(m0, nc, n_pc_max, n_pc, pt_off, pc_off, pc_ptr, perm, viz, npar, row, pm, wplus, wm, wpb, part, &
+                           ig, imf_bar)
+        integer, intent(in) :: m0, nc, n_pc_max, npar, row, ig
+        integer, intent(in), contiguous :: n_pc(:), pt_off(:), pc_off(:), pc_ptr(:), perm(:), viz(:)
+        real(WP), intent(in) :: pm(npar, *)
+        real(WP), intent(in), contiguous :: wplus(:,:), wm(:,:), wpb(:,:)
+        real(WP), intent(inout), contiguous :: part(:,:), imf_bar(:,:)
+        integer :: q, j, k, k0, n, iz, o, m
+        real(WP) :: s
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(k, k0, n, iz, o, s)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(k, k0, n, iz, o, s)
+#endif
+        do j = 1, nc
+            do q = 1, n_pc_max
+                iz = viz(m0 + j - 1)
+                s = 0.0_wp
+                if (q <= n_pc(iz)) then
+                    o = pt_off(iz)
+                    k0 = pc_ptr(pc_off(iz) + q)
+                    n = pc_ptr(pc_off(iz) + q + 1) - k0
+                    do k = k0 - o, k0 - o + n - 1
+                        s = s + wpb(j, k) * (wplus(j, k) - wm(j, k))
+                    end do
+                end if
+                part(q, j) = s
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(q, m, s)
+#elif defined(_OPENMP)
+        !$omp parallel do private(q, m, s)
+#endif
+        do j = 1, nc
+            m = perm(m0 + j - 1)
+            s = 0.0_wp
+            do q = 1, n_pc_max
+                s = s + part(q, j)
+            end do
+            imf_bar(ig, m) = imf_bar(ig, m) + s / (2.0_wp * adj_step(pm(row, m)))
+        end do
+    end subroutine adj_imf_dot
 
     !> imf_pieces_chunk for the virtual models m0 .. m0 + nc - 1 of a pass (model perm(v), metallicity
     !> viz(v)) with the tables of an ssp_opset_t: the thread (piece q, virtual model) takes the piece
