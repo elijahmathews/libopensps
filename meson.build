@@ -404,6 +404,18 @@ test('csp_batch', csp_batch_exe,
     timeout : 900
 )
 
+# Integration test: the gradients of the batched CSP (reverse pass) against finite differences
+csp_batch_grad_exe = executable('test_csp_batch_grad', 'tests/test_csp_batch_grad.f90',
+    dependencies : [opensps_dep, test_utils_dep],
+    link_language : 'fortran'
+)
+test('csp_batch_grad', csp_batch_grad_exe,
+    protocol : 'tap',
+    env : regression_env,
+    suite : 'regression',
+    timeout : 900
+)
+
 # Integration test: the batched SSP operator (opensps_ssp_operator) against generate_ssp_grid, for
 # many IMFs from one IMF-independent operator
 ssp_operator_exe = executable('test_ssp_operator', 'tests/test_ssp_operator.f90',

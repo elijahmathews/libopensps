@@ -54,8 +54,10 @@ contains
 
     !> @brief Magnitudes of spec(:, 1:n_col) (present on the device, L_sun/Hz) at redshift zred,
     !> as compute_magnitudes(ctx, zred, spec(:, i), mags(:, i), mag_compute) for each column; with
-    !> zred_col, column i at redshift zred_col(i) (zred is then ignored).
-    subroutine compute_magnitudes_columns(ctx, zred, igm_factor, spec, n_col, mags, mag_compute, zred_col)
+    !> zred_col, column i at redshift zred_col(i) (zred is then ignored). fband_out: the band fluxes
+    !> (filter integrals of the observed spectrum / lambda, before the distance term), for the
+    !> adjoint of the magnitudes.
+    subroutine compute_magnitudes_columns(ctx, zred, igm_factor, spec, n_col, mags, mag_compute, zred_col, fband_out)
         type(opensps_context_t), intent(inout) :: ctx
         real(WP), intent(in)                :: zred, igm_factor
         real(KP), intent(in)                :: spec(:,:)
@@ -63,6 +65,7 @@ contains
         real(WP), intent(out)               :: mags(:,:)
         integer, intent(in), optional       :: mag_compute(:)
         real(WP), intent(in), optional      :: zred_col(:)
+        real(WP), intent(out), optional     :: fband_out(:,:)
 
         integer  :: nspec, nbands, b, m
         integer, allocatable  :: do_band(:)
@@ -129,6 +132,9 @@ contains
             call band_fluxes_gemm(n_col, npad, nbands, g%cmat, fobs, fband)
             call magnitudes_from_fluxes(ctx, n_col, nbands, do_band, dist, fband, mags_l)
 #ifdef OMP_TARGET
+            if (present(fband_out)) then
+                !$omp target update from(fband)
+            end if
             !$omp end target data
 #endif
             done = .true.
@@ -147,6 +153,9 @@ contains
             call band_fluxes(n_col, nspec, nbands, g%bands_t, g%j_lo, g%j_hi, do_band, g%wtl, fobs, fband)
             call magnitudes_from_fluxes(ctx, n_col, nbands, do_band, dist, fband, mags_l)
 #ifdef OMP_TARGET
+            if (present(fband_out)) then
+                !$omp target update from(fband)
+            end if
             !$omp end target data
 #endif
         end if
@@ -157,6 +166,7 @@ contains
         if (.not. ctx%on_device) call batch_grid_release(ctx%state%batch)
 
         mags(1:nbands, 1:n_col) = mags_l
+        if (present(fband_out)) fband_out(1:nbands, 1:n_col) = fband
     end subroutine compute_magnitudes_columns
 
     !> Magnitudes from band fluxes (fband, present), as compute_magnitudes: AB, the distance term,
