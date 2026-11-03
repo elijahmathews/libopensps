@@ -33,6 +33,7 @@ contains
         call test_weights_match_quadrature()
         call test_runtime_imf_limits_are_honoured()
         call test_powerlaw_bin_worst_cases()
+        call test_lognormal_narrow_bins_additive()
 
         call print_summary_line("Module Summary", total_tests - total_failures, total_tests)
 
@@ -279,6 +280,45 @@ contains
     !> integrate_imf_interval_analytic must equal the integral of get_imf_value, for number and
     !> mass weighting, on intervals inside single segments and straddling the 0.5 / 1.0 Msun
     !> (Kroupa) and mdave (Dave) breakpoints. This pins the segment continuity constants.
+    !> The lognormal bin integral of a wide bin (erf difference) equals the sum of its narrow sub-bins
+    !> (Gauss-Legendre) to rounding, for Chabrier and van Dokkum, number and mass weighted.
+    subroutine test_lognormal_narrow_bins_additive()
+        integer, parameter :: NS = 4000
+        real(WP) :: p(IMF_NPAR), edge(0:NS), whole, parts, worst
+        integer  :: t, k, mw, j
+        ! (and far in both tails of a narrow lognormal, vdmc 0.13 with mass limits 30-100 and
+        ! 0.0001-0.001 Msun, where an erf difference loses up to 3e-5 of the bin)
+        integer, parameter :: NR = 5
+        real(WP), parameter :: LO(NR) = [0.1_wp, 0.2_wp, 0.5_wp, 30.0_wp, 1.0e-4_wp], &
+                               HI(NR) = [0.9_wp, 1.0_wp, 0.95_wp, 100.0_wp, 1.0e-3_wp]
+        character(len=64) :: label
+
+        call print_group("Lognormal IMF bins: wide bin = sum of narrow bins")
+        p = 0.0_wp
+        p(IMF_P_SALP) = 2.35_wp
+        p(IMF_P_ALPHA:IMF_P_ALPHA + 2) = [1.1_wp, 2.1_wp, 2.6_wp]
+        p(IMF_P_VDMC) = 0.13_wp
+        p(IMF_P_MDAVE) = 0.7_wp
+        do t = 1, 3, 2
+            do mw = 0, 1
+                worst = 0.0_wp
+                do j = 1, NR
+                    do k = 0, NS
+                        edge(k) = LO(j) * (HI(j) / LO(j))**(real(k, WP) / NS)
+                    end do
+                    whole = imf_integral_p(t, p, edge(0), edge(NS), mw == 1)
+                    parts = 0.0_wp
+                    do k = 1, NS
+                        parts = parts + imf_integral_p(t, p, edge(k - 1), edge(k), mw == 1)
+                    end do
+                    worst = max(worst, abs(parts / whole - 1.0_wp))
+                end do
+                write(label, '(A,I0,A,I0)') "IMF type ", t, ", mass weighted ", mw
+                call assert_true(worst < 1.0e-13_wp, trim(label), total_tests, total_failures)
+            end do
+        end do
+    end subroutine test_lognormal_narrow_bins_additive
+
     subroutine test_analytic_integrals_match_quadrature()
         type(opensps_context_t), allocatable :: ctx
         integer, parameter :: types(3) = [0, 2, 4]
