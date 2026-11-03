@@ -17,6 +17,8 @@ program test_csp_batch_grad
     !> - with SFH parameters, d L / d(tage, tau, const, fburst, tburst, sf_start, sf_trunc, sf_slope);
     !> - d L / d zred above z = 0 (resampling, distance, IGM);
     !> - with smoothing, d L / d sigma_smooth (shared by the batch: the sum of the models' rows);
+    !> - the loss includes the mass and lbol outputs (cotangents mass_bar, lbol_bar);
+    !> - SSP-level nebular emission (add_neb_emission = 2, in the basis);
     !> - with the IMF free per model (ssp_ops), d L / d(imf1, imf2, imf3) and every other row through
     !>   the operator's reverse pass;
     !> - unsupported stages return status 2.
@@ -81,6 +83,9 @@ program test_csp_batch_grad
     type(ssp_opset_t) :: opset
     !> The cotangents of the current check (the loss L is formed with them)
     real(WP), allocatable :: lbar_m(:, :), lbar_s(:, :)
+    !> ... and of the mass and lbol outputs; the last call's mass and lbol (cb)
+    real(WP), allocatable :: lbar_mass(:), lbar_lbol(:)
+    real(WP) :: last_mass(N_MOD), last_lbol(N_MOD)
 
     call skip_without_data()
     call print_major_header("Batched CSP gradients")
@@ -120,6 +125,14 @@ program test_csp_batch_grad
     call set_int('add_dust_emission', 0)
     call set_int('add_neb_emission', 0)
     call check_unsupported()
+    ! SSP-level nebular emission (in the basis: the batch adds none; gas_logz, gas_logu do not act)
+    call set_int('add_neb_emission', 2)
+    call build_basis()
+    call set_int('add_dust_emission', 1)
+    call check_grad(2, 0.513_wp, 1, 1, .false., "Calzetti, z = 0.513, SSP-level nebular, dust emission, AGN, SFH")
+    call set_int('add_dust_emission', 0)
+    call set_int('add_neb_emission', 0)
+    call build_basis()
     ! The IMF free per model (Kroupa slopes through the SSP operator), with full physics
     call set_int('imf_type', 2)
     call build_opset()
@@ -160,6 +173,7 @@ contains
                  spec_ssp(ctx%state%nspec, ctx%state%ntfull))
         call opensps_context_set_pset(ctx, pset)
         call generate_ssp_grid(ctx, pset, mass_ssp, lbol_ssp, spec_ssp)
+        ctx%state%ssp_basis_is_dirty = .true.
         call opensps_context_update_ssp_basis(ctx, reshape(spec_ssp, [size(spec_ssp, 1), size(spec_ssp, 2), 1]), &
                                               reshape(mass_ssp, [size(mass_ssp), 1]), &
                                               reshape(lbol_ssp, [size(lbol_ssp), 1]), 1)
@@ -184,12 +198,25 @@ contains
         integer, intent(out) :: status
         real(WP), intent(out), optional :: spec(:, :), params_bar(:, :), weights_bar(:, :)
         real(WP), intent(in), optional :: ssp_weights(:, :), mags_bar(:, :), spec_bar(:, :)
-        if (use_ops) then
+        logical :: grad
+        ! (the mass and lbol cotangents with the gradients, when drawn; the mass's not with ssp_ops)
+        grad = (present(params_bar) .or. present(weights_bar)) .and. allocated(lbar_mass)
+        if (use_ops .and. grad) then
             call compute_csp_batch(ctx, psets, mags, status, spec=spec, ssp_weights=ssp_weights, ssp_ops=opset, &
-                                   mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, weights_bar=weights_bar)
+                                   mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, weights_bar=weights_bar, &
+                                   mass=last_mass, lbol=last_lbol, lbol_bar=lbar_lbol)
+        else if (use_ops) then
+            call compute_csp_batch(ctx, psets, mags, status, spec=spec, ssp_weights=ssp_weights, ssp_ops=opset, &
+                                   mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, weights_bar=weights_bar, &
+                                   mass=last_mass, lbol=last_lbol)
+        else if (grad) then
+            call compute_csp_batch(ctx, psets, mags, status, spec=spec, ssp_weights=ssp_weights, mags_bar=mags_bar, &
+                                   spec_bar=spec_bar, params_bar=params_bar, weights_bar=weights_bar, &
+                                   mass=last_mass, lbol=last_lbol, mass_bar=lbar_mass, lbol_bar=lbar_lbol)
         else
             call compute_csp_batch(ctx, psets, mags, status, spec=spec, ssp_weights=ssp_weights, mags_bar=mags_bar, &
-                                   spec_bar=spec_bar, params_bar=params_bar, weights_bar=weights_bar)
+                                   spec_bar=spec_bar, params_bar=params_bar, weights_bar=weights_bar, &
+                                   mass=last_mass, lbol=last_lbol)
         end if
     end subroutine cb
 
@@ -305,7 +332,7 @@ contains
 
         ! The loss: magnitudes with O(1) cotangents, the spectrum with cotangents scaled by the
         ! model's peak, so that both parts of L are of order one
-        if (allocated(lbar_m)) deallocate(lbar_m, lbar_s)
+        if (allocated(lbar_m)) deallocate(lbar_m, lbar_s, lbar_mass, lbar_lbol)
         call loss(psets, w, given_w, lp, mags, spec)
         do m = 1, N_MOD
             do b = 1, nbands
@@ -324,6 +351,12 @@ contains
         end do
         lbar_m = mbar
         lbar_s = sbar
+        ! (the mass and lbol outputs: O(1) cotangents; the mass's not with ssp_ops)
+        allocate(lbar_mass(N_MOD), lbar_lbol(N_MOD))
+        do m = 1, N_MOD
+            lbar_mass(m) = merge(0.0_wp, 2.0_wp * urand() - 1.0_wp, use_ops)
+            lbar_lbol(m) = 2.0_wp * urand() - 1.0_wp
+        end do
         if (given_w) then
             call cb(psets, mags, status, spec=spec, ssp_weights=w, mags_bar=mbar, spec_bar=sbar, &
                                    params_bar=pbar, weights_bar=wbar)
@@ -350,7 +383,9 @@ contains
             g_ad = sum(wbar * dir)
             write(*, '(A,2ES16.8,A,ES10.2)') "# weights, random direction (adjoint, differences): ", g_ad, g_fd, &
                 ", relative ", abs(g_ad - g_fd) / abs(g_fd)
-            call assert_true(abs(g_ad - g_fd) <= GRAD_RTOL * abs(g_fd), "d L / d weights along a direction", &
+            ! (FP32: the full loss, magnitudes and lbol, at h = 1e-2: 3e-3)
+            call assert_true(abs(g_ad - g_fd) <= merge(3.0e-3_wp, GRAD_RTOL, LINEAR_ONLY) * abs(g_fd), &
+                             "d L / d weights along a direction", &
                              total_tests, total_failures)
         else
             ! The gradient with respect to the weights the SFH parameters give equals that of the
@@ -368,6 +403,8 @@ contains
         ! alone, which is linear in fagn and in the weights (any step is exact up to rounding)
         if (LINEAR_ONLY) then
             lbar_m = 0.0_wp
+            lbar_mass = 0.0_wp
+            lbar_lbol = 0.0_wp
             if (given_w) then
                 call cb(psets, mags, status, ssp_weights=w, mags_bar=lbar_m, spec_bar=sbar, &
                                        params_bar=pbar, weights_bar=wbar)
@@ -691,7 +728,9 @@ contains
     real(WP) function loss_of(mags, spec)
         real(WP), intent(in) :: mags(:, :), spec(:, :)
         loss_of = 0.0_wp
-        if (allocated(lbar_m)) loss_of = sum(lbar_m * merge(mags, 0.0_wp, mags == mags)) + sum(lbar_s * spec)
+        if (allocated(lbar_m)) loss_of = sum(lbar_m * merge(mags, 0.0_wp, mags == mags)) + sum(lbar_s * spec) + &
+                                         sum(lbar_mass * last_mass(1:size(lbar_mass))) + &
+                                         sum(lbar_lbol * last_lbol(1:size(lbar_lbol)))
     end function loss_of
 
     real(WP) function urand()
