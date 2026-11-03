@@ -28,3 +28,4 @@ str_imf_shallow|mist|miles|DL07|csp|imf_type=2 imf1=1.3 imf2=2.3 imf3=1.5 sfh=1 
 str_agb_dust_max|mist|miles|DL07|csp|imf_type=1 sfh=1 tau=1.0 tage=1.0 agb_dust=10.0
 str_bpass|bpss|bpass|DL07|csp|imf_type=1 sfh=1 tau=0.1 tage=0.1 add_neb_emission=1 dust2=0.5
 str_basel_young|pdva|basel|DL07|csp|imf_type=1 zmet=20 sfh=0 tage=0.01 dust1=1.0 dust2=0.5
+str_lines_outside_dust|mist|miles|DL07|csp|imf_type=1 sfh=4 tau=0.002 tage=0.005 add_neb_emission=1 nebemlineinspec=0 gas_logu=-2.5 gas_logz=0.0 dust1=1.0 dust2=0.3 dust_type=2
