@@ -107,7 +107,8 @@ def main():
     out = sys.argv[1]
     cases_file = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, "tests/data/param_cases.psv")
     cases = [l.split("|")[0] for l in open(cases_file) if l.strip() and not l.startswith("#")]
-    lam_eff = pivot_wavelengths(os.path.join(ROOT, "data/allfilters.dat"))
+    # The filter curves of the legacy data tree that run_matrix.sh links into OUTDIR
+    lam_eff = pivot_wavelengths(os.path.join(out, "sps_home", "data", "allfilters.dat"))
     band_ir = lam_eff >= SPLIT_UM * 1e4
 
     print(f"{'case':26s} " + " ".join(f"{c:>10s}" for c in COLUMNS) + "  note")
