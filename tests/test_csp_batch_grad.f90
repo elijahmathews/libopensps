@@ -490,10 +490,11 @@ contains
             g_ad = sum(pbar(BGRAD_SIGMA_SMOOTH, :))
             write(*, '(A,2ES16.8,A,ES10.2)') "# sigma_smooth (adjoint, differences): ", g_ad, g_fd, ", relative ", &
                 abs(g_ad - g_fd) / abs(g_fd)
-            ! (FP32: an absolute floor of 1e-5, the spectrum part's FP32 rounding over the step being
-            ! ~1e-7: its sigma gradient can be ~1e-9)
-            call assert_true(abs(g_ad - g_fd) <= merge(2.0e-2_wp, 1.0e-4_wp, LINEAR_ONLY) * &
-                             max(abs(g_fd), merge(1.0e-5_wp, 0.0_wp, LINEAR_ONLY)), &
+            ! (An absolute floor of 1e-5. FP32: the spectrum part's FP32 rounding over the step is ~1e-7,
+            ! and its sigma gradient can be ~1e-9. FP64: the window-edge jumps leave the differences
+            ! ~1e-10 absolute; the random cotangents can make the batch's sigma gradient ~1e-6, as with
+            ! LLVM flang's draws at 5.37 A: 2.4e-10 = 1e-4 relative)
+            call assert_true(abs(g_ad - g_fd) <= merge(2.0e-2_wp, 1.0e-4_wp, LINEAR_ONLY) * max(abs(g_fd), 1.0e-5_wp), &
                              "d L / d sigma_smooth against finite differences", total_tests, total_failures)
         end if
 
