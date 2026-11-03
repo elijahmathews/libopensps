@@ -29,6 +29,7 @@ module opensps_batch_photometry
 
     public :: compute_magnitudes_columns, prepare_batch_grid
     public :: smoothing_on_device, prepare_smoothing_kernel, smooth_columns, smooth_columns_adjoint
+    public :: distance_term_dz
 #ifdef FSPS_CUBLAS
     public :: blas, blas_init
 #endif
@@ -516,6 +517,25 @@ contains
         if (dm /= dm .or. dm <= SAFE_FLOOR) return
         dist = 5.0_wp * log10(dm / 10.0_wp) + mag_from_flux(1.0_wp + zred)
     end function distance_term
+
+    !> d distance_term / dz: 5 / ln 10 (d d_L / dz) / d_L - 2.5 / (ln 10 (1 + z)), d_L linear in the
+    !> context's table (zero at z = 0, where the term is 0: absolute magnitudes).
+    function distance_term_dz(ctx, zred) result(dd)
+        type(opensps_context_t), intent(in) :: ctx
+        real(WP), intent(in)             :: zred
+        real(WP) :: dd, dm, slope
+        integer  :: i, n
+
+        dd = 0.0_wp
+        if (abs(zred) <= SAFE_FLOOR) return
+        dm = interpolate_linear(ctx%state%cosmospl(:,1), ctx%state%cosmospl(:,3), zred)
+        if (dm /= dm .or. dm <= SAFE_FLOOR) return
+        n = size(ctx%state%cosmospl, 1)
+        i = max(1, min(find_interval(ctx%state%cosmospl(:,1), zred), n - 1))
+        slope = (ctx%state%cosmospl(i + 1, 3) - ctx%state%cosmospl(i, 3)) / &
+                (ctx%state%cosmospl(i + 1, 1) - ctx%state%cosmospl(i, 1))
+        dd = 5.0_wp / log(10.0_wp) * slope / dm - 2.5_wp / (log(10.0_wp) * (1.0_wp + zred))
+    end function distance_term_dz
 
     !> Observed-frame spectrum / lambda with a redshift per column (zc, present): per (pixel,
     !> column) the rest-frame interval and position as prepare_batch_grid finds them for one
