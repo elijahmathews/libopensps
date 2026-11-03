@@ -574,9 +574,22 @@ contains
                 case (1)
                     k0 = maxloc(w(:, m), 1)
                 case (2)
-                    k0 = findloc(w(:, m) > 0.0_wp, .true., 1)
+                    ! (loops, not findloc: the nvfortran runtime has no findloc on logical arrays)
+                    k0 = 0
+                    do k = 1, size(w, 1)
+                        if (w(k, m) > 0.0_wp) then
+                            k0 = k
+                            exit
+                        end if
+                    end do
                 case (3)
-                    k0 = findloc(w(:, m) > 0.0_wp, .false., 1, back=.true.)
+                    k0 = 0
+                    do k = size(w, 1), 1, -1
+                        if (.not. (w(k, m) > 0.0_wp)) then
+                            k0 = k
+                            exit
+                        end if
+                    end do
                 end select
                 if (k0 < 1) cycle
                 ! (relative to the age's own weight: a young age that dominates a UV band makes its
