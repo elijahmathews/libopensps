@@ -1119,7 +1119,9 @@ contains
             ! per-model metallicity, which then adds to logzsol's row)
             if (present(mass_bar)) then
 #ifdef OMP_TARGET
-                if (zmode) then
+                ! (the SFH weights from the device, where it computed them; with few models the host
+                ! did, and the device copy is not current)
+                if (zmode .and. .not. host_m) then
                     !$omp target update from(weights)
                 end if
 #endif
