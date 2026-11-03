@@ -14,7 +14,7 @@ program test_csp_batch_grad
     !> - d L / d(SSP weights) along a random direction (relative perturbations of the weights, so
     !>   they stay positive), and for single ages, including an age whose weight is zero;
     !> - the weights' gradient of a parametric SFH equals that of the same weights given as a matrix;
-    !> - with SFH parameters, d L / d(tage, tau, const, fburst, tburst, sf_start, sf_trunc);
+    !> - with SFH parameters, d L / d(tage, tau, const, fburst, tburst, sf_start, sf_trunc, sf_slope);
     !> - d L / d zred above z = 0 (resampling, distance, IGM);
     !> - with smoothing, d L / d sigma_smooth (shared by the batch: the sum of the models' rows);
     !> - unsupported stages return status 2.
@@ -31,7 +31,8 @@ program test_csp_batch_grad
                                  BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, &
                                  BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, &
                                  BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
-                                 BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, NBGRAD
+                                 BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, &
+                                 BGRAD_SF_SLOPE, NBGRAD
     use opensps_ssp, only: generate_ssp_grid
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                                opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
@@ -169,9 +170,9 @@ contains
     subroutine set_model(m, zred)
         integer, intent(in) :: m
         real(WP), intent(in) :: zred
-        ! (SFH forms with parameter gradients: an SSP, tau and delayed tau with constant, burst and a
-        ! late start)
-        integer, parameter :: sfh(N_MOD) = [1, 4, 0, 1, 4, 1]
+        ! (SFH forms with parameter gradients: an SSP, tau and delayed tau with constant, burst,
+        ! truncation and a late start, Simha)
+        integer, parameter :: sfh(N_MOD) = [1, 4, 0, 1, 4, 5]
         ! (off the grid ages, where the weights have a kink in tage)
         real(WP), parameter :: tage(N_MOD) = [10.3_wp, 3.1_wp, 7.2_wp, 0.31_wp, 8.3_wp, 12.7_wp]
         real(WP), parameter :: tau(N_MOD) = [1.0_wp, 0.5_wp, 2.0_wp, 0.1_wp, 3.0_wp, 0.7_wp]
@@ -193,8 +194,8 @@ contains
         call set_int('sfh', sfh(m))
         call set_float('tage', tage(m))
         call set_float('tau', tau(m))
-        call set_float('sf_trunc', merge(0.71_wp * tage(m), 0.0_wp, m == 1 .or. m == 4))   ! (truncated)
-        call set_float('sf_slope', 0.0_wp)
+        call set_float('sf_trunc', merge(0.71_wp * tage(m), 0.0_wp, m == 1 .or. m == 4 .or. m == 6))   ! (truncated)
+        call set_float('sf_slope', merge(-1.3_wp, 0.0_wp, m == 6))
         call set_float('const', merge(0.15_wp, 0.0_wp, m == 2 .or. m == 6))
         call set_float('fburst', merge(0.2_wp, 0.0_wp, m == 1 .or. m == 5))
         call set_float('tburst', 0.63_wp * tage(m))
@@ -375,7 +376,10 @@ contains
             g_ad = sum(pbar(BGRAD_SIGMA_SMOOTH, :))
             write(*, '(A,2ES16.8,A,ES10.2)') "# sigma_smooth (adjoint, differences): ", g_ad, g_fd, ", relative ", &
                 abs(g_ad - g_fd) / abs(g_fd)
-            call assert_true(abs(g_ad - g_fd) <= merge(2.0e-2_wp, 1.0e-4_wp, LINEAR_ONLY) * abs(g_fd), &
+            ! (FP32: an absolute floor of 1e-5, the spectrum part's FP32 rounding over the step being
+            ! ~1e-7: its sigma gradient can be ~1e-9)
+            call assert_true(abs(g_ad - g_fd) <= merge(2.0e-2_wp, 1.0e-4_wp, LINEAR_ONLY) * &
+                             max(abs(g_fd), merge(1.0e-5_wp, 0.0_wp, LINEAR_ONLY)), &
                              "d L / d sigma_smooth against finite differences", total_tests, total_failures)
         end if
 
@@ -432,17 +436,17 @@ contains
         type(PARAMS), intent(in) :: psets(:)
         real(WP), intent(in) :: w(:, :), pbar(:, :)
         logical, intent(in) :: given_w
-        integer, parameter :: NQ = 23
+        integer, parameter :: NQ = 24
         integer, parameter :: ROWS(NQ) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
                                           BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, &
                                           BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, &
                                           BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, BGRAD_FBURST, BGRAD_TBURST, &
-                                          BGRAD_SF_START, BGRAD_ZRED, BGRAD_SF_TRUNC]
+                                          BGRAD_SF_START, BGRAD_ZRED, BGRAD_SF_TRUNC, BGRAD_SF_SLOPE]
         character(len=12), parameter :: NAMES(NQ) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
                                                      'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb', &
                                                      'duste_qpah', 'duste_umin', 'duste_gamma', 'gas_logz', 'gas_logu', &
                                                      'logzsol', 'tage', 'tau', 'const', 'fburst', 'tburst', 'sf_start', &
-                                                     'zred', 'sf_trunc']
+                                                     'zred', 'sf_trunc', 'sf_slope']
         type(PARAMS) :: pp(size(psets))
         real(WP) :: g_fd(NQ, size(psets)), lp, lm, l0, l3, x, h, worst(NQ), gmax
         integer :: q, m, worst_m(NQ)
@@ -453,7 +457,7 @@ contains
                 pp = psets
                 x = get_par(pp(m), q)
                 ! Parameters at their bound 0 (masses of dust, fractions): one-sided, second order
-                bound = q /= 4 .and. q /= 5 .and. q /= 8 .and. q /= 9 .and. q /= 15 .and. x <= 0.0_wp
+                bound = q /= 4 .and. q /= 5 .and. q /= 8 .and. q /= 9 .and. q /= 15 .and. q /= 24 .and. x <= 0.0_wp
                 ! (sf_trunc = 0: no truncation, not a bound of a continuous parameter; not checked)
                 if (q == 23 .and. x <= 0.0_wp) then
                     g_fd(q, m) = pbar(ROWS(q), m)
@@ -558,7 +562,8 @@ contains
         case (20); get_par = p%tburst
         case (21); get_par = p%sf_start
         case (22); get_par = p%zred
-        case default; get_par = p%sf_trunc
+        case (23); get_par = p%sf_trunc
+        case default; get_par = p%sf_slope
         end select
     end function get_par
 
@@ -589,7 +594,8 @@ contains
         case (20); p%tburst = x
         case (21); p%sf_start = x
         case (22); p%zred = x
-        case default; p%sf_trunc = x
+        case (23); p%sf_trunc = x
+        case default; p%sf_slope = x
         end select
     end subroutine set_par
 
