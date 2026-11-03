@@ -57,7 +57,8 @@ program test_csp_batch
     ! usual tolerance (the difference form had cost the oracle ~7e-10)
     real(WP), parameter :: IMF_SPEC_RTOL = SPEC_RTOL
     ! Mass and L_bol with the IMF per model: FP64 weights, unless built with -Dfp32_imf_weights=true
-    ! (FP32 kernels; per age ~3e-8 measured on MIST against quad precision)
+    ! (FP32 kernels; per age ~3e-8 measured on MIST against quad precision, L_bol up to 7.3e-7 at
+    ! extreme IMF parameters on the A100)
 #if defined(OPENSPS_FP32_IMF_WEIGHTS)
     real(WP), parameter :: IMF_SCAL_TOL = 1.0e-6_wp
 #else

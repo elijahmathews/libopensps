@@ -4,10 +4,14 @@
 #
 # Usage: tools/legacy_parity/run_matrix.sh LEGACY_SRC LEGACY_SPS_HOME [OUTDIR]
 #   LEGACY_SRC       clean legacy FSPS src/ directory (e.g. git -C fsps archive HEAD src | tar -x)
-#   LEGACY_SPS_HOME  legacy-layout data tree whose files match this fork's data/ tree
+#   LEGACY_SPS_HOME  legacy-layout data tree whose files match this fork's data (e.g. upstream
+#                    FSPS at 82a8735: its SPECTRA/, ISOCHRONES/, dust/, nebular/, data/)
 #   OUTDIR           scratch directory (default: ./legacy_parity_matrix)
 # Environment: JOBS (parallel cases, default 4), BUILD (fork build directory, default build),
-#              CASES (case table, default tests/data/param_cases.psv)
+#              CASES (case table, default tests/data/param_cases.psv),
+#              DATA_HOME (the fork's data root, default OPENSPS_DATA_HOME),
+#              LEGACY_NEBULAR (directory with the corrected ZAU_{ND,WD}_{mist,pdva,prsc}.lines
+#              that the fork's data holds, e.g. data/nebular of elijahmathews/fsps at fsps-final)
 
 set -euo pipefail
 
@@ -15,6 +19,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 LEGACY_SRC="$(realpath "${1:?usage: $0 LEGACY_SRC LEGACY_SPS_HOME [OUTDIR]}")"
 LEGACY_HOME="$(realpath "${2:?usage: $0 LEGACY_SRC LEGACY_SPS_HOME [OUTDIR]}")"
+DATA_HOME="$(realpath "${DATA_HOME:-${OPENSPS_DATA_HOME:?set DATA_HOME or OPENSPS_DATA_HOME to the fork data root}}")"
+LEGACY_NEBULAR="$(realpath -m "${LEGACY_NEBULAR:?set LEGACY_NEBULAR to the corrected nebular line tables (README.md)}")"
+for k in ND_mist ND_pdva ND_prsc WD_mist WD_pdva WD_prsc; do
+    [ -f "$LEGACY_NEBULAR/ZAU_$k.lines" ] || { echo "missing $LEGACY_NEBULAR/ZAU_$k.lines" >&2; exit 2; }
+done
 OUT="$(realpath -m "${3:-legacy_parity_matrix}")"
 JOBS="${JOBS:-4}"
 BUILD="$(realpath -m "$ROOT/${BUILD:-build}")"
@@ -41,7 +50,7 @@ done
 ln -s "$LEGACY_HOME"/nebular/* "$OUT/sps_home/nebular/"
 for k in ND_mist ND_pdva ND_prsc WD_mist WD_pdva WD_prsc; do
     rm "$OUT/sps_home/nebular/ZAU_$k.lines"
-    cp "$ROOT/data/nebular/ZAU_$k.lines" "$OUT/sps_home/nebular/"
+    cp "$LEGACY_NEBULAR/ZAU_$k.lines" "$OUT/sps_home/nebular/"
 done
 
 # 2. Legacy builds with the fork's constants and the upstream AGN fix (patches/)
@@ -83,12 +92,12 @@ run_case() {
     (cd "$legacy" && SPS_HOME="$OUT/sps_home" ./csp_dump --out "$OUT/legacy/$name.opsf" \
         "${extra[@]}" $overrides > "$OUT/legacy/$name.log" 2>&1) || { echo "legacy failed: $name" >&2; return 1; }
     # shellcheck disable=SC2086
-    (cd "$OUT/fork" && OPENSPS_DATA_HOME="$ROOT" SPS_HOME="$ROOT" FSPS_DATA_HOME="$ROOT" "$BUILD/generate_opensps_fixtures" \
+    (cd "$OUT/fork" && OPENSPS_DATA_HOME="$DATA_HOME" SPS_HOME="$DATA_HOME" FSPS_DATA_HOME="$DATA_HOME" "$BUILD/generate_opensps_fixtures" \
         --isoc "$isoc" --spec "$spec" --dust "$dust" "${extra[@]}" --out "$name.opsf" $overrides \
         > "$name.log" 2>&1) || { echo "fork failed: $name" >&2; return 1; }
 }
 export -f run_case
-export OUT ROOT BUILD
+export OUT ROOT BUILD DATA_HOME
 status=0
 grep -v '^#' "$CASES" | grep . | tr '\n' '\0' | xargs -0 -P "$JOBS" -I{} bash -c 'run_case "$1"' _ {} || status=1
 

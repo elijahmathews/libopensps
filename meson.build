@@ -52,10 +52,12 @@ if accel_target == 'omp_gpu' and fc_id in ['llvm-flang', 'flang']
     # LLVM flang (AMD and other GPUs): -Dgpu_arch is an offload target such as gfx1103 or gfx942.
     # flang assumes OpenMP 3.1 unless told otherwise and then rejects the 5.x clauses the
     # kernels use (use_device_addr, teams loop): 5.2. System-specific paths go in
-    # -Dfortran_args / -Dfortran_link_args; with Fedora's ROCm packages (doc/ROADMAP.md,
-    # priority 5): --rocm-device-lib-path=<ROCm LLVM>/lib/clang/<v>/lib/amdgcn/bitcode, and for
-    # the link also -Xoffload-linker --library-path=/usr/lib64/amdgcn-amd-amdhsa (not -L, which
-    # meson moves away from -Xoffload-linker)
+    # -Dfortran_args / -Dc_args and -Dfortran_link_args / -Dc_link_args (the C sources get the
+    # offload flags too); with Fedora's ROCm packages (doc/GPU_PLAN.md, "On the R9700 desktop"):
+    # --rocm-device-lib-path=<ROCm LLVM>/lib/clang/<v>/lib/amdgcn/bitcode, and for the link also
+    # -Xoffload-linker --library-path=/usr/lib64/amdgcn-amd-amdhsa (not -L, which meson moves away
+    # from -Xoffload-linker), given as a meson list (['a', 'b', 'c']): a comma-separated string
+    # reaches the linker as one argument
     accel_args = ['-fopenmp', '-fopenmp-version=52', '--offload-arch=' + get_option('gpu_arch')]
     # map-type modifier of the kernels' map clauses for data that is already on the device
     # (OMP_MAP_PRESENT_ALLOC; OpenMP 5.1): flang checks presence, nvfortran 25.1 does not parse it
