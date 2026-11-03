@@ -182,6 +182,13 @@ module opensps_context_types
         !> for; compute_line_gaussians is skipped while they are unchanged (negative: not built)
         real(WP) :: gauss_built_sigma = -1.0_wp
         integer :: gauss_built_velocity = -1
+        !> The batch's grid-only attenuation-curve tables (attenuation_tables in opensps_csp_batch):
+        !> built for the dust type att_dust_type (-1: not built) and kept between calls, on the
+        !> device too once att_on_device (rebuilding them per call cost ~34 us at N = 1 on the A100)
+        real(KP), allocatable :: att_tab(:, :)
+        real(WP), allocatable :: att_ltab(:)
+        integer :: att_dust_type = -1
+        logical :: att_on_device = .false.
         real(WP), dimension(NAGNDUST) :: agndust_tau = 0.0_wp
         real(WP), pointer, contiguous :: agndust_spec(:, :) => null()
         real(WP), pointer, contiguous :: mact_isoc(:, :, :) => null()
@@ -453,6 +460,10 @@ contains
         if (associated(state%nebem_cont)) nullify (state%nebem_cont)
         if (associated(state%xnebem_cont)) nullify (state%xnebem_cont)
         if (associated(state%neb_res_min)) nullify (state%neb_res_min)
+        if (allocated(state%att_tab)) deallocate (state%att_tab)
+        if (allocated(state%att_ltab)) deallocate (state%att_ltab)
+        state%att_dust_type = -1
+        state%att_on_device = .false.
         if (state%owns_gaussnebarr) then
             if (associated(state%gaussnebarr)) deallocate (state%gaussnebarr)
             state%owns_gaussnebarr = .false.
