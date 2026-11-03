@@ -75,7 +75,7 @@ loses energy, or uses rounded constants.
 | Difference | Effect against legacy | Matrix cases |
 |---|---|---|
 | Constants: IAU 2015 / CODATA 2018 and exact 1/(4 pi sigma) (#83) | Legacy spectra 1.77% brighter (`gsig4pi`); AGB dust and WR winds shift | Patched out |
-| IMF weights and remnant masses from exact integrals (erf for the lognormal parts) | Legacy's Romberg integration (1e-7 per bin) shifts Chabrier and van Dokkum by up to 1.4e-6 in spectra, 1e-6 dex in mass; other IMFs identical | Chabrier, van Dokkum |
+| IMF weights and remnant masses from exact integrals (lognormal parts: erf for wide bins, 5-point Gauss-Legendre for bins narrower than 0.1 in the erf argument, where the erf difference would cancel) | Legacy's Romberg integration (1e-7 per bin) shifts Chabrier and van Dokkum by up to 1.4e-6 in spectra, 1e-6 dex in mass; other IMFs identical | Chabrier, van Dokkum |
 | Dust self-absorption summed analytically (#82) | Legacy's iteration loses up to 0.25% of L_bol: 1.4% of the dust emission for a power-law curve (dust_type 0, the default); about 0.1% of the AGB-dust IR | dust_type 0 with dust emission |
 | Filter transmission clamped at 0 before normalization | Legacy normalizes with the negative values its linear edge extrapolation produces: LSST u +0.0008, LSST y +0.0005, Bessell M +0.004 mag | All |
 | Calzetti R_V = 4.05 exactly | Legacy's 4.0455: 3e-4 in attenuated spectra | dust_type 2, 4 |
