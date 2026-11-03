@@ -29,7 +29,7 @@ module opensps_batch_photometry
 
     public :: compute_magnitudes_columns, prepare_batch_grid
     public :: smoothing_on_device, prepare_smoothing_kernel, smooth_columns, smooth_columns_adjoint
-    public :: distance_term_dz
+    public :: distance_term_dz, smooth_sigma_adjoint
 #ifdef FSPS_CUBLAS
     public :: blas, blas_init
 #endif
@@ -402,6 +402,91 @@ contains
         call smooth_kernel_t(ctx%state%nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
                              ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_coef, spec_bar)
     end subroutine smooth_columns_adjoint
+
+    !> d L / d sigma_smooth per column, for the prepared operator (smooth_columns): with
+    !> C(i, k) = c_k exp(-a x_k^2) / sum_k (...), x_k = ln lambda_i - ln lambda_k, a = 1 / (2 sigma_beta^2),
+    !> d C / d sigma = C (x_k^2 - <x^2>_i) / (sigma_beta^3 c 1e-13) (<>: the C-weighted mean over the
+    !> window; the window's edges, at N_SIGMA_RANGE sigma, do not move continuously). spec: the
+    !> spectra before smoothing; spec_bar: the cotangents of the smoothed spectra. One thread per
+    !> (column, chunk of NCH pixels), FP64 sums.
+    subroutine smooth_sigma_adjoint(ctx, sigma, spec, spec_bar, n_col, ds)
+        type(opensps_context_t), intent(inout) :: ctx
+        real(WP), intent(in)                :: sigma
+        real(KP), intent(in), contiguous    :: spec(:,:), spec_bar(:,:)
+        integer, intent(in)                 :: n_col
+        real(WP), intent(out)               :: ds(n_col)
+        real(WP) :: sb, kfac
+        real(WP), allocatable :: ll(:)
+        integer :: nspec
+
+        nspec = ctx%state%nspec
+        sb = sigma / (C_LIGHT * 1.0e-13_wp)
+        kfac = 1.0_wp / (sb**3 * C_LIGHT * 1.0e-13_wp)
+        allocate(ll(nspec))
+        ll = log(ctx%state%spec_lambda(1:nspec))
+        call smooth_sigma_kernel(nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
+                                 ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_coef, ll, kfac, &
+                                 spec, spec_bar, ds)
+    end subroutine smooth_sigma_adjoint
+
+    subroutine smooth_sigma_kernel(nspec, n_col, ncoef, sm_lo, sm_hi, sm_off, sm_coef, ll, kfac, spec, spec_bar, ds)
+        integer, intent(in)     :: nspec, n_col, ncoef
+        integer, intent(in)     :: sm_lo(nspec), sm_hi(nspec), sm_off(nspec)
+        real(WP), intent(in)    :: sm_coef(ncoef), ll(nspec), kfac
+        real(KP), intent(in)    :: spec(nspec, n_col), spec_bar(nspec, n_col)
+        real(WP), intent(out)   :: ds(n_col)
+        integer, parameter :: NCH = 64
+        real(WP), allocatable :: part(:,:)
+        integer  :: m, c, i, k, lo, off
+        real(WP) :: s, x2m, sx, sxx, x2
+
+        allocate(part(NCH, n_col))
+#ifdef OMP_TARGET
+        !$omp target data map(to: ll) map(alloc: part) map(from: ds)
+#endif
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(s, i, k, lo, off, x2m, sx, sxx, x2)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(s, i, k, lo, off, x2m, sx, sxx, x2)
+#endif
+        do m = 1, n_col
+            do c = 1, NCH
+                s = 0.0_wp
+                do i = c, nspec, NCH
+                    lo = sm_lo(i)
+                    if (lo == 0) cycle
+                    off = sm_off(i) - lo
+                    ! <x^2>, then sum C (x^2 - <x^2>) S
+                    x2m = 0.0_wp
+                    do k = lo, sm_hi(i)
+                        x2m = x2m + sm_coef(off + k) * (ll(i) - ll(k))**2
+                    end do
+                    sx = 0.0_wp
+                    do k = lo, sm_hi(i)
+                        x2 = (ll(i) - ll(k))**2
+                        sx = sx + sm_coef(off + k) * (x2 - x2m) * real(spec(k, m), WP)
+                    end do
+                    s = s + real(spec_bar(i, m), WP) * sx
+                end do
+                part(c, m) = s
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(c, sxx)
+#elif defined(_OPENMP)
+        !$omp parallel do private(c, sxx)
+#endif
+        do m = 1, n_col
+            sxx = 0.0_wp
+            do c = 1, NCH
+                sxx = sxx + part(c, m)
+            end do
+            ds(m) = kfac * sxx
+        end do
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine smooth_sigma_kernel
 
     !> smooth_kernel transposed: one thread per column, serial over the pixels (each output pixel
     !> scatters into its window), the sums in FP64.
