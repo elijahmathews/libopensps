@@ -9,7 +9,8 @@ program test_csp_batch_grad
     !> - d L / d (dust1, dust2, dust3, dust_index, dust1_index, frac_obrun, frac_nodust, mwr, uvb) per
     !>   model (one-sided, second order, where a parameter sits at its bound 0), and with dust emission
     !>   (energy balance) also duste_qpah, duste_umin, duste_gamma; with velocity smoothing; with
-    !>   nebular emission (continuum and lines) also gas_logz and gas_logu;
+    !>   nebular emission (continuum and lines) also gas_logz and gas_logu; with every metallicity's
+    !>   basis resident, logzsol;
     !> - d L / d(SSP weights) along a random direction (relative perturbations of the weights, so
     !>   they stay positive), and for single ages, including an age whose weight is zero;
     !> - the weights' gradient of a parametric SFH equals that of the same weights given as a matrix;
@@ -26,7 +27,7 @@ program test_csp_batch_grad
     use opensps_csp_batch, only: compute_csp_batch, BGRAD_FAGN, BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, &
                                  BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, &
                                  BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, &
-                                 BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, NBGRAD
+                                 BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, NBGRAD
     use opensps_ssp, only: generate_ssp_grid
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                                opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
@@ -104,6 +105,17 @@ program test_csp_batch_grad
     call set_int('add_dust_emission', 0)
     call set_int('add_neb_emission', 0)
     call check_unsupported()
+    ! Per-model metallicity: every metallicity's basis resident (the SSPs interpolated in log Z)
+    call opensps_setup(ctx, 0, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
+    call opensps_context_move_to_device(ctx)
+    call set_int('zmet', 10)
+    call set_int('imf_type', 1)
+    call build_basis_all()
+    call set_int('add_neb_emission', 1)
+    call set_int('add_dust_emission', 1)
+    call check_grad(2, 0.5_wp, 1, 1, .true., "Calzetti, z = 0.5, per-model logzsol, IGM, nebular, dust emission, AGN")
+    call set_int('add_dust_emission', 0)
+    call set_int('add_neb_emission', 0)
 
     call print_summary_line("Batched CSP gradients", total_tests - total_failures, total_tests)
     call tap_finish()
@@ -125,6 +137,27 @@ contains
                                               reshape(lbol_ssp, [size(lbol_ssp), 1]), 1)
     end subroutine build_basis
 
+    !> The bases of every metallicity of the context (per-model logzsol).
+    subroutine build_basis_all()
+        type(PARAMS) :: pset
+        real(WP), allocatable :: spec_z(:, :, :), mass_z(:, :), lbol_z(:, :)
+        integer :: z, nz
+
+        nz = ctx%state%nz
+        allocate(spec_z(ctx%state%nspec, ctx%state%ntfull, nz), mass_z(ctx%state%ntfull, nz), &
+                 lbol_z(ctx%state%ntfull, nz))
+        do z = 1, nz
+            call set_int('zmet', z)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pset)
+            call opensps_context_set_pset(ctx, pset)
+            call generate_ssp_grid(ctx, pset, mass_z(:, z), lbol_z(:, z), spec_z(:, :, z))
+        end do
+        call set_int('zmet', 10)
+        ctx%state%ssp_basis_is_dirty = .true.
+        call opensps_context_update_ssp_basis(ctx, spec_z, mass_z, lbol_z, nz)
+    end subroutine build_basis_all
+
     !> Model m: SFH, dust and AGN parameters over their usual ranges (fagn = 0 for model 6).
     subroutine set_model(m, zred)
         integer, intent(in) :: m
@@ -144,6 +177,8 @@ contains
         ! Inside the CLOUDY grid intervals
         real(WP), parameter :: glogz(N_MOD) = [-1.37_wp, -0.62_wp, 0.13_wp, -0.29_wp, -1.81_wp, 0.37_wp]
         real(WP), parameter :: glogu(N_MOD) = [-2.3_wp, -3.15_wp, -1.7_wp, -3.6_wp, -2.6_wp, -1.35_wp]
+        ! Inside the metallicity grid's intervals
+        real(WP), parameter :: logz(N_MOD) = [-1.37_wp, -0.62_wp, 0.13_wp, -0.29_wp, -1.81_wp, 0.07_wp]
 
         call set_int('sfh', sfh(m))
         call set_float('tage', tage(m))
@@ -167,6 +202,7 @@ contains
         call set_float('duste_gamma', gam(m))
         call set_float('gas_logz', glogz(m))
         call set_float('gas_logu', glogu(m))
+        call set_float('logzsol', logz(m))
         call set_float('agn_tau', 5.0_wp + 15.0_wp * mod(m, 8))
         call set_float('sigma_smooth', smooth_sigma)
         call set_float('zred', zred)
@@ -361,13 +397,15 @@ contains
         type(PARAMS), intent(in) :: psets(:)
         real(WP), intent(in) :: w(:, :), pbar(:, :)
         logical, intent(in) :: given_w
-        integer, parameter :: NQ = 14
+        integer, parameter :: NQ = 15
         integer, parameter :: ROWS(NQ) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
                                           BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, &
-                                          BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU]
+                                          BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, &
+                                          BGRAD_LOGZSOL]
         character(len=12), parameter :: NAMES(NQ) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
                                                      'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb', &
-                                                     'duste_qpah', 'duste_umin', 'duste_gamma', 'gas_logz', 'gas_logu']
+                                                     'duste_qpah', 'duste_umin', 'duste_gamma', 'gas_logz', 'gas_logu', &
+                                                     'logzsol']
         type(PARAMS) :: pp(size(psets))
         real(WP) :: g_fd(NQ, size(psets)), lp, lm, l0, l3, x, h, worst(NQ), gmax
         integer :: q, m, worst_m(NQ)
@@ -451,7 +489,8 @@ contains
         case (11); get_par = p%duste_umin
         case (12); get_par = p%duste_gamma
         case (13); get_par = p%gas_logz
-        case default; get_par = p%gas_logu
+        case (14); get_par = p%gas_logu
+        case default; get_par = p%logzsol
         end select
     end function get_par
 
@@ -473,7 +512,8 @@ contains
         case (11); p%duste_umin = x
         case (12); p%duste_gamma = x
         case (13); p%gas_logz = x
-        case default; p%gas_logu = x
+        case (14); p%gas_logu = x
+        case default; p%logzsol = x
         end select
     end subroutine set_par
 
