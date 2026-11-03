@@ -339,7 +339,7 @@ priority 3 (not implemented).
 | **Radeon 780M (iGPU)**, measured 2026-10-22/23 | ~0.2 s / ~5-10 ms (projected) | ~0.6-1 ms / ~5 ms (projected) | **6.9 / 9.5 ms** (median of 3; range over both series: FP32 4.0-8.6, FP64 5.9-12.8) | **217 / 284 us** (N = 10^4, median of 3; both series: FP32 214-295, FP64 280-390; 293 / 375 at N = 100) |
 | Radeon 780M, projected after further optimization | ~0.2 s / ~5-10 ms | ~0.6-1 ms / ~5 ms | ~3.5-5 / ~6-9 ms | ~130-180 / ~230-300 us |
 | Intel Arc Pro B70 | ~0.15 s / ~3-5 ms | ~100 / ~400 us | ~1.5-3 ms | ~20-30 / ~150-250 us |
-| AMD Radeon AI Pro R9700 | ~0.15 s / ~3-5 ms | ~80 / ~300 us | ~1.5-3 ms | ~15-25 / ~100-150 us |
+| **AMD Radeon AI Pro R9700**, measured 2026-11-02 | **0.048 s** (SSP grid 44 ms + CSP 4 ms; FP32) | **175 / 231 us** (IMF and Z free, `feat/ssp-batch-v2-a100-zvar2`) | **6.0 / 6.3 ms** | **28.8 / 36.9 us** (N = 10^4; median of 6, spread < 4%) |
 | NVIDIA P100 | ~0.5 s / ~3 ms | ~100 / ~140 us | ~1.5-2.5 ms | ~15-18 / ~25-30 us |
 | NVIDIA V100 | ~0.15 s / ~2-3 ms | ~70 / ~100 us | ~1-1.5 ms | ~11-13 / ~18-20 us |
 | NVIDIA A40 | ~0.15 s / ~2-3 ms | ~60 / ~500 us | ~1-1.5 ms | ~12-16 / ~100-150 us |
@@ -353,7 +353,11 @@ configuration this table describes: full physics, smoothing, metallicity per mod
 only; the A100 figures come from `full_smooth` and `full_smooth_z`, which differ by ~3% there).
 The iGPU runs at 68-80 C and ~30 W under load and its time varies by up to ~30% from run to run,
 so the cells are medians of three interleaved runs (a second series a day later agreed within the
-range) with the observed range over both series. The SSP+CSP columns
+range) with the observed range over both series. The R9700 row (LLVM flang 22.1.8 + Fedora ROCm
+7.1.1; `doc/GPU_RESULTS.md`, 2026-11-02) is measured on `zvar2`, whose `*_z` configs load every
+metallicity (`main`'s left the other bases empty: 26.4 / 34.2 us there); its "folded" cell is
+`full_smooth_z_imf` (IMF and metallicity free per model), the SSP+CSP cell `benchmark_phases`.
+The SSP+CSP columns
 were not measured. Before the optimization work of 2026-10-22 the same runs took 12-29 ms per
 single call and ~25 ms per model at N = 100, and did not finish at N = 1000.
 Where the large-N time goes (FP32, N = 10^4, us per model): nebular continuum ~78 (FP64
