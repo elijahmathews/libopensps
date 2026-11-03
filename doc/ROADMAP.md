@@ -246,7 +246,7 @@ tables and interpolation weights:
 | `duste_qpah`, `duste_umin`, `duste_gamma` | the energy balance (absorbed light, escaping fraction) and the Draine & Li interpolation |
 | `gas_logz`, `gas_logu` (and `frac_obrun`) | the nebular continuum and lines (CLOUDY grids in log space), the EUV rows |
 | `logzsol` | the bases (and L_bol, Q) interpolated in log Z, with every metallicity resident |
-| `tage`, `tau`, `const`, `fburst`, `tburst`, `sf_start`, `sf_trunc` | the SFH weights' tangents (`opensps_sfh_tangent`; sfh = 0, 1, 4) |
+| `tage`, `tau`, `const`, `fburst`, `tburst`, `sf_start`, `sf_trunc`, `sf_slope` | the SFH weights' tangents (`opensps_sfh_tangent`; sfh = 0, 1, 4, 5) |
 | `zred` | the resampling, the distance term, the IGM (`igm_tau_dz`) |
 | `sigma_smooth` | the velocity kernel's coefficients (one sigma per batch: per-model sensitivities) |
 
@@ -261,7 +261,7 @@ FP32 builds.
 Not yet (status 2 with gradients): the IMF through `ssp_ops`, SSP-level nebular emission
 (`add_neb_emission = 2`), lines outside the spectrum with dust emission, the host smoothing modes,
 `ssp_weights_z`; not differentiated: `emlines`, `mass`,
-`lbol`, `mdust`, indices as outputs; the Simha SFH (sfh = 5).
+`lbol`, `mdust`, indices as outputs.
 
 Cost (2026-11-02, full physics: nebular, dust emission, AGN, IGM, SFH parameters; forward / with
 gradients, per model): gfortran FP64, one CPU thread, 1.2-1.4 / 6.0-6.1 ms (4.5-5x); R9700 FP32,
