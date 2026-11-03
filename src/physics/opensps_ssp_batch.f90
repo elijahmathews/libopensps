@@ -1083,11 +1083,15 @@ contains
         real(KP), intent(in) :: x(n), y(n)
         real(WP) :: s
         integer, parameter :: NL = 8
-        real(KP) :: a(NL), c(NL), t(NL), u(NL), v(NL)
+        real(KP) :: a(NL), c(NL), t(NL), u(NL), ra, rc, rv, ru
         integer  :: i, l, n8
 
+        ! (all lanes defined, and the remainder in scalars: with lane-array elements in the remainder
+        ! loop, nvfortran 26.1 at -O3 returned NaN whenever n was not a multiple of NL)
         a = 0.0_KP
         c = 0.0_KP
+        t = 0.0_KP
+        u = 0.0_KP
         n8 = (n / NL) * NL
         if (KP == WP) then
             do i = 1, n8, NL
@@ -1103,12 +1107,15 @@ contains
                 c = (u - a) - t
                 a = u
             end do
+            ra = a(1)
+            rc = c(1)
             do i = n8 + 1, n
-                v(1) = x(i) * y(i) - c(1)
-                u(1) = a(1) + v(1)
-                c(1) = (u(1) - a(1)) - v(1)
-                a(1) = u(1)
+                rv = x(i) * y(i) - rc
+                ru = ra + rv
+                rc = (ru - ra) - rv
+                ra = ru
             end do
+            a(1) = ra
         end if
         s = 0.0_wp
         do l = 1, NL
