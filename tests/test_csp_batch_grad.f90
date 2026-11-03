@@ -581,9 +581,12 @@ contains
                 if (k0 < 1) cycle
                 ! (relative to the age's own weight: a young age that dominates a UV band makes its
                 ! magnitude strongly curved in that weight)
-                if (w(k0, m) > 0.0_wp) then
-                    h = merge(H_LIN, 1.0e-5_wp, LINEAR_ONLY) * w(k0, m)
+                if (w(k0, m) > 0.0_wp .and. .not. LINEAR_ONLY) then
+                    h = 1.0e-5_wp * w(k0, m)
                 else
+                    ! (FP32: the check is linear, so any step is exact; relative to the model's largest
+                    ! weight, L changes well above the FP32 rounding of the forward's sums, which a step of
+                    ! a young age's own weight did not: 1.65e-2 in the offload builds' host fallback)
                     h = merge(H_LIN, 1.0e-5_wp, LINEAR_ONLY) * maxval(w(:, m))
                 end if
                 wp_ = w
@@ -601,7 +604,11 @@ contains
                     call loss(psets, wm, .true., lm)
                     g_fd = (-3.0_wp * l0 + 4.0_wp * lp - lm) / (2.0_wp * h)
                 end if
-                worst = max(worst, abs(wbar(k0, m) - g_fd) / max(abs(g_fd), tiny(1.0_wp)))
+                ! (FP32: an absolute floor of 1e-4 of the model's largest weight gradient: an old age with
+                ! zero weight can have a gradient 1e-7 of that, below the FP32 rounding of L over any step)
+                worst = max(worst, abs(wbar(k0, m) - g_fd) / max(abs(g_fd), &
+                                                               merge(1.0e-4_wp * maxval(abs(wbar(:, m))), &
+                                                                     tiny(1.0_wp), LINEAR_ONLY)))
             end do
             write(*, '(A,ES10.2)') "# single ages: worst relative difference ", worst
             ! (FP64: the step is relative to the age's own weight, so for the smallest weights the
