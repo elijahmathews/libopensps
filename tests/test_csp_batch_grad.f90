@@ -8,7 +8,8 @@ program test_csp_batch_grad
     !>   the forward model switches on);
     !> - d L / d (dust1, dust2, dust3, dust_index, dust1_index, frac_obrun, frac_nodust, mwr, uvb) per
     !>   model (one-sided, second order, where a parameter sits at its bound 0), and with dust emission
-    !>   (energy balance) also duste_qpah, duste_umin, duste_gamma; with velocity smoothing;
+    !>   (energy balance) also duste_qpah, duste_umin, duste_gamma; with velocity smoothing; with
+    !>   nebular emission (continuum and lines) also gas_logz and gas_logu;
     !> - d L / d(SSP weights) along a random direction (relative perturbations of the weights, so
     !>   they stay positive), and for single ages, including an age whose weight is zero;
     !> - the weights' gradient of a parametric SFH equals that of the same weights given as a matrix;
@@ -24,7 +25,8 @@ program test_csp_batch_grad
     use opensps_csp, only: sfh_weights_core
     use opensps_csp_batch, only: compute_csp_batch, BGRAD_FAGN, BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, &
                                  BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, &
-                                 BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, NBGRAD
+                                 BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, &
+                                 BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, NBGRAD
     use opensps_ssp, only: generate_ssp_grid
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                                opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
@@ -94,6 +96,13 @@ program test_csp_batch_grad
     call check_grad(0, 0.5_wp, 1, 1, .true., "power law, z = 0.5, IGM, dust emission, AGN, sigma_smooth = 150 km/s")
     smooth_sigma = 0.0_wp
     call set_int('add_dust_emission', 0)
+    ! Nebular emission (continuum and lines in the spectrum)
+    call set_int('add_neb_emission', 1)
+    call check_grad(2, 0.0_wp, 0, 0, .true., "Calzetti, z = 0, nebular, weight matrix")
+    call set_int('add_dust_emission', 1)
+    call check_grad(1, 0.5_wp, 1, 1, .false., "Cardelli et al., z = 0.5, IGM, nebular, dust emission, AGN, SFH parameters")
+    call set_int('add_dust_emission', 0)
+    call set_int('add_neb_emission', 0)
     call check_unsupported()
 
     call print_summary_line("Batched CSP gradients", total_tests - total_failures, total_tests)
@@ -132,6 +141,9 @@ contains
         real(WP), parameter :: umin(N_MOD) = [1.1_wp, 4.3_wp, 13.0_wp, 0.55_wp, 2.2_wp, 0.9_wp]
         real(WP), parameter :: qpah(N_MOD) = [3.3_wp, 0.6_wp, 4.4_wp, 2.1_wp, 1.2_wp, 3.0_wp]
         real(WP), parameter :: gam(N_MOD) = [0.01_wp, 0.1_wp, 0.05_wp, 0.3_wp, 0.02_wp, 0.5_wp]
+        ! Inside the CLOUDY grid intervals
+        real(WP), parameter :: glogz(N_MOD) = [-1.37_wp, -0.62_wp, 0.13_wp, -0.29_wp, -1.81_wp, 0.37_wp]
+        real(WP), parameter :: glogu(N_MOD) = [-2.3_wp, -3.15_wp, -1.7_wp, -3.6_wp, -2.6_wp, -1.35_wp]
 
         call set_int('sfh', sfh(m))
         call set_float('tage', tage(m))
@@ -153,6 +165,8 @@ contains
         call set_float('duste_umin', umin(m))
         call set_float('duste_qpah', qpah(m))
         call set_float('duste_gamma', gam(m))
+        call set_float('gas_logz', glogz(m))
+        call set_float('gas_logu', glogu(m))
         call set_float('agn_tau', 5.0_wp + 15.0_wp * mod(m, 8))
         call set_float('sigma_smooth', smooth_sigma)
         call set_float('zred', zred)
@@ -347,13 +361,13 @@ contains
         type(PARAMS), intent(in) :: psets(:)
         real(WP), intent(in) :: w(:, :), pbar(:, :)
         logical, intent(in) :: given_w
-        integer, parameter :: NQ = 12
+        integer, parameter :: NQ = 14
         integer, parameter :: ROWS(NQ) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
                                           BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, &
-                                          BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA]
+                                          BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU]
         character(len=12), parameter :: NAMES(NQ) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
                                                      'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb', &
-                                                     'duste_qpah', 'duste_umin', 'duste_gamma']
+                                                     'duste_qpah', 'duste_umin', 'duste_gamma', 'gas_logz', 'gas_logu']
         type(PARAMS) :: pp(size(psets))
         real(WP) :: g_fd(NQ, size(psets)), lp, lm, l0, l3, x, h, worst(NQ), gmax
         integer :: q, m, worst_m(NQ)
@@ -372,6 +386,7 @@ contains
                 ! (the template's parameters: steps inside their grid interval)
                 h = merge(H_DUST32, H_DUST, LINEAR_ONLY) * max(abs(x), 1.0_wp)
                 if (q >= 10) h = merge(H_DUST32, H_DUST, LINEAR_ONLY) * max(abs(x), 0.01_wp)
+                if (q >= 13) h = merge(H_DUST32, H_DUST, LINEAR_ONLY)
                 if (bound) then
                     ! One-sided, third order: (-11 L0 + 18 L1 - 9 L2 + 2 L3) / 6h (at dust2 = 0 the UV
                     ! curve makes L strongly curved; second order needed h ~ 1e-6, below the
@@ -393,16 +408,18 @@ contains
                 end if
             end do
         end do
-        ! Relative to the larger of |g_fd| and 1e-3 of the largest gradient of that model (the
-        ! differences' rounding, ~1e-8 absolute, on gradients of ~1e-5; rows that do not act, mwr and
-        ! uvb outside dust type 1, are zero both ways)
+        ! Relative to the larger of |g_fd|, 1e-3 of the largest gradient of that model, and an
+        ! absolute floor: the differences' rounding (L ~ 1-10, rounding ~1e-13 over h = 1e-5) is up to
+        ! ~1e-7 absolute, so gradients below ~0.1 are checked to 1e-6 absolute (rows that do not act,
+        ! mwr and uvb outside dust type 1, gas_logz and gas_logu without nebular emission, are zero)
         worst = 0.0_wp
         worst_m = 0
         do m = 1, size(psets)
             gmax = maxval(abs(g_fd(:, m)))
             do q = 1, NQ
                 x = abs(pbar(ROWS(q), m) - g_fd(q, m)) / max(abs(g_fd(q, m)), &
-                                                               merge(1.0e-2_wp, 1.0e-3_wp, LINEAR_ONLY) * gmax, tiny(1.0_wp))
+                                                               merge(1.0e-2_wp, 1.0e-3_wp, LINEAR_ONLY) * gmax, &
+                                                               merge(tiny(1.0_wp), 0.1_wp, LINEAR_ONLY))
                 if (x > worst(q)) then
                     worst(q) = x
                     worst_m(q) = m
@@ -432,7 +449,9 @@ contains
         case (9); get_par = p%uvb
         case (10); get_par = p%duste_qpah
         case (11); get_par = p%duste_umin
-        case default; get_par = p%duste_gamma
+        case (12); get_par = p%duste_gamma
+        case (13); get_par = p%gas_logz
+        case default; get_par = p%gas_logu
         end select
     end function get_par
 
@@ -452,7 +471,9 @@ contains
         case (9); p%uvb = x
         case (10); p%duste_qpah = x
         case (11); p%duste_umin = x
-        case default; p%duste_gamma = x
+        case (12); p%duste_gamma = x
+        case (13); p%gas_logz = x
+        case default; p%gas_logu = x
         end select
     end subroutine set_par
 
@@ -504,11 +525,17 @@ contains
         call print_group("Gradients: unsupported stages")
         allocate(mags(ctx%state%nbands, 1), wbar(ctx%state%ntfull, 1))
         call set_model(1, 0.0_wp)
+        ! Lines outside the spectrum with dust emission (their absorbed part joins the energy balance)
         call set_int('add_neb_emission', 1)
+        call set_int('add_dust_emission', 1)
+        call set_int('nebemlineinspec', 0)
         call opensps_context_prepare_pset(ctx)
         call opensps_context_get_pset(ctx, psets(1))
         call compute_csp_batch(ctx, psets, mags, status, mags_bar=mags, weights_bar=wbar)
-        call assert_true(status == 2, "nebular emission: status 2", total_tests, total_failures)
+        call assert_true(status == 2, "nebular lines outside the spectrum, dust emission: status 2", total_tests, &
+                         total_failures)
+        call set_int('nebemlineinspec', 1)
+        call set_int('add_dust_emission', 0)
         call set_int('add_neb_emission', 0)
         ! Smoothing at constant width in wavelength (on the host): not yet
         call set_int('smooth_velocity', 0)
