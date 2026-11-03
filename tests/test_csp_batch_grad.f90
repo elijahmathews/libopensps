@@ -14,7 +14,7 @@ program test_csp_batch_grad
     !> - d L / d(SSP weights) along a random direction (relative perturbations of the weights, so
     !>   they stay positive), and for single ages, including an age whose weight is zero;
     !> - the weights' gradient of a parametric SFH equals that of the same weights given as a matrix;
-    !> - with SFH parameters, d L / d(tage, tau, const, fburst, tburst, sf_start);
+    !> - with SFH parameters, d L / d(tage, tau, const, fburst, tburst, sf_start, sf_trunc);
     !> - d L / d zred above z = 0 (resampling, distance, IGM);
     !> - with smoothing, d L / d sigma_smooth (shared by the batch: the sum of the models' rows);
     !> - unsupported stages return status 2.
@@ -31,7 +31,7 @@ program test_csp_batch_grad
                                  BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, &
                                  BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, &
                                  BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
-                                 BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, NBGRAD
+                                 BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, NBGRAD
     use opensps_ssp, only: generate_ssp_grid
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                                opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
@@ -193,7 +193,7 @@ contains
         call set_int('sfh', sfh(m))
         call set_float('tage', tage(m))
         call set_float('tau', tau(m))
-        call set_float('sf_trunc', 0.0_wp)
+        call set_float('sf_trunc', merge(0.71_wp * tage(m), 0.0_wp, m == 1 .or. m == 4))   ! (truncated)
         call set_float('sf_slope', 0.0_wp)
         call set_float('const', merge(0.15_wp, 0.0_wp, m == 2 .or. m == 6))
         call set_float('fburst', merge(0.2_wp, 0.0_wp, m == 1 .or. m == 5))
@@ -432,17 +432,17 @@ contains
         type(PARAMS), intent(in) :: psets(:)
         real(WP), intent(in) :: w(:, :), pbar(:, :)
         logical, intent(in) :: given_w
-        integer, parameter :: NQ = 22
+        integer, parameter :: NQ = 23
         integer, parameter :: ROWS(NQ) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
                                           BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, &
                                           BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, &
                                           BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, BGRAD_FBURST, BGRAD_TBURST, &
-                                          BGRAD_SF_START, BGRAD_ZRED]
+                                          BGRAD_SF_START, BGRAD_ZRED, BGRAD_SF_TRUNC]
         character(len=12), parameter :: NAMES(NQ) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
                                                      'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb', &
                                                      'duste_qpah', 'duste_umin', 'duste_gamma', 'gas_logz', 'gas_logu', &
                                                      'logzsol', 'tage', 'tau', 'const', 'fburst', 'tburst', 'sf_start', &
-                                                     'zred']
+                                                     'zred', 'sf_trunc']
         type(PARAMS) :: pp(size(psets))
         real(WP) :: g_fd(NQ, size(psets)), lp, lm, l0, l3, x, h, worst(NQ), gmax
         integer :: q, m, worst_m(NQ)
@@ -454,6 +454,11 @@ contains
                 x = get_par(pp(m), q)
                 ! Parameters at their bound 0 (masses of dust, fractions): one-sided, second order
                 bound = q /= 4 .and. q /= 5 .and. q /= 8 .and. q /= 9 .and. q /= 15 .and. x <= 0.0_wp
+                ! (sf_trunc = 0: no truncation, not a bound of a continuous parameter; not checked)
+                if (q == 23 .and. x <= 0.0_wp) then
+                    g_fd(q, m) = pbar(ROWS(q), m)
+                    cycle
+                end if
                 ! (zred: zero at z = 0 by definition, the rest frame; not checked there)
                 if (q == 22 .and. x <= 0.0_wp) then
                     g_fd(q, m) = pbar(ROWS(q), m)
@@ -507,10 +512,12 @@ contains
                 x = abs(pbar(ROWS(q), m) - g_fd(q, m)) / max(abs(g_fd(q, m)), &
                                                                merge(1.0e-2_wp, 1.0e-3_wp, LINEAR_ONLY) * gmax, &
                                                                merge(tiny(1.0_wp), 0.1_wp, LINEAR_ONLY))
-                ! (zred: tolerance 1e-3 in FP64: its steps are 1e-9, and over the spectrum's ~6000 pixels a
-                ! pixel crossing, a kink of the resampled spectrum, falls inside a step now and then;
-                ! measured 1e-7 - 2e-4)
-                if (q == 22 .and. .not. LINEAR_ONLY) x = 0.01_wp * x
+                ! (zred: tolerance 1e-3 in FP64 and an absolute floor of 1e-3: its steps are 1e-9, the
+                ! differences' rounding is ~1e-4 absolute, and over the spectrum's ~6000 pixels a pixel
+                ! crossing, a kink of the resampled spectrum, falls inside a step now and then; measured
+                ! 1e-7 - 2e-4)
+                if (q == 22 .and. .not. LINEAR_ONLY) x = 0.01_wp * abs(pbar(ROWS(q), m) - g_fd(q, m)) / &
+                                                          max(abs(g_fd(q, m)), 1.0_wp)
                 if (x > worst(q)) then
                     worst(q) = x
                     worst_m(q) = m
@@ -550,7 +557,8 @@ contains
         case (19); get_par = p%fburst
         case (20); get_par = p%tburst
         case (21); get_par = p%sf_start
-        case default; get_par = p%zred
+        case (22); get_par = p%zred
+        case default; get_par = p%sf_trunc
         end select
     end function get_par
 
@@ -580,7 +588,8 @@ contains
         case (19); p%fburst = x
         case (20); p%tburst = x
         case (21); p%sf_start = x
-        case default; p%zred = x
+        case (22); p%zred = x
+        case default; p%sf_trunc = x
         end select
     end subroutine set_par
 

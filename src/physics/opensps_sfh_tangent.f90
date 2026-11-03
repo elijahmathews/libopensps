@@ -13,10 +13,10 @@ module opensps_sfh_tangent
     !> differentiated as written. The burst's two weights are linear in its age (log or linear, as
     !> the SSP interpolation).
     !>
-    !> Supported: sfh = 0 (SSP), 1 (tau), 4 (delayed tau), with const and fburst, without
-    !> truncation (sf_trunc outside (0, tage]); the Simha form (sfh = 5) and truncation are not
+    !> Supported: sfh = 0 (SSP), 1 (tau), 4 (delayed tau), with const, fburst and truncation (the
+    !> window's young end tq = tage - sf_trunc moves with both); the Simha form (sfh = 5) is not
     !> (sfh_tangent_supported). Parameters, in the units of PARAMS (Gyr): tage, tau, const, fburst,
-    !> tburst, sf_start (SFHT_*).
+    !> tburst, sf_start, sf_trunc (SFHT_*).
     !> Where tage (or the burst's age) sits exactly on a grid age the weights have a kink; the tangent
     !> there is the upward one (the derivative from above).
 
@@ -33,10 +33,10 @@ module opensps_sfh_tangent
     private
 
     public :: sfh_weights_tangent, sfh_tangent_supported
-    public :: SFHT_TAGE, SFHT_TAU, SFHT_CONST, SFHT_FBURST, SFHT_TBURST, SFHT_SF_START, NSFHT
+    public :: SFHT_TAGE, SFHT_TAU, SFHT_CONST, SFHT_FBURST, SFHT_TBURST, SFHT_SF_START, SFHT_SF_TRUNC, NSFHT
 
     integer, parameter :: SFHT_TAGE = 1, SFHT_TAU = 2, SFHT_CONST = 3, SFHT_FBURST = 4, SFHT_TBURST = 5, &
-                          SFHT_SF_START = 6, NSFHT = 6
+                          SFHT_SF_START = 6, SFHT_SF_TRUNC = 7, NSFHT = 7
     real(WP), parameter :: LOG_E = log10(exp(1.0_wp))
     real(WP), parameter :: LN10 = log(10.0_wp)
     real(WP), parameter :: GYR = 1.0e9_wp
@@ -50,15 +50,8 @@ contains
 #endif
         type(params_core), intent(in) :: pl
         real(WP), intent(in)          :: tage
-        type(sfhparams) :: sfh
 
-        sfh_tangent_supported = .false.
-        if (pl%sfh /= 0 .and. pl%sfh /= 1 .and. pl%sfh /= 4 .and. pl%sfh /= 2 .and. pl%sfh /= 3) return
-        if (pl%sfh == 1 .or. pl%sfh == 4) then
-            call convert_sfhparams(pl, tage, sfh)
-            if (sfh%tq /= 0.0_wp) return   ! truncation inside (0, tage]
-        end if
-        sfh_tangent_supported = .true.
+        sfh_tangent_supported = pl%sfh == 0 .or. pl%sfh == 1 .or. pl%sfh == 4 .or. pl%sfh == 2 .or. pl%sfh == 3
     end function sfh_tangent_supported
 
     !> The SFH weights w (as sfh_weights_core, one metallicity) and their derivative dw with respect
@@ -75,7 +68,7 @@ contains
         real(WP), intent(inout)             :: w(:), dw(:), s(:,:)
 
         type(sfhparams) :: sfh
-        real(WP) :: dtg, dtau, dtb, mass1, dmass1, massc, dmassc, c, fb, wt, dwt, cn, dcn
+        real(WP) :: dtg, dtau, dtb, dtq, mass1, dmass1, massc, dmassc, c, fb, wt, dwt, cn, dcn
         integer  :: nt, imax, i
 
         nt = ctx%state%ntfull
@@ -86,11 +79,15 @@ contains
         if (pl%sfh /= 0 .and. pl%sfh /= 1 .and. pl%sfh /= 4) return
         call convert_sfhparams(pl, tage, sfh)
         ! The internal parameters' tangents (years; lookback time): tage_int = (tage - sf_start) Gyr,
-        ! tau, tb = tage_int - tburst_int = (tage - tburst) Gyr
-        dtg = 0.0_wp; dtau = 0.0_wp; dtb = 0.0_wp
+        ! tau, tb = tage_int - tburst_int = (tage - tburst) Gyr, and with truncation (tq > 0)
+        ! tq = tage_int - sf_trunc_int = (tage - sf_trunc) Gyr
+        dtg = 0.0_wp; dtau = 0.0_wp; dtb = 0.0_wp; dtq = 0.0_wp
         select case (q)
         case (SFHT_TAGE)
             dtg = GYR; dtb = GYR
+            if (sfh%tq > 0.0_wp) dtq = GYR
+        case (SFHT_SF_TRUNC)
+            if (sfh%tq > 0.0_wp) dtq = -GYR
         case (SFHT_TAU)
             dtau = GYR
         case (SFHT_TBURST)
@@ -104,13 +101,13 @@ contains
             ! A burst at tb = tage
             sfh%type = -1
             sfh%tb = sfh%tage
-            call ssp_weights_t(ctx, sfh, 0.0_wp, 0.0_wp, dtg, max(imax - 2, 1), imax, w, dw)
+            call ssp_weights_t(ctx, sfh, 0.0_wp, 0.0_wp, dtg, 0.0_wp, max(imax - 2, 1), imax, w, dw)
             return
         end if
 
         ! Tau or delayed tau, normalized to one solar mass
         sfh%type = pl%sfh
-        call ssp_weights_t(ctx, sfh, dtg, dtau, 0.0_wp, 0, imax, w, dw)
+        call ssp_weights_t(ctx, sfh, dtg, dtau, 0.0_wp, dtq, 0, imax, w, dw)
         mass1 = 0.0_wp
         dmass1 = 0.0_wp
         do i = 1, imax
@@ -124,7 +121,7 @@ contains
         ! Constant and burst components (computed whatever const and fburst: the derivative with
         ! respect to them at 0 is the one-sided one)
         sfh%type = 0
-        call ssp_weights_t(ctx, sfh, dtg, 0.0_wp, 0.0_wp, 0, imax, s(:, 1), s(:, 2))
+        call ssp_weights_t(ctx, sfh, dtg, 0.0_wp, 0.0_wp, dtq, 0, imax, s(:, 1), s(:, 2))
         massc = 0.0_wp
         dmassc = 0.0_wp
         do i = 1, imax
@@ -142,7 +139,7 @@ contains
         fb = 0.0_wp
         if (sfh%tb >= 0.0_wp) then
             sfh%type = -1
-            call ssp_weights_t(ctx, sfh, 0.0_wp, 0.0_wp, dtb, 0, imax, s(:, 3), s(:, 4))
+            call ssp_weights_t(ctx, sfh, 0.0_wp, 0.0_wp, dtb, 0.0_wp, 0, imax, s(:, 3), s(:, 4))
             fb = pl%fburst
         end if
         c = pl%const
@@ -164,19 +161,19 @@ contains
     end subroutine sfh_weights_tangent
 
     !> compute_ssp_weights (types 0, 1, 4 and the burst, -1; no Simha limits) with tangents: dtg, dtau,
-    !> dtb the tangents of sfh%tage, sfh%tau, sfh%tb (years). sfh%tq is constant (no truncation).
-    subroutine ssp_weights_t(ctx, sfh, dtg, dtau, dtb, idx_min, idx_max, w, dw)
+    !> dtb, dtq the tangents of sfh%tage, sfh%tau, sfh%tb, sfh%tq (years).
+    subroutine ssp_weights_t(ctx, sfh, dtg, dtau, dtb, dtq, idx_min, idx_max, w, dw)
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
         type(opensps_context_t), intent(in) :: ctx
         type(sfhparams), intent(in)         :: sfh
-        real(WP), intent(in)                :: dtg, dtau, dtb
+        real(WP), intent(in)                :: dtg, dtau, dtb, dtq
         integer, intent(in)                 :: idx_min, idx_max
         real(WP), intent(inout)             :: w(:), dw(:)
 
         integer  :: j, nt, j_start, j_end
-        real(WP) :: lim_min, lts, lte, dlte, l1, dl1, l2, dl2, lim_prev, inv_dt, node_lo, node_hi
+        real(WP) :: lim_min, lts, dlts, lte, dlte, l1, dl1, l2, dl2, lim_prev, inv_dt, node_lo, node_hi
         real(WP) :: m0p, dm0p, m1p, dm1p, m0c, dm0c, m1c, dm1c, m0, dm0, m1, dm1, ltb, dltb, bdt, tb
         real(WP) :: ma, dma, mb, dmb, m1a, dm1a, m1b, dm1b
 
@@ -215,8 +212,11 @@ contains
             return
         end if
 
-        ! Star-forming window [tq, tage] (log years); only its old end moves (tage)
+        ! Star-forming window [tq, tage] (log years): the old end moves with tage, the young one with
+        ! the truncation
         lts = log10(max(sfh%tq, lim_min))
+        dlts = 0.0_wp
+        if (sfh%tq > lim_min) dlts = dtq / (sfh%tq * LN10)
         lte = log10(max(sfh%tage, lim_min))
         dlte = 0.0_wp
         if (sfh%tage > lim_min) dlte = dtg / (sfh%tage * LN10)
@@ -225,11 +225,11 @@ contains
         j_start = max(j_start, max(idx_min, 1))
         j_end = min(j_end, min(idx_max, nt - 1))
 
-        call clamp_t(ctx%state%time_full(j_start), lts, lte, dlte, l1, dl1)
+        call clamp_t(ctx%state%time_full(j_start), lts, dlts, lte, dlte, l1, dl1)
         lim_prev = l1
         call moments_t(ctx, l1, dl1, sfh, dtg, dtau, m0p, dm0p, m1p, dm1p)
         do j = j_start, j_end
-            call clamp_t(ctx%state%time_full(j + 1), lts, lte, dlte, l2, dl2)
+            call clamp_t(ctx%state%time_full(j + 1), lts, dlts, lte, dlte, l2, dl2)
             ! (a segment of zero width is kept: it adds nothing to the weights, but where the window's
             ! end sits on a grid age its tangent is the one-sided one, upwards; the forward skips it)
             if (l2 < lim_prev) then
@@ -259,8 +259,8 @@ contains
 
         ! The youngest edge: the mass formed before the first grid age goes to it
         if (idx_min == 0) then
-            call clamp_t(ctx%tiny_logt_val, lts, lte, dlte, l1, dl1)
-            call clamp_t(ctx%state%time_full(1), lts, lte, dlte, l2, dl2)
+            call clamp_t(ctx%tiny_logt_val, lts, dlts, lte, dlte, l1, dl1)
+            call clamp_t(ctx%state%time_full(1), lts, dlts, lte, dlte, l2, dl2)
             if (l1 < l2) then
                 call moments_t(ctx, l2, dl2, sfh, dtg, dtau, mb, dmb, m1b, dm1b)
                 call moments_t(ctx, l1, dl1, sfh, dtg, dtau, ma, dma, m1a, dm1a)
@@ -270,15 +270,20 @@ contains
         end if
     end subroutine ssp_weights_t
 
-    !> min(max(node, lts), lte) with its tangent (only lte moves).
-    pure subroutine clamp_t(node, lts, lte, dlte, v, dv)
+    !> min(max(node, lts), lte) with its tangent (both window ends move; at equality the upward
+    !> derivative of the kept value).
+    pure subroutine clamp_t(node, lts, dlts, lte, dlte, v, dv)
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
-        real(WP), intent(in)  :: node, lts, lte, dlte
+        real(WP), intent(in)  :: node, lts, dlts, lte, dlte
         real(WP), intent(out) :: v, dv
-        v = max(node, lts)
+        v = node
         dv = 0.0_wp
+        if (lts > node) then
+            v = lts
+            dv = dlts
+        end if
         if (lte < v) then
             v = lte
             dv = dlte

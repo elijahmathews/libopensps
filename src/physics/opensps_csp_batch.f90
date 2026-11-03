@@ -116,7 +116,7 @@ module opensps_csp_batch
     public :: BGRAD_FAGN, BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
               BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, &
               BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
-              BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, NBGRAD
+              BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, NBGRAD
 
     !> Rows of params_bar (compute_csp_batch's gradients): the derivative of the caller's loss with
     !> respect to each parameter of the model. The list grows as the adjoints of more stages are
@@ -135,8 +135,8 @@ module opensps_csp_batch
     !> Per-model metallicity (all metallicities' bases resident: the SSPs interpolated linearly in
     !> log Z, not clamped; zero with one basis, where logzsol does not act in the batch)
     integer, parameter :: BGRAD_LOGZSOL = 16
-    !> The SFH parameters (models with SFH parameters, not a weight matrix: sfh = 0, 1, 4 with const
-    !> and burst, no truncation; opensps_sfh_tangent). Zero with a weight matrix
+    !> The SFH parameters (models with SFH parameters, not a weight matrix: sfh = 0, 1, 4 with const,
+    !> burst and truncation; opensps_sfh_tangent). Zero with a weight matrix
     integer, parameter :: BGRAD_TAGE = 17, BGRAD_TAU = 18, BGRAD_CONST = 19, BGRAD_FBURST = 20, &
                           BGRAD_TBURST = 21, BGRAD_SF_START = 22
     !> The redshift: the observed-frame resampling and distance of the magnitudes (unless zred_mags
@@ -145,7 +145,11 @@ module opensps_csp_batch
     !> sigma_smooth (the device smoothing operator), per model: the batch shares one sigma, so the
     !> row is that model's own sensitivity (a sampler with one sigma for all sums the rows)
     integer, parameter :: BGRAD_SIGMA_SMOOTH = 24
-    integer, parameter :: NBGRAD = 24
+    !> The SFH's truncation (sf_trunc in (0, tage]: the young end of the star-forming window)
+    integer, parameter :: BGRAD_SF_TRUNC = 25
+    integer, parameter :: NBGRAD = 25
+    !> The rows of the SFH tangents' parameters (opensps_sfh_tangent: SFHT_TAGE .. SFHT_SF_TRUNC)
+    integer, parameter :: SFHT_ROWS(7) = [17, 18, 19, 20, 21, 22, 25]
     !> Rows BGRAD_DUST1 .. BGRAD_DUSTE_GAMMA, summed per model by the attenuation adjoint (10-12 as
     !> derivatives with respect to the template's interpolation weights wq, wu, gamma), and (13) the
     !> IGM's part of d / d zred
@@ -267,8 +271,8 @@ contains
     !>                       spectra are linear in the weights). Masses are per solar mass formed, so a
     !>                       mass scale is the caller's: d mag / d log10 M = -2.5.
     !>                       With SFH parameters, params_bar includes tage, tau, const, fburst,
-    !>                       tburst and sf_start for sfh = 0, 1, 4 without truncation (status 2 for
-    !>                       sfh = 5 or sf_trunc in (0, tage] with params_bar).
+    !>                       tburst, sf_start and sf_trunc for sfh = 0, 1, 4 (status 2 for sfh = 5
+    !>                       with params_bar).
     !>                       Gradients are not yet available (status 2) with SSP-level nebular
     !>                       emission (add_neb_emission = 2) or lines outside the spectrum with dust
     !>                       emission (nebemlineinspec = 0), the host smoothing modes (smooth_velocity = 0 or smoothspec_fast = 0), ssp_ops
@@ -1107,7 +1111,7 @@ contains
                     do q = 1, NSFHT
                         call sfh_weights_tangent(ctx, psets(m)%params_core, psets(m)%tage, q, tw(:, m), tdw(:, m), &
                                                  tsc(:, :, m))
-                        params_bar(BGRAD_TAGE + q - 1, m) = sum(wbl(:, m) * tdw(:, m))
+                        params_bar(SFHT_ROWS(q), m) = sum(wbl(:, m) * tdw(:, m))
                     end do
                 end do
             end if
