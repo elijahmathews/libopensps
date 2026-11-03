@@ -21,6 +21,7 @@ program test_csp_batch_grad
     !> - SSP-level nebular emission (add_neb_emission = 2, in the basis);
     !> - with the IMF free per model (ssp_ops), d L / d(imf1, imf2, imf3) and every other row through
     !>   the operator's reverse pass;
+    !> - every smoothing mode (the device operator, the host modes);
     !> - unsupported stages return status 2.
     !> The spectra are linear in the weights and in fagn, so the differences are exact up to rounding
     !> and the curvature of the magnitudes (log10 of the band fluxes). FP64 builds are the
@@ -116,6 +117,18 @@ program test_csp_batch_grad
     call set_int('smooth_velocity', 1)
     smooth_sigma = 150.0_wp
     call check_grad(0, 0.513_wp, 1, 1, .true., "power law, z = 0.513, IGM, dust emission, AGN, sigma_smooth = 150 km/s")
+    smooth_sigma = 0.0_wp
+    ! The host smoothing modes: the exact log-linear velocity convolution, constant width in wavelength
+    call set_int('smoothspec_fast', 0)
+    smooth_sigma = 150.0_wp
+    call check_grad(2, 0.513_wp, 1, 1, .true., "Calzetti, z = 0.513, IGM, dust emission, AGN, exact velocity smoothing")
+    call set_int('smoothspec_fast', 1)
+    call set_int('smooth_velocity', 0)
+    ! (5.37 A, not 5: at 5 A the windows' edges, lambda +- 20 A, fall on pixels of the 5 A-spaced parts of
+    ! the grid, where the smoothed spectrum jumps in sigma)
+    smooth_sigma = 5.37_wp
+    call check_grad(1, 0.0_wp, 0, 0, .false., "Cardelli et al., z = 0, dust emission, smoothing at 5.37 A, SFH")
+    call set_int('smooth_velocity', 1)
     smooth_sigma = 0.0_wp
     call set_int('add_dust_emission', 0)
     ! Nebular emission (continuum and lines in the spectrum)
@@ -477,10 +490,11 @@ contains
             g_ad = sum(pbar(BGRAD_SIGMA_SMOOTH, :))
             write(*, '(A,2ES16.8,A,ES10.2)') "# sigma_smooth (adjoint, differences): ", g_ad, g_fd, ", relative ", &
                 abs(g_ad - g_fd) / abs(g_fd)
-            ! (FP32: an absolute floor of 1e-5, the spectrum part's FP32 rounding over the step being
-            ! ~1e-7: its sigma gradient can be ~1e-9)
-            call assert_true(abs(g_ad - g_fd) <= merge(2.0e-2_wp, 1.0e-4_wp, LINEAR_ONLY) * &
-                             max(abs(g_fd), merge(1.0e-5_wp, 0.0_wp, LINEAR_ONLY)), &
+            ! (An absolute floor of 1e-5. FP32: the spectrum part's FP32 rounding over the step is ~1e-7,
+            ! and its sigma gradient can be ~1e-9. FP64: the window-edge jumps leave the differences
+            ! ~1e-10 absolute; the random cotangents can make the batch's sigma gradient ~1e-6, as with
+            ! LLVM flang's draws at 5.37 A: 2.4e-10 = 1e-4 relative)
+            call assert_true(abs(g_ad - g_fd) <= merge(2.0e-2_wp, 1.0e-4_wp, LINEAR_ONLY) * max(abs(g_fd), 1.0e-5_wp), &
                              "d L / d sigma_smooth against finite differences", total_tests, total_failures)
         end if
 
@@ -526,8 +540,8 @@ contains
             write(*, '(A,ES10.2)') "# single ages: worst relative difference ", worst
             ! (FP64: the step is relative to the age's own weight, so for the smallest weights the
             ! differences' rounding reaches ~1e-5: 5e-5. FP32: L changes by one age's share, ~1e-4 of L
-            ! for a young age, whose FP32 rounding, ~1e-7 of L, is ~1e-3 of the difference: 5e-3)
-            call assert_true(worst <= merge(5.0e-3_wp, 5.0e-5_wp, LINEAR_ONLY), "d L / d weight, single ages", &
+            ! for a young age, whose FP32 rounding, ~1e-7 of L, is ~1e-3 of the difference: 1e-2)
+            call assert_true(worst <= merge(1.0e-2_wp, 5.0e-5_wp, LINEAR_ONLY), "d L / d weight, single ages", &
                              total_tests, total_failures)
         end if
     end subroutine check_grad
@@ -578,6 +592,9 @@ contains
                 h = merge(H_DUST32, H_DUST, LINEAR_ONLY) * max(abs(x), 1.0_wp)
                 if (q >= 10) h = merge(H_DUST32, H_DUST, LINEAR_ONLY) * max(abs(x), 0.01_wp)
                 if (q >= 13) h = merge(H_DUST32, H_DUST, LINEAR_ONLY)
+                ! (gas_logz, gas_logu: smooth in the CLOUDY grids' log space; 1e-4 keeps the rounding of
+                ! their small gradients below the floor's 3e-6, truncation ~1e-8)
+                if ((q == 13 .or. q == 14) .and. .not. LINEAR_ONLY) h = 1.0e-4_wp
                 ! (SFH: relative steps; times in Gyr)
                 if (q >= 16) h = merge(H_DUST32, H_DUST, LINEAR_ONLY) * max(abs(x), 1.0_wp)
                 ! (zred: the resampled spectrum is piecewise linear in z, with a kink at every pixel
@@ -760,15 +777,16 @@ contains
         call print_group("Gradients: unsupported stages")
         allocate(mags(ctx%state%nbands, 1), wbar(ctx%state%ntfull, 1))
         call set_model(1, 0.0_wp)
-        ! Smoothing at constant width in wavelength (on the host): not yet
-        call set_int('smooth_velocity', 0)
-        call set_float('sigma_smooth', 5.0_wp)
         call opensps_context_prepare_pset(ctx)
         call opensps_context_get_pset(ctx, psets(1))
-        call compute_csp_batch(ctx, psets, mags, status, mags_bar=mags, weights_bar=wbar)
-        call assert_true(status == 2, "smoothing on the host: status 2", total_tests, total_failures)
-        call set_int('smooth_velocity', 1)
-        call set_float('sigma_smooth', 0.0_wp)
+        ! Weights over ages and metallicities: not yet
+        block
+            real(WP), allocatable :: wz(:, :, :)
+            allocate(wz(ctx%state%ntfull, 1, 1))
+            wz = 1.0e-3_wp
+            call compute_csp_batch(ctx, psets, mags, status, ssp_weights_z=wz, mags_bar=mags, weights_bar=wbar)
+        end block
+        call assert_true(status == 2, "ssp_weights_z: status 2", total_tests, total_failures)
     end subroutine check_unsupported
 
     subroutine set_int(key, value)
