@@ -159,7 +159,8 @@ the exponential and expm1 are FP32. Measured on the R9700 (2026-11-02, FP32 kern
 `full_smooth_imf` 75.5 -> 69.1 us/model (-8%), `full_smooth_z_imf` 118.1 -> 106.9 (-9%).
 The cost is accuracy of the WP outputs that FP32 builds otherwise keep exact: per bin a few FP32
 ulp (2.8e-7 worst on MIST), per age ~3e-8 in mass, L_bol, star counts and ionizing photons
-(against quad precision); spectra and magnitudes do not change measurably (their FP32 differences
+(against quad precision) at ordinary IMF parameters; at extreme ones (`imf_batch_dump`'s 64 models)
+the A100 measured mass to 4e-8 and L_bol to 7.3e-7 against the FP64 weights; spectra and magnitudes do not change measurably (their FP32 differences
 are ~10x larger). Off by default so that mass and L_bol stay FP64-exact; the tests' tolerances
 follow the option (`test_opensps_imf`: 16 ulp of FP32 per bin; `test_csp_batch`: 1e-6 for mass
 and L_bol with the IMF per model).

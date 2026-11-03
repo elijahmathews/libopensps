@@ -81,7 +81,7 @@ both:
   logs without cancellation (104.6 -> 74.5 us; on the A100 -4 to -6%), shared bin edges (-2%
   A100), blocked compensated sums in the FP32 template products, the FP32 nebular continuum and
   attenuation (#36). `-Dfp32_imf_weights` (FP32 exponentials in the weights, off by default:
-  mass and L_bol to ~3e-8) is a further -8 to -9% on the R9700 and nothing on the A100.
+  mass and L_bol to ~3e-8, L_bol to 7e-7 at extreme IMF parameters) is a further -8 to -9% on the R9700 and nothing on the A100.
 - amdflang (ROCm 7.2.4, `containers/`) is ~15% faster than Fedora's LLVM flang 22.1.8 on the
   R9700 with the same source.
 - Weak spots, in their own issues: N = 100 with metallicity free is launch bound (about 12
