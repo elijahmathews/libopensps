@@ -176,6 +176,7 @@ lib_sources = files(
     'src/physics/opensps_gas.f90',
     'src/physics/opensps_imf.f90',
     'src/physics/opensps_sfh.f90',
+    'src/physics/opensps_sfh_tangent.f90',
     'src/physics/opensps_ssp.f90',
     'src/physics/opensps_ssp_operator.f90',
     'src/physics/opensps_ssp_batch.f90',

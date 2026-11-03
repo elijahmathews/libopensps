@@ -14,6 +14,7 @@ program test_csp_batch_grad
     !> - d L / d(SSP weights) along a random direction (relative perturbations of the weights, so
     !>   they stay positive), and for single ages, including an age whose weight is zero;
     !> - the weights' gradient of a parametric SFH equals that of the same weights given as a matrix;
+    !> - with SFH parameters, d L / d(tage, tau, const, fburst, tburst, sf_start);
     !> - unsupported stages return status 2.
     !> The spectra are linear in the weights and in fagn, so the differences are exact up to rounding
     !> and the curvature of the magnitudes (log10 of the band fluxes). FP64 builds are the
@@ -27,7 +28,8 @@ program test_csp_batch_grad
     use opensps_csp_batch, only: compute_csp_batch, BGRAD_FAGN, BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, &
                                  BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, &
                                  BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, &
-                                 BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, NBGRAD
+                                 BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
+                                 BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, NBGRAD
     use opensps_ssp, only: generate_ssp_grid
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                                opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
@@ -162,8 +164,11 @@ contains
     subroutine set_model(m, zred)
         integer, intent(in) :: m
         real(WP), intent(in) :: zred
-        integer, parameter :: sfh(N_MOD) = [1, 4, 5, 1, 4, 1]
-        real(WP), parameter :: tage(N_MOD) = [10.0_wp, 3.0_wp, 7.0_wp, 0.3_wp, 8.0_wp, 13.0_wp]
+        ! (SFH forms with parameter gradients: an SSP, tau and delayed tau with constant, burst and a
+        ! late start)
+        integer, parameter :: sfh(N_MOD) = [1, 4, 0, 1, 4, 1]
+        ! (off the grid ages, where the weights have a kink in tage)
+        real(WP), parameter :: tage(N_MOD) = [10.3_wp, 3.1_wp, 7.2_wp, 0.31_wp, 8.3_wp, 12.7_wp]
         real(WP), parameter :: tau(N_MOD) = [1.0_wp, 0.5_wp, 2.0_wp, 0.1_wp, 3.0_wp, 0.7_wp]
         real(WP), parameter :: dust1(N_MOD) = [0.0_wp, 0.6_wp, 1.0_wp, 1.5_wp, 0.0_wp, 0.4_wp]
         real(WP), parameter :: dust2(N_MOD) = [0.3_wp, 0.0_wp, 0.5_wp, 2.0_wp, 0.1_wp, 0.2_wp]
@@ -183,8 +188,12 @@ contains
         call set_int('sfh', sfh(m))
         call set_float('tage', tage(m))
         call set_float('tau', tau(m))
-        call set_float('sf_trunc', merge(0.7_wp * tage(m), 0.0_wp, sfh(m) == 5))
-        call set_float('sf_slope', merge(-1.0_wp, 0.0_wp, sfh(m) == 5))
+        call set_float('sf_trunc', 0.0_wp)
+        call set_float('sf_slope', 0.0_wp)
+        call set_float('const', merge(0.15_wp, 0.0_wp, m == 2 .or. m == 6))
+        call set_float('fburst', merge(0.2_wp, 0.0_wp, m == 1 .or. m == 5))
+        call set_float('tburst', 0.63_wp * tage(m))
+        call set_float('sf_start', merge(0.43_wp, 0.0_wp, m == 2 .or. m == 5))   ! (before tage)
         call set_float('dust1', dust1(m))
         call set_float('dust2', dust2(m))
         call set_float('dust_index', dindex(m))
@@ -339,7 +348,9 @@ contains
                 worst = max(worst, abs(g_ad - g_fd) / max(abs(g_fd), 1.0e-3_wp))
             end do
             write(*, '(A,ES10.2)') "# fagn: worst relative difference ", worst
-            call assert_true(worst <= GRAD_RTOL, "d L / d fagn against finite differences", total_tests, total_failures)
+            ! (FP64: the differences' rounding reaches ~1e-6 where an AGN dominates a band: 5e-6)
+            call assert_true(worst <= merge(GRAD_RTOL, 5.0e-6_wp, LINEAR_ONLY), "d L / d fagn against finite differences", &
+                             total_tests, total_failures)
         end if
 
         call check_dust(psets, w, given_w, pbar)
@@ -397,15 +408,16 @@ contains
         type(PARAMS), intent(in) :: psets(:)
         real(WP), intent(in) :: w(:, :), pbar(:, :)
         logical, intent(in) :: given_w
-        integer, parameter :: NQ = 15
+        integer, parameter :: NQ = 21
         integer, parameter :: ROWS(NQ) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
                                           BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, &
                                           BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, &
-                                          BGRAD_LOGZSOL]
+                                          BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, BGRAD_FBURST, BGRAD_TBURST, &
+                                          BGRAD_SF_START]
         character(len=12), parameter :: NAMES(NQ) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
                                                      'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb', &
                                                      'duste_qpah', 'duste_umin', 'duste_gamma', 'gas_logz', 'gas_logu', &
-                                                     'logzsol']
+                                                     'logzsol', 'tage', 'tau', 'const', 'fburst', 'tburst', 'sf_start']
         type(PARAMS) :: pp(size(psets))
         real(WP) :: g_fd(NQ, size(psets)), lp, lm, l0, l3, x, h, worst(NQ), gmax
         integer :: q, m, worst_m(NQ)
@@ -416,7 +428,7 @@ contains
                 pp = psets
                 x = get_par(pp(m), q)
                 ! Parameters at their bound 0 (masses of dust, fractions): one-sided, second order
-                bound = q /= 4 .and. q /= 5 .and. q /= 8 .and. q /= 9 .and. x <= 0.0_wp
+                bound = q /= 4 .and. q /= 5 .and. q /= 8 .and. q /= 9 .and. q /= 15 .and. x <= 0.0_wp
                 if (bound .and. LINEAR_ONLY) then
                     g_fd(q, m) = pbar(ROWS(q), m)   ! (FP32: not checked at a bound)
                     cycle
@@ -425,6 +437,8 @@ contains
                 h = merge(H_DUST32, H_DUST, LINEAR_ONLY) * max(abs(x), 1.0_wp)
                 if (q >= 10) h = merge(H_DUST32, H_DUST, LINEAR_ONLY) * max(abs(x), 0.01_wp)
                 if (q >= 13) h = merge(H_DUST32, H_DUST, LINEAR_ONLY)
+                ! (SFH: relative steps; times in Gyr)
+                if (q >= 16) h = merge(H_DUST32, H_DUST, LINEAR_ONLY) * max(abs(x), 1.0_wp)
                 if (bound) then
                     ! One-sided, third order: (-11 L0 + 18 L1 - 9 L2 + 2 L3) / 6h (at dust2 = 0 the UV
                     ! curve makes L strongly curved; second order needed h ~ 1e-6, below the
@@ -490,7 +504,13 @@ contains
         case (12); get_par = p%duste_gamma
         case (13); get_par = p%gas_logz
         case (14); get_par = p%gas_logu
-        case default; get_par = p%logzsol
+        case (15); get_par = p%logzsol
+        case (16); get_par = p%tage
+        case (17); get_par = p%tau
+        case (18); get_par = p%const
+        case (19); get_par = p%fburst
+        case (20); get_par = p%tburst
+        case default; get_par = p%sf_start
         end select
     end function get_par
 
@@ -513,7 +533,13 @@ contains
         case (12); p%duste_gamma = x
         case (13); p%gas_logz = x
         case (14); p%gas_logu = x
-        case default; p%logzsol = x
+        case (15); p%logzsol = x
+        case (16); p%tage = x
+        case (17); p%tau = x
+        case (18); p%const = x
+        case (19); p%fburst = x
+        case (20); p%tburst = x
+        case default; p%sf_start = x
         end select
     end subroutine set_par
 
