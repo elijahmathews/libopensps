@@ -600,9 +600,9 @@ contains
         integer, intent(in) :: np, nspec, n_eff, k, nc, v0, c0
         real(KP), intent(in), contiguous, target :: etpl(:,:), v(:,:)
         real(KP), intent(inout), contiguous, target :: yo(:,:)
-        integer, parameter :: MT = 8, PT = 4, PIX_BLOCK = 256
-        integer  :: i, j, e, mq, ip, npt, l, p, mm(MT), ii(PT), p0, p1, nb, q
-        real(KP) :: bk(PT), wk(MT), acc(PT, MT), cmp(PT, MT), term, tsum
+        integer, parameter :: MT = 8, PT = 4, PIX_BLOCK = 256, KB = 4
+        integer  :: i, j, e, e0, mq, ip, npt, l, p, mm(MT), ii(PT), p0, p1, nb, q
+        real(KP) :: bk(PT), wk(MT), acc(PT, MT), cmp(PT, MT), blk(PT, MT), term, tsum
         real(KP), allocatable :: a(:,:), c(:,:)
 
         if (np < 1 .or. nc < 1) return
@@ -629,7 +629,7 @@ contains
 #endif
             npt = (np + PT - 1) / PT
 #ifdef OMP_TARGET
-            !$omp target teams loop collapse(2) private(mm, ii, bk, wk, acc, cmp, e, l, p, term, tsum)
+            !$omp target teams loop collapse(2) private(mm, ii, bk, wk, acc, cmp, blk, e, e0, l, p, term, tsum)
 #endif
             do mq = 1, (nc + MT - 1) / MT
                 do ip = 1, npt
@@ -642,27 +642,52 @@ contains
                     end do
                     acc = 0.0_KP
                     cmp = 0.0_KP
-                    do e = 1, k
-                        do l = 1, MT
-                            wk(l) = v(e, v0 + mm(l))
-                        end do
-                        do p = 1, PT
-                            bk(p) = etpl(ii(p), e)
-                        end do
-                        do l = 1, MT
-                            if (wk(l) == 0.0_KP) cycle
+                    if (KP == WP) then
+                        ! FP64 kernels: plain sums, skipping the zero weights (sparse in age)
+                        do e = 1, k
+                            do l = 1, MT
+                                wk(l) = v(e, v0 + mm(l))
+                            end do
                             do p = 1, PT
-                                if (KP == WP) then
+                                bk(p) = etpl(ii(p), e)
+                            end do
+                            do l = 1, MT
+                                if (wk(l) == 0.0_KP) cycle
+                                do p = 1, PT
                                     acc(p, l) = acc(p, l) + wk(l) * bk(p)
-                                else
-                                    term = wk(l) * bk(p) - cmp(p, l)
+                                end do
+                            end do
+                        end do
+                    else
+                        ! FP32 kernels: blocks of KB templates summed with plain multiply-adds (all
+                        ! terms >= 0: a block loses at most ~KB eps of itself), the blocks into the
+                        ! total with compensation (rule 1 of doc/MIXED_PRECISION.md): ~2 instead of
+                        ! ~5 operations per term. No zero-weight test here: its branches cost the gain
+                        do e0 = 1, k, KB
+                            blk = 0.0_KP
+                            do e = e0, min(e0 + KB - 1, k)
+                                do l = 1, MT
+                                    wk(l) = v(e, v0 + mm(l))
+                                end do
+                                do p = 1, PT
+                                    bk(p) = etpl(ii(p), e)
+                                end do
+                                do l = 1, MT
+                                    do p = 1, PT
+                                        blk(p, l) = blk(p, l) + wk(l) * bk(p)
+                                    end do
+                                end do
+                            end do
+                            do l = 1, MT
+                                do p = 1, PT
+                                    term = blk(p, l) - cmp(p, l)
                                     tsum = acc(p, l) + term
                                     cmp(p, l) = (tsum - acc(p, l)) - term
                                     acc(p, l) = tsum
-                                end if
+                                end do
                             end do
                         end do
-                    end do
+                    end if
                     do l = 1, MT
                         do p = 1, PT
                             yo(ii(p), c0 + mm(l)) = acc(p, l)
