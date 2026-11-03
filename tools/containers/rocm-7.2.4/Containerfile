@@ -1,0 +1,14 @@
+# libopensps build and profiling environment: ROCm 7.2.4 (amdflang = LLVM flang 22, rocprofv3)
+# on Ubuntu 24.04. Run with the GPU (rootless podman):
+#   podman run --rm -it --device /dev/kfd --device /dev/dri --group-add keep-groups \
+#     --security-opt label=disable -e ROCR_VISIBLE_DEVICES=... -v <repo>:/src:ro ... opensps-rocm:7.2.4
+FROM docker.io/rocm/dev-ubuntu-24.04:7.2.4-complete
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ninja-build pkg-config python3-numpy python3-pip libdw1 \
+ && rm -rf /var/lib/apt/lists/* \
+ && python3 -m pip install --no-cache-dir --break-system-packages meson==1.11.2
+# libdw1: rocprofv3 needs it. Meson as on Fedora 44: Ubuntu's 1.3.2 does not know LLVM flang (it passes classic-flang flags)
+
+ENV PATH=/opt/rocm/bin:/opt/rocm/lib/llvm/bin:$PATH

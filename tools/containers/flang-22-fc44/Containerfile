@@ -1,0 +1,10 @@
+# LLVM flang 22.1.8-4.fc44 (the R9700 desktop's compiler, Fedora 44) for OpenMP offload builds of libopensps on
+# other machines: AMD (device libraries via ROCm) and NVIDIA (libomptarget's CUDA plugin and the nvptx
+# device runtime are in libomp-devel; ptxas/nvlink come from a CUDA toolkit bound in at run time).
+# Cluster use (no root): podman save -o flang.tar <image>; apptainer build flang.sif docker-archive://flang.tar
+#   apptainer exec --nv --bind $CUDA_HOME flang.sif meson setup ... -Dgpu_arch=sm_80 -Dfortran_args=--cuda-path=$CUDA_HOME
+FROM registry.fedoraproject.org/fedora:44
+RUN dnf install -y --setopt=install_weak_deps=False \
+        flang-22.1.8-4.fc44 flang-runtime-22.1.8-4.fc44 libomp-22.1.8-4.fc44 libomp-devel-22.1.8-4.fc44 llvm-22.1.8-4.fc44 clang-22.1.8-4.fc44 clang-tools-extra-22.1.8-4.fc44 lld-22.1.8-4.fc44 \
+        gcc gcc-gfortran meson ninja-build python3-numpy git which findutils \
+ && dnf clean all
