@@ -3652,6 +3652,8 @@ contains
         ! [j - 1 in band], multiplied as the dense loop did (the same sums, bit for bit)
         integer, allocatable  :: bp(:), bi(:)
         real(WP), allocatable :: bv(:), bc(:)
+        real(KP), allocatable :: bk(:)
+        real(KP) :: gk, tk
 
         zsame = all(zcm(1:n_mod) == zcm(1))
         if (zsame) then
@@ -3683,7 +3685,7 @@ contains
             end do
         end do
         bp(nspec + 1) = nnz + 1
-        allocate(bi(max(nnz, 1)), bv(max(nnz, 1)), bc(max(nnz, 1)))
+        allocate(bi(max(nnz, 1)), bv(max(nnz, 1)), bc(max(nnz, 1)), bk(max(nnz, 1)))
         k = 0
         do j = 1, nspec
             do b = 1, nbands
@@ -3699,16 +3701,21 @@ contains
             end do
         end do
 
+        ! (at kernel precision: a dozen terms per pixel, stored at kernel precision; FP64 arithmetic
+        ! here ran at the R9700's FP64 rate, 12 ms per call of 1000 models)
+        do k = 1, nnz
+            bk(k) = real(bv(k) * bc(k), KP)
+        end do
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(gv, v, t, il, k) map(to: bp, bi, bv, bc)
+        !$omp target teams distribute parallel do collapse(2) private(gk, vk, tk, t, il, k) map(to: bp, bi, bk)
 #elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(gv, v, t, il, k)
+        !$omp parallel do collapse(2) private(gk, vk, tk, t, il, k)
 #endif
         do m = 1, n_mod
             do j = 1, nspec
-                gv = 0.0_wp
+                gk = 0.0_KP
                 do k = bp(j), bp(j + 1) - 1
-                    gv = gv + fb_bar(bi(k), m) * bv(k) * bc(k)
+                    gk = gk + real(fb_bar(bi(k), m), KP) * bk(k)
                 end do
                 ! The clamp of the forward (max(v, 0), NaN -> 0): no gradient where it acts
                 if (zsame) then
@@ -3717,10 +3724,11 @@ contains
                 else
                     call frame_point(nspec, lam, zcm(m), j, il, t)
                 end if
-                v = (1.0_wp - t) * real(total(il, m), WP)
-                if (t /= 0.0_wp) v = v + t * real(total(il + 1, m), WP)
-                if (.not. (v > 0.0_wp)) gv = 0.0_wp
-                gw(j, m) = real(gv * real(wl(j), WP), KP)
+                tk = real(t, KP)
+                vk = (1.0_KP - tk) * total(il, m)
+                if (t /= 0.0_wp) vk = vk + tk * total(il + 1, m)
+                if (.not. (vk > 0.0_KP)) gk = 0.0_KP
+                gw(j, m) = gk * real(wl(j), KP)
             end do
         end do
 
