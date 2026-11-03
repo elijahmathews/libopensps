@@ -7,7 +7,7 @@ module opensps_imf
     !> parameterizations (Salpeter, Chabrier, Kroupa, etc.) and to compute
     !> the mass weights for SSP generation.
     
-    use opensps_precision, only: WP
+    use opensps_precision, only: WP, KP
     use opensps_context_types, only: opensps_context_t
     implicit none
 
@@ -16,6 +16,7 @@ module opensps_imf
     public :: compute_imf_weights
     public :: get_imf_value
     public :: integrate_imf_interval_analytic, imf_integral, imf_integral_p, imf_pack_params
+    public :: imf_bin_weights, imf_bin_weights_tab, imf_bin_logs
     public :: IMF_NPAR, IMF_P_SALP, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE, IMF_P_LOWER_LIMIT, &
               IMF_P_UPPER_LIMIT, IMF_P_LOWER_BOUND, IMF_P_MLIM_BH, IMF_P_MLIM_NS, IMF_P_NUSER, IMF_P_USER
     public :: CHAB_MC, CHAB_SIGMA2, CHAB_IND
@@ -57,6 +58,7 @@ module opensps_imf
     integer, parameter :: IMF_P_NUSER = 12        !< number of user IMF segments (as a real)
     integer, parameter :: IMF_P_USER = 13         !< 13..312: user segments (lower, upper, slope) x 100
     integer, parameter :: IMF_NPAR = IMF_P_USER + 3 * 100 - 1
+
 
 contains
 
@@ -309,6 +311,359 @@ contains
             int_val = 0.0_wp
         end select
     end function imf_integral
+
+    !> @brief IMF weights of a run of consecutive isochrone mass bins (the points of one age):
+    !> stars per bin per unit initial mass.
+    !>
+    !> @details
+    !> Point k (initial mass mini(k), bin [m1(k), m2(k)]; for the first point of an age, first(k) = 1,
+    !> the lower edge is p(IMF_P_LOWER_BOUND)) gets imf_integral_p(imf_type, p, lo, hi, .false.) /
+    !> total_mass, zero outside the IMF mass limits or for an empty bin (compute_imf_weights). The
+    !> value is imf_integral's bit for bit, computed with fewer powers: a bin inside one power-law
+    !> segment of the IMF (all of Salpeter; Chabrier and van Dokkum above their lognormal parts;
+    !> each Kroupa and Dave segment) is c (hi**e - lo**e) / d, as integrate_powerlaw computes it,
+    !> with the segment's constants kept while the bins stay in it and lo**e taken from the previous
+    !> bin when the bin starts at its upper edge (one power per bin instead of up to three). Other
+    !> bins (the lognormal parts, bins across a segment boundary, tabulated IMFs, exponent -1) call
+    !> imf_integral_p. The bin state stays local to this routine (in registers on a GPU).
+    !> w(1, k): the weights, with leading dimension ldw (a batch writes a model's weights into a
+    !> models x points array).
+    pure subroutine imf_bin_weights(imf_type, p, total_mass, n, mini, m1, m2, first, w, ldw)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        integer, intent(in)  :: imf_type, n, ldw
+        real(WP), intent(in) :: p(IMF_NPAR), total_mass
+        real(WP), intent(in) :: mini(n), m1(n), m2(n)
+        integer, intent(in)  :: first(n)
+        real(WP), intent(inout) :: w(ldw, n)
+        integer  :: k, t, seg, cur
+        real(WP) :: lo, hi, val, plo, phi, alpha, coeff, e, c, d, prev_hi, prev_phi, lim_lo, lim_hi
+
+        t = mod(imf_type, 10)
+        lim_lo = p(IMF_P_LOWER_LIMIT)
+        lim_hi = p(IMF_P_UPPER_LIMIT)
+        cur = 0
+        e = 0.0_wp; c = 0.0_wp; d = 1.0_wp
+        prev_hi = -1.0_wp
+        prev_phi = 0.0_wp
+        do k = 1, n
+            w(1, k) = 0.0_wp
+            if (mini(k) < lim_lo .or. mini(k) > lim_hi) cycle
+            if (first(k) == 1) then
+                lo = p(IMF_P_LOWER_BOUND)
+            else
+                lo = m1(k)
+            end if
+            hi = m2(k)
+            if (hi <= lo) cycle      ! empty or inverted bin: no stars
+
+            ! The power-law segment containing the bin, if any
+            seg = 0
+            select case (t)
+            case (0)
+                seg = 1
+            case (1)
+                if (lo >= 1.0_wp) seg = 2
+            case (3)
+                if (lo >= VD_NC * p(IMF_P_VDMC)) seg = 2
+            case (2)
+                if (lo >= 0.08_wp .and. hi <= 0.5_wp) then
+                    seg = 1
+                else if (lo >= 0.5_wp .and. hi <= 1.0_wp) then
+                    seg = 2
+                else if (lo >= 1.0_wp) then
+                    seg = 3
+                end if
+            case (4)
+                if (lo >= 0.08_wp .and. hi <= p(IMF_P_MDAVE)) then
+                    seg = 1
+                else if (lo >= p(IMF_P_MDAVE)) then
+                    seg = 2
+                end if
+            end select
+            if (seg > 0 .and. seg /= cur) then
+                ! The segment's constants (as imf_integral passes them to integrate_powerlaw)
+                select case (t)
+                case (0)
+                    alpha = p(IMF_P_SALP); coeff = 1.0_wp
+                case (1)
+                    alpha = CHAB_IND + 1.0_wp; coeff = CHAB_HIGH_NORM
+                case (3)
+                    alpha = VD_IND + 1.0_wp; coeff = VD_AH
+                case (2)
+                    alpha = p(IMF_P_ALPHA + seg - 1)
+                    coeff = 1.0_wp
+                    if (seg > 1) coeff = 0.5_wp**(-p(IMF_P_ALPHA) + p(IMF_P_ALPHA + 1))
+                case default
+                    alpha = p(IMF_P_ALPHA + seg - 1)
+                    coeff = 1.0_wp
+                    if (seg > 1) coeff = p(IMF_P_MDAVE)**(-p(IMF_P_ALPHA) + p(IMF_P_ALPHA + 1))
+                end select
+                e = 1.0_wp - alpha
+                c = coeff
+                d = 1.0_wp - alpha
+                cur = seg
+                prev_hi = -1.0_wp
+                if (abs(d) <= 1.0e-12_wp) cur = -1   ! log integral: imf_integral_p
+            end if
+            if (seg > 0 .and. cur == seg) then
+                if (lo == prev_hi) then
+                    plo = prev_phi
+                else
+                    plo = lo**e
+                end if
+                phi = hi**e
+                val = c * powerlaw_bin(plo, lo, hi, d)   ! as integrate_powerlaw (bit for bit)
+                prev_hi = hi
+                prev_phi = phi
+            else
+                val = imf_integral_p(imf_type, p, lo, hi, .false.)
+                if (seg == 0) cur = 0
+                prev_hi = -1.0_wp
+            end if
+            if (total_mass > 0.0_wp) val = val / total_mass
+            w(1, k) = val
+        end do
+    end subroutine imf_bin_weights
+
+    !> @brief imf_bin_weights with the bins' logarithms given (the batched SSP's operator set): a bin
+    !> [m1, m2] inside one power-law segment is c m1**e expm1(e ln(m2/m1)) / d, from llo = ln m1 and
+    !> dl = ln(m2/m1) (model-independent, computed once per operator set): one FP64 exponential and a
+    !> short series per bin instead of a power, and no difference of nearly equal powers for narrow
+    !> bins, and none of e / e for slopes near 1 either (exactly 1: c dl). The first bin of an age
+    !> (lower edge from the IMF's lower bound), bins across segment boundaries, the lognormal parts
+    !> and tabulated IMFs are as imf_bin_weights.
+    pure subroutine imf_bin_weights_tab(imf_type, p, total_mass, n, mini, m1, m2, llo, dl, first, w, ldw)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        integer, intent(in)  :: imf_type, n, ldw
+        real(WP), intent(in) :: p(IMF_NPAR), total_mass
+        real(WP), intent(in) :: mini(n), m1(n), m2(n), llo(n), dl(n)
+        integer, intent(in)  :: first(n)
+        real(WP), intent(inout) :: w(ldw, n)
+        integer  :: k, t, seg, cur
+        real(WP) :: lo, hi, val, alpha, coeff, e, c, d, ce, lim_lo, lim_hi, inv_total, plo, em1, prev_hi, prev_phi
+
+        t = mod(imf_type, 10)
+        lim_lo = p(IMF_P_LOWER_LIMIT)
+        lim_hi = p(IMF_P_UPPER_LIMIT)
+        cur = 0
+        e = 0.0_wp; c = 0.0_wp; d = 1.0_wp; ce = 0.0_wp
+        prev_hi = -1.0_wp; prev_phi = 0.0_wp
+        inv_total = 1.0_wp
+        if (total_mass > 0.0_wp) inv_total = 1.0_wp / total_mass   ! once per call
+        do k = 1, n
+            w(1, k) = 0.0_wp
+            if (mini(k) < lim_lo .or. mini(k) > lim_hi) cycle
+            if (first(k) == 1) then
+                lo = p(IMF_P_LOWER_BOUND)
+            else
+                lo = m1(k)
+            end if
+            hi = m2(k)
+            if (hi <= lo) cycle      ! empty or inverted bin: no stars
+
+            ! The power-law segment containing the bin, if any (as imf_bin_weights)
+            seg = 0
+            select case (t)
+            case (0)
+                seg = 1
+            case (1)
+                if (lo >= 1.0_wp) seg = 2
+            case (3)
+                if (lo >= VD_NC * p(IMF_P_VDMC)) seg = 2
+            case (2)
+                if (lo >= 0.08_wp .and. hi <= 0.5_wp) then
+                    seg = 1
+                else if (lo >= 0.5_wp .and. hi <= 1.0_wp) then
+                    seg = 2
+                else if (lo >= 1.0_wp) then
+                    seg = 3
+                end if
+            case (4)
+                if (lo >= 0.08_wp .and. hi <= p(IMF_P_MDAVE)) then
+                    seg = 1
+                else if (lo >= p(IMF_P_MDAVE)) then
+                    seg = 2
+                end if
+            end select
+            if (seg > 0 .and. seg /= cur) then
+                select case (t)
+                case (0)
+                    alpha = p(IMF_P_SALP); coeff = 1.0_wp
+                case (1)
+                    alpha = CHAB_IND + 1.0_wp; coeff = CHAB_HIGH_NORM
+                case (3)
+                    alpha = VD_IND + 1.0_wp; coeff = VD_AH
+                case (2)
+                    alpha = p(IMF_P_ALPHA + seg - 1)
+                    coeff = 1.0_wp
+                    if (seg > 1) coeff = 0.5_wp**(-p(IMF_P_ALPHA) + p(IMF_P_ALPHA + 1))
+                case default
+                    alpha = p(IMF_P_ALPHA + seg - 1)
+                    coeff = 1.0_wp
+                    if (seg > 1) coeff = p(IMF_P_MDAVE)**(-p(IMF_P_ALPHA) + p(IMF_P_ALPHA + 1))
+                end select
+                e = 1.0_wp - alpha
+                c = coeff
+                d = 1.0_wp - alpha
+                ce = 0.0_wp
+                if (e /= 0.0_wp) ce = c / e     ! once per segment: no division per bin
+                cur = seg
+                prev_hi = -1.0_wp               ! the chain of shared edges restarts
+            end if
+            if (seg > 0 .and. cur == seg) then
+                if (first(k) == 1) then
+                    if (abs(d) <= 1.0e-12_wp) then
+                        val = c * log(hi / lo)
+                    else
+                        val = c * (hi**e - lo**e) / d
+                    end if
+                else if (e == 0.0_wp) then
+                    val = c * dl(k)
+                else
+                    ! c (hi**e - lo**e) / e = c lo**e expm1(e dl) / e: smooth through e = 0 (no
+                    ! special case for slopes near 1, where the difference form divides a
+                    ! cancellation by a small e)
+#if defined(OPENSPS_FP32_IMF_WEIGHTS)
+                    ! -Dfp32_imf_weights=true (FP32 kernels only): the exponentials in kernel
+                    ! precision, the exponent e ln lo (up to ~25) formed and reduced in FP64
+                    ! (doc/MIXED_PRECISION.md, rule 7); mass and L_bol then good to ~3e-8 (L_bol
+                    ! ~7e-7 at extreme IMF parameters)
+                    val = real(real(ce, KP) * exp_reduced_kp(e * llo(k)) * expm1_kp(real(e * dl(k), KP)), WP)
+#else
+                    ! lo**e: from the previous bin when it ends where this one starts (consecutive
+                    ! bins of an age share their edges): hi**e = lo**e (1 + expm1(e dl)), so one
+                    ! FP64 exponential per run of bins instead of per bin (~2 ulp per chained step)
+                    if (lo == prev_hi) then
+                        plo = prev_phi
+                    else
+                        plo = exp(e * llo(k))
+                    end if
+                    em1 = expm1_series(e * dl(k))
+                    val = ce * plo * em1
+                    prev_hi = hi
+                    prev_phi = plo + plo * em1
+#endif
+                end if
+            else
+                val = imf_integral_p(imf_type, p, lo, hi, .false.)
+                prev_hi = -1.0_wp
+                if (seg == 0) cur = 0
+            end if
+            w(1, k) = val * inv_total
+        end do
+    end subroutine imf_bin_weights_tab
+
+    !> The logarithms imf_bin_weights_tab takes for a bin [m1, m2]: llo = ln m1 and dl = ln(m2 / m1),
+    !> the latter as log1p((m2 - m1) / m1) in Kahan's form (no cancellation for narrow bins); zero for
+    !> an empty or invalid bin.
+    elemental subroutine imf_bin_logs(m1, m2, llo, dl)
+        real(WP), intent(in)  :: m1, m2
+        real(WP), intent(out) :: llo, dl
+        real(WP) :: x, u
+        llo = 0.0_wp
+        dl = 0.0_wp
+        if (m1 <= 0.0_wp .or. m2 <= m1) return
+        llo = log(m1)
+        x = (m2 - m1) / m1
+        u = 1.0_wp + x
+        if (u == 1.0_wp) then
+            dl = x
+        else
+            dl = log(u) * x / (u - 1.0_wp)
+        end if
+    end subroutine imf_bin_logs
+
+    !> exp(x) in kernel precision for an FP64 argument: x = n ln 2 + r reduced in FP64, exp(r) in
+    !> KP times 2**n by binary exponentiation (exact; `scale` and `transfer` are Fortran-runtime
+    !> calls in LLVM flang device code). ~1 ulp of KP, where rounding x to FP32 would cost |x| eps.
+    !> Results below the smallest normal KP flush to 0.
+    pure function exp_reduced_kp(x) result(e)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(WP), intent(in) :: x
+        real(KP) :: e, b, p2
+        real(WP), parameter :: LN2 = log(2.0_wp), LOG2E = 1.0_wp / log(2.0_wp)
+        real(WP) :: xc
+        integer :: n, k
+
+        xc = max(-1.0e4_wp, min(1.0e4_wp, x))
+        n = nint(xc * LOG2E)
+        if (n < minexponent(1.0_KP)) then
+            e = 0.0_KP
+        else if (n >= maxexponent(1.0_KP)) then
+            e = huge(1.0_KP)
+        else
+            b = merge(0.5_KP, 2.0_KP, n < 0)
+            k = abs(n)
+            p2 = 1.0_KP
+            do while (k > 0)
+                if (iand(k, 1) == 1) p2 = p2 * b
+                b = b * b
+                k = ishft(k, -1)
+            end do
+            e = exp(real(xc - n * LN2, KP)) * p2
+        end if
+    end function exp_reduced_kp
+
+    !> exp(y) - 1 in kernel precision without cancellation: the series to y**7 for |y| < 1/4
+    !> (truncation < 5e-10 relative, below FP32's 6e-8), constant reciprocals; exp(y) - 1 above.
+    pure function expm1_kp(y) result(r)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(KP), intent(in) :: y
+        real(KP) :: r
+        real(KP), parameter :: I2 = 1.0_KP / 2, I3 = 1.0_KP / 3, I4 = 1.0_KP / 4, I5 = 1.0_KP / 5, &
+                               I6 = 1.0_KP / 6, I7 = 1.0_KP / 7
+        if (abs(y) < 0.25_KP) then
+            r = 1.0_KP + y * I7
+            r = 1.0_KP + y * I6 * r
+            r = 1.0_KP + y * I5 * r
+            r = 1.0_KP + y * I4 * r
+            r = 1.0_KP + y * I3 * r
+            r = 1.0_KP + y * I2 * r
+            r = y * r
+        else
+            r = exp(y) - 1.0_KP
+        end if
+    end function expm1_kp
+
+    !> exp(y) - 1 without cancellation: Taylor series to y**13 for |y| < 1/4 (truncation < 3e-18
+    !> relative), exp(y) - 1 above (cancellation at most a factor 4). The series is nested
+    !> multiply-adds with the constants 1/k: no divisions (an FP64 division is a long instruction
+    !> sequence on a GPU, at the FP64 rate).
+    pure function expm1_series(y) result(r)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(WP), intent(in) :: y
+        real(WP) :: r
+        real(WP), parameter :: I2 = 1.0_wp / 2, I3 = 1.0_wp / 3, I4 = 1.0_wp / 4, I5 = 1.0_wp / 5, &
+                               I6 = 1.0_wp / 6, I7 = 1.0_wp / 7, I8 = 1.0_wp / 8, I9 = 1.0_wp / 9, &
+                               I10 = 1.0_wp / 10, I11 = 1.0_wp / 11, I12 = 1.0_wp / 12, I13 = 1.0_wp / 13
+        if (abs(y) < 0.25_wp) then
+            r = 1.0_wp + y * I13
+            r = 1.0_wp + y * I12 * r
+            r = 1.0_wp + y * I11 * r
+            r = 1.0_wp + y * I10 * r
+            r = 1.0_wp + y * I9 * r
+            r = 1.0_wp + y * I8 * r
+            r = 1.0_wp + y * I7 * r
+            r = 1.0_wp + y * I6 * r
+            r = 1.0_wp + y * I5 * r
+            r = 1.0_wp + y * I4 * r
+            r = 1.0_wp + y * I3 * r
+            r = 1.0_wp + y * I2 * r
+            r = y * r
+        else
+            r = exp(y) - 1.0_wp
+        end if
+    end function expm1_series
 
     !> Integral of a lognormal IMF segment, exp(-(log10 m - log_mc)^2 / (2 sigma2)) / m, over
     !> [m1, m2], or of m times it when mass_weighted (Chabrier and van Dokkum below their break).

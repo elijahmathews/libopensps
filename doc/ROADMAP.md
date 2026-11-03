@@ -153,6 +153,24 @@ before folding it into the batch. IMF *type* is best shared per batch. Isochrone
 rebuilt per model (the expensive case). Narrow mass bins: evaluate as midpoint value x width
 with a correction, so IMF weights work in FP32.
 
+Status (2026-11-02, #32): `compute_csp_batch(..., ssp_ops=ops)` takes the IMF and the
+metallicity free per model. `ops` (`ssp_opset_t`, `src/physics/opensps_ssp_batch.f90`) holds
+one operator S per metallicity (`ssp_operator_build` per metallicity, then `ssp_opset_build`;
+built once, ~0.1 s each); one metallicity is a set of one. The IMF
+type is shared per batch; the slopes, `vdmc` and `mdave` vary per model, the mass limits are
+shared. The IMF weights of every isochrone point are computed per model on the device, power-law
+bins as (c/e) m1^e expm1(e ln(m2/m1)) from per-point logs (no cancellation in narrow bins: 30% of
+MIST's bins are narrower than 1e-6), lognormal bins by erf or Gauss-Legendre (#43). Checked
+against per-model `generate_ssp_grid` bases for every IMF type, a range of parameters, mass
+limits and metallicities (`test_csp_batch`: FP64 ~1e-14 on CPU, FP32 ~6e-7). Cost at N = 10^4
+(FP32, us/model): A100 19.9 (IMF free) and 32.2 (IMF and metallicity free) against 6.4-7.2 for
+the resident basis; R9700 59.0 and 96.6 against 19.1 (`doc/GPU_RESULTS.md`).
+
+Not supported per model: the isochrone modifications (`fbhb`, `sbss`, `delt`, `dell`, `agb`,
+`pagb`, `redgb`, `agb_dust`, `evtype`, `masscut`). A batch whose models differ from the
+operators' build returns status 2 (`ssp_op_mod_signature`). The design that keeps them on the
+batch path (per-point group factors; operator sets grouped by `delt`, `dell`) is in its own issue.
+
 Alongside, two input generalisations that reuse the same machinery:
 
 - **Age x metallicity weight matrices:** extend the SSP-weight input from (ages x N) to (ages x

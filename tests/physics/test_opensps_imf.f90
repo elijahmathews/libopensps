@@ -1,5 +1,5 @@
 module test_opensps_imf_mod
-    use opensps_precision, only: WP
+    use opensps_precision, only: WP, KP
     use opensps_context_types, only: opensps_context_t
     use opensps_imf
     use opensps_types, only: params
@@ -32,8 +32,11 @@ contains
         call test_analytic_integrals_match_quadrature()
         call test_weights_match_quadrature()
         call test_runtime_imf_limits_are_honoured()
-        call test_powerlaw_bin_worst_cases()
+        call test_bin_integral_equals_imf_integral()
         call test_lognormal_narrow_bins_additive()
+        call test_powerlaw_bin_worst_cases()
+        call test_bin_weights_tab_paths()
+        call test_powerlaw_integral_worst_cases()
 
         call print_summary_line("Module Summary", total_tests - total_failures, total_tests)
 
@@ -280,6 +283,54 @@ contains
     !> integrate_imf_interval_analytic must equal the integral of get_imf_value, for number and
     !> mass weighting, on intervals inside single segments and straddling the 0.5 / 1.0 Msun
     !> (Kroupa) and mdave (Dave) breakpoints. This pins the segment continuity constants.
+    !> imf_bin_weights (the SSP operator's IMF weights, each shared edge's power computed once)
+    !> equals imf_integral_p per bin, bit for bit: every analytic IMF type, consecutive bins from
+    !> 0.07 to 150 M_sun (narrow and wide, across every segment boundary), in several runs.
+    subroutine test_bin_integral_equals_imf_integral()
+        integer, parameter :: NB = 4000
+        integer, parameter :: RUNS(5) = [1, 777, 1554, 2331, 3108]
+        real(WP) :: p(IMF_NPAR), edge(0:NB), mini(NB), m1(NB), m2(NB), w(NB), ref
+        integer  :: first(NB), t, k, r, k0, k1, n_diff
+        character(len=64) :: label
+
+        call print_group("IMF bin weights with shared edges equal imf_integral")
+        do k = 0, NB
+            ! Log-spaced edges, with a few exact segment boundaries and a cluster of narrow bins
+            edge(k) = 0.07_wp * (150.0_wp / 0.07_wp)**(real(k, WP) / NB)
+        end do
+        edge(1000) = 0.5_wp; edge(1300) = 1.0_wp; edge(2000) = 0.08_wp * 25.0_wp
+        do k = 2500, 2600
+            edge(k) = edge(2499) * (1.0_wp + 1.0e-7_wp * (k - 2499))
+        end do
+        do k = 1, NB
+            m1(k) = edge(k - 1); m2(k) = edge(k); mini(k) = 0.5_wp * (edge(k - 1) + edge(k))
+        end do
+        first = 0
+        do t = 0, 4
+            p = 0.0_wp
+            p(IMF_P_SALP) = 2.35_wp
+            p(IMF_P_ALPHA:IMF_P_ALPHA + 2) = [1.1_wp, 2.1_wp, 2.6_wp]
+            p(IMF_P_VDMC) = 0.08_wp
+            p(IMF_P_MDAVE) = 0.7_wp
+            p(IMF_P_LOWER_LIMIT) = 0.0_wp
+            p(IMF_P_UPPER_LIMIT) = 1.0e3_wp
+            do r = 1, size(RUNS)
+                k0 = RUNS(r)
+                k1 = NB
+                if (r < size(RUNS)) k1 = RUNS(r + 1) - 1
+                call imf_bin_weights(t, p, 1.0_wp, k1 - k0 + 1, mini(k0), m1(k0), m2(k0), first(k0), w(k0), 1)
+            end do
+            n_diff = 0
+            do k = 1, NB
+                ref = 0.0_wp
+                if (edge(k) > edge(k - 1)) ref = imf_integral_p(t, p, edge(k - 1), edge(k), .false.)
+                if (w(k) /= ref) n_diff = n_diff + 1
+            end do
+            write(label, '(A,I0)') "IMF type ", t
+            call assert_true(n_diff == 0, trim(label), total_tests, total_failures)
+        end do
+    end subroutine test_bin_integral_equals_imf_integral
+
     !> The lognormal bin integral of a wide bin (erf difference) equals the sum of its narrow sub-bins
     !> (Gauss-Legendre) to rounding, for Chabrier and van Dokkum, number and mass weighted.
     subroutine test_lognormal_narrow_bins_additive()
@@ -465,13 +516,173 @@ contains
         deallocate(ctx)
     end subroutine test_runtime_imf_limits_are_honoured
 
+    !> Power-law bin weights where a difference of powers breaks, against 60-digit references
+    !> (tests/data/imf_powerlaw_bins.txt, from tools/reference/imf_powerlaw_bins.py: Python decimal,
+    !> independent of this code): bins down to a relative width of 1e-14 (the powers cancel), slopes
+    !> within 1e-6 of 1 and exactly 1 (a cancellation divided by a small exponent; ln(hi/lo) of a
+    !> rounded ratio), slopes 0.3 to 5 at 0.08 to 300 M_sun, bins up to a factor 10 wide, and either
+    !> side of the switch between the series and exp(y) - 1 in imf_bin_weights_tab.
+    !> imf_bin_weights_tab (the batched SSP's weights) must be within 1e-14 of the reference in
+    !> every category; built with -Dfp32_imf_weights=true (FP32 kernels) its power-law bins are FP32
+    !> arithmetic (exponents reduced in FP64), within 16 ulp of FP32 (1.9e-6; 2.8e-7 on MIST).
+    !> The difference of powers (the single SSP's weights before #40) is evaluated on the same bins
+    !> and its worst error printed beside it: the failure modes the table form removes, measured.
+    subroutine test_powerlaw_bin_worst_cases()
+#if defined(OPENSPS_FP32_IMF_WEIGHTS)
+        real(WP), parameter :: TOL = 16.0_wp * real(epsilon(1.0_KP), WP)   ! FP32 IMF weights (opt-in)
+#else
+        real(WP), parameter :: TOL = 1.0e-14_wp
+#endif
+        integer, parameter :: NCAT = 6
+        character(len=*), parameter :: CAT_NAME(NCAT) = [character(len=40) :: &
+            "relative width 1e-14 to 1e-12", "relative width 1e-9 to 1e-6", "relative width 1e-3 to 0.1", &
+            "wide bins (factor 2 to 10)", "slope within 1e-6 of 1 (or exactly 1)", "either side of the series switch"]
+        character(len=4096) :: root
+        character(len=256) :: line
+        real(WP) :: p(IMF_NPAR), alpha, lo, hi, ref, llo, dl, w_new(1), w_old(1), mini(1), rw
+        real(WP) :: worst_new(NCAT), worst_old(NCAT)
+        integer :: u, n, i, ios, cat, cnt(NCAT), first(1)
+
+        call print_group("Power-law IMF bins: worst cases against 60-digit references")
+        call get_environment_variable('FSPS_TEST_SOURCE_ROOT', root)
+        open(newunit=u, file=trim(root)//'/tests/data/imf_powerlaw_bins.txt', status='old', action='read', iostat=ios)
+        call assert_true(ios == 0, "reference table tests/data/imf_powerlaw_bins.txt", total_tests, total_failures)
+        if (ios /= 0) return
+        read(u, '(A)') line
+        read(u, *) n
+        worst_new = 0.0_wp; worst_old = 0.0_wp; cnt = 0
+        first = 0
+        do i = 1, n
+            read(u, *) alpha, lo, hi, ref
+            rw = (hi - lo) / lo
+            if (i > n - 12) then
+                cat = 6
+            else if (abs(1.0_wp - alpha) < 1.0e-5_wp) then
+                cat = 5
+            else if (rw < 1.0e-11_wp) then
+                cat = 1
+            else if (rw < 1.0e-5_wp) then
+                cat = 2
+            else if (rw < 0.5_wp) then
+                cat = 3
+            else
+                cat = 4
+            end if
+            p = 0.0_wp
+            p(IMF_P_SALP) = alpha
+            p(IMF_P_LOWER_LIMIT) = 0.0_wp
+            p(IMF_P_UPPER_LIMIT) = 1.0e5_wp      ! above the widest bins (300 to 3000 M_sun)
+            mini(1) = 0.5_wp * (lo + hi)
+            call imf_bin_logs(lo, hi, llo, dl)
+            call imf_bin_weights_tab(0, p, 1.0_wp, 1, mini, [lo], [hi], [llo], [dl], first, w_new, 1)
+            if (abs(1.0_wp - alpha) > 1.0e-12_wp) then   ! the difference form (before #40)
+                w_old(1) = (hi**(1.0_wp - alpha) - lo**(1.0_wp - alpha)) / (1.0_wp - alpha)
+            else
+                w_old(1) = log(hi / lo)
+            end if
+            worst_new(cat) = max(worst_new(cat), abs(w_new(1) / ref - 1.0_wp))
+            worst_old(cat) = max(worst_old(cat), abs(w_old(1) / ref - 1.0_wp))
+            cnt(cat) = cnt(cat) + 1
+        end do
+        close(u)
+        do cat = 1, NCAT
+            write(line, '(A,A,A,I0,A,ES8.1,A,ES8.1)') '# ', trim(CAT_NAME(cat)), ' (', cnt(cat), ' bins): table form ', &
+                worst_new(cat), ', difference form ', worst_old(cat)
+            write(*, '(A)') trim(line)
+            write(line, '(A,ES8.1)') ": table form within ", TOL
+            call assert_true(worst_new(cat) <= TOL .and. cnt(cat) > 0, trim(CAT_NAME(cat)) // trim(line), &
+                             total_tests, total_failures)
+        end do
+    end subroutine test_powerlaw_bin_worst_cases
+
+    !> imf_bin_weights_tab takes the right path for every analytic IMF type: power-law bins (table
+    !> form), bins across the segment boundaries (0.5 and 1 M_sun for Kroupa, mdave for Dave, the
+    !> lognormal breaks of Chabrier and van Dokkum), lognormal bins, first bins of an age (lower edge
+    !> from the IMF's lower bound) and points outside the IMF's mass limits (zero). Reference:
+    !> imf_integral_p per bin, a difference of powers, whose own error is ~ eps / (|e| w) for a bin of
+    !> relative width w and exponent e (here |e| >= 0.1: Kroupa's first slope 1.1): the tolerance is
+    !> 1e-13 plus 4 eps / (0.1 w), so the narrow bins here (w = 1e-7) test the paths, and
+    !> test_powerlaw_bin_worst_cases tests the accuracy.
+    subroutine test_bin_weights_tab_paths()
+        integer, parameter :: NB = 4000
+        integer, parameter :: RUNS(5) = [1, 777, 1554, 2331, 3108]
+        real(WP) :: p(IMF_NPAR), edge(0:NB), mini(NB), m1(NB), m2(NB), llo(NB), dl(NB), w(NB), ref, lo, tol, worst
+        integer  :: first(NB), t, k, r, k0, k1, n_bad, n_zero_bad, lim
+        character(len=64) :: label
+
+        call print_group("IMF bin weights from the bins' logarithms: paths for every IMF type")
+        do k = 0, NB
+            edge(k) = 0.07_wp * (150.0_wp / 0.07_wp)**(real(k, WP) / NB)
+        end do
+        edge(1000) = 0.5_wp; edge(1300) = 1.0_wp; edge(2000) = 0.08_wp * 25.0_wp
+        do k = 2500, 2600
+            edge(k) = edge(2499) * (1.0_wp + 1.0e-7_wp * (k - 2499))
+        end do
+        do k = 1, NB
+            m1(k) = edge(k - 1); m2(k) = edge(k); mini(k) = 0.5_wp * (edge(k - 1) + edge(k))
+        end do
+        call imf_bin_logs(m1, m2, llo, dl)
+        first = 0
+        first(RUNS) = 1      ! the first bin of each run is the first of its age
+        do lim = 1, 2
+            do t = 0, 4
+                p = 0.0_wp
+                p(IMF_P_SALP) = 2.35_wp
+                p(IMF_P_ALPHA:IMF_P_ALPHA + 2) = [1.1_wp, 2.1_wp, 2.6_wp]
+                p(IMF_P_VDMC) = 0.08_wp
+                p(IMF_P_MDAVE) = 0.7_wp
+                p(IMF_P_LOWER_BOUND) = 0.065_wp
+                if (lim == 1) then
+                    p(IMF_P_LOWER_LIMIT) = 0.0_wp
+                    p(IMF_P_UPPER_LIMIT) = 1.0e3_wp
+                else
+                    ! Mass limits inside the bins: points outside must get zero
+                    p(IMF_P_LOWER_LIMIT) = 0.3_wp
+                    p(IMF_P_UPPER_LIMIT) = 40.0_wp
+                end if
+                do r = 1, size(RUNS)
+                    k0 = RUNS(r)
+                    k1 = NB
+                    if (r < size(RUNS)) k1 = RUNS(r + 1) - 1
+                    call imf_bin_weights_tab(t, p, 1.0_wp, k1 - k0 + 1, mini(k0), m1(k0), m2(k0), llo(k0), dl(k0), &
+                                             first(k0), w(k0), 1)
+                end do
+                n_bad = 0; n_zero_bad = 0; worst = 0.0_wp
+                do k = 1, NB
+                    if (mini(k) < p(IMF_P_LOWER_LIMIT) .or. mini(k) > p(IMF_P_UPPER_LIMIT)) then
+                        if (w(k) /= 0.0_wp) n_zero_bad = n_zero_bad + 1
+                        cycle
+                    end if
+                    lo = m1(k)
+                    if (first(k) == 1) lo = p(IMF_P_LOWER_BOUND)
+                    ref = 0.0_wp
+                    if (m2(k) > lo) ref = imf_integral_p(t, p, lo, m2(k), .false.)
+                    tol = 1.0e-13_wp + 40.0_wp * epsilon(1.0_wp) * lo / (m2(k) - lo)
+#if defined(OPENSPS_FP32_IMF_WEIGHTS)
+                    tol = tol + 16.0_wp * real(epsilon(1.0_KP), WP)   ! FP32 IMF weights (opt-in)
+#endif
+                    if (ref == 0.0_wp) then
+                        if (w(k) /= 0.0_wp) n_bad = n_bad + 1
+                    else
+                        worst = max(worst, abs(w(k) / ref - 1.0_wp))
+                        if (abs(w(k) / ref - 1.0_wp) > tol) n_bad = n_bad + 1
+                    end if
+                end do
+                write(label, '(A,I0,A)') "IMF type ", t, merge(", wide limits     ", ", limits 0.3-40   ", lim == 1)
+                call assert_true(n_bad == 0, trim(label) // ": every bin", total_tests, total_failures)
+                call assert_true(n_zero_bad == 0, trim(label) // ": zero outside the limits", total_tests, total_failures)
+            end do
+        end do
+    end subroutine test_bin_weights_tab_paths
+
+
     !> Power-law IMF integrals where a difference of powers breaks, against 60-digit references
     !> (tests/data/imf_powerlaw_bins.txt, from tools/reference/imf_powerlaw_bins.py: Python decimal):
     !> bins down to a relative width of 1e-14, slopes within 1e-6 of 1 and exactly 1, slopes 0.3 to 5
     !> at 0.08 to 300 M_sun, bins up to a factor 10 wide, and either side of the series switch.
     !> imf_integral_p (integrate_powerlaw, issue #37) must be within 1e-14 in every category; the
     !> difference form it replaced is evaluated beside it and its worst error printed.
-    subroutine test_powerlaw_bin_worst_cases()
+    subroutine test_powerlaw_integral_worst_cases()
         real(WP), parameter :: TOL = 1.0e-14_wp
         integer, parameter :: NCAT = 6
         character(len=*), parameter :: CAT_NAME(NCAT) = [character(len=40) :: &
@@ -529,6 +740,6 @@ contains
             call assert_true(worst_new(cat) <= TOL .and. cnt(cat) > 0, trim(CAT_NAME(cat)) // ": within 1e-14", &
                              total_tests, total_failures)
         end do
-    end subroutine test_powerlaw_bin_worst_cases
+    end subroutine test_powerlaw_integral_worst_cases
 
 end module test_opensps_imf_mod

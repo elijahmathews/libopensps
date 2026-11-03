@@ -113,6 +113,10 @@ endif
 kernel_precision = get_option('kernel_precision')
 if kernel_precision == 'single'
     add_project_arguments('-DKERNEL_SINGLE_PRECISION', language: 'fortran')
+    if get_option('fp32_imf_weights')
+        # The batched SSP's IMF weights in FP32 arithmetic (imf_bin_weights_tab; opt-in)
+        add_project_arguments('-DOPENSPS_FP32_IMF_WEIGHTS', language: 'fortran')
+    endif
 endif
 
 cpu_baseline = get_option('cpu_baseline')
@@ -176,6 +180,7 @@ lib_sources = files(
     'src/physics/opensps_sfh.f90',
     'src/physics/opensps_ssp.f90',
     'src/physics/opensps_ssp_operator.f90',
+    'src/physics/opensps_ssp_batch.f90',
     'src/physics/opensps_stellar_modifications.f90',
 
     # Spectra Modules
@@ -310,6 +315,7 @@ executable('generate_opensps_fixtures', 'tests/generate_opensps_fixtures.f90', d
 executable('benchmark_hotpaths', 'tests/benchmark_hotpaths.f90', dependencies : opensps_dep, link_language : 'fortran')
 executable('benchmark_phases', 'tests/benchmark_phases.f90', dependencies : opensps_dep, link_language : 'fortran')
 executable('benchmark_csp_batch', 'tests/benchmark_csp_batch.f90', dependencies : opensps_dep, link_language : 'fortran')
+executable('imf_batch_dump', 'tools/compare_builds/imf_batch_dump.f90', dependencies : opensps_dep, link_language : 'fortran')
 executable('benchmark_ssp_operator', 'tests/benchmark_ssp_operator.f90', dependencies : opensps_dep, link_language : 'fortran')
 
 if get_option('enable_stress_testing')

@@ -13,6 +13,9 @@ option('enable_stress_testing', type: 'boolean', value: false,
 option('kernel_precision', type: 'combo', choices: ['double', 'single'], value: 'double',
   description: 'Precision of the per-pixel kernels (spectral templates, SSP/CSP sums, dust, nebular, photometry); setup, isochrones and weights stay double')
 
+option('fp32_imf_weights', type: 'boolean', value: false,
+  description: 'With -Dkernel_precision=single: the batched SSP\'s power-law IMF bin weights in FP32 arithmetic (~8-9% faster IMF-free batches on GPUs with slow FP64; mass and L_bol then good to ~3e-8 at ordinary IMF parameters and ~7e-7 at extreme ones instead of ~1e-13; doc/MIXED_PRECISION.md). No effect in double builds')
+
 option('gpu_arch', type: 'string', value: 'cc80,cc90',
   description: 'Offload targets for -Daccel=omp_gpu: nvfortran -gpu= (cc80 = A100, cc90 = H100; cc70 for V100 with HPC SDK < 26) or an LLVM offload arch (gfx1103, gfx942)')
 

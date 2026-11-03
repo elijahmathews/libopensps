@@ -58,6 +58,43 @@ Session 3 (2026-10-21), new questions:
     parameter) or optionally fitted analytically. Grid, units and the amplitude treatment to be
     agreed before the code.
 
+## Batched SSP: IMF and metallicity free per model (#32, 2026-10-23 to 2026-11-02)
+
+`compute_csp_batch(..., ssp_ops=ops)`: design and status in `doc/ROADMAP.md` (priority 3). Built
+by three agents (laptop: CPU compilers, LLVM flang, Radeon 780M; A100: nvfortran 25.1; desktop:
+Radeon AI PRO R9700); every measurement is in #32.
+
+Cost per model at N = 10^4, us (FP32 / FP64; `tests/benchmark_csp_batch`, median of alternating
+rounds). `full_smooth` is the resident-basis batch (fixed IMF and metallicity); `_z` varies the
+metallicity per model through the basis; `_imf` takes the IMF free through the operator; `_z_imf`
+both:
+
+| | A100 (nvfortran 25.1, FP32 + cuBLAS) | R9700 (LLVM flang 22.1.8, ROCm 7.1.1) |
+|---|---|---|
+| `full_smooth` | 6.4-7.2 | 19.1 / 32.8 |
+| `full_smooth_z` | 8.5-8.7 | 20.3 / 35.9 |
+| `full_smooth_imf` | 19.9 | 59.0 / 107.7 |
+| `full_smooth_z_imf` | 32.2 | 96.6 / 167.9 |
+
+- The 780M (LLVM flang): the IMF-free batch costs 3.6x the resident basis at large N.
+- What made the difference on the R9700 (FP32, `full_smooth_imf`): IMF weights from per-point
+  logs without cancellation (104.6 -> 74.5 us; on the A100 -4 to -6%), shared bin edges (-2%
+  A100), blocked compensated sums in the FP32 template products, the FP32 nebular continuum and
+  attenuation (#36). `-Dfp32_imf_weights` (FP32 exponentials in the weights, off by default:
+  mass and L_bol to ~3e-8, L_bol to 7e-7 at extreme IMF parameters) is a further -8 to -9% on the R9700 and nothing on the A100.
+- amdflang (ROCm 7.2.4, `containers/`) is ~15% faster than Fedora's LLVM flang 22.1.8 on the
+  R9700 with the same source.
+- Weak spots, in their own issues: N = 100 with metallicity free is launch bound (about 12
+  metallicity runs of ~8 models; 8.5x `full_smooth` on the R9700 against 6.1x at 10^4); the one
+  metallicity case pays ~5% for the one code path (A100 16.6 -> 17.5 us).
+
+Verified (unit + regression, FP64 and FP32): at the pull request's tip, gfortran (with and
+without `-Dfp32_imf_weights`), gfortran host threads, LLVM flang CPU, and the R9700 offload builds
+on the host and the GPU; at earlier tips of the same work, nvfortran offload on the A100 (five
+builds, `ddf2a2d`) and LLVM flang offload on the 780M (`2468916`). GPU vs CPU over the case matrix: FP64 ~3e-11, FP32 6.9e-7 (R9700) and
+8.4e-7 (A100) on the stress cases. The IMF oracles against per-model `generate_ssp_grid` agree to
+~1e-14 in FP64 on CPU.
+
 ## AMD Radeon AI PRO R9700 desktop (2026-11-02)
 
 Fedora 44, LLVM flang 22.1.8 + Fedora ROCm 7.1.1 (recipe: `doc/GPU_PLAN.md`, "On the R9700

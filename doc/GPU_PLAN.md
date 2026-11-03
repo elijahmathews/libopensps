@@ -208,6 +208,17 @@ Forecast to compare against: ~4 us per model (FP32) on the A100 at large N.
     after the region;
   - no array constructors in device routines (`any([1, 4, 5] == k)`): LLVM flang allocates them
     on the device heap, which is small and fixed; compare the scalar.
+  - (LLVM flang) an array of derived types with allocatable components cannot be mapped whole:
+    map each element's components (`ssp_ops%ops(iz)%etpl`) or concatenate them into one flat
+    type (`ssp_opset_t`);
+  - (LLVM flang) `private(x)` of a derived-type local in a target loop maps `x` through an
+    implicit mapper that the offload runtime rejects ("explicit extension not allowed");
+    (nvfortran 25.1) a `BLOCK` construct inside a parallel loop does not compile. For per-iteration
+    locals of derived type, put the iteration's work in a `declare target` routine and keep the
+    locals there (`attenuation_table_row`);
+  - (nvfortran 25.1) no `c_f_pointer` in device code;
+  - (NVIDIA) band sums are not bit-reproducible from run to run; compare magnitudes of two
+    runs to rounding (100 eps of `KP`), not bit for bit.
 
 ## OpenACC and OpenMP
 
