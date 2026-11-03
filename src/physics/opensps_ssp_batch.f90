@@ -552,8 +552,10 @@ contains
                                      zsg, wk, vb, wbar, wpb, fesc_bar, zbar, w, wm, sxa, sea)
                 call adj_lq(m0, nc, nt, nt_neb, set%n_pc_max, set%n_pc, set%pt_off, set%pc_off, set%pc_ptr, set%pt_age, &
                             set%pt_cl, set%pt_q, perm, viz, cz, zsg, wsfh, slum, lsum_bar, qbar, ntq, slz, sqz, wpb, zbar)
-                ! The IMF parameters: central differences of the point weights
+                ! The IMF parameters: central differences of the point weights (only those the IMF type
+                ! reads; the others' rows are zero)
                 do ig = 1, NIMFG
+                    if (.not. imf_row_acts(imf_type, ig)) cycle
 #if defined(OMP_TARGET)
                     !$omp target teams distribute parallel do
 #elif defined(_OPENMP)
@@ -598,6 +600,23 @@ contains
         !$omp end target data
 #endif
     end subroutine ssp_batch_age_sums_adjoint
+
+    !> Whether IMF row ig (imf1, imf2, imf3, vdmc, mdave) acts for imf_type (as imf_integral and
+    !> imf_bin_weights_tab read them): Kroupa the three slopes, van Dokkum vdmc, Dave imf1, imf2 and
+    !> mdave; Salpeter, Chabrier and the user IMF none of them.
+    pure logical function imf_row_acts(imf_type, ig)
+        integer, intent(in) :: imf_type, ig
+        select case (mod(imf_type, 10))
+        case (2)
+            imf_row_acts = ig <= 3
+        case (3)
+            imf_row_acts = ig == 4
+        case (4)
+            imf_row_acts = ig == 1 .or. ig == 2 .or. ig == 5
+        case default
+            imf_row_acts = .false.
+        end select
+    end function imf_row_acts
 
     !> The step of the IMF parameter's central difference: relative 1e-6 (the FP64 weights: error
     !> ~1e-10); with -Dfp32_imf_weights 1e-3 (the weights' FP32 rounding, ~1e-7, over the step: ~1e-4)

@@ -26,7 +26,8 @@ program test_csp_batch_grad
     !>   and for single entries, and the dust, AGN and redshift rows;
     !> - with the IMF and the metallicity free per model (an operator per metallicity), the IMF rows,
     !>   logzsol and the mass output through the operator's reverse pass;
-    !> - agn_tau and igm_factor.
+    !> - agn_tau and igm_factor;
+    !> - van Dokkum's vdmc and Dave's mdave (and slopes) with those IMF types free.
     !> The spectra are linear in the weights and in fagn, so the differences are exact up to rounding
     !> and the curvature of the magnitudes (log10 of the band fluxes). FP64 builds are the
     !> validation (roadmap priority 4); FP32 builds check the same with differences sized for FP32.
@@ -42,7 +43,7 @@ program test_csp_batch_grad
                                  BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
                                  BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, &
                                  BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, BGRAD_AGN_TAU, &
-                                 BGRAD_IGM_FACTOR, NBGRAD
+                                 BGRAD_IGM_FACTOR, BGRAD_VDMC, BGRAD_MDAVE, NBGRAD
     use opensps_ssp, only: generate_ssp_grid
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build
     use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free
@@ -181,6 +182,16 @@ program test_csp_batch_grad
     call check_grad(1, 0.0_wp, 0, 0, .true., "Kroupa IMF free (ssp_ops), z = 0, nebular, dust emission, weight matrix")
     call set_int('add_dust_emission', 0)
     call set_int('add_neb_emission', 0)
+    call ssp_opset_free(opset)
+    ! van Dokkum (vdmc) and Dave (imf1, imf2, mdave) through the operator: their rows against finite
+    ! differences, and the rows each type does not read zero (the reverse pass skips their differences)
+    call set_int('imf_type', 3)
+    call build_opset()
+    call check_grad(2, 0.0_wp, 0, 0, .true., "van Dokkum IMF free (ssp_ops), z = 0, weight matrix")
+    call ssp_opset_free(opset)
+    call set_int('imf_type', 4)
+    call build_opset()
+    call check_grad(1, 0.0_wp, 0, 0, .true., "Dave IMF free (ssp_ops), z = 0, weight matrix")
     use_ops = .false.
     call ssp_opset_free(opset)
     call set_int('imf_type', 1)
@@ -378,6 +389,9 @@ contains
         call set_float('imf1', 1.1_wp + 0.07_wp * m)
         call set_float('imf2', 2.1_wp + 0.05_wp * m)
         call set_float('imf3', 2.2_wp + 0.09_wp * m)
+        ! (van Dokkum's characteristic mass, Dave's break mass: used with those IMF types free)
+        call set_float('vdmc', 0.25_wp + 0.05_wp * m)
+        call set_float('mdave', 0.35_wp + 0.1_wp * m)
         ! (inside the torus grid's intervals, 5 10 20 30 40 60 80 100 150: 21.7 - 96.7)
         call set_float('agn_tau', 6.7_wp + 15.0_wp * mod(m, 8))
         ! (the IGM's factor: one value for the batch, as the common IGM table takes it; a finite
@@ -792,19 +806,20 @@ contains
         type(PARAMS), intent(in) :: psets(:)
         real(WP), intent(in) :: w(:, :), pbar(:, :)
         logical, intent(in) :: given_w
-        integer, parameter :: NQ = 29
+        integer, parameter :: NQ = 31
         integer, parameter :: ROWS(NQ) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
                                           BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, &
                                           BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, &
                                           BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, BGRAD_FBURST, BGRAD_TBURST, &
                                           BGRAD_SF_START, BGRAD_ZRED, BGRAD_SF_TRUNC, BGRAD_SF_SLOPE, BGRAD_IMF1, &
-                                          BGRAD_IMF2, BGRAD_IMF3, BGRAD_AGN_TAU, BGRAD_IGM_FACTOR]
+                                          BGRAD_IMF2, BGRAD_IMF3, BGRAD_AGN_TAU, BGRAD_IGM_FACTOR, &
+                                          BGRAD_VDMC, BGRAD_MDAVE]
         character(len=12), parameter :: NAMES(NQ) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
                                                      'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb', &
                                                      'duste_qpah', 'duste_umin', 'duste_gamma', 'gas_logz', 'gas_logu', &
                                                      'logzsol', 'tage', 'tau', 'const', 'fburst', 'tburst', 'sf_start', &
                                                      'zred', 'sf_trunc', 'sf_slope', 'imf1', 'imf2', 'imf3', 'agn_tau', &
-                                                     'igm_factor']
+                                                     'igm_factor', 'vdmc', 'mdave']
         type(PARAMS) :: pp(size(psets))
         real(WP) :: g_fd(NQ, size(psets)), lp, lm, l0, l3, x, h, worst(NQ), gmax
         integer :: q, m, worst_m(NQ)
@@ -845,6 +860,11 @@ contains
                 ! avoid them, and the differences' rounding is then ~1e-5 relative. FP32 builds check
                 ! the spectrum part, smooth in z (the IGM))
                 if (q == 22) h = merge(1.0e-4_wp, 1.0e-9_wp, LINEAR_ONLY) * (1.0_wp + x)
+                ! (vdmc: van Dokkum's break from the lognormal to the power law, at a mass proportional to vdmc,
+                ! crosses isochrone mass points ~1e-5 apart in relative terms, each a kink of L; steps of
+                ! 1e-6 relative resolve the local derivative. Measured: central differences -0.2770633 at
+                ! 1e-6, -0.2770529 at 1e-5 and 1e-4, -0.2770666 at 1e-3, against the adjoint's -0.2770632)
+                if (q == 30 .and. .not. LINEAR_ONLY) h = 1.0e-6_wp * max(abs(x), 1.0e-2_wp)
                 if (bound) then
                     ! (h / 10: at dust2 or dust3 = 0 the curvature of the UV screen leaves the third-order
                     ! formula a truncation of up to ~2e-4 at h = 1e-5 (as h^3); the rounding floor is below)
@@ -940,7 +960,9 @@ contains
         case (26); get_par = p%imf2
         case (27); get_par = p%imf3
         case (28); get_par = p%agn_tau
-        case default; get_par = p%igm_factor
+        case (29); get_par = p%igm_factor
+        case (30); get_par = p%vdmc
+        case default; get_par = p%mdave
         end select
     end function get_par
 
@@ -977,7 +999,9 @@ contains
         case (26); p%imf2 = x
         case (27); p%imf3 = x
         case (28); p%agn_tau = x
-        case default; p%igm_factor = x
+        case (29); p%igm_factor = x
+        case (30); p%vdmc = x
+        case default; p%mdave = x
         end select
     end subroutine set_par
 
