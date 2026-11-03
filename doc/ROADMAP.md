@@ -232,6 +232,44 @@ offload; Tapenade does not handle OpenACC / OpenMP) and a re-implementation in a
 
 Why after priorities 2 and 3: the adjoints are written once, on the final hot path.
 
+Status (2026-11-02, PRs #50-#56 and their successors, stacked on #44): `compute_csp_batch` takes the
+gradient of the caller's loss with respect to its magnitudes and spectra (`mags_bar`, `spec_bar`)
+and returns `params_bar(NBGRAD, N)` (rows `BGRAD_*`) and `weights_bar(ntfull, N)` (dL / d(SSP
+weight), the non-parametric SFH), by a reverse pass in the same call (`batch_backward`). Each stage's
+adjoint is the transpose of its forward map, evaluated with the forward's own transmissions,
+tables and interpolation weights:
+
+| Rows | Through |
+|---|---|
+| SSP weights, `fagn` | age sums, AGN (L_bol), magnitudes and the observed-frame resampling |
+| `dust1`, `dust2`, `dust3`, `dust_index`, `dust1_index`, `frac_obrun`, `frac_nodust`, `mwr`, `uvb` | the three transmissions (the curve tables' derivatives), AGN's diffuse transmission |
+| `duste_qpah`, `duste_umin`, `duste_gamma` | the energy balance (absorbed light, escaping fraction) and the Draine & Li interpolation |
+| `gas_logz`, `gas_logu` (and `frac_obrun`) | the nebular continuum and lines (CLOUDY grids in log space), the EUV rows |
+| `logzsol` | the bases (and L_bol, Q) interpolated in log Z, with every metallicity resident |
+| `tage`, `tau`, `const`, `fburst`, `tburst`, `sf_start`, `sf_trunc` | the SFH weights' tangents (`opensps_sfh_tangent`; sfh = 0, 1, 4) |
+| `zred` | the resampling, the distance term, the IGM (`igm_tau_dz`) |
+| `sigma_smooth` | the velocity kernel's coefficients (one sigma per batch: per-model sensitivities) |
+
+Kinks are one-sided: interpolation nodes of the dust-emission and nebular grids, grid ages for
+tage, observed pixels coinciding with rest-frame pixels for zred, z = 0. Precision: each model's
+cotangents are scaled to unit maximum before they are stored at kernel precision (a magnitude of a
+nearly dark band has a gradient of 1 / F), long sums are compensated in FP32 builds. Validation:
+`tests/test_csp_batch_grad` against finite differences of the loss in FP64 (every row, every model,
+11 configurations; agreement 1e-8 - 1e-5, limited by the differences), with linear-only checks in
+FP32 builds.
+
+Not yet (status 2 with gradients): the IMF through `ssp_ops`, SSP-level nebular emission
+(`add_neb_emission = 2`), lines outside the spectrum with dust emission, the host smoothing modes,
+`ssp_weights_z`; not differentiated: `emlines`, `mass`,
+`lbol`, `mdust`, indices as outputs; the Simha SFH (sfh = 5).
+
+Cost (2026-11-02, full physics: nebular, dust emission, AGN, IGM, SFH parameters; forward / with
+gradients, per model): gfortran FP64, one CPU thread, 1.2-1.4 / 6.0-6.1 ms (4.5-5x); R9700 FP32,
+N = 100: 96 / 638 us (6.7x), N = 1000: 18.4 / 133 us (7.2x). Above the 2-4x estimated here: the
+reverse pass is untuned (simple kernels: the age sums' adjoint is a hand-written basis-transpose
+product with uncoalesced reads on GPUs, the nebular adjoint interpolates the grids per pixel and
+age, the observed-frame transpose is one thread per model).
+
 ### 5. AMD and Intel GPUs (future work)
 
 Deferred (2026-10-22). LLVM flang (22, with ROCm 7.1) builds `-Daccel=omp_gpu` for the Radeon
