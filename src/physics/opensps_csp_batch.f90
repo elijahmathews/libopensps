@@ -97,7 +97,7 @@ module opensps_csp_batch
     use opensps_spectral_indices, only: compute_spectral_indices_columns
     use opensps_smoothing, only: apply_smoothing
     use opensps_batch_photometry, only: compute_magnitudes_columns, prepare_batch_grid, smoothing_on_device, &
-                                     prepare_smoothing_kernel, smooth_columns
+                                     prepare_smoothing_kernel, smooth_columns, smooth_columns_adjoint
     use opensps_ssp, only: configure_imf_parameters
     use opensps_imf, only: imf_pack_params, IMF_NPAR, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE
     use opensps_ssp_operator, only: ssp_op_mod_signature
@@ -247,8 +247,9 @@ contains
     !>                       parameters give), for every age, including ages whose weight is zero (the
     !>                       spectra are linear in the weights). Masses are per solar mass formed, so a
     !>                       mass scale is the caller's: d mag / d log10 M = -2.5.
-    !>                       Gradients are not yet available (status 2) with nebular emission,
-    !>                       velocity smoothing, ssp_ops or ssp_weights_z.
+    !>                       Gradients are not yet available (status 2) with nebular emission, the
+    !>                       host smoothing modes (smooth_velocity = 0 or smoothspec_fast = 0), ssp_ops
+    !>                       or ssp_weights_z; sigma_smooth itself is not differentiated.
     subroutine compute_csp_batch(ctx, psets, mags, status, spec, mass, lbol, mdust, sfr, emlines, indx, ssp_weights, &
                                  spec_young, spec_old, mass_young, mass_old, lbol_young, lbol_old, zred_mags, &
                                  ssp_weights_z, ssp_ops, mags_bar, spec_bar, params_bar, weights_bar)
@@ -435,7 +436,7 @@ contains
             end if
             ! Stages whose adjoints are not written yet
             if (imf .or. present(ssp_weights_z) .or. ctx%add_neb_emission_val /= 0 .or. &
-                psets(1)%sigma_smooth > SAFE_FLOOR) then
+                (psets(1)%sigma_smooth > SAFE_FLOOR .and. .not. smoothing_on_device(ctx))) then
                 status = 2; return
             end if
         end if
@@ -1006,12 +1007,12 @@ contains
             if (any_emis) then
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
                                     it_tesc, zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
-                                    absorbed, ysave, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, &
+                                    absorbed, ysave, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
                                     mags_bar, spec_bar, params_bar, weights_bar)
             else
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
                                     it_tesc, zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
-                                    absorbed, yo, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, &
+                                    absorbed, yo, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
                                     mags_bar, spec_bar, params_bar, weights_bar)
             end if
         end if
@@ -3040,7 +3041,7 @@ contains
     !> forward's age sums) is read.
     subroutine batch_backward(ctx, pbuf, n_mod, nspec, nt, nbands, zred, igm_factor, mags, fband, zcm, it_tesc, &
                               zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, yo, total, &
-                              emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, &
+                              emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
                               mags_bar, spec_bar, params_bar, weights_bar)
         type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in)              :: n_mod, nspec, nt, nbands
@@ -3062,6 +3063,7 @@ contains
         logical, intent(in)              :: emis(n_mod)
         integer, intent(in)              :: iq(n_mod), iu(n_mod)
         real(WP), intent(in)             :: wq(n_mod), wu(n_mod), gam(n_mod), s_abs(n_mod), s_esc(n_mod), dchain(3, n_mod)
+        logical, intent(in)              :: smooth   ! the forward smoothed the spectra (smooth_columns)
         real(WP), intent(in), optional   :: mags_bar(:,:), spec_bar(:,:)
         real(WP), intent(out), optional  :: params_bar(:,:), weights_bar(:,:)
 
@@ -3127,6 +3129,8 @@ contains
         associate (g => ctx%state%batch)
         call backward_observed_frame(n_mod, nspec, nbands, fb_bar, g%bands_t, g%j_lo, g%j_hi, g%wtl, g%wl, &
                                      ctx%state%spec_lambda, zcm, total, have_s, sbar, gw)
+        ! Velocity smoothing (the last stage of the spectrum): its transpose
+        if (smooth) call smooth_columns_adjoint(ctx, gw(:, n_mod + 1:2 * n_mod), n_mod)
         if (any_agn) then
             call backward_agn(n_mod, nspec, ntau, pbuf, agn_on, ita, wta, lsum, ctx%state%agndust_spec, tdiff, gw, &
                               fagn_bar, lsum_bar)

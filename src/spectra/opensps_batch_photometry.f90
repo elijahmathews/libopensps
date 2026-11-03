@@ -28,7 +28,7 @@ module opensps_batch_photometry
     private
 
     public :: compute_magnitudes_columns, prepare_batch_grid
-    public :: smoothing_on_device, prepare_smoothing_kernel, smooth_columns
+    public :: smoothing_on_device, prepare_smoothing_kernel, smooth_columns, smooth_columns_adjoint
 #ifdef FSPS_CUBLAS
     public :: blas, blas_init
 #endif
@@ -389,6 +389,69 @@ contains
         call smooth_kernel(ctx%state%nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
                            ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_coef, spec)
     end subroutine smooth_columns
+
+    !> The transpose of smooth_columns, in place: spec_bar(k) = sum over pixels i of C(i, k)
+    !> spec_bar_out(i) (pixels outside the smoothing window pass through), for the gradients of
+    !> compute_csp_batch.
+    subroutine smooth_columns_adjoint(ctx, spec_bar, n_col)
+        type(opensps_context_t), intent(inout) :: ctx
+        real(KP), intent(inout), contiguous :: spec_bar(:,:)
+        integer, intent(in)                 :: n_col
+
+        call smooth_kernel_t(ctx%state%nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
+                             ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_coef, spec_bar)
+    end subroutine smooth_columns_adjoint
+
+    !> smooth_kernel transposed: one thread per column, serial over the pixels (each output pixel
+    !> scatters into its window), the sums in FP64.
+    subroutine smooth_kernel_t(nspec, n_col, ncoef, sm_lo, sm_hi, sm_off, sm_coef, spec)
+        integer, intent(in)                 :: nspec, n_col, ncoef
+        integer, intent(in)                 :: sm_lo(nspec), sm_hi(nspec), sm_off(nspec)
+        real(WP), intent(in)                :: sm_coef(ncoef)
+        real(KP), intent(inout)             :: spec(nspec, n_col)
+
+        real(WP), allocatable :: sm(:,:)
+        integer  :: m, i, k, lo, off
+
+        allocate(sm(nspec, n_col))
+#ifdef OMP_TARGET
+        !$omp target data map(alloc: sm)
+#endif
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(i, k, lo, off)
+#elif defined(_OPENMP)
+        !$omp parallel do private(i, k, lo, off)
+#endif
+        do m = 1, n_col
+            do i = 1, nspec
+                sm(i, m) = 0.0_wp
+            end do
+            do i = 1, nspec
+                lo = sm_lo(i)
+                if (lo == 0) then
+                    sm(i, m) = sm(i, m) + real(spec(i, m), WP)
+                else
+                    off = sm_off(i) - lo
+                    do k = lo, sm_hi(i)
+                        sm(k, m) = sm(k, m) + sm_coef(off + k) * real(spec(i, m), WP)
+                    end do
+                end if
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2)
+#endif
+        do m = 1, n_col
+            do i = 1, nspec
+                spec(i, m) = real(sm(i, m), KP)
+            end do
+        end do
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine smooth_kernel_t
 
     subroutine smooth_kernel(nspec, n_col, ncoef, sm_lo, sm_hi, sm_off, sm_coef, spec)
         ! Explicit-shape arguments: no array descriptors to map in every launch
