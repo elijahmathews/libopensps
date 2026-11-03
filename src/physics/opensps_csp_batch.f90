@@ -102,6 +102,7 @@ module opensps_csp_batch
     use opensps_imf, only: imf_pack_params, IMF_NPAR, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE
     use opensps_ssp_operator, only: ssp_op_mod_signature
     use opensps_ssp_batch, only: ssp_batch_age_sums_z, ssp_opset_t
+    use opensps_sfh_tangent, only: sfh_weights_tangent, sfh_tangent_supported, NSFHT
 #ifdef FSPS_CUBLAS
     use opensps_batch_photometry, only: blas, blas_init
     use cublas
@@ -113,7 +114,8 @@ module opensps_csp_batch
     public :: compute_csp_batch, batch_spectra_device, batch_spectra_host
     public :: BGRAD_FAGN, BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
               BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, &
-              BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, NBGRAD
+              BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
+              BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, NBGRAD
 
     !> Rows of params_bar (compute_csp_batch's gradients): the derivative of the caller's loss with
     !> respect to each parameter of the model. The list grows as the adjoints of more stages are
@@ -132,7 +134,11 @@ module opensps_csp_batch
     !> Per-model metallicity (all metallicities' bases resident: the SSPs interpolated linearly in
     !> log Z, not clamped; zero with one basis, where logzsol does not act in the batch)
     integer, parameter :: BGRAD_LOGZSOL = 16
-    integer, parameter :: NBGRAD = 16
+    !> The SFH parameters (models with SFH parameters, not a weight matrix: sfh = 0, 1, 4 with const
+    !> and burst, no truncation; opensps_sfh_tangent). Zero with a weight matrix
+    integer, parameter :: BGRAD_TAGE = 17, BGRAD_TAU = 18, BGRAD_CONST = 19, BGRAD_FBURST = 20, &
+                          BGRAD_TBURST = 21, BGRAD_SF_START = 22
+    integer, parameter :: NBGRAD = 22
     !> Rows BGRAD_DUST1 .. BGRAD_DUSTE_GAMMA, summed per model by the attenuation adjoint (the last
     !> three as derivatives with respect to the template's interpolation weights wq, wu, gamma)
     integer, parameter :: NDP = 12
@@ -252,6 +258,9 @@ contains
     !>                       parameters give), for every age, including ages whose weight is zero (the
     !>                       spectra are linear in the weights). Masses are per solar mass formed, so a
     !>                       mass scale is the caller's: d mag / d log10 M = -2.5.
+    !>                       With SFH parameters, params_bar includes tage, tau, const, fburst,
+    !>                       tburst and sf_start for sfh = 0, 1, 4 without truncation (status 2 for
+    !>                       sfh = 5 or sf_trunc in (0, tage] with params_bar).
     !>                       Gradients are not yet available (status 2) with SSP-level nebular
     !>                       emission (add_neb_emission = 2) or lines outside the spectrum with dust
     !>                       emission (nebemlineinspec = 0), the host smoothing modes (smooth_velocity = 0 or smoothspec_fast = 0), ssp_ops
@@ -284,6 +293,9 @@ contains
         logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw, host_m, imf, dev, zimf, grad
         ! Gradients: the band fluxes of the magnitudes, and each column's magnitude redshift
         real(WP), allocatable :: fbk(:,:), zcm(:), dchain(:,:)
+        ! Gradients: dL / d(SSP weights) of every model, and the SFH weights' tangents (opensps_sfh_tangent)
+        real(WP), allocatable :: wbl(:,:), tw(:,:), tdw(:,:), tsc(:,:,:)
+        integer :: q
         ! Gradients with dust emission: the age sums before attenuate_batch replaces them
         real(KP), allocatable :: ysave(:,:)
         ! IMF per model (ssp_ops): IMF parameters (IMF_NPAR x N), per age and model the surviving mass
@@ -486,6 +498,14 @@ contains
             end if
             if (psets(m)%zred /= zred .or. psets(m)%igm_factor /= psets(1)%igm_factor) zvar = .true.
         end do
+        ! Gradients of the SFH parameters: the forms opensps_sfh_tangent covers
+        if (present(params_bar) .and. .not. given_w) then
+            do m = 1, n_mod
+                if (.not. sfh_tangent_supported(psets(m)%params_core, psets(m)%tage)) then
+                    status = 2; return
+                end if
+            end do
+        end if
         host_w = .false.
 #if defined(OMP_TARGET)
         host_w = (.not. given_w) .and. n_mod < HOST_SFH_MAX
@@ -999,6 +1019,7 @@ contains
             else
                 zcm = zred
             end if
+            allocate(wbl(nt, n_mod))
             ! The template's interpolation weights against q_PAH, U_min and gamma (dl07_indices: linear in
             ! the bracketing interval, clamped to the grid; one-sided at the nodes)
             allocate(dchain(7, n_mod))
@@ -1039,13 +1060,29 @@ contains
                                     it_tesc, zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
                                     absorbed, ysave, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
                                     neb, nb, w2, &
-                                    mags_bar, spec_bar, params_bar, weights_bar)
+                                    mags_bar, spec_bar, params_bar, wbl)
             else
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
                                     it_tesc, zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
                                     absorbed, yo, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
                                     neb, nb, w2, &
-                                    mags_bar, spec_bar, params_bar, weights_bar)
+                                    mags_bar, spec_bar, params_bar, wbl)
+            end if
+            if (present(weights_bar)) weights_bar(1:nt, 1:n_mod) = wbl
+            ! The SFH parameters: dL / d theta = sum over ages of dL / d w_k  d w_k / d theta, with the
+            ! weights' tangents in FP64 on the host (one model per thread)
+            if (present(params_bar) .and. .not. given_w) then
+                allocate(tw(nt, n_mod), tdw(nt, n_mod), tsc(nt, 4, n_mod))
+#if defined(_OPENMP)
+                !$omp parallel do private(q)
+#endif
+                do m = 1, n_mod
+                    do q = 1, NSFHT
+                        call sfh_weights_tangent(ctx, psets(m)%params_core, psets(m)%tage, q, tw(:, m), tdw(:, m), &
+                                                 tsc(:, :, m))
+                        params_bar(BGRAD_TAGE + q - 1, m) = sum(wbl(:, m) * tdw(:, m))
+                    end do
+                end do
             end if
         end if
 
