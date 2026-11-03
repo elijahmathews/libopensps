@@ -2111,7 +2111,13 @@ contains
         real(KP) :: ly, lo_
         type(params_core), pointer :: pl
 
-#ifdef OMP_TARGET
+#if defined(OMP_TARGET) && defined(__flang__)
+        ! (LLVM flang: one thread per model, the lines summed serially; the result of a parallel do
+        ! reduction nested in a teams distribute loop is lost there, which left s_line wrong on AMD GPUs)
+        !$omp target teams distribute parallel do private(si, sa, fob, fnd, pl, lo, t_lo, t_hi, curve, tau_d, &
+        !$omp& trans, td, birth, ay, ao, ly, lo_, pos) &
+        !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%nebem_line_pos)
+#elif defined(OMP_TARGET)
         !$omp target teams distribute private(si, sa, fob, fnd, pl) &
         !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%nebem_line_pos)
 #endif
@@ -2125,7 +2131,7 @@ contains
             sa = 0.0_wp
             fob = pl%frac_obrun
             fnd = pl%frac_nodust
-#ifdef OMP_TARGET
+#if defined(OMP_TARGET) && !defined(__flang__)
             !$omp parallel do reduction(+:si, sa) private(lo, t_lo, t_hi, curve, tau_d, trans, td, birth, &
             !$omp& ay, ao, ly, lo_, pos)
 #endif
