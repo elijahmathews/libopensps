@@ -168,7 +168,7 @@ module opensps_csp_batch
     !> IGM's part of d / d zred, (14) d / d igm_factor
     integer, parameter :: NDP = 14
     !> Nebular continuum adjoint: at most this many ages per run (ages in one CLOUDY interval)
-    integer, parameter :: NEB_RUN = 16
+    integer, parameter :: NEB_RUN = 4
     !> Pixel chunks per model of the attenuation adjoint (each thread takes every NCHG-th pixel)
     integer, parameter :: NCHG = 64
 
@@ -3357,7 +3357,8 @@ contains
         ! (no AGN: a zero template of the right shape, for the explicit-shape dummies of the device
         ! routines; a smaller placeholder made LLVM flang add a runtime copy in device code)
         real(WP), allocatable :: noagn(:,:)
-        integer  :: m, b, nzb, ntau
+        integer  :: m, b, nzb, ntau, i
+        real(WP) :: c
         logical  :: have_s, any_agn
         real(WP), parameter :: DMAG_DF = -2.5_wp / log(10.0_wp)
 
@@ -3400,22 +3401,37 @@ contains
                 end do
             end do
         end if
+        ! (explicit loops over the models in host threads: maxval(abs(section)) made a temporary per
+        ! model, and one thread took 24 ms per call of 1000 models for these two passes)
         have_s = present(spec_bar)
-        do m = 1, n_mod
-            cscale(m) = maxval(abs(fb_bar(:, m)))
-            cscale(m) = max(cscale(m), abs(lbx(m)) * max(lsum(m), 0.0_wp))
-            if (have_s) cscale(m) = max(cscale(m), maxval(abs(spec_bar(1:nspec, m))))
-            if (.not. (cscale(m) > 0.0_wp) .or. cscale(m) > huge(1.0_wp)) cscale(m) = 1.0_wp
-            fb_bar(:, m) = fb_bar(:, m) / cscale(m)
-        end do
         if (have_s) then
             allocate(sbar(nspec, n_mod))
-            do m = 1, n_mod
-                sbar(:, m) = real(spec_bar(1:nspec, m) / cscale(m), KP)
-            end do
         else
             allocate(sbar(1, 1))
         end if
+        !$omp parallel do private(b, i, c)
+        do m = 1, n_mod
+            c = 0.0_wp
+            do b = 1, nbands
+                c = max(c, abs(fb_bar(b, m)))
+            end do
+            c = max(c, abs(lbx(m)) * max(lsum(m), 0.0_wp))
+            if (have_s) then
+                do i = 1, nspec
+                    c = max(c, abs(spec_bar(i, m)))
+                end do
+            end if
+            if (.not. (c > 0.0_wp) .or. c > huge(1.0_wp)) c = 1.0_wp
+            cscale(m) = c
+            do b = 1, nbands
+                fb_bar(b, m) = fb_bar(b, m) / c
+            end do
+            if (have_s) then
+                do i = 1, nspec
+                    sbar(i, m) = real(spec_bar(i, m) / c, KP)
+                end do
+            end if
+        end do
         ! The band weights and trapezoid weights (z-independent), and the common IGM transmission of
         ! the forward's redshift (the cache: compute_magnitudes_columns may have released it, or
         ! left the z = 0 grid with per-model redshifts, where the IGM is per model anyway)
@@ -4948,12 +4964,13 @@ contains
     end subroutine backward_nebular
 
     !> The nebular continuum's adjoint for one (model, run of ages, block of pixels): over the block's
-    !> pixels, per age t of the run, the sums of g = S_bar(young or old column) 10**lg(t) Q_ref and of
-    !> g times the interval ends' z and U slopes (raz, rbz, rau, rbu; backward_nebular weights them
+    !> pixels, per age t of the run (at most NEB_RUN = 4), the sums of g = S_bar(young or old column)
+    !> 10**lg(t) Q_ref and of g times the interval ends' z and U slopes (backward_nebular weights them
     !> by the age's position wa and scales by Q(t) / Q_ref). Within a CLOUDY age interval
     !> lg = ra + wa (rb - ra), so 10**lg advances by exp(dwa (rb - ra) ln 10) from age to age: one
     !> exponential per pixel and run (and one per change of the step), as the forward's continuum
-    !> (nebular_kernels). Exponents in FP64 (exp_kp); FP32 kernels sum with compensation.
+    !> (nebular_kernels). Exponents in FP64 (exp_kp); FP32 kernels sum with compensation. The 20 sums
+    !> are scalars (an array of them spilled to scratch memory on the R9700).
     subroutine neb_run_block(nspec, n_mod, ntn, npb, ctab, gw, wa, qzt, fabs, it_tesc, m, ts, tl, a, z0, u0, wzm, &
                              wum, lnq, p, cpart)
 #ifdef OMP_TARGET
@@ -4966,18 +4983,58 @@ contains
         real(KP), intent(in)    :: gw(nspec, 2 * n_mod)
         real(KP), intent(inout) :: cpart(5, ntn, npb, n_mod)
         real(WP), parameter :: LN10 = log(10.0_wp)
-        real(KP) :: acc(5, NEB_RUN), cmp(5, NEB_RUN), d(5), e, rr, gy, go, g, term, tsum
+        real(KP) :: e, rr, gy, go, g, term, tsum, rz_a, rz_b, ru_a, ru_b
+        real(KP) :: a11, a21, a31, a41, a51, a12, a22, a32, a42, a52, a13, a23, a33, a43, a53, a14, a24, a34, a44, a54
+        real(KP) :: k11, k21, k31, k41, k51, k12, k22, k32, k42, k52, k13, k23, k33, k43, k53, k14, k24, k34, k44, k54
         real(WP) :: c00, c01, c10, c11, ra, rb, raz, rbz, rau, rbu, dl, dw, dwp
-        logical  :: ok(NEB_RUN)
-        integer  :: j, j0, j1, k, q, t, nbk
+        logical  :: ok1, ok2, ok3, ok4
+        integer  :: j, j0, j1, nbk
 
-        do k = 1, tl
-            ok(k) = qzt(ts + k - 1, m) * abs(fabs(m)) > SAFE_FLOOR
-            do q = 1, 5
-                acc(q, k) = 0.0_KP
-                cmp(q, k) = 0.0_KP
-            end do
-        end do
+        ok1 = .false.; ok2 = .false.; ok3 = .false.; ok4 = .false.
+        if (tl >= 1) ok1 = qzt(ts, m) * abs(fabs(m)) > SAFE_FLOOR
+        if (tl >= 2) ok2 = qzt(ts + 1, m) * abs(fabs(m)) > SAFE_FLOOR
+        if (tl >= 3) ok3 = qzt(ts + 2, m) * abs(fabs(m)) > SAFE_FLOOR
+        if (tl >= 4) ok4 = qzt(ts + 3, m) * abs(fabs(m)) > SAFE_FLOOR
+        a11 = 0.0_KP
+        k11 = 0.0_KP
+        a21 = 0.0_KP
+        k21 = 0.0_KP
+        a31 = 0.0_KP
+        k31 = 0.0_KP
+        a41 = 0.0_KP
+        k41 = 0.0_KP
+        a51 = 0.0_KP
+        k51 = 0.0_KP
+        a12 = 0.0_KP
+        k12 = 0.0_KP
+        a22 = 0.0_KP
+        k22 = 0.0_KP
+        a32 = 0.0_KP
+        k32 = 0.0_KP
+        a42 = 0.0_KP
+        k42 = 0.0_KP
+        a52 = 0.0_KP
+        k52 = 0.0_KP
+        a13 = 0.0_KP
+        k13 = 0.0_KP
+        a23 = 0.0_KP
+        k23 = 0.0_KP
+        a33 = 0.0_KP
+        k33 = 0.0_KP
+        a43 = 0.0_KP
+        k43 = 0.0_KP
+        a53 = 0.0_KP
+        k53 = 0.0_KP
+        a14 = 0.0_KP
+        k14 = 0.0_KP
+        a24 = 0.0_KP
+        k24 = 0.0_KP
+        a34 = 0.0_KP
+        k34 = 0.0_KP
+        a44 = 0.0_KP
+        k44 = 0.0_KP
+        a54 = 0.0_KP
+        k54 = 0.0_KP
         if (lnq < huge(1.0_wp)) then
             c00 = (1.0_wp - wzm) * (1.0_wp - wum)
             c01 = (1.0_wp - wzm) * wum
@@ -5002,52 +5059,212 @@ contains
                       wzm * (ctab(j, z0 + 1, a, u0 + 1) - ctab(j, z0 + 1, a, u0))
                 rbu = (1.0_wp - wzm) * (ctab(j, z0, a + 1, u0 + 1) - ctab(j, z0, a + 1, u0)) + &
                       wzm * (ctab(j, z0 + 1, a + 1, u0 + 1) - ctab(j, z0 + 1, a + 1, u0))
+                rz_a = real(raz, KP)
+                rz_b = real(rbz, KP)
+                ru_a = real(rau, KP)
+                ru_b = real(rbu, KP)
                 dl = (rb - ra) * LN10
                 e = exp_kp(ra * LN10 + wa(ts) * dl + lnq)
                 rr = 1.0_KP
                 dwp = 0.0_wp
-                do k = 1, tl
-                    t = ts + k - 1
-                    if (k > 1) then
-                        dw = wa(t) - wa(t - 1)
-                        if (dw /= dwp) then
-                            rr = exp_kp(dw * dl)
-                            dwp = dw
-                        end if
-                        e = e * rr
-                    end if
-                    if (.not. ok(k)) cycle
-                    if (t <= it_tesc(m)) then
+                ! (age 1 of the run)
+                if (tl >= 1 .and. ok1) then
+                    if (ts + 0 <= it_tesc(m)) then
                         g = gy * e
                     else
                         g = go * e
                     end if
-                    d(1) = g
-                    d(2) = g * real(raz, KP)
-                    d(3) = g * real(rbz, KP)
-                    d(4) = g * real(rau, KP)
-                    d(5) = g * real(rbu, KP)
                     if (KP == WP) then
-                        ! (FP64 kernels: plain sums)
-                        do q = 1, 5
-                            acc(q, k) = acc(q, k) + d(q)
-                        end do
+                        a11 = a11 + g
+                        a21 = a21 + g * rz_a
+                        a31 = a31 + g * rz_b
+                        a41 = a41 + g * ru_a
+                        a51 = a51 + g * ru_b
                     else
-                        do q = 1, 5
-                            term = d(q) - cmp(q, k)
-                            tsum = acc(q, k) + term
-                            cmp(q, k) = (tsum - acc(q, k)) - term
-                            acc(q, k) = tsum
-                        end do
+                        term = g - k11
+                        tsum = a11 + term
+                        k11 = (tsum - a11) - term
+                        a11 = tsum
+                        term = g * rz_a - k21
+                        tsum = a21 + term
+                        k21 = (tsum - a21) - term
+                        a21 = tsum
+                        term = g * rz_b - k31
+                        tsum = a31 + term
+                        k31 = (tsum - a31) - term
+                        a31 = tsum
+                        term = g * ru_a - k41
+                        tsum = a41 + term
+                        k41 = (tsum - a41) - term
+                        a41 = tsum
+                        term = g * ru_b - k51
+                        tsum = a51 + term
+                        k51 = (tsum - a51) - term
+                        a51 = tsum
                     end if
-                end do
+                end if
+                ! (age 2 of the run)
+                if (tl >= 2) then
+                    dw = wa(ts + 1) - wa(ts + 0)
+                    if (dw /= dwp) then
+                        rr = exp_kp(dw * dl)
+                        dwp = dw
+                    end if
+                    e = e * rr
+                end if
+                if (tl >= 2 .and. ok2) then
+                    if (ts + 1 <= it_tesc(m)) then
+                        g = gy * e
+                    else
+                        g = go * e
+                    end if
+                    if (KP == WP) then
+                        a12 = a12 + g
+                        a22 = a22 + g * rz_a
+                        a32 = a32 + g * rz_b
+                        a42 = a42 + g * ru_a
+                        a52 = a52 + g * ru_b
+                    else
+                        term = g - k12
+                        tsum = a12 + term
+                        k12 = (tsum - a12) - term
+                        a12 = tsum
+                        term = g * rz_a - k22
+                        tsum = a22 + term
+                        k22 = (tsum - a22) - term
+                        a22 = tsum
+                        term = g * rz_b - k32
+                        tsum = a32 + term
+                        k32 = (tsum - a32) - term
+                        a32 = tsum
+                        term = g * ru_a - k42
+                        tsum = a42 + term
+                        k42 = (tsum - a42) - term
+                        a42 = tsum
+                        term = g * ru_b - k52
+                        tsum = a52 + term
+                        k52 = (tsum - a52) - term
+                        a52 = tsum
+                    end if
+                end if
+                ! (age 3 of the run)
+                if (tl >= 3) then
+                    dw = wa(ts + 2) - wa(ts + 1)
+                    if (dw /= dwp) then
+                        rr = exp_kp(dw * dl)
+                        dwp = dw
+                    end if
+                    e = e * rr
+                end if
+                if (tl >= 3 .and. ok3) then
+                    if (ts + 2 <= it_tesc(m)) then
+                        g = gy * e
+                    else
+                        g = go * e
+                    end if
+                    if (KP == WP) then
+                        a13 = a13 + g
+                        a23 = a23 + g * rz_a
+                        a33 = a33 + g * rz_b
+                        a43 = a43 + g * ru_a
+                        a53 = a53 + g * ru_b
+                    else
+                        term = g - k13
+                        tsum = a13 + term
+                        k13 = (tsum - a13) - term
+                        a13 = tsum
+                        term = g * rz_a - k23
+                        tsum = a23 + term
+                        k23 = (tsum - a23) - term
+                        a23 = tsum
+                        term = g * rz_b - k33
+                        tsum = a33 + term
+                        k33 = (tsum - a33) - term
+                        a33 = tsum
+                        term = g * ru_a - k43
+                        tsum = a43 + term
+                        k43 = (tsum - a43) - term
+                        a43 = tsum
+                        term = g * ru_b - k53
+                        tsum = a53 + term
+                        k53 = (tsum - a53) - term
+                        a53 = tsum
+                    end if
+                end if
+                ! (age 4 of the run)
+                if (tl >= 4) then
+                    dw = wa(ts + 3) - wa(ts + 2)
+                    if (dw /= dwp) then
+                        rr = exp_kp(dw * dl)
+                        dwp = dw
+                    end if
+                    e = e * rr
+                end if
+                if (tl >= 4 .and. ok4) then
+                    if (ts + 3 <= it_tesc(m)) then
+                        g = gy * e
+                    else
+                        g = go * e
+                    end if
+                    if (KP == WP) then
+                        a14 = a14 + g
+                        a24 = a24 + g * rz_a
+                        a34 = a34 + g * rz_b
+                        a44 = a44 + g * ru_a
+                        a54 = a54 + g * ru_b
+                    else
+                        term = g - k14
+                        tsum = a14 + term
+                        k14 = (tsum - a14) - term
+                        a14 = tsum
+                        term = g * rz_a - k24
+                        tsum = a24 + term
+                        k24 = (tsum - a24) - term
+                        a24 = tsum
+                        term = g * rz_b - k34
+                        tsum = a34 + term
+                        k34 = (tsum - a34) - term
+                        a34 = tsum
+                        term = g * ru_a - k44
+                        tsum = a44 + term
+                        k44 = (tsum - a44) - term
+                        a44 = tsum
+                        term = g * ru_b - k54
+                        tsum = a54 + term
+                        k54 = (tsum - a54) - term
+                        a54 = tsum
+                    end if
+                end if
             end do
         end if
-        do k = 1, tl
-            do q = 1, 5
-                cpart(q, ts + k - 1, p, m) = acc(q, k)
-            end do
-        end do
+        if (tl >= 1) then
+            cpart(1, ts + 0, p, m) = a11
+            cpart(2, ts + 0, p, m) = a21
+            cpart(3, ts + 0, p, m) = a31
+            cpart(4, ts + 0, p, m) = a41
+            cpart(5, ts + 0, p, m) = a51
+        end if
+        if (tl >= 2) then
+            cpart(1, ts + 1, p, m) = a12
+            cpart(2, ts + 1, p, m) = a22
+            cpart(3, ts + 1, p, m) = a32
+            cpart(4, ts + 1, p, m) = a42
+            cpart(5, ts + 1, p, m) = a52
+        end if
+        if (tl >= 3) then
+            cpart(1, ts + 2, p, m) = a13
+            cpart(2, ts + 2, p, m) = a23
+            cpart(3, ts + 2, p, m) = a33
+            cpart(4, ts + 2, p, m) = a43
+            cpart(5, ts + 2, p, m) = a53
+        end if
+        if (tl >= 4) then
+            cpart(1, ts + 3, p, m) = a14
+            cpart(2, ts + 3, p, m) = a24
+            cpart(3, ts + 3, p, m) = a34
+            cpart(4, ts + 3, p, m) = a44
+            cpart(5, ts + 3, p, m) = a54
+        end if
     end subroutine neb_run_block
 
 
