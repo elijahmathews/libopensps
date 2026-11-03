@@ -8,7 +8,7 @@ program test_csp_batch_grad
     !>   the forward model switches on);
     !> - d L / d (dust1, dust2, dust3, dust_index, dust1_index, frac_obrun, frac_nodust, mwr, uvb) per
     !>   model (one-sided, second order, where a parameter sits at its bound 0), and with dust emission
-    !>   (energy balance) also duste_qpah, duste_umin, duste_gamma;
+    !>   (energy balance) also duste_qpah, duste_umin, duste_gamma; with velocity smoothing;
     !> - d L / d(SSP weights) along a random direction (relative perturbations of the weights, so
     !>   they stay positive), and for single ages, including an age whose weight is zero;
     !> - the weights' gradient of a parametric SFH equals that of the same weights given as a matrix;
@@ -60,6 +60,7 @@ program test_csp_batch_grad
     type(opensps_context_t), allocatable :: ctx
     integer :: seed = 12345
     logical :: zred_per_model = .false.
+    real(WP) :: smooth_sigma = 0.0_wp   ! sigma_smooth of every model
     !> The cotangents of the current check (the loss L is formed with them)
     real(WP), allocatable :: lbar_m(:, :), lbar_s(:, :)
 
@@ -87,6 +88,11 @@ program test_csp_batch_grad
     call set_int('add_dust_emission', 1)
     call check_grad(2, 0.0_wp, 0, 1, .true., "Calzetti, z = 0, dust emission, AGN, weight matrix")
     call check_grad(1, 0.5_wp, 1, 0, .false., "Cardelli et al., z = 0.5, IGM, dust emission, SFH parameters")
+    ! Velocity smoothing (the device operator), with dust emission, AGN and IGM
+    call set_int('smooth_velocity', 1)
+    smooth_sigma = 150.0_wp
+    call check_grad(0, 0.5_wp, 1, 1, .true., "power law, z = 0.5, IGM, dust emission, AGN, sigma_smooth = 150 km/s")
+    smooth_sigma = 0.0_wp
     call set_int('add_dust_emission', 0)
     call check_unsupported()
 
@@ -148,6 +154,7 @@ contains
         call set_float('duste_qpah', qpah(m))
         call set_float('duste_gamma', gam(m))
         call set_float('agn_tau', 5.0_wp + 15.0_wp * mod(m, 8))
+        call set_float('sigma_smooth', smooth_sigma)
         call set_float('zred', zred)
     end subroutine set_model
 
@@ -159,7 +166,7 @@ contains
         type(PARAMS) :: psets(N_MOD), pp(N_MOD)
         real(WP), allocatable :: mags(:, :), spec(:, :), mbar(:, :), sbar(:, :), pbar(:, :), wbar(:, :), wbar2(:, :)
         real(WP), allocatable :: w(:, :), wp_(:, :), wm(:, :), dir(:, :), t1(:), t2(:)
-        real(WP) :: lp, lm, l0, g_fd, g_ad, h, worst, scale
+        real(WP) :: lp, lm, l0, l3, g_fd, g_ad, h, worst, scale
         integer :: m, b, i, k, nspec, nbands, nt, status, k0
 
         call print_group("Gradients: " // label)
@@ -266,15 +273,17 @@ contains
                     call loss(pp, w, given_w, lm)
                     g_fd = (lp - lm) / (2.0_wp * h)
                 else
-                    ! One-sided at fagn = 0, second order: (-3 L(0) + 4 L(h) - L(2h)) / 2h (where the
-                    ! AGN dominates a band the magnitudes' curvature is large)
-                    h = merge(0.1_wp, 1.0e-8_wp, LINEAR_ONLY)
+                    ! One-sided at fagn = 0, third order (-11 L0 + 18 L1 - 9 L2 + 2 L3) / 6h (where the AGN
+                    ! dominates a band the magnitudes' curvature in fagn is large)
+                    h = merge(0.1_wp, 1.0e-6_wp, LINEAR_ONLY)
                     call loss(pp, w, given_w, l0)
                     pp(m)%fagn = h
                     call loss(pp, w, given_w, lp)
                     pp(m)%fagn = 2.0_wp * h
                     call loss(pp, w, given_w, lm)
-                    g_fd = (-3.0_wp * l0 + 4.0_wp * lp - lm) / (2.0_wp * h)
+                    pp(m)%fagn = 3.0_wp * h
+                    call loss(pp, w, given_w, l3)
+                    g_fd = (-11.0_wp * l0 + 18.0_wp * lp - 9.0_wp * lm + 2.0_wp * l3) / (6.0_wp * h)
                 end if
                 g_ad = pbar(BGRAD_FAGN, m)
                 worst = max(worst, abs(g_ad - g_fd) / max(abs(g_fd), 1.0e-3_wp))
@@ -501,6 +510,15 @@ contains
         call compute_csp_batch(ctx, psets, mags, status, mags_bar=mags, weights_bar=wbar)
         call assert_true(status == 2, "nebular emission: status 2", total_tests, total_failures)
         call set_int('add_neb_emission', 0)
+        ! Smoothing at constant width in wavelength (on the host): not yet
+        call set_int('smooth_velocity', 0)
+        call set_float('sigma_smooth', 5.0_wp)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, psets(1))
+        call compute_csp_batch(ctx, psets, mags, status, mags_bar=mags, weights_bar=wbar)
+        call assert_true(status == 2, "smoothing on the host: status 2", total_tests, total_failures)
+        call set_int('smooth_velocity', 1)
+        call set_float('sigma_smooth', 0.0_wp)
     end subroutine check_unsupported
 
     subroutine set_int(key, value)
