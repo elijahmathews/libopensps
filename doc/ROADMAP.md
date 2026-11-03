@@ -251,7 +251,7 @@ tables and interpolation weights:
 | `tage`, `tau`, `const`, `fburst`, `tburst`, `sf_start`, `sf_trunc`, `sf_slope` | the SFH weights' tangents (`opensps_sfh_tangent`; sfh = 0, 1, 4, 5) |
 | `zred` | the resampling, the distance term, the IGM (`igm_tau_dz`) |
 | `igm_factor` | the IGM transmission (-tau T, the forward's capped optical depth); per model, as `sigma_smooth` |
-| `imf1`, `imf2`, `imf3`, `vdmc`, `mdave` (with `ssp_ops`) | the SSP operator in reverse (`ssp_batch_age_sums_adjoint`: templates transposed, the fold in reverse, L_bol and Q per point), the point weights' derivatives by central differences of their FP64 closed forms |
+| `imf1`, `imf2`, `imf3`, `vdmc`, `mdave` (with `ssp_ops`) | the SSP operator in reverse (`ssp_batch_age_sums_adjoint`: templates transposed, the fold as gathers, L_bol and Q per point); the point weights' derivatives analytic for Kroupa and Dave (`imf_integral_dp`, `powerlaw_j_dj`), by central differences of their FP64 closed forms for van Dokkum (`vdmc`); only the rows each IMF type reads |
 | `sigma_smooth` | the smoothing kernels' coefficients, every mode (the device operator; on the host the exact log-linear and the constant-width convolutions); one sigma per batch: per-model sensitivities |
 
 Kinks are one-sided: interpolation nodes of the dust-emission and nebular grids, grid ages for
@@ -274,12 +274,25 @@ parameters (`dell`, `delt`, `fbhb`, `sbss`, `pagb`, `redgb`, `agb`, `agb_dust`, 
 `pmetals`, `frac_xrb`), which are in the bases or operators; `dust_clumps`, which no physics reads;
 the smoothing window's edges; integer switches.
 
-Cost (2026-11-02, full physics: nebular, dust emission, AGN, IGM, SFH parameters; forward / with
-gradients, per model): gfortran FP64, one CPU thread, 1.2-1.4 / 6.0-6.1 ms (4.5-5x); R9700 FP32,
-N = 100: 96 / 638 us (6.7x), N = 1000: 18.4 / 133 us (7.2x). Above the 2-4x estimated here: the
-reverse pass is untuned (simple kernels: the age sums' adjoint is a hand-written basis-transpose
-product with uncoalesced reads on GPUs, the nebular adjoint interpolates the grids per pixel and
-age, the observed-frame transpose is one thread per model).
+Cost (2026-11-03, after a first tuning pass; full physics: nebular, dust emission, AGN, IGM, SFH
+parameters; forward / with gradients, per model):
+
+| | forward | with gradients |
+|---|---|---|
+| gfortran FP64, one CPU thread, N = 100 | 1.35 ms | 3.50 ms (2.6x) |
+| R9700 FP32 (LLVM flang 22), N = 100 | 49 us | 181 us (3.7x) |
+| R9700 FP32, N = 1000 | 24 us | 85 us (3.5x; 95 with amdflang 7.2.4 before the last change) |
+| R9700 FP32, IMF free (Kroupa, `ssp_ops`), N = 1000 | 73 us | 417 us (5.7x) |
+
+What the tuning found (rocprofv3 kernel traces on the R9700, stage timers on both): FP64 atomics in
+the IMF operator's fold (4 s per call of 100 models: now gathers), FP64 arithmetic at the consumer
+GPU's FP64 rate (the template transpose, the band integrals' transpose: now kernel precision,
+compensated where the sums are long), accumulator arrays spilled to scratch memory (now scalar register tiles), passes
+serial per model (observed frame, IGM cap, AGN, line profiles), a single-threaded host pass over the
+cotangents, the IMF rows' finite differences (now analytic for Kroupa and Dave), and on CPUs
+unvectorized running sums (now lane-vectorized dot products). Remaining: the nebular continuum's
+table reads, the age sums' adjoint on GPUs (one basis column per thread), host-side setup, and the
+SFH tangents on the host.
 
 ### 5. AMD and Intel GPUs (future work)
 
