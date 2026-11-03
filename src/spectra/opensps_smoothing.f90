@@ -17,7 +17,7 @@ module opensps_smoothing
     implicit none
     private
 
-    public :: apply_smoothing
+    public :: apply_smoothing, apply_smoothing_adjoint
     public :: smooth_velocity
     public :: velocity_kernel_t, build_velocity_kernel, apply_velocity_kernel
 
@@ -758,6 +758,165 @@ contains
         spec = spec_smooth
 
     end subroutine convolve_constant_lambda
+
+    !> The transpose of apply_smoothing's host modes (convolve_log_linear: smooth_velocity = 1,
+    !> smoothspec_fast = 0; convolve_constant_lambda: smooth_velocity = 0), one spectrum, for the
+    !> gradients of compute_csp_batch: on entry gbar is d L / d(smoothed spectrum), on exit d L /
+    !> d(spectrum before smoothing), spec_in the spectrum before smoothing; dsig = d L / d sigma.
+    !> Each mode is a linear map with the forward's windows and clamps; the kernels are normalized
+    !> Gaussians over their (possibly partial) windows, so d C / d s = C (x^2 - <x^2>) / s^3 (x: the
+    !> offset in the kernel's unit, s its width). The windows' integer edges do not move.
+    subroutine apply_smoothing_adjoint(ctx, lambda, spec_in, gbar, sigma, minl, maxl, dsig)
+        type(opensps_context_t), intent(in) :: ctx
+        real(WP), dimension(:), intent(in), contiguous :: lambda, spec_in
+        real(WP), dimension(:), intent(inout), contiguous :: gbar
+        real(WP), intent(in)  :: sigma, minl, maxl
+        real(WP), intent(out) :: dsig
+
+        dsig = 0.0_wp
+        if (size(lambda) < 2 .or. sigma <= SAFE_FLOOR) return
+        if (ctx%smooth_velocity_val == 1) then
+            call log_linear_adjoint(lambda, spec_in, gbar, sigma, minl, maxl, dsig)
+        else
+            call constant_lambda_adjoint(lambda, spec_in, gbar, sigma, minl, maxl, dsig)
+        end if
+    end subroutine apply_smoothing_adjoint
+
+    !> convolve_log_linear transposed (the log-grid resampling, the edge-renormalized convolution,
+    !> the resampling back), and its sigma derivative.
+    subroutine log_linear_adjoint(lambda, spec_in, gbar, sigma, minl, maxl, dsig)
+        real(WP), dimension(:), intent(in), contiguous :: lambda, spec_in
+        real(WP), dimension(:), intent(inout), contiguous :: gbar
+        real(WP), intent(in)  :: sigma, minl, maxl
+        real(WP), intent(out) :: dsig
+        integer  :: n, i, k, k_rad, ks, ke, idx
+        real(WP) :: c_kms, ln_min, ln_max, d_ln, inv_d_ln, sp, w, fr, x, e, se, sx2, sxf, sf, t, lam
+        real(WP), allocatable :: f(:), cb(:), fb(:), ti(:), gout(:)
+        integer, allocatable  :: ii(:)
+
+        n = size(lambda)
+        dsig = 0.0_wp
+        c_kms = C_LIGHT * 1.0e-13_wp
+        ln_min = log(max(minl, lambda(1)))
+        ln_max = log(min(maxl, lambda(n)))
+        d_ln = (ln_max - ln_min) / real(n - 1, WP)
+        inv_d_ln = 1.0_wp / d_ln
+        sp = sigma / c_kms * inv_d_ln
+        k_rad = ceiling(N_SIGMA_RANGE * sp)
+        w = -0.5_wp / sp**2
+        ! The forward's log-grid values and interpolation (pixel, fraction)
+        allocate(f(n), cb(n), fb(n), ti(n), ii(n), gout(n))
+        idx = 1
+        do i = 1, n
+            lam = exp(ln_min + (i - 1) * d_ln)
+            call hunt_interval(lambda, lam, idx)
+            ii(i) = idx
+            ti(i) = (lam - lambda(idx)) / (lambda(idx + 1) - lambda(idx))
+            f(i) = interpolate_linear_scalar(lambda(idx), lambda(idx + 1), spec_in(idx), spec_in(idx + 1), lam)
+        end do
+        ! The resampling back, transposed: smoothed pixels take their cotangent from conv_log
+        gout = gbar
+        cb = 0.0_wp
+        do i = 1, n
+            if (lambda(i) < minl .or. lambda(i) > maxl) cycle
+            x = (log(lambda(i)) - ln_min) * inv_d_ln + 1.0_wp
+            ks = int(x)
+            fr = x - real(ks, WP)
+            if (ks < 1) then
+                ks = 1; fr = 0.0_wp
+            else if (ks >= n) then
+                ks = n - 1; fr = 1.0_wp
+            end if
+            cb(ks) = cb(ks) + (1.0_wp - fr) * gout(i)
+            cb(ks + 1) = cb(ks + 1) + fr * gout(i)
+            gbar(i) = 0.0_wp
+        end do
+        ! The convolution, transposed, with each window's normalization (full or partial: e / sum e)
+        fb = 0.0_wp
+        do i = 1, n
+            if (cb(i) == 0.0_wp) cycle
+            ks = max(-k_rad, 1 - i)
+            ke = min(k_rad, n - i)
+            if (ks > ke) then
+                fb(i) = fb(i) + cb(i)
+                cycle
+            end if
+            se = 0.0_wp; sx2 = 0.0_wp; sxf = 0.0_wp; sf = 0.0_wp
+            do k = ks, ke
+                e = exp(w * real(k, WP)**2)
+                se = se + e
+                sx2 = sx2 + e * real(k, WP)**2
+                sf = sf + e * f(i + k)
+                sxf = sxf + e * real(k, WP)**2 * f(i + k)
+            end do
+            if (se <= SAFE_FLOOR) cycle
+            do k = ks, ke
+                fb(i + k) = fb(i + k) + cb(i) * exp(w * real(k, WP)**2) / se
+            end do
+            ! d conv_i / d s = (sum e k^2 f / se - (sum e f / se)(sum e k^2 / se)) / s^3
+            dsig = dsig + cb(i) * (sxf / se - (sf / se) * (sx2 / se)) / sp**3
+        end do
+        dsig = dsig / (c_kms * d_ln)
+        ! The resampling to the log grid, transposed
+        do i = 1, n
+            t = ti(i)
+            gbar(ii(i)) = gbar(ii(i)) + (1.0_wp - t) * fb(i)
+            gbar(ii(i) + 1) = gbar(ii(i) + 1) + t * fb(i)
+        end do
+    end subroutine log_linear_adjoint
+
+    !> convolve_constant_lambda transposed, and its sigma derivative.
+    subroutine constant_lambda_adjoint(lambda, spec_in, gbar, sigma, minl, maxl, dsig)
+        real(WP), dimension(:), intent(in), contiguous :: lambda, spec_in
+        real(WP), dimension(:), intent(inout), contiguous :: gbar
+        real(WP), intent(in)  :: sigma, minl, maxl
+        real(WP), intent(out) :: dsig
+        integer  :: n, i, k, il, ih
+        real(WP) :: inv_2s2, vl, vh, tw, sx2, sxf, sf, ck, g, dl2
+        real(WP), allocatable :: gout(:), c(:)
+
+        n = size(lambda)
+        dsig = 0.0_wp
+        allocate(gout(n), c(n))
+        gout = gbar
+        inv_2s2 = 0.5_wp / sigma**2
+        il = 1
+        ih = 1
+        do i = 1, n
+            if (lambda(i) < minl .or. lambda(i) > maxl) cycle
+            vl = lambda(i) - N_SIGMA_RANGE * sigma
+            vh = lambda(i) + N_SIGMA_RANGE * sigma
+            do while (il < n .and. lambda(il) < vl)
+                il = il + 1
+            end do
+            if (il > 1 .and. lambda(il) > vl) il = max(1, il - 1)
+            do while (ih < n .and. lambda(ih) < vh)
+                ih = ih + 1
+            end do
+            if (ih - il + 1 < 2) cycle
+            ! The trapezoid coefficients of the window's points
+            tw = 0.0_wp; sx2 = 0.0_wp; sxf = 0.0_wp; sf = 0.0_wp
+            do k = il, ih
+                ck = 0.0_wp
+                if (k > il) ck = ck + 0.5_wp * (lambda(k) - lambda(k - 1))
+                if (k < ih) ck = ck + 0.5_wp * (lambda(k + 1) - lambda(k))
+                dl2 = (lambda(k) - lambda(i))**2
+                g = exp(-dl2 * inv_2s2)
+                c(k) = ck * g
+                tw = tw + c(k)
+                sx2 = sx2 + c(k) * dl2
+                sf = sf + c(k) * spec_in(k)
+                sxf = sxf + c(k) * dl2 * spec_in(k)
+            end do
+            if (tw <= SAFE_FLOOR) cycle
+            ! smoothed(i) = sum c spec / tw: its cotangent goes to the window (and leaves pixel i)
+            gbar(i) = gbar(i) - gout(i)
+            do k = il, ih
+                gbar(k) = gbar(k) + gout(i) * c(k) / tw
+            end do
+            dsig = dsig + gout(i) * (sxf / tw - (sf / tw) * (sx2 / tw)) / sigma**3
+        end do
+    end subroutine constant_lambda_adjoint
 
     !> @brief Finds interval in a sorted array such that arr(i) <= val < arr(i+1)
     !> @details Optimized "Hunter" that starts search from a guess index.

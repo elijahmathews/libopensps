@@ -249,7 +249,7 @@ tables and interpolation weights:
 | `tage`, `tau`, `const`, `fburst`, `tburst`, `sf_start`, `sf_trunc`, `sf_slope` | the SFH weights' tangents (`opensps_sfh_tangent`; sfh = 0, 1, 4, 5) |
 | `zred` | the resampling, the distance term, the IGM (`igm_tau_dz`) |
 | `imf1`, `imf2`, `imf3`, `vdmc`, `mdave` (with `ssp_ops`) | the SSP operator in reverse (`ssp_batch_age_sums_adjoint`: templates transposed, the fold in reverse, L_bol and Q per point), the point weights' derivatives by central differences of their FP64 closed forms |
-| `sigma_smooth` | the velocity kernel's coefficients (one sigma per batch: per-model sensitivities) |
+| `sigma_smooth` | the smoothing kernels' coefficients, every mode (the device operator; on the host the exact log-linear and the constant-width convolutions); one sigma per batch: per-model sensitivities |
 
 Kinks are one-sided: interpolation nodes of the dust-emission and nebular grids, grid ages for
 tage, observed pixels coinciding with rest-frame pixels for zred, z = 0. Precision: each model's
@@ -263,8 +263,7 @@ Cotangents of the outputs `mass` and `lbol` are taken too (`mass_bar`, `lbol_bar
 `ssp_ops`, which would need the remnant masses' IMF derivatives). SSP-level nebular emission
 (`add_neb_emission = 2`) is in the basis, so its gas parameters do not act in the batch (rows zero).
 
-Not yet (status 2 with gradients): the host smoothing modes, `ssp_weights_z`, `mass_bar` with
-`ssp_ops`; not differentiated: `emlines`, `mdust`, indices as
+Not yet (status 2 with gradients): `ssp_weights_z`, `mass_bar` with `ssp_ops`; not differentiated: `emlines`, `mdust`, indices as
 outputs.
 
 Cost (2026-11-02, full physics: nebular, dust emission, AGN, IGM, SFH parameters; forward / with

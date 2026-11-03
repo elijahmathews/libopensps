@@ -95,7 +95,7 @@ module opensps_csp_batch
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
     use opensps_gas, only: get_grid_indices_weights, prepare_line_gaussians
     use opensps_spectral_indices, only: compute_spectral_indices_columns
-    use opensps_smoothing, only: apply_smoothing
+    use opensps_smoothing, only: apply_smoothing, apply_smoothing_adjoint
     use opensps_batch_photometry, only: compute_magnitudes_columns, prepare_batch_grid, smoothing_on_device, &
                                      prepare_smoothing_kernel, smooth_columns, smooth_columns_adjoint, distance_term_dz, &
                                      smooth_sigma_adjoint
@@ -279,8 +279,7 @@ contains
     !>                       tburst, sf_start, sf_trunc and sf_slope for sfh = 0, 1, 4, 5.
     !> @param[in]    mass_bar, lbol_bar Optional dL / d(mass), dL / d(lbol) (N): cotangents of those
     !>                       outputs (mass_bar not with ssp_ops: status 2).
-    !>                       Gradients are not yet available (status 2) with the host smoothing modes
-    !>                       (smooth_velocity = 0 or smoothspec_fast = 0) or ssp_weights_z. With
+    !>                       Gradients are not yet available (status 2) with ssp_weights_z. With
     !>                       ssp_ops, params_bar includes the IMF's imf1, imf2, imf3, vdmc and mdave.
     subroutine compute_csp_batch(ctx, psets, mags, status, spec, mass, lbol, mdust, sfr, emlines, indx, ssp_weights, &
                                  spec_young, spec_old, mass_young, mass_old, lbol_young, lbol_old, zred_mags, &
@@ -474,8 +473,7 @@ contains
             ! Stages whose adjoints are not written yet
             ! (SSP-level nebular emission, add_neb_emission = 2, is in the basis. The mass's cotangent
             ! with ssp_ops would need the remnants' IMF derivatives)
-            if (present(ssp_weights_z) .or. (present(mass_bar) .and. imf) .or. &
-                (psets(1)%sigma_smooth > SAFE_FLOOR .and. .not. smoothing_on_device(ctx))) then
+            if (present(ssp_weights_z) .or. (present(mass_bar) .and. imf)) then
                 status = 2; return
             end if
         end if
@@ -1101,6 +1099,7 @@ contains
                                     it_tesc, zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
                                     absorbed, ysave, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
                                     neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
+                                    psets(1)%min_wave_smooth, psets(1)%max_wave_smooth, &
                                     imf, zimf, pm, wsfh, slum, ssp_ops, lbx, &
                                     mags_bar, spec_bar, params_bar, wbl)
             else
@@ -1108,6 +1107,7 @@ contains
                                     it_tesc, zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
                                     absorbed, yo, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
                                     neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
+                                    psets(1)%min_wave_smooth, psets(1)%max_wave_smooth, &
                                     imf, zimf, pm, wsfh, slum, ssp_ops, lbx, &
                                     mags_bar, spec_bar, params_bar, wbl)
             end if
@@ -1229,6 +1229,33 @@ contains
         !$omp target update to(sp)
 #endif
     end subroutine smooth_columns_host
+
+    !> The transpose of smooth_columns_host (the host smoothing modes) for the gradients: per model,
+    !> apply_smoothing_adjoint on the smoothed spectrum's cotangent (gw(:, N + m)) and the spectrum
+    !> before smoothing (tsave), and d L / d sigma (dsg).
+    subroutine smooth_columns_host_adjoint(ctx, nspec, n_mod, sigma, minl, maxl, tsave, gw, dsg)
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)     :: nspec, n_mod
+        real(WP), intent(in)    :: sigma, minl, maxl
+        real(KP), intent(inout) :: tsave(:,:), gw(:,:)
+        real(WP), intent(out)   :: dsg(n_mod)
+        real(WP), allocatable :: col(:), gb(:)
+        integer :: m
+
+        allocate(col(nspec), gb(nspec))
+#ifdef OMP_TARGET
+        !$omp target update from(tsave, gw)
+#endif
+        do m = 1, n_mod
+            col = real(tsave(1:nspec, m), WP)
+            gb = real(gw(1:nspec, n_mod + m), WP)
+            call apply_smoothing_adjoint(ctx, ctx%state%spec_lambda(1:nspec), col, gb, sigma, minl, maxl, dsg(m))
+            gw(1:nspec, n_mod + m) = real(gb, KP)
+        end do
+#ifdef OMP_TARGET
+        !$omp target update to(gw)
+#endif
+    end subroutine smooth_columns_host_adjoint
 
     !> Copies the batch's spectra (sp = the batch output, columns 1:n_mod, on the device) to spec
     !> at WP. NVIDIA GPU builds: in chunks of columns on two CUDA streams, each chunk converted on
@@ -3175,7 +3202,7 @@ contains
     subroutine batch_backward(ctx, pbuf, n_mod, nspec, nt, nbands, zred, igm_factor, mags, fband, zcm, it_tesc, &
                               zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, yo, total, &
                               emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, neb, nb, w2, lzm, tsave, &
-                              sigma, imf, zimf, pm, wsfh, slum, ssp_ops, lbx, mags_bar, spec_bar, params_bar, &
+                              sigma, minl, maxl, imf, zimf, pm, wsfh, slum, ssp_ops, lbx, mags_bar, spec_bar, params_bar, &
                               weights_bar)
         type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in)              :: n_mod, nspec, nt, nbands
@@ -3204,8 +3231,8 @@ contains
         real(KP), intent(in)             :: w2(nt, 2 * n_mod)
         logical, intent(in)              :: lzm   ! the magnitudes at zred_mags (not at zred)
         ! Smoothing: the spectra before it (nspec x N when smooth), and sigma_smooth
-        real(KP), intent(in), contiguous :: tsave(:,:)
-        real(WP), intent(in)             :: sigma
+        real(KP), intent(inout), contiguous :: tsave(:,:)
+        real(WP), intent(in)             :: sigma, minl, maxl   ! (the smoothing window: host modes)
         ! The IMF per model (ssp_ops): its flags, parameters, masked SFH weights, L_bol per age, operators
         logical, intent(in)              :: imf, zimf
         real(WP), intent(in), contiguous :: pm(:,:), wsfh(:,:), slum(:,:)
@@ -3326,9 +3353,13 @@ contains
         if (igm) call igm_cap_pixels(n_mod, nspec, pbuf, ctx%state%spec_lambda, jmx)
         ! Velocity smoothing (the last stage of the spectrum): sigma_smooth's gradient (from the
         ! smoothed spectra's cotangents and the spectra before smoothing), then the transpose
-        if (smooth) then
+        if (smooth .and. smoothing_on_device(ctx)) then
             call smooth_sigma_adjoint(ctx, sigma, tsave, gw(:, n_mod + 1:2 * n_mod), n_mod, dsg)
             call smooth_columns_adjoint(ctx, gw(:, n_mod + 1:2 * n_mod), n_mod)
+        else if (smooth) then
+            ! The host modes (exact log-linear velocity convolution, constant width in wavelength): their
+            ! transpose in FP64 on the host, a column at a time (as smooth_columns_host)
+            call smooth_columns_host_adjoint(ctx, nspec, n_mod, sigma, minl, maxl, tsave, gw, dsg)
         end if
         if (any_agn) then
             call backward_agn(n_mod, nspec, ntau, pbuf, agn_on, ita, wta, lsum, ctx%state%agndust_spec, tdiff, gw, &
