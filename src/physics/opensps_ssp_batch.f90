@@ -26,7 +26,8 @@ module opensps_ssp_batch
     use opensps_precision, only: WP, KP
     use opensps_constants, only: SAFE_FLOOR
     use opensps_imf, only: imf_integral_p, imf_bin_weights_tab, imf_bin_logs, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT, &
-                           IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE
+                           IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE, IMF_P_LOWER_BOUND, IMF_NPAR, imf_integral_dp, &
+                           integrate_powerlaw, powerlaw_dj_de
     use opensps_stellar_modifications, only: add_remnant_mass_p
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_to_device, ssp_operator_from_device
     implicit none
@@ -450,7 +451,8 @@ contains
         integer :: nz, pass, m, t, j, i, np, nc_max, neb_cols, ntq, m0, nc, j0, jr, iz, ky, ig, isg
         integer, allocatable :: perm(:), viz(:), ptr(:), cnt(:)
         real(WP), allocatable :: cz(:), ones(:), w(:,:), wm(:,:), tot(:), pps(:,:,:), slz(:,:), sqz(:,:), wpb(:,:), &
-                                 vb(:,:,:), dsm(:,:), dsl(:,:), dsq(:,:), pmp(:,:), part(:,:), zsg(:), dsp(:,:), sxa(:,:), sea(:,:)
+                                 vb(:,:,:), dsm(:,:), dsl(:,:), dsq(:,:), pmp(:,:), part(:,:), zsg(:), dsp(:,:), sxa(:,:), &
+                                 sea(:,:), apt(:,:,:), amp(:,:,:), dtt(:,:), remp(:,:), remm(:,:)
         real(KP), allocatable :: wk(:,:)
         real(WP) :: sgn
 
@@ -464,10 +466,13 @@ contains
         allocate(w(nc_max, set%n_pts_max), wm(nc_max, set%n_pts_max), wk(nc_max, set%n_pts_max), tot(nc_max), &
                  pps(nc_max, 3, set%n_pc_max), slz(nt, nc_max), sqz(nt, nc_max), wpb(nc_max, set%n_pts_max), &
                  vb(set%n_eff_max, 4, nc_max), dsm(nt, n_mod), dsl(nt, n_mod), dsq(nt, n_mod), pmp(size(pm, 1), n_mod), &
-                 part(set%n_pc_max, nc_max), dsp(nt, n_mod), sxa(nt, nc_max), sea(nt, nc_max))
+                 part(set%n_pc_max, nc_max), dsp(nt, n_mod), sxa(nt, nc_max), sea(nt, nc_max), &
+                 apt(NIMFG, set%n_pc_max, nc_max), amp(NIMFG, set%n_pc_max, nc_max), dtt(NIMFG, nc_max), &
+                 remp(nt, nc_max), remm(nt, nc_max))
         ones = 1.0_wp
 #ifdef OMP_TARGET
         !$omp target data map(alloc: w, wm, wk, tot, pps, slz, sqz, wpb, vb, dsm, dsl, dsq, part, dsp, sxa, sea) &
+        !$omp& map(alloc: apt, amp, dtt, remp, remm) &
         !$omp& map(to: pm, ones, msum_bar) map(from: wbar, imf_bar, fesc_bar, zbar) map(alloc: perm, viz, cz, zsg, pmp)
 #endif
 #if defined(OMP_TARGET)
@@ -552,8 +557,18 @@ contains
                                      zsg, wk, vb, wbar, wpb, fesc_bar, zbar, w, wm, sxa, sea)
                 call adj_lq(m0, nc, nt, nt_neb, set%n_pc_max, set%n_pc, set%pt_off, set%pc_off, set%pc_ptr, set%pt_age, &
                             set%pt_cl, set%pt_q, perm, viz, cz, zsg, wsfh, slum, lsum_bar, qbar, ntq, slz, sqz, wpb, zbar)
-                ! The IMF parameters: central differences of the point weights (only those the IMF type
-                ! reads; the others' rows are zero)
+                ! The IMF parameters: Kroupa and Dave (power-law slopes and break) analytically
+                ! (adj_imf_analytic); otherwise central differences of the point weights (only those the
+                ! IMF type reads; the others' rows are zero)
+                if (mod(imf_type, 10) == 2 .or. mod(imf_type, 10) == 4) then
+                    call adj_imf_analytic(imf_type, remnants, m0, nc, nt, set%n_pc_max, set%n_pc, set%pt_off, &
+                                          set%pc_off, set%pc_ptr, set%age_pc, set%pt_ptr, set%pt_mini, set%pt_m1, &
+                                          set%pt_m2, set%pt_llo, set%pt_dl, set%pt_first, set%pt_cm, set%age_mmax, perm, &
+                                          viz, cz, wsfh, pm, &
+                                          pmp, tot, size(wk, 1), wk, size(wpb, 1), wpb, msum_bar, apt, amp, dtt, &
+                                          remp, remm, imf_bar)
+                    cycle
+                end if
                 do ig = 1, NIMFG
                     if (.not. imf_row_acts(imf_type, ig)) cycle
 #if defined(OMP_TARGET)
@@ -601,10 +616,324 @@ contains
 #endif
     end subroutine ssp_batch_age_sums_adjoint
 
+    !> The IMF rows of Kroupa and Dave analytically: dw/d theta of each point weight w = N / M (N the
+    !> bin's number integral, M the IMF's mass integral between its limits) is
+    !> (dN/d theta - w dM/d theta) / M, with dN, dM from imf_integral_dp; then, per (piece, model),
+    !> the sums of w_bar dw (the template, L_bol and Q cotangents of the points) and of the points'
+    !> surviving masses times dw (the mass output's), per row; per model the rows. The remnants' part
+    !> of the surviving mass (a scalar per age and model) by central differences, as before.
+    subroutine adj_imf_analytic(imf_type, remnants, m0, nc, nt, n_pc_max, n_pc, pt_off, pc_off, pc_ptr, age_pc, &
+                                pt_ptr, pt_mini, pt_m1, pt_m2, pt_llo, pt_dl, pt_first, pt_cm, age_mmax, perm, viz, cz, &
+                                wsfh, pm, pmp, tot, ldk, wk, ldw, wpb, msum_bar, apt, amp, dtt, remp, remm, imf_bar)
+        integer, intent(in) :: imf_type, m0, nc, nt, n_pc_max, ldk, ldw
+        logical, intent(in) :: remnants
+        integer, intent(in), contiguous :: n_pc(:), pt_off(:), pc_off(:), pc_ptr(:), age_pc(:), pt_ptr(:), pt_first(:), &
+                                           perm(:), viz(:)
+        real(WP), intent(in), contiguous :: pt_mini(:), pt_m1(:), pt_m2(:), pt_llo(:), pt_dl(:), pt_cm(:), age_mmax(:), &
+                                            cz(:), wsfh(:,:), pm(:,:), tot(:), msum_bar(:)
+        ! (explicit leading dimensions: a point's row is passed by its first element, as imf_pieces_multi)
+        real(KP), intent(in) :: wk(ldk, *)
+        real(WP), intent(in) :: wpb(ldw, *)
+        real(WP), intent(inout), contiguous :: pmp(:,:), apt(:,:,:), amp(:,:,:), dtt(:,:), remp(:,:), remm(:,:), imf_bar(:,:)
+        integer  :: j, q, m, iz, o, k0, n, ig, t, isg, i, npar
+        real(WP) :: s, sm, sgn, h
+
+        npar = size(pm, 1)
+        ! dM / d theta per model of the chunk
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(m, ig)
+#elif defined(_OPENMP)
+        !$omp parallel do private(m, ig)
+#endif
+        do j = 1, nc
+            m = perm(m0 + j - 1)
+            do ig = 1, NIMFG
+                dtt(ig, j) = 0.0_wp
+                if (imf_row_acts(imf_type, ig)) &
+                    dtt(ig, j) = imf_integral_dp(imf_type, pm(:, m), pm(IMF_P_LOWER_LIMIT, m), &
+                                                 pm(IMF_P_UPPER_LIMIT, m), .true., imf_row_param(ig))
+            end do
+        end do
+        ! Per (piece, model): the sums (pieces outer: consecutive threads take consecutive models)
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(m, iz, o, k0, n, ig)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(m, iz, o, k0, n, ig)
+#endif
+        do q = 1, n_pc_max
+            do j = 1, nc
+                iz = viz(m0 + j - 1)
+                do ig = 1, NIMFG
+                    apt(ig, q, j) = 0.0_wp
+                    amp(ig, q, j) = 0.0_wp
+                end do
+                if (q > n_pc(iz)) cycle
+                m = perm(m0 + j - 1)
+                o = pt_off(iz)
+                k0 = pc_ptr(pc_off(iz) + q)
+                n = pc_ptr(pc_off(iz) + q + 1) - k0
+                call imf_piece_grad(imf_type, pm(:, m), tot(j), dtt(:, j), n, pt_mini(k0:k0 + n - 1), &
+                                    pt_m1(k0:k0 + n - 1), pt_m2(k0:k0 + n - 1), pt_llo(k0:k0 + n - 1), &
+                                    pt_dl(k0:k0 + n - 1), pt_first(k0:k0 + n - 1), &
+                                    pt_cm(k0:k0 + n - 1), wk(j, k0 - o), ldk, wpb(j, k0 - o), ldw, &
+                                    apt(:, q, j), amp(:, q, j))
+            end do
+        end do
+        ! Per model: the rows (the mass output's part over each age's pieces, weighted by the SFH)
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(m, iz, ig, q, t, s, sm)
+#elif defined(_OPENMP)
+        !$omp parallel do private(m, iz, ig, q, t, s, sm)
+#endif
+        do j = 1, nc
+            m = perm(m0 + j - 1)
+            iz = viz(m0 + j - 1)
+            do ig = 1, NIMFG
+                if (.not. imf_row_acts(imf_type, ig)) cycle
+                s = 0.0_wp
+                do q = 1, n_pc(iz)
+                    s = s + apt(ig, q, j)
+                end do
+                if (msum_bar(m) /= 0.0_wp) then
+                    sm = 0.0_wp
+                    do t = 1, nt
+                        do q = age_pc((iz - 1) * (nt + 1) + t), age_pc((iz - 1) * (nt + 1) + t + 1) - 1
+                            sm = sm + wsfh(m, t) * amp(ig, q, j)
+                        end do
+                    end do
+                    s = s + msum_bar(m) * cz(m0 + j - 1) * sm
+                end if
+                imf_bar(ig, m) = imf_bar(ig, m) + s
+            end do
+        end do
+        ! The remnants' mass (with the mass output's cotangent): central differences per (age, model)
+        if (.not. remnants .or. .not. any(msum_bar /= 0.0_wp)) return
+        do ig = 1, NIMFG
+            if (.not. imf_row_acts(imf_type, ig)) cycle
+            do isg = 1, 2
+                sgn = merge(1.0_wp, -1.0_wp, isg == 1)
+#if defined(OMP_TARGET)
+                !$omp target teams distribute parallel do private(i, m)
+#elif defined(_OPENMP)
+                !$omp parallel do private(i, m)
+#endif
+                do j = 1, nc
+                    m = perm(m0 + j - 1)
+                    do i = 1, npar
+                        pmp(i, m) = pm(i, m)
+                    end do
+                    pmp(imf_row_param(ig), m) = pm(imf_row_param(ig), m) + sgn * adj_step(pm(imf_row_param(ig), m))
+                end do
+#if defined(OMP_TARGET)
+                !$omp target teams distribute parallel do collapse(2) private(m, iz, sm)
+#elif defined(_OPENMP)
+                !$omp parallel do collapse(2) private(m, iz, sm)
+#endif
+                do j = 1, nc
+                    do t = 1, nt
+                        m = perm(m0 + j - 1)
+                        iz = viz(m0 + j - 1)
+                        sm = 0.0_wp
+                        if (pt_ptr((iz - 1) * (nt + 1) + t + 1) > pt_ptr((iz - 1) * (nt + 1) + t)) &
+                            call add_remnant_mass_p(imf_type, pmp(:, m), sm, age_mmax((iz - 1) * nt + t))
+                        if (isg == 1) then
+                            remp(t, j) = sm
+                        else
+                            remm(t, j) = sm
+                        end if
+                    end do
+                end do
+            end do
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do private(m, t, sm, h)
+#elif defined(_OPENMP)
+            !$omp parallel do private(m, t, sm, h)
+#endif
+            do j = 1, nc
+                m = perm(m0 + j - 1)
+                if (msum_bar(m) == 0.0_wp) cycle
+                h = adj_step(pm(imf_row_param(ig), m))
+                sm = 0.0_wp
+                do t = 1, nt
+                    sm = sm + wsfh(m, t) * (remp(t, j) - remm(t, j))
+                end do
+                imf_bar(ig, m) = imf_bar(ig, m) + msum_bar(m) * cz(m0 + j - 1) * sm / (2.0_wp * h)
+            end do
+        end do
+    end subroutine adj_imf_analytic
+
+    !> One piece of adj_imf_analytic: over its points, ps(row) = sum of w_bar dw/d theta and
+    !> pms(row) = sum of the surviving mass per star times dw/d theta, for the rows the IMF type reads.
+    !> Bins inside one power-law segment take that segment's integral and slope derivative once for
+    !> all rows (Kroupa 0.5**(a2 - a1), Dave mdave**(a2 - a1) continuity coefficients); bins across a
+    !> break take imf_integral_dp per row.
+    subroutine imf_piece_grad(imf_type, p, tt, dtt, n, mini, m1, m2, llo, dl, first, cm, wkp, ldk, wpbp, ldw, ps, pms)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        integer, intent(in)   :: imf_type, n, ldk, ldw
+        real(WP), intent(in)  :: p(IMF_NPAR), tt, dtt(NIMFG)
+        real(WP), intent(in)  :: mini(n), m1(n), m2(n), llo(n), dl(n), cm(n)
+        integer, intent(in)   :: first(n)
+        real(KP), intent(in)  :: wkp(ldk, n)
+        real(WP), intent(in)  :: wpbp(ldw, n)
+        real(WP), intent(out) :: ps(NIMFG), pms(NIMFG)
+        integer  :: k, t, seg, ig
+        real(WP) :: lo, hi, a1, a2, a3, md, c2, lc, jv, dj, dv(NIMFG), dw, wkk, inv_t, lnlo, lnr
+
+        t = mod(imf_type, 10)
+        do ig = 1, NIMFG
+            ps(ig) = 0.0_wp
+            pms(ig) = 0.0_wp
+        end do
+        if (.not. (tt > 0.0_wp)) return
+        inv_t = 1.0_wp / tt
+        a1 = p(IMF_P_ALPHA)
+        a2 = p(IMF_P_ALPHA + 1)
+        a3 = p(IMF_P_ALPHA + 2)
+        md = p(IMF_P_MDAVE)
+        if (t == 2) then
+            c2 = 0.5_wp**(-a1 + a2)
+            lc = log(0.5_wp)
+        else
+            c2 = md**(-a1 + a2)
+            lc = log(md)
+        end if
+        do k = 1, n
+            if (mini(k) < p(IMF_P_LOWER_LIMIT) .or. mini(k) > p(IMF_P_UPPER_LIMIT)) cycle
+            if (first(k) == 1) then
+                lo = p(IMF_P_LOWER_BOUND)
+            else
+                lo = m1(k)
+            end if
+            hi = m2(k)
+            if (hi <= lo) cycle
+            ! ln lo, ln(hi / lo): the point's (as imf_bin_weights_tab), or the first bin's own
+            if (first(k) == 1) then
+                lnlo = log(lo)
+                lnr = log(hi / lo)
+            else
+                lnlo = llo(k)
+                lnr = dl(k)
+            end if
+            do ig = 1, NIMFG
+                dv(ig) = 0.0_wp
+            end do
+            seg = 0
+            if (t == 2) then
+                if (lo >= 0.08_wp .and. hi <= 0.5_wp) then
+                    seg = 1
+                else if (lo >= 0.5_wp .and. hi <= 1.0_wp) then
+                    seg = 2
+                else if (lo >= 1.0_wp) then
+                    seg = 3
+                end if
+            else
+                if (lo >= 0.08_wp .and. hi <= md) then
+                    seg = 1
+                else if (lo >= md) then
+                    seg = 2
+                end if
+            end if
+            if (seg == 1) then
+                call powerlaw_j_dj(lnlo, lnr, 1.0_wp - a1, jv, dj)
+                dv(1) = -dj
+            else if (seg == 2 .and. t == 2) then
+                call powerlaw_j_dj(lnlo, lnr, 1.0_wp - a2, jv, dj)
+                dv(1) = -lc * c2 * jv
+                dv(2) = lc * c2 * jv - c2 * dj
+            else if (seg == 3) then
+                call powerlaw_j_dj(lnlo, lnr, 1.0_wp - a3, jv, dj)
+                dv(1) = -lc * c2 * jv
+                dv(2) = lc * c2 * jv
+                dv(3) = -c2 * dj
+            else if (seg == 2) then
+                call powerlaw_j_dj(lnlo, lnr, 1.0_wp - a2, jv, dj)
+                dv(1) = -lc * c2 * jv
+                dv(2) = lc * c2 * jv - c2 * dj
+                dv(5) = c2 * (a2 - a1) / md * jv
+            else
+                dv(1) = imf_integral_dp(imf_type, p, lo, hi, .false., IMF_P_ALPHA)
+                dv(2) = imf_integral_dp(imf_type, p, lo, hi, .false., IMF_P_ALPHA + 1)
+                if (t == 2) then
+                    dv(3) = imf_integral_dp(imf_type, p, lo, hi, .false., IMF_P_ALPHA + 2)
+                else
+                    dv(5) = imf_integral_dp(imf_type, p, lo, hi, .false., IMF_P_MDAVE)
+                end if
+            end if
+            wkk = real(wkp(1, k), WP)
+            do ig = 1, NIMFG
+                dw = (dv(ig) - wkk * dtt(ig)) * inv_t
+                ps(ig) = ps(ig) + wpbp(1, k) * dw
+                pms(ig) = pms(ig) + cm(k) * dw
+            end do
+        end do
+    end subroutine imf_piece_grad
+
+    !> The parameter index (IMF_P_*) of IMF row ig: imf1, imf2, imf3, vdmc, mdave (a function: device
+    !> code cannot index a parameter array on LLVM flang)
+    pure integer function imf_row_param(ig)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        integer, intent(in) :: ig
+        select case (ig)
+        case (1)
+            imf_row_param = IMF_P_ALPHA
+        case (2)
+            imf_row_param = IMF_P_ALPHA + 1
+        case (3)
+            imf_row_param = IMF_P_ALPHA + 2
+        case (4)
+            imf_row_param = IMF_P_VDMC
+        case default
+            imf_row_param = IMF_P_MDAVE
+        end select
+    end function imf_row_param
+
+    !> J = integral of m**(e - 1) from lo to hi = lo**e expm1(e L) / e and dJ/de, from ln lo and
+    !> L = ln(hi / lo): lo**e once for both; g = expm1(e L) / e and g' = dg/de by series below
+    !> |e L| = 1/2 (stopped when the terms no longer change the sums: narrow bins take a few) and in
+    !> closed form above. dJ/de = lo**e (ln lo g + g').
+    pure subroutine powerlaw_j_dj(lnlo, x, e, jv, dj)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(WP), intent(in)  :: lnlo, x, e
+        real(WP), intent(out) :: jv, dj
+        real(WP) :: el, g, gp, term, u, ex, plo
+        integer  :: n
+
+        plo = exp(e * lnlo)
+        el = e * x
+        if (abs(el) < 0.5_wp) then
+            g = x
+            term = x
+            u = 0.5_wp * x * x
+            gp = u
+            do n = 2, 24
+                term = term * el / n
+                if (n >= 3) u = u * el / n
+                if (g + term == g .and. gp + (n - 1) * u == gp) exit
+                g = g + term
+                if (n >= 3) gp = gp + (n - 1) * u
+            end do
+        else
+            ex = exp(el)
+            g = (ex - 1.0_wp) / e
+            gp = (x * ex - g) / e
+        end if
+        jv = plo * g
+        dj = plo * (lnlo * g + gp)
+    end subroutine powerlaw_j_dj
+
     !> Whether IMF row ig (imf1, imf2, imf3, vdmc, mdave) acts for imf_type (as imf_integral and
     !> imf_bin_weights_tab read them): Kroupa the three slopes, van Dokkum vdmc, Dave imf1, imf2 and
     !> mdave; Salpeter, Chabrier and the user IMF none of them.
     pure logical function imf_row_acts(imf_type, ig)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
         integer, intent(in) :: imf_type, ig
         select case (mod(imf_type, 10))
         case (2)
