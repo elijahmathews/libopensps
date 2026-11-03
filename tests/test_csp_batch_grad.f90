@@ -15,6 +15,7 @@ program test_csp_batch_grad
     !>   they stay positive), and for single ages, including an age whose weight is zero;
     !> - the weights' gradient of a parametric SFH equals that of the same weights given as a matrix;
     !> - with SFH parameters, d L / d(tage, tau, const, fburst, tburst, sf_start);
+    !> - d L / d zred above z = 0 (resampling, distance, IGM);
     !> - unsupported stages return status 2.
     !> The spectra are linear in the weights and in fagn, so the differences are exact up to rounding
     !> and the curvature of the magnitudes (log10 of the band fluxes). FP64 builds are the
@@ -29,7 +30,7 @@ program test_csp_batch_grad
                                  BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, &
                                  BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, &
                                  BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
-                                 BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, NBGRAD
+                                 BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, NBGRAD
     use opensps_ssp, only: generate_ssp_grid
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                                opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
@@ -61,7 +62,10 @@ program test_csp_batch_grad
     !> of the model's largest gradient; the bounds are validated in FP64
     real(WP), parameter :: H_DUST = 1.0e-5_wp, H_DUST32 = 1.0e-2_wp
     real(WP), parameter :: DUST_RTOL = 1.0e-5_wp, DUST_RTOL32 = 2.0e-2_wp
-    real(WP), parameter :: ZLIST(N_MOD) = [0.0_wp, 0.1_wp, 0.5_wp, 1.2_wp, 2.0_wp, 3.0_wp]
+    !> Per-model redshifts, off round values: at z = 0.5 (or 2, 3) many observed pixels fall exactly on
+    !> rest-frame pixels, where the resampled spectrum has a kink in z (the gradient there is
+    !> one-sided, central differences average the two sides)
+    real(WP), parameter :: ZLIST(N_MOD) = [0.0_wp, 0.113_wp, 0.507_wp, 1.213_wp, 2.017_wp, 3.011_wp]
     type(opensps_context_t), allocatable :: ctx
     integer :: seed = 12345
     logical :: zred_per_model = .false.
@@ -84,7 +88,7 @@ program test_csp_batch_grad
     call build_basis()
 
     call check_grad(2, 0.0_wp, 0, 1, .true., "Calzetti, z = 0, AGN, weight matrix")
-    call check_grad(0, 0.5_wp, 1, 1, .false., "power law, z = 0.5, IGM, AGN, SFH parameters")
+    call check_grad(0, 0.513_wp, 1, 1, .false., "power law, z = 0.513, IGM, AGN, SFH parameters")
     call check_grad(1, 0.0_wp, 0, 0, .true., "Cardelli et al., z = 0, weight matrix")
     zred_per_model = .true.
     call check_grad(4, 0.0_wp, 1, 1, .true., "Kriek & Conroy, per-model zred 0-3, IGM, AGN, weight matrix")
@@ -92,18 +96,18 @@ program test_csp_batch_grad
     ! Dust emission (energy balance), with AGN and IGM
     call set_int('add_dust_emission', 1)
     call check_grad(2, 0.0_wp, 0, 1, .true., "Calzetti, z = 0, dust emission, AGN, weight matrix")
-    call check_grad(1, 0.5_wp, 1, 0, .false., "Cardelli et al., z = 0.5, IGM, dust emission, SFH parameters")
+    call check_grad(1, 0.513_wp, 1, 0, .false., "Cardelli et al., z = 0.513, IGM, dust emission, SFH parameters")
     ! Velocity smoothing (the device operator), with dust emission, AGN and IGM
     call set_int('smooth_velocity', 1)
     smooth_sigma = 150.0_wp
-    call check_grad(0, 0.5_wp, 1, 1, .true., "power law, z = 0.5, IGM, dust emission, AGN, sigma_smooth = 150 km/s")
+    call check_grad(0, 0.513_wp, 1, 1, .true., "power law, z = 0.513, IGM, dust emission, AGN, sigma_smooth = 150 km/s")
     smooth_sigma = 0.0_wp
     call set_int('add_dust_emission', 0)
     ! Nebular emission (continuum and lines in the spectrum)
     call set_int('add_neb_emission', 1)
     call check_grad(2, 0.0_wp, 0, 0, .true., "Calzetti, z = 0, nebular, weight matrix")
     call set_int('add_dust_emission', 1)
-    call check_grad(1, 0.5_wp, 1, 1, .false., "Cardelli et al., z = 0.5, IGM, nebular, dust emission, AGN, SFH parameters")
+    call check_grad(1, 0.513_wp, 1, 1, .false., "Cardelli et al., z = 0.513, IGM, nebular, dust emission, AGN, SFH parameters")
     call set_int('add_dust_emission', 0)
     call set_int('add_neb_emission', 0)
     call check_unsupported()
@@ -115,7 +119,7 @@ program test_csp_batch_grad
     call build_basis_all()
     call set_int('add_neb_emission', 1)
     call set_int('add_dust_emission', 1)
-    call check_grad(2, 0.5_wp, 1, 1, .true., "Calzetti, z = 0.5, per-model logzsol, IGM, nebular, dust emission, AGN")
+    call check_grad(2, 0.513_wp, 1, 1, .true., "Calzetti, z = 0.513, per-model logzsol, IGM, nebular, dust emission, AGN")
     call set_int('add_dust_emission', 0)
     call set_int('add_neb_emission', 0)
 
@@ -408,16 +412,17 @@ contains
         type(PARAMS), intent(in) :: psets(:)
         real(WP), intent(in) :: w(:, :), pbar(:, :)
         logical, intent(in) :: given_w
-        integer, parameter :: NQ = 21
+        integer, parameter :: NQ = 22
         integer, parameter :: ROWS(NQ) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
                                           BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, &
                                           BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, &
                                           BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, BGRAD_FBURST, BGRAD_TBURST, &
-                                          BGRAD_SF_START]
+                                          BGRAD_SF_START, BGRAD_ZRED]
         character(len=12), parameter :: NAMES(NQ) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
                                                      'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb', &
                                                      'duste_qpah', 'duste_umin', 'duste_gamma', 'gas_logz', 'gas_logu', &
-                                                     'logzsol', 'tage', 'tau', 'const', 'fburst', 'tburst', 'sf_start']
+                                                     'logzsol', 'tage', 'tau', 'const', 'fburst', 'tburst', 'sf_start', &
+                                                     'zred']
         type(PARAMS) :: pp(size(psets))
         real(WP) :: g_fd(NQ, size(psets)), lp, lm, l0, l3, x, h, worst(NQ), gmax
         integer :: q, m, worst_m(NQ)
@@ -429,6 +434,11 @@ contains
                 x = get_par(pp(m), q)
                 ! Parameters at their bound 0 (masses of dust, fractions): one-sided, second order
                 bound = q /= 4 .and. q /= 5 .and. q /= 8 .and. q /= 9 .and. q /= 15 .and. x <= 0.0_wp
+                ! (zred: zero at z = 0 by definition, the rest frame; not checked there)
+                if (q == 22 .and. x <= 0.0_wp) then
+                    g_fd(q, m) = pbar(ROWS(q), m)
+                    cycle
+                end if
                 if (bound .and. LINEAR_ONLY) then
                     g_fd(q, m) = pbar(ROWS(q), m)   ! (FP32: not checked at a bound)
                     cycle
@@ -439,6 +449,11 @@ contains
                 if (q >= 13) h = merge(H_DUST32, H_DUST, LINEAR_ONLY)
                 ! (SFH: relative steps; times in Gyr)
                 if (q >= 16) h = merge(H_DUST32, H_DUST, LINEAR_ONLY) * max(abs(x), 1.0_wp)
+                ! (zred: the resampled spectrum is piecewise linear in z, with a kink at every pixel
+                ! crossing, ~1e-4 apart in z for each pixel but dense over the spectrum: steps of 1e-9
+                ! avoid them, and the differences' rounding is then ~1e-5 relative. FP32 builds check
+                ! the spectrum part, smooth in z (the IGM))
+                if (q == 22) h = merge(1.0e-4_wp, 1.0e-9_wp, LINEAR_ONLY) * (1.0_wp + x)
                 if (bound) then
                     ! One-sided, third order: (-11 L0 + 18 L1 - 9 L2 + 2 L3) / 6h (at dust2 = 0 the UV
                     ! curve makes L strongly curved; second order needed h ~ 1e-6, below the
@@ -472,6 +487,10 @@ contains
                 x = abs(pbar(ROWS(q), m) - g_fd(q, m)) / max(abs(g_fd(q, m)), &
                                                                merge(1.0e-2_wp, 1.0e-3_wp, LINEAR_ONLY) * gmax, &
                                                                merge(tiny(1.0_wp), 0.1_wp, LINEAR_ONLY))
+                ! (zred: tolerance 1e-3 in FP64: its steps are 1e-9, and over the spectrum's ~6000 pixels a
+                ! pixel crossing, a kink of the resampled spectrum, falls inside a step now and then;
+                ! measured 1e-7 - 2e-4)
+                if (q == 22 .and. .not. LINEAR_ONLY) x = 0.01_wp * x
                 if (x > worst(q)) then
                     worst(q) = x
                     worst_m(q) = m
@@ -510,7 +529,8 @@ contains
         case (18); get_par = p%const
         case (19); get_par = p%fburst
         case (20); get_par = p%tburst
-        case default; get_par = p%sf_start
+        case (21); get_par = p%sf_start
+        case default; get_par = p%zred
         end select
     end function get_par
 
@@ -539,7 +559,8 @@ contains
         case (18); p%const = x
         case (19); p%fburst = x
         case (20); p%tburst = x
-        case default; p%sf_start = x
+        case (21); p%sf_start = x
+        case default; p%zred = x
         end select
     end subroutine set_par
 

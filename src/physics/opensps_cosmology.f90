@@ -29,7 +29,7 @@ module opensps_cosmology
     public :: vacuum_to_air
     public :: get_universe_age
     public :: get_luminosity_distance
-    public :: compute_igm_transmission, igm_tau
+    public :: compute_igm_transmission, igm_tau, igm_tau_dz
     public :: convolve_with_mdf
 
     ! ------------------------------------------------------------------------
@@ -402,6 +402,50 @@ contains
                 (MADAU_C4 * (one_plus_z**MADAU_P4 - lambda_ratio**MADAU_P4))
         end if
     end function igm_tau
+
+    !> d igm_tau / d(1 + z) at a rest-frame wavelength (the gradients of compute_csp_batch): the
+    !> Lyman-series power laws and Madau's continuum terms differentiated term by term.
+    function igm_tau_dz(wavelength, one_plus_z) result(dtau)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(WP), intent(in) :: wavelength, one_plus_z
+        real(WP) :: dtau
+        real(WP) :: obs, lr, dlr, opz
+        integer  :: i
+#ifdef OMP_TARGET
+        real(WP), parameter :: LYW(N_LYMAN_LINES) = LY_WAVE, LYC(N_LYMAN_LINES) = LY_COEFF
+#else
+#define LYW LY_WAVE
+#define LYC LY_COEFF
+#endif
+
+        opz = one_plus_z
+        obs = wavelength * opz
+        lr = obs / LYMAN_LIMIT
+        dlr = wavelength / LYMAN_LIMIT
+        dtau = 0.0_wp
+        do i = 1, N_LYMAN_LINES
+            if (wavelength < LYW(i)) then
+                dtau = dtau + LYC(i) * 3.46_wp * (obs / LYW(i))**2.46_wp * wavelength / LYW(i)
+                if (i == 1) dtau = dtau + A_METAL * 1.68_wp * (obs / LYW(i))**0.68_wp * wavelength / LYW(i)
+            end if
+        end do
+        if (wavelength < LYMAN_LIMIT) then
+            dtau = dtau + &
+                MADAU_C1 * (3.0_wp * lr**2 * dlr * (opz**MADAU_P1 - lr**MADAU_P1) + &
+                            lr**3 * MADAU_P1 * (opz**(MADAU_P1 - 1.0_wp) - lr**(MADAU_P1 - 1.0_wp) * dlr)) + &
+                MADAU_C2 * (1.5_wp * lr**0.5_wp * dlr * (opz**MADAU_P2 - lr**MADAU_P2) + &
+                            lr**1.5_wp * MADAU_P2 * (opz**(MADAU_P2 - 1.0_wp) - lr**(MADAU_P2 - 1.0_wp) * dlr)) - &
+                MADAU_C3 * (3.0_wp * lr**2 * dlr * (lr**(-MADAU_P3) - opz**(-MADAU_P3)) + &
+                            lr**3 * MADAU_P3 * (-lr**(-MADAU_P3 - 1.0_wp) * dlr + opz**(-MADAU_P3 - 1.0_wp))) - &
+                MADAU_C4 * MADAU_P4 * (opz**(MADAU_P4 - 1.0_wp) - lr**(MADAU_P4 - 1.0_wp) * dlr)
+        end if
+#ifndef OMP_TARGET
+#undef LYW
+#undef LYC
+#endif
+    end function igm_tau_dz
 
     !> @brief
     !> Convolves Single Stellar Populations (SSPs) with a Metallicity Distribution Function (MDF).
