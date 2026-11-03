@@ -9,7 +9,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'dev/**']
     paths-ignore:
       - '**.md'
       - 'doc/**'
@@ -19,7 +19,7 @@ on:
       - '.github/workflows/nightly.yml'
       - '.github/workflows/packaging.yml'
   pull_request:
-    branches: [main]
+    branches: [main, 'dev/**']
     paths-ignore:
       - '**.md'
       - 'doc/**'
