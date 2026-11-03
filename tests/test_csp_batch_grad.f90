@@ -559,8 +559,8 @@ contains
             ! (An absolute floor of 1e-5. FP32: the spectrum part's FP32 rounding over the step is ~1e-7,
             ! and its sigma gradient can be ~1e-9. FP64: the window-edge jumps leave the differences
             ! ~1e-10 absolute; the random cotangents can make the batch's sigma gradient ~1e-6, as with
-            ! LLVM flang's draws at 5.37 A: 2.4e-10 = 1e-4 relative)
-            call assert_true(abs(g_ad - g_fd) <= merge(2.0e-2_wp, 1.0e-4_wp, LINEAR_ONLY) * max(abs(g_fd), 1.0e-5_wp), &
+            ! LLVM flang's draws at 5.37 A: 2.4e-10 = 1e-4 relative; nvfortran 1.3e-9: the floor is 3e-5)
+            call assert_true(abs(g_ad - g_fd) <= merge(2.0e-2_wp, 1.0e-4_wp, LINEAR_ONLY) * max(abs(g_fd), 3.0e-5_wp), &
                              "d L / d sigma_smooth against finite differences", total_tests, total_failures)
         end if
 
@@ -617,11 +617,14 @@ contains
                     call loss(psets, wm, .true., lm)
                     g_fd = (-3.0_wp * l0 + 4.0_wp * lp - lm) / (2.0_wp * h)
                 end if
-                ! (FP32: an absolute floor of 1e-4 of the model's largest weight gradient: an old age with
-                ! zero weight can have a gradient 1e-7 of that, below the FP32 rounding of L over any step)
+                ! (An absolute floor, a fraction of the model's largest weight gradient: the differences'
+                ! rounding scales with L / h, not with the age's own gradient. FP32 1e-4: an old age with zero
+                ! weight can have a gradient 1e-7 of the largest, below the FP32 rounding of L over any step.
+                ! FP64 1e-6: a small age's step is relative to its own weight; 1.3e-4 relative in the -O0
+                ! coverage build)
                 worst = max(worst, abs(wbar(k0, m) - g_fd) / max(abs(g_fd), &
-                                                               merge(1.0e-4_wp * maxval(abs(wbar(:, m))), &
-                                                                     tiny(1.0_wp), LINEAR_ONLY)))
+                                                               merge(1.0e-4_wp, 1.0e-6_wp, LINEAR_ONLY) * &
+                                                               maxval(abs(wbar(:, m)))))
             end do
             write(*, '(A,ES10.2)') "# single ages: worst relative difference ", worst
             ! (FP64: the step is relative to the age's own weight, so for the smallest weights the
