@@ -167,6 +167,8 @@ module opensps_csp_batch
     !> derivatives with respect to the template's interpolation weights wq, wu, gamma), and (13) the
     !> IGM's part of d / d zred, (14) d / d igm_factor
     integer, parameter :: NDP = 14
+    !> Nebular continuum adjoint: at most this many ages per run (ages in one CLOUDY interval)
+    integer, parameter :: NEB_RUN = 16
     !> Pixel chunks per model of the attenuation adjoint (each thread takes every NCHG-th pixel)
     integer, parameter :: NCHG = 64
 
@@ -2220,19 +2222,42 @@ contains
         real(KP), intent(out)             :: eml(NEMLINE, n_mod)
         real(WP), intent(out)             :: s_line(n_mod)
 
-        integer  :: m, i, lo
-        real(WP) :: si, sa, t_lo, t_hi, curve, tau_d, trans, td, birth, ay, ao, fob, fnd, pos
-        real(KP) :: ly, lo_
+        integer  :: m, i
+        real(WP) :: si, sa, ay, ao
         type(params_core), pointer :: pl
-
 #if defined(OMP_TARGET) && defined(__flang__)
-        ! (LLVM flang: one thread per model, the lines summed serially; the result of a parallel do
-        ! reduction nested in a teams distribute loop is lost there, which left s_line wrong on AMD GPUs)
-        !$omp target teams distribute parallel do private(si, sa, fob, fnd, pl, lo, t_lo, t_hi, curve, tau_d, &
-        !$omp& trans, td, birth, ay, ao, ly, lo_, pos) &
+        real(WP), allocatable :: lw(:,:,:)
+
+        ! (LLVM flang: the result of a parallel do reduction nested in a teams distribute loop is lost
+        ! there, which left s_line wrong on AMD GPUs. One thread per (line, model), the lines' terms
+        ! summed per model afterwards in line order: the serial sums, bit for bit)
+        allocate(lw(2, NEMLINE, n_mod))
+        !$omp target data map(alloc: lw)
+        !$omp target teams distribute parallel do collapse(2) private(pl, ay, ao) &
         !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%nebem_line_pos)
-#elif defined(OMP_TARGET)
-        !$omp target teams distribute private(si, sa, fob, fnd, pl) &
+        do m = 1, n_mod
+            do i = 1, NEMLINE
+                call c_f_pointer(c_loc(pbuf(1, m)), pl)
+                call line_attenuated(ctx, pl, i, nb_llo(i), nb_lum(i, m), nb_lum(i, n_mod + m), ay, ao)
+                lw(1, i, m) = real(nb_lum(i, m) + nb_lum(i, n_mod + m), WP)   ! (summed at KP, as before)
+                lw(2, i, m) = ay + ao
+                eml(i, m) = real(ay, KP) + real(ao, KP)
+            end do
+        end do
+        !$omp target teams distribute parallel do private(i, si, sa)
+        do m = 1, n_mod
+            si = 0.0_wp
+            sa = 0.0_wp
+            do i = 1, NEMLINE
+                si = si + lw(1, i, m)
+                sa = sa + lw(2, i, m)
+            end do
+            s_line(m) = si - sa
+        end do
+        !$omp end target data
+#else
+#if defined(OMP_TARGET)
+        !$omp target teams distribute private(si, sa, pl) &
         !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%nebem_line_pos)
 #endif
         do m = 1, n_mod
@@ -2243,46 +2268,59 @@ contains
 #endif
             si = 0.0_wp
             sa = 0.0_wp
-            fob = pl%frac_obrun
-            fnd = pl%frac_nodust
-#if defined(OMP_TARGET) && !defined(__flang__)
-            !$omp parallel do reduction(+:si, sa) private(lo, t_lo, t_hi, curve, tau_d, trans, td, birth, &
-            !$omp& ay, ao, ly, lo_, pos)
+#if defined(OMP_TARGET)
+            !$omp parallel do reduction(+:si, sa) private(ay, ao)
 #endif
             do i = 1, NEMLINE
-                pos = ctx%state%nebem_line_pos(i)
-                if (1.0_wp - fnd <= SAFE_FLOOR) then
-                    td = 1.0_wp
-                else
-                    lo = nb_llo(i)
-                    call diffuse_transmission(ctx, pl, lo, curve, tau_d, trans)
-                    t_lo = real(real(trans, KP), WP)
-                    call diffuse_transmission(ctx, pl, lo + 1, curve, tau_d, trans)
-                    t_hi = real(real(trans, KP), WP)
-                    td = t_lo + (t_hi - t_lo) / (ctx%state%spec_lambda(lo + 1) - ctx%state%spec_lambda(lo)) * &
-                         (pos - ctx%state%spec_lambda(lo))
-                end if
-                if (td /= td) td = 1.0_wp
-                if (pl%dust1 <= SAFE_FLOOR .or. 1.0_wp - fob <= SAFE_FLOOR) then
-                    birth = 1.0_wp
-                else
-                    birth = exp(-pl%dust1 * (pos / V_BAND_ANGSTROMS)**pl%dust1_index)
-                end if
-                ly = nb_lum(i, m)
-                lo_ = nb_lum(i, n_mod + m)
-                ay = ly * (birth * (1.0_wp - fob) + fob)
-                ao = lo_
-                if (1.0_wp - fnd > SAFE_FLOOR) then
-                    ay = ay * (td * (1.0_wp - fnd) + fnd)
-                    ao = ao * (td * (1.0_wp - fnd) + fnd)
-                end if
-                si = si + (ly + lo_)
+                call line_attenuated(ctx, pl, i, nb_llo(i), nb_lum(i, m), nb_lum(i, n_mod + m), ay, ao)
+                si = si + (nb_lum(i, m) + nb_lum(i, n_mod + m))
                 sa = sa + (ay + ao)
                 eml(i, m) = real(ay, KP) + real(ao, KP)
             end do
             s_line(m) = si - sa
         end do
+#endif
     end subroutine attenuate_lines
+
+    !> One line of attenuate_lines: its young and old luminosities after the birth cloud and the
+    !> diffuse dust (T_d interpolated between the line's two pixels).
+    subroutine line_attenuated(ctx, pl, i, lo, ly, lo_, ay, ao)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        type(opensps_context_t), intent(in) :: ctx
+        type(params_core), intent(in)    :: pl
+        integer, intent(in)              :: i, lo
+        real(KP), intent(in)             :: ly, lo_
+        real(WP), intent(out)            :: ay, ao
+        real(WP) :: t_lo, t_hi, curve, tau_d, trans, td, birth, fob, fnd, pos
+
+        fob = pl%frac_obrun
+        fnd = pl%frac_nodust
+        pos = ctx%state%nebem_line_pos(i)
+        if (1.0_wp - fnd <= SAFE_FLOOR) then
+            td = 1.0_wp
+        else
+            call diffuse_transmission(ctx, pl, lo, curve, tau_d, trans)
+            t_lo = real(real(trans, KP), WP)
+            call diffuse_transmission(ctx, pl, lo + 1, curve, tau_d, trans)
+            t_hi = real(real(trans, KP), WP)
+            td = t_lo + (t_hi - t_lo) / (ctx%state%spec_lambda(lo + 1) - ctx%state%spec_lambda(lo)) * &
+                 (pos - ctx%state%spec_lambda(lo))
+        end if
+        if (td /= td) td = 1.0_wp
+        if (pl%dust1 <= SAFE_FLOOR .or. 1.0_wp - fob <= SAFE_FLOOR) then
+            birth = 1.0_wp
+        else
+            birth = exp(-pl%dust1 * (pos / V_BAND_ANGSTROMS)**pl%dust1_index)
+        end if
+        ay = ly * (birth * (1.0_wp - fob) + fob)
+        ao = lo_
+        if (1.0_wp - fnd > SAFE_FLOOR) then
+            ay = ay * (td * (1.0_wp - fnd) + fnd)
+            ao = ao * (td * (1.0_wp - fnd) + fnd)
+        end if
+    end subroutine line_attenuated
 
     !> exp(x) in kernel precision for an FP64 argument of any size. x = n ln 2 + r (|r| <= ln 2 / 2)
     !> is reduced in FP64, so r keeps its digits; exp(r) is taken in KP and scaled by 2**n. The
@@ -3586,6 +3624,12 @@ contains
         real(WP) :: gv, cw, v, t, sz
         real(KP) :: vk
         real(WP), allocatable :: zp(:,:)
+        ! One redshift for the batch (the usual fit): the pixels' rest-frame intervals ilc, tc once
+        ! (frame_point's values, so the same arithmetic) and, per rest pixel i, the first observed
+        ! pixel jr0(i) that reaches it (il >= i - 1)
+        logical  :: zsame
+        integer, allocatable  :: ilc(:), jr0(:)
+        real(WP), allocatable :: tc(:)
         ! The band integrals' transpose as a sparse matrix by pixel (each band covers a few hundred of
         ! the pixels): bp(j) .. bp(j + 1) - 1 index the bands of pixel j (in band order, as the dense
         ! loop summed them), bands_t(b, j) and the pixel's weight wtl(j) [j in band] + wtl(j - 1)
@@ -3593,6 +3637,27 @@ contains
         integer, allocatable  :: bp(:), bi(:)
         real(WP), allocatable :: bv(:), bc(:)
 
+        zsame = all(zcm(1:n_mod) == zcm(1))
+        if (zsame) then
+            allocate(ilc(nspec), tc(nspec), jr0(nspec))
+            il = 1
+            do j = 1, nspec
+                call frame_point(nspec, lam, zcm(1), j, ilc(j), tc(j))
+            end do
+            k = 1
+            do i = 1, nspec
+                do while (k <= nspec)
+                    if (ilc(k) >= i - 1) exit
+                    k = k + 1
+                end do
+                jr0(i) = k
+            end do
+        else
+            allocate(ilc(1), tc(1), jr0(1))
+        end if
+#if defined(OMP_TARGET)
+        !$omp target data map(to: ilc, tc, jr0)
+#endif
         allocate(bp(nspec + 1))
         nnz = 0
         do j = 1, nspec
@@ -3630,7 +3695,12 @@ contains
                     gv = gv + fb_bar(bi(k), m) * bv(k) * bc(k)
                 end do
                 ! The clamp of the forward (max(v, 0), NaN -> 0): no gradient where it acts
-                call frame_point(nspec, lam, zcm(m), j, il, t)
+                if (zsame) then
+                    il = ilc(j)
+                    t = tc(j)
+                else
+                    call frame_point(nspec, lam, zcm(m), j, il, t)
+                end if
                 v = (1.0_wp - t) * real(total(il, m), WP)
                 if (t /= 0.0_wp) v = v + t * real(total(il + 1, m), WP)
                 if (.not. (v > 0.0_wp)) gv = 0.0_wp
@@ -3657,7 +3727,12 @@ contains
                     j1 = min(c * nbz, nspec)
                     il = 1
                     do j = j0, j1
-                        call frame_point_h(nspec, lam, zcm(m), j, il, t)
+                        if (zsame) then
+                            il = ilc(j)
+                            t = tc(j)
+                        else
+                            call frame_point_h(nspec, lam, zcm(m), j, il, t)
+                        end if
                         sz = sz + real(gw(j, m), WP) * (real(total(il + 1, m), WP) - real(total(il, m), WP)) * &
                                   (-lam(j) / (1.0_wp + zcm(m))**2) / (lam(il + 1) - lam(il))
                     end do
@@ -3699,6 +3774,10 @@ contains
                 ! (first j with il(j) >= i - 1)
                 jlo = 1
                 jhi = nspec + 1
+                if (zsame) then
+                    jlo = jr0(i)
+                    jhi = jlo
+                end if
                 do while (jlo < jhi)
                     jm = (jlo + jhi) / 2
                     call frame_point(nspec, lam, zcm(m), jm, il, t)
@@ -3710,7 +3789,12 @@ contains
                 end do
                 il = 1
                 do j = jlo, nspec
-                    call frame_point(nspec, lam, zcm(m), j, il, t)
+                    if (zsame) then
+                        il = ilc(j)
+                        t = tc(j)
+                    else
+                        call frame_point(nspec, lam, zcm(m), j, il, t)
+                    end if
                     if (il > i) exit
                     if (il == i - 1) then
                         if (t /= 0.0_wp) vk = vk + real(t * real(gw(j, m), WP), KP)
@@ -3736,11 +3820,19 @@ contains
             end do
             il = 1
             do j = 1, nspec
-                call frame_point_h(nspec, lam, zcm(m), j, il, t)
+                if (zsame) then
+                    il = ilc(j)
+                    t = tc(j)
+                else
+                    call frame_point_h(nspec, lam, zcm(m), j, il, t)
+                end if
                 gw(il, n_mod + m) = gw(il, n_mod + m) + real((1.0_wp - t) * real(gw(j, m), WP), KP)
                 if (t /= 0.0_wp) gw(il + 1, n_mod + m) = gw(il + 1, n_mod + m) + real(t * real(gw(j, m), WP), KP)
             end do
         end do
+#endif
+#if defined(OMP_TARGET)
+        !$omp end target data
 #endif
     end subroutine backward_observed_frame
 
@@ -3886,15 +3978,53 @@ contains
         !> d L / d wta (the template's interpolation weight): L_bol fagn sum(S_bar (tmpl_hi - tmpl_lo) T_d)
         real(WP), intent(out)            :: tmb(n_mod)
 
-        integer  :: m, i
+        ! Per model the sums over NAC blocks of pixels (one thread each; compensated at kernel
+        ! precision), then the blocks in order (FP64)
+        integer, parameter :: NAC = 32
+        integer  :: m, i, c, i0, i1, nbk
         real(KP) :: sk, ck, term, tsum, sd, cd
-        real(WP) :: lb
+        real(WP) :: lb, s1, s2
+        real(KP), allocatable :: ap(:,:,:)
         type(params_core), pointer :: pl
 
+        nbk = (nspec + NAC - 1) / NAC
+        allocate(ap(2, NAC, n_mod))
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do private(i, sk, ck, term, tsum, sd, cd, lb, pl)
+        !$omp target data map(alloc: ap)
+        !$omp target teams distribute parallel do collapse(2) private(i, i0, i1, sk, ck, term, tsum, sd, cd)
 #elif defined(_OPENMP)
-        !$omp parallel do private(i, sk, ck, term, tsum, sd, cd, lb, pl)
+        !$omp parallel do collapse(2) private(i, i0, i1, sk, ck, term, tsum, sd, cd)
+#endif
+        do m = 1, n_mod
+            do c = 1, NAC
+                sk = 0.0_KP
+                ck = 0.0_KP
+                sd = 0.0_KP
+                cd = 0.0_KP
+                if (agn_on(m)) then
+                    i0 = (c - 1) * nbk + 1
+                    i1 = min(c * nbk, nspec)
+                    do i = i0, i1
+                        term = gw(i, n_mod + m) * real((1.0_wp - wta(m)) * agndust_spec(i, ita(m)) + &
+                                                       wta(m) * agndust_spec(i, ita(m) + 1), KP) * tdiff(i, m) - ck
+                        tsum = sk + term
+                        ck = (tsum - sk) - term
+                        sk = tsum
+                        term = gw(i, n_mod + m) * real(agndust_spec(i, ita(m) + 1) - agndust_spec(i, ita(m)), KP) * &
+                               tdiff(i, m) - cd
+                        tsum = sd + term
+                        cd = (tsum - sd) - term
+                        sd = tsum
+                    end do
+                end if
+                ap(1, c, m) = sk
+                ap(2, c, m) = sd
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(c, s1, s2, lb, pl)
+#elif defined(_OPENMP)
+        !$omp parallel do private(c, s1, s2, lb, pl)
 #endif
         do m = 1, n_mod
             fagn_bar(m) = 0.0_wp
@@ -3906,32 +4036,25 @@ contains
 #else
                 call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
-                sk = 0.0_KP
-                ck = 0.0_KP
-                sd = 0.0_KP
-                cd = 0.0_KP
-                do i = 1, nspec
-                    term = gw(i, n_mod + m) * real((1.0_wp - wta(m)) * agndust_spec(i, ita(m)) + &
-                                                   wta(m) * agndust_spec(i, ita(m) + 1), KP) * tdiff(i, m) - ck
-                    tsum = sk + term
-                    ck = (tsum - sk) - term
-                    sk = tsum
-                    term = gw(i, n_mod + m) * real(agndust_spec(i, ita(m) + 1) - agndust_spec(i, ita(m)), KP) * &
-                           tdiff(i, m) - cd
-                    tsum = sd + term
-                    cd = (tsum - sd) - term
-                    sd = tsum
+                s1 = 0.0_wp
+                s2 = 0.0_wp
+                do c = 1, NAC
+                    s1 = s1 + real(ap(1, c, m), WP)
+                    s2 = s2 + real(ap(2, c, m), WP)
                 end do
                 if (lsum(m) > SAFE_FLOOR) then
                     lb = log10(lsum(m))
-                    lsum_bar(m) = pl%fagn * real(sk, WP)
+                    lsum_bar(m) = pl%fagn * s1
                 else
                     lb = 0.0_wp
                 end if
-                fagn_bar(m) = 10.0_wp**lb * real(sk, WP)
-                tmb(m) = 10.0_wp**lb * pl%fagn * real(sd, WP)
+                fagn_bar(m) = 10.0_wp**lb * s1
+                tmb(m) = 10.0_wp**lb * pl%fagn * s2
             end if
         end do
+#if defined(OMP_TARGET)
+        !$omp end target data
+#endif
     end subroutine backward_agn
 
     !> Dust emission, first pass: the emission E = shape T_d R (R = s_abs / s_esc) is linear in R, so
@@ -4585,7 +4708,7 @@ contains
         integer, intent(in), contiguous :: lid(:)
         real(WP), intent(in)    :: dz(n_mod), wa(max(1, ntn)), wz(n_mod), wu(n_mod), fabs(n_mod), q0(max(1, ntn), nzb)
         real(KP), intent(in)    :: w2(nt, 2 * n_mod), gw(nspec, 2 * n_mod)
-        real(WP), intent(in)    :: ctab(:,:,:,:), ltab(:,:,:,:)
+        real(WP), intent(in)    :: ctab(nspec, NEBNZ, NEBNAGE, NEBNIP), ltab(:,:,:,:)
         real(KP), intent(in)    :: gauss(:,:)
         real(KP), intent(inout) :: lbar(:,:)
         real(WP), intent(out)   :: nwb(max(1, ntn), n_mod)
@@ -4596,55 +4719,140 @@ contains
         !> lbar given (the lines' absorbed part, backward_line_absorption), not from the profiles
         logical, intent(in)     :: lgiven
 
-        integer  :: m, t, j, i, p, c, col, a, z0, u0
+        integer  :: m, t, j, i, p, c, col, a, z0, u0, r, nrun, k
         real(KP) :: sw, sz, su, cw, cz, cu, term, tsum, val, gv
-        real(WP) :: qz, lnq, c00, c01, c10, c11, ra, rb, raz, rbz, rau, rbu, lg, w1, fa
+        real(WP) :: qz, lnq, c00, c01, c10, c11, ra, rb, raz, rbz, rau, rbu, lg, w1, fa, qf, s1, s2, s3, s4, s5
         real(WP), parameter :: LN10 = log(10.0_wp)
         real(WP), allocatable :: tz(:,:), tu(:,:), tf(:,:), tq(:,:)
+        ! The continuum (cont): runs of consecutive nebular ages in one CLOUDY age interval (at most
+        ! NEB_RUN ages), run r = ages rs(r) .. rs(r) + rl(r) - 1 (rt(t): the run of age t); per
+        ! (model, run, block of pixels) a thread sums the pixels (neb_run_block), partial sums cpart
+        ! (5 per age and block); qzt(t, m) the ionizing photons Q of age t, lref(r, m) the log Q of
+        ! the run's first age with emission (the sums are taken with it, then scaled by Q / Q_ref)
+        ! (npb pixel blocks per (model, run): GPUs, enough threads to fill the device (~64k), at most 64
+        ! blocks and at least 8; CPUs 8)
+        integer :: npb
+        integer, allocatable  :: rs(:), rl(:), rt(:)
+        integer :: ljr(2, NEMLINE)
+        real(WP), allocatable :: qzt(:,:), lref(:,:)
+        real(KP), allocatable :: cpart(:,:,:,:)
 
         ! (tq: per-model metallicity, d L / d dz through Q, interpolated in log Z)
         allocate(tz(max(1, ntn), n_mod), tu(max(1, ntn), n_mod), tf(max(1, ntn), n_mod), tq(max(1, ntn), n_mod))
-#ifdef OMP_TARGET
-        !$omp target data map(alloc: tz, tu, tf, tq)
-#endif
-        ! The lines' cotangents (profiles transposed: one thread per young / old column)
-        if (lines .and. .not. lgiven) then
+        allocate(rs(max(1, ntn)), rl(max(1, ntn)), rt(max(1, ntn)), qzt(max(1, ntn), n_mod), lref(max(1, ntn), n_mod))
+        nrun = 0
+        do t = 1, ntn
+            if (nrun > 0) then
+                if (ia(t) == ia(rs(nrun)) .and. rl(nrun) < NEB_RUN) then
+                    rl(nrun) = rl(nrun) + 1
+                    rt(t) = nrun
+                    cycle
+                end if
+            end if
+            nrun = nrun + 1
+            rs(nrun) = t
+            rl(nrun) = 1
+            rt(t) = nrun
+        end do
 #if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do private(j, p, i)
+        npb = max(8, min(64, 65536 / max(1, n_mod * nrun)))
+#else
+        npb = 8
+#endif
+        if (cont .and. ntn > 0) then
+            allocate(cpart(5, ntn, npb, n_mod))
+        else
+            allocate(cpart(5, 1, 1, 1))
+        end if
+#ifdef OMP_TARGET
+        !$omp target data map(alloc: tz, tu, tf, tq, qzt, lref, cpart) map(to: rs, rl, rt)
+#endif
+        ! Q per (age, model)
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2)
 #elif defined(_OPENMP)
-            !$omp parallel do private(j, p, i)
+        !$omp parallel do collapse(2)
+#endif
+        do m = 1, n_mod
+            do t = 1, ntn
+                if (qmod) then
+                    qzt(t, m) = abs(q0(t, m))
+                else if (zmode) then
+                    qzt(t, m) = abs((1.0_wp - dz(m)) * q0(t, zlo(m)) + dz(m) * q0(t, zhi(m)))
+                else
+                    qzt(t, m) = abs(q0(t, 1))
+                end if
+            end do
+        end do
+        ! The continuum's sums: one thread per (model, run, block of pixels)
+        if (cont .and. ntn > 0) then
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(3) private(t, lnq)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(3) private(t, lnq)
+#endif
+            do m = 1, n_mod
+                do r = 1, nrun
+                    do p = 1, npb
+                        ! (the log Q of the run's first age with emission; none: the run adds nothing)
+                        lnq = huge(1.0_wp)
+                        do t = rs(r), rs(r) + rl(r) - 1
+                            if (qzt(t, m) * abs(fabs(m)) > SAFE_FLOOR) then
+                                lnq = log(qzt(t, m))
+                                exit
+                            end if
+                        end do
+                        if (p == 1) lref(r, m) = lnq
+                        call neb_run_block(nspec, n_mod, ntn, npb, ctab, gw, wa, qzt, fabs, it_tesc, m, rs(r), rl(r), &
+                                           ia(rs(r)), iz(m), iu(m), wz(m), wu(m), lnq, p, cpart)
+                    end do
+                end do
+            end do
+        end if
+        ! The lines' cotangents (profiles transposed): one thread per (line, young / old column), over
+        ! the pixels whose profile lists include the line (ljr: its first and last such pixel), in
+        ! pixel order as a pass over the pixels would add them
+        if (lines .and. .not. lgiven) then
+            ljr(1, :) = nspec + 1
+            ljr(2, :) = 0
+            do j = 1, nspec
+                do p = lptr(j), lptr(j + 1) - 1
+                    i = lid(p)
+                    ljr(1, i) = min(ljr(1, i), j)
+                    ljr(2, i) = max(ljr(2, i), j)
+                end do
+            end do
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2) private(j, p, val) map(to: ljr)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2) private(j, p, val)
 #endif
             do c = 1, 2 * n_mod
                 do i = 1, NEMLINE
-                    lbar(i, c) = 0.0_KP
-                end do
-                do j = 1, nspec
-                    do p = lptr(j), lptr(j + 1) - 1
-                        i = lid(p)
-                        lbar(i, c) = lbar(i, c) + gauss(j, i) * gw(j, c)
+                    val = 0.0_KP
+                    do j = ljr(1, i), ljr(2, i)
+                        do p = lptr(j), lptr(j + 1) - 1
+                            if (lid(p) == i) val = val + gauss(j, i) * gw(j, c)
+                        end do
                     end do
+                    lbar(i, c) = val
                 end do
             end do
         end if
 
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(col, a, z0, u0, sw, sz, su, cw, cz, cu, term, &
-        !$omp& tsum, val, gv, qz, lnq, c00, c01, c10, c11, ra, rb, raz, rbz, rau, rbu, lg, w1, fa, j, i)
+        !$omp& tsum, val, gv, qz, lnq, c00, c01, c10, c11, ra, rb, raz, rbz, rau, rbu, lg, w1, fa, j, i, qf, s1, s2, &
+        !$omp& s3, s4, s5, k)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(col, a, z0, u0, sw, sz, su, cw, cz, cu, term, tsum, val, gv, qz, lnq, &
-        !$omp& c00, c01, c10, c11, ra, rb, raz, rbz, rau, rbu, lg, w1, fa, j, i)
+        !$omp& c00, c01, c10, c11, ra, rb, raz, rbz, rau, rbu, lg, w1, fa, j, i, qf, s1, s2, s3, s4, s5, k)
 #endif
         do m = 1, n_mod
             do t = 1, ntn
                 col = n_mod + m
                 if (t <= it_tesc(m)) col = m
-                if (qmod) then
-                    qz = abs(q0(t, m))
-                else if (zmode) then
-                    qz = abs((1.0_wp - dz(m)) * q0(t, zlo(m)) + dz(m) * q0(t, zhi(m)))
-                else
-                    qz = abs(q0(t, 1))
-                end if
+                qz = qzt(t, m)
                 fa = abs(fabs(m))
                 nwb(t, m) = 0.0_wp
                 tz(t, m) = 0.0_wp
@@ -4663,30 +4871,6 @@ contains
                     c11 = wz(m) * wu(m)
                     sw = 0.0_KP; sz = 0.0_KP; su = 0.0_KP
                     cw = 0.0_KP; cz = 0.0_KP; cu = 0.0_KP
-                    if (cont) then
-                        do j = 1, nspec
-                            ra = c00 * ctab(j, z0, a, u0) + c01 * ctab(j, z0, a, u0 + 1) + &
-                                 c10 * ctab(j, z0 + 1, a, u0) + c11 * ctab(j, z0 + 1, a, u0 + 1)
-                            rb = c00 * ctab(j, z0, a + 1, u0) + c01 * ctab(j, z0, a + 1, u0 + 1) + &
-                                 c10 * ctab(j, z0 + 1, a + 1, u0) + c11 * ctab(j, z0 + 1, a + 1, u0 + 1)
-                            raz = (1.0_wp - wu(m)) * (ctab(j, z0 + 1, a, u0) - ctab(j, z0, a, u0)) + &
-                                  wu(m) * (ctab(j, z0 + 1, a, u0 + 1) - ctab(j, z0, a, u0 + 1))
-                            rbz = (1.0_wp - wu(m)) * (ctab(j, z0 + 1, a + 1, u0) - ctab(j, z0, a + 1, u0)) + &
-                                  wu(m) * (ctab(j, z0 + 1, a + 1, u0 + 1) - ctab(j, z0, a + 1, u0 + 1))
-                            rau = (1.0_wp - wz(m)) * (ctab(j, z0, a, u0 + 1) - ctab(j, z0, a, u0)) + &
-                                  wz(m) * (ctab(j, z0 + 1, a, u0 + 1) - ctab(j, z0 + 1, a, u0))
-                            rbu = (1.0_wp - wz(m)) * (ctab(j, z0, a + 1, u0 + 1) - ctab(j, z0, a + 1, u0)) + &
-                                  wz(m) * (ctab(j, z0 + 1, a + 1, u0 + 1) - ctab(j, z0 + 1, a + 1, u0))
-                            lg = (1.0_wp - w1) * ra + w1 * rb
-                            val = exp_kp(lg * LN10 + lnq)
-                            gv = gw(j, col) * val
-                            term = gv - cw; tsum = sw + term; cw = (tsum - sw) - term; sw = tsum
-                            term = gv * real(LN10 * ((1.0_wp - w1) * raz + w1 * rbz), KP) - cz
-                            tsum = sz + term; cz = (tsum - sz) - term; sz = tsum
-                            term = gv * real(LN10 * ((1.0_wp - w1) * rau + w1 * rbu), KP) - cu
-                            tsum = su + term; cu = (tsum - su) - term; su = tsum
-                        end do
-                    end if
                     if (lines) then
                         do i = 1, NEMLINE
                             ra = c00 * ltab(i, z0, a, u0) + c01 * ltab(i, z0, a, u0 + 1) + &
@@ -4711,12 +4895,31 @@ contains
                             tsum = su + term; cu = (tsum - su) - term; su = tsum
                         end do
                     end if
-                    nwb(t, m) = fa * real(sw, WP)
-                    tz(t, m) = real(w2(t, col), WP) * fa * real(sz, WP)
-                    tu(t, m) = real(w2(t, col), WP) * fa * real(su, WP)
-                    tf(t, m) = real(w2(t, col), WP) * real(sw, WP)
-                    if (qmod) qb(t, m) = real(w2(t, col), WP) * fa * real(sw, WP) / qz
-                    if (zmode) tq(t, m) = real(w2(t, col), WP) * fa * real(sw, WP) / qz * &
+                    ! (the continuum: the blocks' sums, scaled by Q / Q_ref of the run; s1 .. s5 as in
+                    ! neb_run_block)
+                    s1 = real(sw, WP)
+                    s2 = real(sz, WP)
+                    s3 = real(su, WP)
+                    if (cont) then
+                        qf = exp(lnq - lref(rt(t), m))
+                        s4 = 0.0_wp
+                        s5 = 0.0_wp
+                        do k = 1, npb
+                            s1 = s1 + qf * real(cpart(1, t, k, m), WP)
+                        end do
+                        do k = 1, npb
+                            s4 = s4 + real(cpart(2, t, k, m), WP) * (1.0_wp - w1) + real(cpart(3, t, k, m), WP) * w1
+                            s5 = s5 + real(cpart(4, t, k, m), WP) * (1.0_wp - w1) + real(cpart(5, t, k, m), WP) * w1
+                        end do
+                        s2 = s2 + qf * LN10 * s4
+                        s3 = s3 + qf * LN10 * s5
+                    end if
+                    nwb(t, m) = fa * s1
+                    tz(t, m) = real(w2(t, col), WP) * fa * s2
+                    tu(t, m) = real(w2(t, col), WP) * fa * s3
+                    tf(t, m) = real(w2(t, col), WP) * s1
+                    if (qmod) qb(t, m) = real(w2(t, col), WP) * fa * s1 / qz
+                    if (zmode) tq(t, m) = real(w2(t, col), WP) * fa * s1 / qz * &
                                           sign(1.0_wp, (1.0_wp - dz(m)) * q0(t, zlo(m)) + dz(m) * q0(t, zhi(m))) * &
                                           (q0(t, zhi(m)) - q0(t, zlo(m)))
                 end if
@@ -4743,6 +4946,109 @@ contains
         !$omp end target data
 #endif
     end subroutine backward_nebular
+
+    !> The nebular continuum's adjoint for one (model, run of ages, block of pixels): over the block's
+    !> pixels, per age t of the run, the sums of g = S_bar(young or old column) 10**lg(t) Q_ref and of
+    !> g times the interval ends' z and U slopes (raz, rbz, rau, rbu; backward_nebular weights them
+    !> by the age's position wa and scales by Q(t) / Q_ref). Within a CLOUDY age interval
+    !> lg = ra + wa (rb - ra), so 10**lg advances by exp(dwa (rb - ra) ln 10) from age to age: one
+    !> exponential per pixel and run (and one per change of the step), as the forward's continuum
+    !> (nebular_kernels). Exponents in FP64 (exp_kp); FP32 kernels sum with compensation.
+    subroutine neb_run_block(nspec, n_mod, ntn, npb, ctab, gw, wa, qzt, fabs, it_tesc, m, ts, tl, a, z0, u0, wzm, &
+                             wum, lnq, p, cpart)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        integer, intent(in)     :: nspec, n_mod, ntn, npb, m, ts, tl, a, z0, u0, p
+        integer, intent(in)     :: it_tesc(n_mod)
+        real(WP), intent(in)    :: ctab(nspec, NEBNZ, NEBNAGE, NEBNIP), wa(max(1, ntn)), qzt(max(1, ntn), n_mod)
+        real(WP), intent(in)    :: fabs(n_mod), wzm, wum, lnq
+        real(KP), intent(in)    :: gw(nspec, 2 * n_mod)
+        real(KP), intent(inout) :: cpart(5, ntn, npb, n_mod)
+        real(WP), parameter :: LN10 = log(10.0_wp)
+        real(KP) :: acc(5, NEB_RUN), cmp(5, NEB_RUN), d(5), e, rr, gy, go, g, term, tsum
+        real(WP) :: c00, c01, c10, c11, ra, rb, raz, rbz, rau, rbu, dl, dw, dwp
+        logical  :: ok(NEB_RUN)
+        integer  :: j, j0, j1, k, q, t, nbk
+
+        do k = 1, tl
+            ok(k) = qzt(ts + k - 1, m) * abs(fabs(m)) > SAFE_FLOOR
+            do q = 1, 5
+                acc(q, k) = 0.0_KP
+                cmp(q, k) = 0.0_KP
+            end do
+        end do
+        if (lnq < huge(1.0_wp)) then
+            c00 = (1.0_wp - wzm) * (1.0_wp - wum)
+            c01 = (1.0_wp - wzm) * wum
+            c10 = wzm * (1.0_wp - wum)
+            c11 = wzm * wum
+            nbk = (nspec + npb - 1) / npb
+            j0 = (p - 1) * nbk + 1
+            j1 = min(p * nbk, nspec)
+            do j = j0, j1
+                gy = gw(j, m)
+                go = gw(j, n_mod + m)
+                if (gy == 0.0_KP .and. go == 0.0_KP) cycle
+                ra = c00 * ctab(j, z0, a, u0) + c01 * ctab(j, z0, a, u0 + 1) + &
+                     c10 * ctab(j, z0 + 1, a, u0) + c11 * ctab(j, z0 + 1, a, u0 + 1)
+                rb = c00 * ctab(j, z0, a + 1, u0) + c01 * ctab(j, z0, a + 1, u0 + 1) + &
+                     c10 * ctab(j, z0 + 1, a + 1, u0) + c11 * ctab(j, z0 + 1, a + 1, u0 + 1)
+                raz = (1.0_wp - wum) * (ctab(j, z0 + 1, a, u0) - ctab(j, z0, a, u0)) + &
+                      wum * (ctab(j, z0 + 1, a, u0 + 1) - ctab(j, z0, a, u0 + 1))
+                rbz = (1.0_wp - wum) * (ctab(j, z0 + 1, a + 1, u0) - ctab(j, z0, a + 1, u0)) + &
+                      wum * (ctab(j, z0 + 1, a + 1, u0 + 1) - ctab(j, z0, a + 1, u0 + 1))
+                rau = (1.0_wp - wzm) * (ctab(j, z0, a, u0 + 1) - ctab(j, z0, a, u0)) + &
+                      wzm * (ctab(j, z0 + 1, a, u0 + 1) - ctab(j, z0 + 1, a, u0))
+                rbu = (1.0_wp - wzm) * (ctab(j, z0, a + 1, u0 + 1) - ctab(j, z0, a + 1, u0)) + &
+                      wzm * (ctab(j, z0 + 1, a + 1, u0 + 1) - ctab(j, z0 + 1, a + 1, u0))
+                dl = (rb - ra) * LN10
+                e = exp_kp(ra * LN10 + wa(ts) * dl + lnq)
+                rr = 1.0_KP
+                dwp = 0.0_wp
+                do k = 1, tl
+                    t = ts + k - 1
+                    if (k > 1) then
+                        dw = wa(t) - wa(t - 1)
+                        if (dw /= dwp) then
+                            rr = exp_kp(dw * dl)
+                            dwp = dw
+                        end if
+                        e = e * rr
+                    end if
+                    if (.not. ok(k)) cycle
+                    if (t <= it_tesc(m)) then
+                        g = gy * e
+                    else
+                        g = go * e
+                    end if
+                    d(1) = g
+                    d(2) = g * real(raz, KP)
+                    d(3) = g * real(rbz, KP)
+                    d(4) = g * real(rau, KP)
+                    d(5) = g * real(rbu, KP)
+                    if (KP == WP) then
+                        ! (FP64 kernels: plain sums)
+                        do q = 1, 5
+                            acc(q, k) = acc(q, k) + d(q)
+                        end do
+                    else
+                        do q = 1, 5
+                            term = d(q) - cmp(q, k)
+                            tsum = acc(q, k) + term
+                            cmp(q, k) = (tsum - acc(q, k)) - term
+                            acc(q, k) = tsum
+                        end do
+                    end if
+                end do
+            end do
+        end if
+        do k = 1, tl
+            do q = 1, 5
+                cpart(q, ts + k - 1, p, m) = acc(q, k)
+            end do
+        end do
+    end subroutine neb_run_block
 
 
     !> Compensated add (CPU builds at FP32 kernel precision).
