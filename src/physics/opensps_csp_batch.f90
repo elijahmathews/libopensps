@@ -102,7 +102,7 @@ module opensps_csp_batch
     use opensps_ssp, only: configure_imf_parameters
     use opensps_imf, only: imf_pack_params, IMF_NPAR, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE
     use opensps_ssp_operator, only: ssp_op_mod_signature
-    use opensps_ssp_batch, only: ssp_batch_age_sums_z, ssp_opset_t, ssp_batch_age_sums_adjoint, NIMFG
+    use opensps_ssp_batch, only: ssp_batch_age_sums_z, ssp_opset_t, ssp_batch_age_sums_adjoint, NIMFG, dot_lanes
     use opensps_sfh_tangent, only: sfh_weights_tangent, sfh_tangent_supported, NSFHT
 #ifdef FSPS_CUBLAS
     use opensps_batch_photometry, only: blas, blas_init
@@ -4611,6 +4611,7 @@ contains
         integer  :: m, k, i, col, zl, zh, nlim
         real(KP) :: sk, ck, term, tsum, d, bk, ek, ce, fk, dk, cd, dbk
         real(WP) :: lk, sf, sd
+        real(WP) :: sr, se, hr, he, sw, ew, dw
         real(WP), allocatable :: euv(:,:), zd(:,:)
 
         ! zd(k, m): with per-model metallicity, d L / d dz through age k (the basis, its EUV rows and
@@ -4619,6 +4620,44 @@ contains
 #ifdef OMP_TARGET
         !$omp target data map(alloc: euv, zd)
 #endif
+#if !defined(OMP_TARGET)
+        ! CPUs: per (model, age) lane-vectorized dot products of the basis columns with the cotangents
+        ! (dot_lanes): the non-EUV and EUV pixels, of the two metallicities with per-model metallicity
+        !$omp parallel do collapse(2) private(col, zl, zh, nlim, fk, lk, sr, se, hr, he, sw, ew, dw)
+        do m = 1, n_mod
+            do k = 1, nt
+                col = n_mod + m
+                if (k <= it_tesc(m)) col = m
+                nlim = 0
+                if (k <= ntn) nlim = whlylim
+                fk = 1.0_KP
+                if (k <= ntn) fk = real(fesc(m), KP)
+                if (zmode) then
+                    zl = zlo(m); zh = zhi(m)
+                    sr = dot_lanes(nspec - nlim, basis(nlim + 1, k, zl), gw(nlim + 1, col))
+                    hr = dot_lanes(nspec - nlim, basis(nlim + 1, k, zh), gw(nlim + 1, col))
+                    se = dot_lanes(nlim, basis(1, k, zl), gw(1, col))
+                    he = dot_lanes(nlim, basis(1, k, zh), gw(1, col))
+                    sw = (1.0_wp - dz(m)) * sr + dz(m) * hr
+                    ew = (1.0_wp - dz(m)) * se + dz(m) * he
+                    dw = (hr - sr) + real(fk, WP) * (he - se)
+                    lk = 10.0_wp**((1.0_wp - dz(m)) * blbol(k, zl) + dz(m) * blbol(k, zh))
+                else
+                    zl = 1; zh = 1
+                    sw = dot_lanes(nspec - nlim, basis(nlim + 1, k, 1), gw(nlim + 1, col))
+                    ew = dot_lanes(nlim, basis(1, k, 1), gw(1, col))
+                    dw = 0.0_wp
+                    lk = lum_linear(k)
+                end if
+                if (k <= ntn) euv(k, m) = ew * real(w2(k, col), WP)
+                w_bar(k, m) = sw + real(fk, WP) * ew + lsum_bar(m) * lk
+                zd(k, m) = 0.0_wp
+                if (zmode) zd(k, m) = real(w2(k, col), WP) * (dw + lsum_bar(m) * lk * log(10.0_wp) * &
+                                                               (blbol(k, zh) - blbol(k, zl)))
+                if (k <= ntn) w_bar(k, m) = w_bar(k, m) + nwb(k, m)
+            end do
+        end do
+#else
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(i, col, zl, zh, sk, ck, term, tsum, d, bk, lk, &
         !$omp& ek, ce, fk, nlim, dk, cd, dbk)
@@ -4683,6 +4722,7 @@ contains
                 if (k <= ntn) w_bar(k, m) = w_bar(k, m) + nwb(k, m)
             end do
         end do
+#endif
         ! d L / d fesc per model
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do private(k, sf, sd)

@@ -32,7 +32,7 @@ module opensps_ssp_batch
     implicit none
     private
 
-    public :: ssp_batch_age_sums_z, ssp_batch_age_sums_adjoint, NIMFG
+    public :: ssp_batch_age_sums_z, ssp_batch_age_sums_adjoint, NIMFG, dot_lanes
     public :: ssp_opset_t, ssp_opset_build, ssp_opset_free
 
     !> The IMF parameters of the gradients (imf1, imf2, imf3, vdmc, mdave)
@@ -746,6 +746,47 @@ contains
 
     !> v_bar(e, 1:4, j) = T^T of the young, old, young EUV and old EUV cotangents for the run j0..jr
     !> (rows above nwhl for 1, 2; rows 1..nwhl for 3, 4); the young product used templates <= ky.
+    !> sum(x(1:n) * y(1:n)) on CPUs: eight partial sums advanced together (a loop the compiler
+    !> vectorizes without reassociating: a single running sum cannot be), compensated in FP32 kernels,
+    !> the lanes added in FP64. Host code only.
+    function dot_lanes(n, x, y) result(s)
+        integer, intent(in)  :: n
+        real(KP), intent(in) :: x(n), y(n)
+        real(WP) :: s
+        integer, parameter :: NL = 8
+        real(KP) :: a(NL), c(NL), t(NL), u(NL), v(NL)
+        integer  :: i, l, n8
+
+        a = 0.0_KP
+        c = 0.0_KP
+        n8 = (n / NL) * NL
+        if (KP == WP) then
+            do i = 1, n8, NL
+                a = a + x(i:i + NL - 1) * y(i:i + NL - 1)
+            end do
+            do i = n8 + 1, n
+                a(1) = a(1) + x(i) * y(i)
+            end do
+        else
+            do i = 1, n8, NL
+                t = x(i:i + NL - 1) * y(i:i + NL - 1) - c
+                u = a + t
+                c = (u - a) - t
+                a = u
+            end do
+            do i = n8 + 1, n
+                v(1) = x(i) * y(i) - c(1)
+                u(1) = a(1) + v(1)
+                c(1) = (u(1) - a(1)) - v(1)
+                a(1) = u(1)
+            end do
+        end if
+        s = 0.0_wp
+        do l = 1, NL
+            s = s + real(a(l), WP)
+        end do
+    end function dot_lanes
+
     subroutine adj_template_bar(nspec, n_eff, ky, nwhl, n_mod, m0, j0, jr, perm, etpl, gw, n_eff_max, nc_max, vb)
         integer, intent(in) :: nspec, n_eff, ky, nwhl, n_mod, m0, j0, jr, n_eff_max, nc_max
         integer, intent(in), contiguous :: perm(:)
@@ -756,11 +797,30 @@ contains
         ! Scalar accumulators (an array tile spilled to scratch memory on the R9700), at kernel
         ! precision, compensated in FP32 kernels: s* over the non-EUV pixels, e* over the EUV pixels
         ! (i <= nwhl); *y young, *o old column
-        integer  :: e, jb, nb, i, j1, j2, j3, j4, m1, m2, m3, m4
+        integer  :: e, jb, nb, i, j1, j2, j3, j4, m1, m2, m3, m4, jj, mm
         real(KP) :: ev, term, tsum
         real(KP) :: sy1, sy2, sy3, sy4, so1, so2, so3, so4, ey1, ey2, ey3, ey4, eo1, eo2, eo3, eo4
         real(KP) :: csy1, csy2, csy3, csy4, cso1, cso2, cso3, cso4, cey1, cey2, cey3, cey4, ceo1, ceo2, ceo3, ceo4
 
+#if !defined(OMP_TARGET)
+        ! CPUs: per (template, model) four lane-vectorized dot products (dot_lanes); the template's
+        ! column stays in cache across the run's models
+        !$omp parallel do private(jj, mm)
+        do e = 1, n_eff
+            do jj = j0, jr
+                mm = perm(m0 + jj - 1)
+                if (e > ky) then
+                    vb(e, 1, jj) = 0.0_wp
+                    vb(e, 3, jj) = 0.0_wp
+                else
+                    vb(e, 1, jj) = dot_lanes(nspec - nwhl, etpl(nwhl + 1, e), gw(nwhl + 1, mm))
+                    vb(e, 3, jj) = dot_lanes(nwhl, etpl(1, e), gw(1, mm))
+                end if
+                vb(e, 2, jj) = dot_lanes(nspec - nwhl, etpl(nwhl + 1, e), gw(nwhl + 1, n_mod + mm))
+                vb(e, 4, jj) = dot_lanes(nwhl, etpl(1, e), gw(1, n_mod + mm))
+            end do
+        end do
+#else
         nb = (jr - j0 + 4) / 4
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(i, j1, j2, j3, j4, m1, m2, m3, m4, ev, &
@@ -943,6 +1003,7 @@ contains
                 vb(e, 4, j4) = real(eo4, WP)
             end do
         end do
+#endif
     end subroutine adj_template_bar
 
     !> The fold in reverse: per template e and chunk model, its segments' ages t: a = sum eff_val w_p,
