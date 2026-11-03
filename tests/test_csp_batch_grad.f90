@@ -22,6 +22,8 @@ program test_csp_batch_grad
     !> - with the IMF free per model (ssp_ops), d L / d(imf1, imf2, imf3) and every other row through
     !>   the operator's reverse pass;
     !> - every smoothing mode (the device operator, the host modes);
+    !> - weights over ages and metallicities (ssp_weights_z): d L / d(weights) along a random direction
+    !>   and for single entries, and the dust, AGN and redshift rows;
     !> - unsupported stages return status 2.
     !> The spectra are linear in the weights and in fagn, so the differences are exact up to rounding
     !> and the curvature of the magnitudes (log10 of the band fluxes). FP64 builds are the
@@ -88,6 +90,10 @@ program test_csp_batch_grad
     !> ... and of the mass and lbol outputs; the last call's mass and lbol (cb)
     real(WP), allocatable :: lbar_mass(:), lbar_lbol(:)
     real(WP) :: last_mass(N_MOD), last_lbol(N_MOD)
+    !> Weights over ages and metallicities: the batch takes wzg (ssp_weights_z) in place of the weight
+    !> matrix, and returns d L / d wzg in wzg_bar (cb)
+    logical :: use_wz = .false.
+    real(WP), allocatable :: wzg(:, :, :), wzg_bar(:, :, :)
 
     call skip_without_data()
     call print_major_header("Batched CSP gradients")
@@ -138,7 +144,6 @@ program test_csp_batch_grad
     call check_grad(1, 0.513_wp, 1, 1, .false., "Cardelli et al., z = 0.513, IGM, nebular, dust emission, AGN, SFH parameters")
     call set_int('add_dust_emission', 0)
     call set_int('add_neb_emission', 0)
-    call check_unsupported()
     ! Nebular lines outside the spectrum with dust emission: their absorbed part joins the energy balance
     call set_int('add_neb_emission', 1)
     call set_int('add_dust_emission', 1)
@@ -168,6 +173,7 @@ program test_csp_batch_grad
     call check_grad(1, 0.0_wp, 0, 0, .true., "Kroupa IMF free (ssp_ops), z = 0, nebular, dust emission, weight matrix")
     call set_int('add_dust_emission', 0)
     call set_int('add_neb_emission', 0)
+    call check_unsupported()
     use_ops = .false.
     call ssp_opset_free(opset)
     call set_int('imf_type', 1)
@@ -180,8 +186,11 @@ program test_csp_batch_grad
     call set_int('add_neb_emission', 1)
     call set_int('add_dust_emission', 1)
     call check_grad(2, 0.513_wp, 1, 1, .true., "Calzetti, z = 0.513, per-model logzsol, IGM, nebular, dust emission, AGN")
-    call set_int('add_dust_emission', 0)
     call set_int('add_neb_emission', 0)
+    ! Weights over ages and metallicities (an enrichment history per model), with dust emission
+    call check_weights_z(4, 0.513_wp, "Kriek & Conroy, z = 0.513, IGM, dust emission, AGN")
+    call set_int('add_dust_emission', 0)
+    call check_weights_z(1, 0.0_wp, "Cardelli et al., z = 0, AGN")
 
     call print_summary_line("Batched CSP gradients", total_tests - total_failures, total_tests)
     call tap_finish()
@@ -226,7 +235,13 @@ contains
         logical :: grad
         ! (the mass and lbol cotangents with the gradients, when drawn; the mass's not with ssp_ops)
         grad = (present(params_bar) .or. present(weights_bar)) .and. allocated(lbar_mass)
-        if (use_ops .and. grad) then
+        if (use_wz .and. grad) then
+            call compute_csp_batch(ctx, psets, mags, status, spec=spec, ssp_weights_z=wzg, mags_bar=mags_bar, &
+                                   spec_bar=spec_bar, params_bar=params_bar, weights_z_bar=wzg_bar, &
+                                   mass=last_mass, lbol=last_lbol, mass_bar=lbar_mass, lbol_bar=lbar_lbol)
+        else if (use_wz) then
+            call compute_csp_batch(ctx, psets, mags, status, spec=spec, ssp_weights_z=wzg, mass=last_mass, lbol=last_lbol)
+        else if (use_ops .and. grad) then
             call compute_csp_batch(ctx, psets, mags, status, spec=spec, ssp_weights=ssp_weights, ssp_ops=opset, &
                                    mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, weights_bar=weights_bar, &
                                    mass=last_mass, lbol=last_lbol, lbol_bar=lbar_lbol)
@@ -546,6 +561,161 @@ contains
         end if
     end subroutine check_grad
 
+    !> Weights over ages and metallicities (ssp_weights_z): each model's SFH weights spread over an
+    !> enrichment history (the metallicity rising from the lowest to near solar over its ages, each age
+    !> split between the two bracketing metallicities), against finite differences of L: along a random
+    !> direction (relative perturbations), single entries (the largest, and one with zero weight,
+    !> one-sided), and the parameter rows (dust, AGN, zred; the SFH and metallicity rows, not used with
+    !> given weights, are zero).
+    subroutine check_weights_z(dust_type, zred, label)
+        integer, intent(in) :: dust_type
+        real(WP), intent(in) :: zred
+        character(len=*), intent(in) :: label
+        type(PARAMS) :: psets(N_MOD)
+        real(WP), allocatable :: mags(:, :), spec(:, :), mbar(:, :), sbar(:, :), pbar(:, :), w(:, :), w0(:, :, :), &
+                                 dir(:, :, :), t1(:), t2(:)
+        real(WP) :: lp, lm, l0, g_fd, g_ad, h, worst, scale, x
+        integer :: m, b, i, k, z, nspec, nbands, nt, nz, status, loc(3)
+
+        call print_group("Gradients: ssp_weights_z, " // label)
+        nspec = ctx%state%nspec
+        nbands = ctx%state%nbands
+        nt = ctx%state%ntfull
+        nz = size(ctx%state%ssp_basis_spec, 3)
+        allocate(mags(nbands, N_MOD), spec(nspec, N_MOD), mbar(nbands, N_MOD), sbar(nspec, N_MOD), &
+                 pbar(NBGRAD, N_MOD), w(nt, N_MOD), t1(nt), t2(nt))
+        if (allocated(wzg)) deallocate(wzg, wzg_bar)
+        allocate(wzg(nt, nz, N_MOD), wzg_bar(nt, nz, N_MOD), w0(nt, nz, N_MOD), dir(nt, nz, N_MOD))
+        call set_int('dust_type', dust_type)
+        call set_int('add_igm_absorption', merge(1, 0, zred > 0.0_wp))
+        call set_int('add_agn_dust', 1)
+        wzg = 0.0_wp
+        do m = 1, N_MOD
+            call set_model(m, zred)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
+            call sfh_weights_core(ctx, psets(m), psets(m)%tage, 1, w(:, m:m), t1, t2)
+            ! (metallicity index rising from 1 at the oldest age to nz - 1 - mod(m, 3) at the youngest)
+            do k = 1, nt
+                x = 1.0_wp + real(nz - 2 - mod(m, 3), WP) * real(nt - k, WP) / real(nt - 1, WP)
+                z = min(int(x), nz - 1)
+                wzg(k, z, m) = w(k, m) * (real(z + 1, WP) - x)
+                wzg(k, z + 1, m) = w(k, m) * (x - real(z, WP))
+            end do
+        end do
+        use_wz = .true.
+        if (allocated(lbar_m)) deallocate(lbar_m, lbar_s, lbar_mass, lbar_lbol)
+        call loss(psets, w, .true., lp, mags, spec)
+        do m = 1, N_MOD
+            do b = 1, nbands
+                mbar(b, m) = 0.0_wp
+                if (mags(b, m) == mags(b, m)) mbar(b, m) = 2.0_wp * urand() - 1.0_wp
+                if (mags(b, m) > minval(mags(:, m), mask=mags(:, m) == mags(:, m)) + MAG_RANGE) mbar(b, m) = 0.0_wp
+            end do
+            scale = maxval(abs(spec(:, m)))
+            do i = 1, nspec
+                sbar(i, m) = (2.0_wp * urand() - 1.0_wp) * 10.0_wp / (scale * nspec)
+            end do
+        end do
+        allocate(lbar_mass(N_MOD), lbar_lbol(N_MOD))
+        do m = 1, N_MOD
+            lbar_mass(m) = 2.0_wp * urand() - 1.0_wp
+            lbar_lbol(m) = 2.0_wp * urand() - 1.0_wp
+        end do
+        ! (FP32: the spectrum part of the loss alone, linear in the weights)
+        if (LINEAR_ONLY) then
+            mbar = 0.0_wp
+            lbar_mass = 0.0_wp
+            lbar_lbol = 0.0_wp
+        end if
+        lbar_m = mbar
+        lbar_s = sbar
+        call cb(psets, mags, status, spec=spec, mags_bar=mbar, spec_bar=sbar, params_bar=pbar)
+        call assert_true(status == 0, "status 0 with gradients (ssp_weights_z)", total_tests, total_failures)
+        if (status /= 0) then
+            use_wz = .false.
+            return
+        end if
+
+        ! A random direction (relative perturbations, so the weights stay positive)
+        w0 = wzg
+        do m = 1, N_MOD
+            do z = 1, nz
+                do k = 1, nt
+                    dir(k, z, m) = w0(k, z, m) * (2.0_wp * urand() - 1.0_wp)
+                end do
+            end do
+        end do
+        h = merge(H_LIN, H_REL, LINEAR_ONLY)
+        wzg = w0 + h * dir
+        call loss(psets, w, .true., lp)
+        wzg = w0 - h * dir
+        call loss(psets, w, .true., lm)
+        wzg = w0
+        g_fd = (lp - lm) / (2.0_wp * h)
+        g_ad = sum(wzg_bar * dir)
+        write(*, '(A,2ES16.8,A,ES10.2)') "# weights over ages and metallicities, random direction (adjoint, " // &
+            "differences): ", g_ad, g_fd, ", relative ", abs(g_ad - g_fd) / abs(g_fd)
+        call assert_true(abs(g_ad - g_fd) <= GRAD_RTOL * abs(g_fd), "d L / d ssp_weights_z along a direction", &
+                         total_tests, total_failures)
+
+        ! Single entries of model 2: the largest weight, and one with zero weight (one-sided, second
+        ! order: weights are masses, >= 0) at a metallicity the model does not use
+        worst = 0.0_wp
+        m = 2
+        do i = 1, 2
+            if (i == 1) then
+                loc = maxloc(w0(:, :, m:m))
+            else
+                loc = [maxloc(w(:, m), 1), nz, 1]
+            end if
+            k = loc(1)
+            z = loc(2)
+            h = merge(H_LIN, 1.0e-5_wp, LINEAR_ONLY) * maxval(w0(:, :, m))
+            if (w0(k, z, m) > 0.0_wp) h = merge(H_LIN, 1.0e-5_wp, LINEAR_ONLY) * w0(k, z, m)
+            wzg(k, z, m) = w0(k, z, m) + h
+            call loss(psets, w, .true., lp)
+            if (w0(k, z, m) > h) then
+                wzg(k, z, m) = w0(k, z, m) - h
+                call loss(psets, w, .true., lm)
+                g_fd = (lp - lm) / (2.0_wp * h)
+            else
+                wzg(k, z, m) = w0(k, z, m)
+                call loss(psets, w, .true., l0)
+                wzg(k, z, m) = w0(k, z, m) + 2.0_wp * h
+                call loss(psets, w, .true., lm)
+                g_fd = (-3.0_wp * l0 + 4.0_wp * lp - lm) / (2.0_wp * h)
+            end if
+            wzg(k, z, m) = w0(k, z, m)
+            worst = max(worst, abs(wzg_bar(k, z, m) - g_fd) / max(abs(g_fd), tiny(1.0_wp)))
+        end do
+        write(*, '(A,ES10.2)') "# single entries: worst relative difference ", worst
+        call assert_true(worst <= merge(1.0e-2_wp, 5.0e-5_wp, LINEAR_ONLY), "d L / d ssp_weights_z, single entries", &
+                         total_tests, total_failures)
+
+        ! fagn and the dust, redshift and remaining rows
+        worst = 0.0_wp
+        do m = 1, N_MOD
+            if (psets(m)%fagn <= 0.0_wp) cycle
+            block
+                type(PARAMS) :: pp(N_MOD)
+                pp = psets
+                h = merge(H_LIN, H_REL, LINEAR_ONLY) * psets(m)%fagn
+                pp(m)%fagn = psets(m)%fagn + h
+                call loss(pp, w, .true., lp)
+                pp(m)%fagn = psets(m)%fagn - h
+                call loss(pp, w, .true., lm)
+            end block
+            g_fd = (lp - lm) / (2.0_wp * h)
+            worst = max(worst, abs(pbar(BGRAD_FAGN, m) - g_fd) / max(abs(g_fd), 1.0e-3_wp))
+        end do
+        write(*, '(A,ES10.2)') "# fagn: worst relative difference ", worst
+        call assert_true(worst <= merge(GRAD_RTOL, 5.0e-6_wp, LINEAR_ONLY), "d L / d fagn (ssp_weights_z)", &
+                         total_tests, total_failures)
+        call check_dust(psets, w, .true., pbar)
+        use_wz = .false.
+    end subroutine check_weights_z
+
     !> d L / d(dust parameter) of every model against finite differences of L.
     subroutine check_dust(psets, w, given_w, pbar)
         type(PARAMS), intent(in) :: psets(:)
@@ -768,25 +938,22 @@ contains
         urand = real(seed, WP) / 2147483647.0_wp
     end function urand
 
-    !> Gradients with stages whose adjoints are not written: status 2.
+    !> Gradients with stages whose adjoints are not written: status 2 (the mass output's cotangent
+    !> with the IMF free per model; called with the operator set built).
     subroutine check_unsupported()
         type(PARAMS) :: psets(1)
-        real(WP), allocatable :: mags(:, :), wbar(:, :)
+        real(WP), allocatable :: mags(:, :), pbar(:, :)
+        real(WP) :: mbar(1)
         integer :: status
 
         call print_group("Gradients: unsupported stages")
-        allocate(mags(ctx%state%nbands, 1), wbar(ctx%state%ntfull, 1))
+        allocate(mags(ctx%state%nbands, 1), pbar(NBGRAD, 1))
         call set_model(1, 0.0_wp)
         call opensps_context_prepare_pset(ctx)
         call opensps_context_get_pset(ctx, psets(1))
-        ! Weights over ages and metallicities: not yet
-        block
-            real(WP), allocatable :: wz(:, :, :)
-            allocate(wz(ctx%state%ntfull, 1, 1))
-            wz = 1.0e-3_wp
-            call compute_csp_batch(ctx, psets, mags, status, ssp_weights_z=wz, mags_bar=mags, weights_bar=wbar)
-        end block
-        call assert_true(status == 2, "ssp_weights_z: status 2", total_tests, total_failures)
+        mbar = 1.0_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=opset, mags_bar=mags, params_bar=pbar, mass_bar=mbar)
+        call assert_true(status == 2, "mass_bar with ssp_ops: status 2", total_tests, total_failures)
     end subroutine check_unsupported
 
     subroutine set_int(key, value)

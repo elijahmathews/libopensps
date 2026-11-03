@@ -279,11 +279,13 @@ contains
     !>                       tburst, sf_start, sf_trunc and sf_slope for sfh = 0, 1, 4, 5.
     !> @param[in]    mass_bar, lbol_bar Optional dL / d(mass), dL / d(lbol) (N): cotangents of those
     !>                       outputs (mass_bar not with ssp_ops: status 2).
-    !>                       Gradients are not yet available (status 2) with ssp_weights_z. With
+    !> @param[out]   weights_z_bar Optional dL / d(ssp_weights_z) (ntfull, nz, N), with ssp_weights_z
+    !>                       (weights_bar is then zero). With
     !>                       ssp_ops, params_bar includes the IMF's imf1, imf2, imf3, vdmc and mdave.
     subroutine compute_csp_batch(ctx, psets, mags, status, spec, mass, lbol, mdust, sfr, emlines, indx, ssp_weights, &
                                  spec_young, spec_old, mass_young, mass_old, lbol_young, lbol_old, zred_mags, &
-                                 ssp_weights_z, ssp_ops, mags_bar, spec_bar, params_bar, weights_bar, mass_bar, lbol_bar)
+                                 ssp_weights_z, ssp_ops, mags_bar, spec_bar, params_bar, weights_bar, mass_bar, lbol_bar, &
+                                 weights_z_bar)
         type(opensps_context_t), intent(inout) :: ctx
 #if defined(__flang__)
         type(params), intent(in)            :: psets(:)
@@ -304,6 +306,7 @@ contains
         real(WP), intent(in), optional      :: mags_bar(:,:), spec_bar(:,:)
         real(WP), intent(out), optional     :: params_bar(:,:), weights_bar(:,:)
         real(WP), intent(in), optional      :: mass_bar(:), lbol_bar(:)
+        real(WP), intent(out), optional     :: weights_z_bar(:,:,:)
 
         integer :: n_mod, nt, nspec, nbands, m, k
         real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk
@@ -311,7 +314,7 @@ contains
         ! Gradients: the band fluxes of the magnitudes, and each column's magnitude redshift
         real(WP), allocatable :: fbk(:,:), zcm(:), dchain(:,:)
         ! Gradients: dL / d(SSP weights) of every model, and the SFH weights' tangents (opensps_sfh_tangent)
-        real(WP), allocatable :: wbl(:,:), tw(:,:), tdw(:,:), tsc(:,:,:), lbx(:)
+        real(WP), allocatable :: wbl(:,:), tw(:,:), tdw(:,:), tsc(:,:,:), lbx(:), wzbl(:,:,:)
         integer :: q
         ! Gradients with dust emission: the age sums before attenuate_batch replaces them; with
         ! smoothing, the spectra before it
@@ -448,7 +451,7 @@ contains
                 status = 3; return
             end if
         end if
-        grad = present(params_bar) .or. present(weights_bar)
+        grad = present(params_bar) .or. present(weights_bar) .or. present(weights_z_bar)
         if (grad) then
             if (present(mags_bar)) then
                 if (size(mags_bar, 1) < nbands .or. size(mags_bar, 2) < n_mod) then
@@ -473,7 +476,7 @@ contains
             ! Stages whose adjoints are not written yet
             ! (SSP-level nebular emission, add_neb_emission = 2, is in the basis. The mass's cotangent
             ! with ssp_ops would need the remnants' IMF derivatives)
-            if (present(ssp_weights_z) .or. (present(mass_bar) .and. imf)) then
+            if (present(mass_bar) .and. imf) then
                 status = 2; return
             end if
         end if
@@ -1057,6 +1060,11 @@ contains
             !$omp target update from(rout)
 #endif
             allocate(wbl(nt, n_mod), lbx(n_mod))
+            if (zw) then
+                allocate(wzbl(nt, nzw, n_mod))
+            else
+                allocate(wzbl(1, 1, 1))
+            end if
             lbx = 0.0_wp
             if (present(lbol_bar)) lbx = lbol_bar(1:n_mod)
             ! The template's interpolation weights against q_PAH, U_min and gamma (dl07_indices: linear in
@@ -1100,7 +1108,7 @@ contains
                                     absorbed, ysave, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
                                     neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
                                     psets(1)%min_wave_smooth, psets(1)%max_wave_smooth, &
-                                    imf, zimf, pm, wsfh, slum, ssp_ops, lbx, &
+                                    imf, zimf, pm, wsfh, slum, ssp_ops, lbx, zw, wzbl, &
                                     mags_bar, spec_bar, params_bar, wbl)
             else
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
@@ -1108,12 +1116,12 @@ contains
                                     absorbed, yo, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
                                     neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
                                     psets(1)%min_wave_smooth, psets(1)%max_wave_smooth, &
-                                    imf, zimf, pm, wsfh, slum, ssp_ops, lbx, &
+                                    imf, zimf, pm, wsfh, slum, ssp_ops, lbx, zw, wzbl, &
                                     mags_bar, spec_bar, params_bar, wbl)
             end if
             ! The mass output's cotangent: mass = sum over ages of w_k M_k (M interpolated in log Z with
             ! per-model metallicity, which then adds to logzsol's row)
-            if (present(mass_bar)) then
+            if (present(mass_bar) .and. .not. zw) then
 #ifdef OMP_TARGET
                 ! (the SFH weights from the device, where it computed them; with few models the host
                 ! did, and the device copy is not current)
@@ -1139,6 +1147,18 @@ contains
                         params_bar(BGRAD_LOGZSOL, m) = params_bar(BGRAD_LOGZSOL, m) + mass_bar(m) * w * dchain(7, m)
                     end if
                 end do
+            end if
+            if (zw) then
+                ! (ssp_weights_z: the mass's cotangent per age and metallicity)
+                if (present(mass_bar)) then
+                    do m = 1, n_mod
+                        do z = 1, nzw
+                            wzbl(:, z, m) = wzbl(:, z, m) + mass_bar(m) * ctx%state%ssp_basis_mass(1:nt, z)
+                        end do
+                    end do
+                end if
+                if (present(weights_z_bar)) weights_z_bar(1:nt, 1:nzw, 1:n_mod) = wzbl
+                wbl = 0.0_wp
             end if
             if (present(weights_bar)) weights_bar(1:nt, 1:n_mod) = wbl
             ! The SFH parameters: dL / d theta = sum over ages of dL / d w_k  d w_k / d theta, with the
@@ -3210,8 +3230,8 @@ contains
     subroutine batch_backward(ctx, pbuf, n_mod, nspec, nt, nbands, zred, igm_factor, mags, fband, zcm, it_tesc, &
                               zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, yo, total, &
                               emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, neb, nb, w2, lzm, tsave, &
-                              sigma, minl, maxl, imf, zimf, pm, wsfh, slum, ssp_ops, lbx, mags_bar, spec_bar, params_bar, &
-                              weights_bar)
+                              sigma, minl, maxl, imf, zimf, pm, wsfh, slum, ssp_ops, lbx, zw, wzb_out, mags_bar, spec_bar, &
+                              params_bar, weights_bar)
         type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in)              :: n_mod, nspec, nt, nbands
 #if !defined(__flang__)
@@ -3247,6 +3267,9 @@ contains
         type(ssp_opset_t), intent(inout), optional :: ssp_ops
         !> dL / d(L_bol) from the lbol output's cotangent (lbol = log10 L_bol), unscaled
         real(WP), intent(in)             :: lbx(n_mod)
+        ! Weights over ages and metallicities (ssp_weights_z): d L / d wz (nt, nz, N; 1 x 1 x 1 otherwise)
+        logical, intent(in)              :: zw
+        real(WP), intent(out), contiguous :: wzb_out(:,:,:)
         real(WP), intent(in), optional   :: mags_bar(:,:), spec_bar(:,:)
         real(WP), intent(out), optional  :: params_bar(:,:), weights_bar(:,:)
 
@@ -3439,9 +3462,18 @@ contains
 #ifdef OMP_TARGET
             !$omp target update to(nwb, gneb)
 #endif
-            if (.not. imf) call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, &
-                                                  ctx%state%ssp_basis_lbol, zmode, it_tesc, zlo, zhi, dz, lum_linear, &
-                                                  lsum_bar, gw, w_bar, 0, 0, nb%fesc, w2, nwb, gneb)
+            if (zw) then
+                call backward_age_sums_w(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, ctx%state%ssp_basis_lbol, &
+                                         it_tesc, lsum_bar, gw, wzb_out)
+                w_bar = 0.0_wp
+#ifdef OMP_TARGET
+                !$omp target update to(w_bar)
+#endif
+            else if (.not. imf) then
+                call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, &
+                                       ctx%state%ssp_basis_lbol, zmode, it_tesc, zlo, zhi, dz, lum_linear, &
+                                       lsum_bar, gw, w_bar, 0, 0, nb%fesc, w2, nwb, gneb)
+            end if
         end if
         ! The IMF per model: the operator's reverse pass (the SFH weights, the IMF parameters, the
         ! escaping fraction and, with the metallicity free, dz), then the nebular weights' part
@@ -3492,6 +3524,11 @@ contains
         if (present(weights_bar)) then
             do m = 1, n_mod
                 weights_bar(1:nt, m) = w_bar(:, m) * cscale(m)
+            end do
+        end if
+        if (zw) then
+            do m = 1, n_mod
+                wzb_out(:, :, m) = wzb_out(:, :, m) * cscale(m)
             end do
         end if
     end subroutine batch_backward
@@ -4167,6 +4204,41 @@ contains
             part(q, c, m) = acc(q)
         end do
     end subroutine atten_adjoint_chunk
+
+    !> Adjoint of age_sums_w (weights over ages and metallicities, ssp_weights_z) and of L_bol:
+    !> wzb(k, z, m) = sum over pixels of basis(:, k, z) times young_bar (k <= dust_tesc) or old_bar,
+    !> plus lsum_bar 10^lbol(k, z) (compensated at FP32 kernel precision).
+    subroutine backward_age_sums_w(n_mod, nspec, nt, nz, basis, blbol, it_tesc, lsum_bar, gw, wzb)
+        integer, intent(in)     :: n_mod, nspec, nt, nz, it_tesc(n_mod)
+        real(KP), intent(in)    :: basis(nspec, nt, nz), gw(nspec, 2 * n_mod)
+        real(WP), intent(in)    :: blbol(nt, nz), lsum_bar(n_mod)
+        real(WP), intent(out)   :: wzb(nt, nz, n_mod)
+        integer  :: m, k, z, i, col
+        real(KP) :: sk, ck, term, tsum
+
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(3) private(i, col, sk, ck, term, tsum) map(from: wzb)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(3) private(i, col, sk, ck, term, tsum)
+#endif
+        do m = 1, n_mod
+            do z = 1, nz
+                do k = 1, nt
+                    col = n_mod + m
+                    if (k <= it_tesc(m)) col = m
+                    sk = 0.0_KP
+                    ck = 0.0_KP
+                    do i = 1, nspec
+                        term = basis(i, k, z) * gw(i, col) - ck
+                        tsum = sk + term
+                        ck = (tsum - sk) - term
+                        sk = tsum
+                    end do
+                    wzb(k, z, m) = real(sk, WP) + lsum_bar(m) * 10.0_wp**blbol(k, z)
+                end do
+            end do
+        end do
+    end subroutine backward_age_sums_w
 
     !> Adjoint of the age sums and of L_bol: w_bar(k, m) = sum over pixels of basis(:, k) times
     !> young_bar (k <= dust_tesc) or old_bar, plus lsum_bar L_bol(k) (compensated at FP32 kernel

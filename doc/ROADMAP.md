@@ -242,6 +242,7 @@ tables and interpolation weights:
 | Rows | Through |
 |---|---|
 | SSP weights, `fagn` | age sums, AGN (L_bol), magnitudes and the observed-frame resampling |
+| weights over ages and metallicities (`ssp_weights_z`: `weights_z_bar`) | the age sums over every resident basis, L_bol and the mass |
 | `dust1`, `dust2`, `dust3`, `dust_index`, `dust1_index`, `frac_obrun`, `frac_nodust`, `mwr`, `uvb` | the three transmissions (the curve tables' derivatives), AGN's diffuse transmission |
 | `duste_qpah`, `duste_umin`, `duste_gamma` | the energy balance (absorbed light, escaping fraction) and the Draine & Li interpolation |
 | `gas_logz`, `gas_logu` (and `frac_obrun`) | the nebular continuum and lines (CLOUDY grids in log space), the EUV rows |
@@ -256,14 +257,14 @@ tage, observed pixels coinciding with rest-frame pixels for zred, z = 0. Precisi
 cotangents are scaled to unit maximum before they are stored at kernel precision (a magnitude of a
 nearly dark band has a gradient of 1 / F), long sums are compensated in FP32 builds. Validation:
 `tests/test_csp_batch_grad` against finite differences of the loss in FP64 (every row, every model,
-11 configurations; agreement 1e-8 - 1e-5, limited by the differences), with linear-only checks in
+19 configurations; agreement 1e-8 - 1e-5, limited by the differences), with linear-only checks in
 FP32 builds.
 
 Cotangents of the outputs `mass` and `lbol` are taken too (`mass_bar`, `lbol_bar`; the mass's not with
 `ssp_ops`, which would need the remnant masses' IMF derivatives). SSP-level nebular emission
 (`add_neb_emission = 2`) is in the basis, so its gas parameters do not act in the batch (rows zero).
 
-Not yet (status 2 with gradients): `ssp_weights_z`, `mass_bar` with `ssp_ops`; not differentiated: `emlines`, `mdust`, indices as
+Not yet (status 2 with gradients): `mass_bar` with `ssp_ops`; not differentiated: `emlines`, `mdust`, indices as
 outputs.
 
 Cost (2026-11-02, full physics: nebular, dust emission, AGN, IGM, SFH parameters; forward / with
