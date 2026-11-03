@@ -337,7 +337,11 @@ contains
         integer, parameter :: NS = 4000
         real(WP) :: p(IMF_NPAR), edge(0:NS), whole, parts, worst
         integer  :: t, k, mw, j
-        real(WP), parameter :: LO(3) = [0.1_wp, 0.2_wp, 0.5_wp], HI(3) = [0.9_wp, 1.0_wp, 0.95_wp]
+        ! (and far in both tails of a narrow lognormal, vdmc 0.13 with mass limits 30-100 and
+        ! 0.0001-0.001 Msun, where an erf difference loses up to 3e-5 of the bin)
+        integer, parameter :: NR = 5
+        real(WP), parameter :: LO(NR) = [0.1_wp, 0.2_wp, 0.5_wp, 30.0_wp, 1.0e-4_wp], &
+                               HI(NR) = [0.9_wp, 1.0_wp, 0.95_wp, 100.0_wp, 1.0e-3_wp]
         character(len=64) :: label
 
         call print_group("Lognormal IMF bins: wide bin = sum of narrow bins")
@@ -349,7 +353,7 @@ contains
         do t = 1, 3, 2
             do mw = 0, 1
                 worst = 0.0_wp
-                do j = 1, 3
+                do j = 1, NR
                     do k = 0, NS
                         edge(k) = LO(j) * (HI(j) / LO(j))**(real(k, WP) / NS)
                     end do
