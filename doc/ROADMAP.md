@@ -259,10 +259,13 @@ nearly dark band has a gradient of 1 / F), long sums are compensated in FP32 bui
 11 configurations; agreement 1e-8 - 1e-5, limited by the differences), with linear-only checks in
 FP32 builds.
 
-Not yet (status 2 with gradients): SSP-level nebular emission
-(`add_neb_emission = 2`), lines outside the spectrum with dust emission, the host smoothing modes,
-`ssp_weights_z`; not differentiated: `emlines`, `mass`,
-`lbol`, `mdust`, indices as outputs.
+Cotangents of the outputs `mass` and `lbol` are taken too (`mass_bar`, `lbol_bar`; the mass's not with
+`ssp_ops`, which would need the remnant masses' IMF derivatives). SSP-level nebular emission
+(`add_neb_emission = 2`) is in the basis, so its gas parameters do not act in the batch (rows zero).
+
+Not yet (status 2 with gradients): lines outside the spectrum with dust emission, the host smoothing
+modes, `ssp_weights_z`, `mass_bar` with `ssp_ops`; not differentiated: `emlines`, `mdust`, indices as
+outputs.
 
 Cost (2026-11-02, full physics: nebular, dust emission, AGN, IGM, SFH parameters; forward / with
 gradients, per model): gfortran FP64, one CPU thread, 1.2-1.4 / 6.0-6.1 ms (4.5-5x); R9700 FP32,
