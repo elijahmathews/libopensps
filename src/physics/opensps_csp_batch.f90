@@ -2974,6 +2974,9 @@ contains
 
         real(WP), allocatable :: fb_bar(:,:), fagn_bar(:), lsum_bar(:), w_bar(:,:), cscale(:), dpar(:,:)
         real(KP), allocatable :: sbar(:,:), gw(:,:), part(:,:,:)
+        ! (no AGN: a zero template of the right shape, for the explicit-shape dummies of the device
+        ! routines; a smaller placeholder made LLVM flang add a runtime copy in device code)
+        real(WP), allocatable :: noagn(:,:)
         integer  :: m, b, nzb, ntau
         logical  :: have_s, any_agn
         real(WP), parameter :: DMAG_DF = -2.5_wp / log(10.0_wp)
@@ -3017,9 +3020,15 @@ contains
         any_agn = any(agn_on)
         ntau = 1
         if (any_agn) ntau = size(ctx%state%agndust_spec, 2)
+        if (any_agn) then
+            allocate(noagn(1, 1))
+        else
+            allocate(noagn(nspec, 1))
+        end if
+        noagn = 0.0_wp
 
 #ifdef OMP_TARGET
-        !$omp target data map(to: fb_bar, sbar, zcm) map(alloc: fagn_bar, lsum_bar, gw, part) &
+        !$omp target data map(to: fb_bar, sbar, zcm, noagn) map(alloc: fagn_bar, lsum_bar, gw, part) &
         !$omp& map(from: w_bar, dpar)
 #endif
         associate (g => ctx%state%batch)
@@ -3039,9 +3048,8 @@ contains
             call backward_attenuation(ctx, pbuf, n_mod, nspec, ntau, igm, zvar, g%igm_t, tau, yo, agn_on, ita, wta, &
                                       lsum, ctx%state%agndust_spec, gw, part, dpar)
         else
-            ! (no AGN: a 1 x 1 placeholder for its template)
             call backward_attenuation(ctx, pbuf, n_mod, nspec, 1, igm, zvar, g%igm_t, tau, yo, agn_on, ita, wta, &
-                                      lsum, fb_bar(1:1, 1:1), gw, part, dpar)
+                                      lsum, noagn, gw, part, dpar)
         end if
         call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, ctx%state%ssp_basis_lbol, zmode, &
                                it_tesc, zlo, zhi, dz, lum_linear, lsum_bar, gw, w_bar)
@@ -3218,7 +3226,7 @@ contains
 #endif
         logical, intent(in)              :: igm, zvar, agn_on(n_mod)
         integer, intent(in)              :: ita(n_mod)
-        real(WP), intent(in)             :: wta(n_mod), lsum(n_mod), agndust_spec(:,:)
+        real(WP), intent(in)             :: wta(n_mod), lsum(n_mod), agndust_spec(nspec, ntau)
         real(KP), intent(in)             :: igm_t(nspec), tau(nspec, n_mod), yo(nspec, 2 * n_mod)
         real(KP), intent(inout)          :: gw(nspec, 2 * n_mod)
         real(KP), intent(out)            :: part(NDP, NCHG, n_mod)
