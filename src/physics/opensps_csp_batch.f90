@@ -117,7 +117,8 @@ module opensps_csp_batch
               BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, &
               BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
               BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, &
-              BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, BGRAD_VDMC, BGRAD_MDAVE, NBGRAD
+              BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, BGRAD_VDMC, BGRAD_MDAVE, BGRAD_AGN_TAU, &
+              BGRAD_IGM_FACTOR, NBGRAD
 
     !> Rows of params_bar (compute_csp_batch's gradients): the derivative of the caller's loss with
     !> respect to each parameter of the model. The list grows as the adjoints of more stages are
@@ -152,13 +153,20 @@ module opensps_csp_batch
     integer, parameter :: BGRAD_SF_SLOPE = 26
     !> The IMF parameters with ssp_ops (the operator's reverse pass, ssp_batch_age_sums_adjoint)
     integer, parameter :: BGRAD_IMF1 = 27, BGRAD_IMF2 = 28, BGRAD_IMF3 = 29, BGRAD_VDMC = 30, BGRAD_MDAVE = 31
-    integer, parameter :: NBGRAD = 31
+    !> The AGN torus optical depth (agn_tau: the templates interpolated linearly, so the derivative is
+    !> that of the bracketing interval, one-sided at the nodes; zero outside the grid, where the
+    !> forward clamps, and for fagn = 0)
+    integer, parameter :: BGRAD_AGN_TAU = 32
+    !> The IGM optical depth's factor (igm_factor), per model as sigma_smooth (zero at z = 0 or
+    !> without IGM absorption)
+    integer, parameter :: BGRAD_IGM_FACTOR = 33
+    integer, parameter :: NBGRAD = 33
     !> The rows of the SFH tangents' parameters (opensps_sfh_tangent: SFHT_TAGE .. SFHT_SF_SLOPE)
     integer, parameter :: SFHT_ROWS(8) = [17, 18, 19, 20, 21, 22, 25, 26]
     !> Rows BGRAD_DUST1 .. BGRAD_DUSTE_GAMMA, summed per model by the attenuation adjoint (10-12 as
     !> derivatives with respect to the template's interpolation weights wq, wu, gamma), and (13) the
-    !> IGM's part of d / d zred
-    integer, parameter :: NDP = 13
+    !> IGM's part of d / d zred, (14) d / d igm_factor
+    integer, parameter :: NDP = 14
     !> Pixel chunks per model of the attenuation adjoint (each thread takes every NCHG-th pixel)
     integer, parameter :: NCHG = 64
 
@@ -278,7 +286,7 @@ contains
     !>                       With SFH parameters, params_bar includes tage, tau, const, fburst,
     !>                       tburst, sf_start, sf_trunc and sf_slope for sfh = 0, 1, 4, 5.
     !> @param[in]    mass_bar, lbol_bar Optional dL / d(mass), dL / d(lbol) (N): cotangents of those
-    !>                       outputs (mass_bar not with ssp_ops: status 2).
+    !>                       outputs.
     !> @param[out]   weights_z_bar Optional dL / d(ssp_weights_z) (ntfull, nz, N), with ssp_weights_z
     !>                       (weights_bar is then zero). With
     !>                       ssp_ops, params_bar includes the IMF's imf1, imf2, imf3, vdmc and mdave.
@@ -314,7 +322,7 @@ contains
         ! Gradients: the band fluxes of the magnitudes, and each column's magnitude redshift
         real(WP), allocatable :: fbk(:,:), zcm(:), dchain(:,:)
         ! Gradients: dL / d(SSP weights) of every model, and the SFH weights' tangents (opensps_sfh_tangent)
-        real(WP), allocatable :: wbl(:,:), tw(:,:), tdw(:,:), tsc(:,:,:), lbx(:), wzbl(:,:,:)
+        real(WP), allocatable :: wbl(:,:), tw(:,:), tdw(:,:), tsc(:,:,:), lbx(:), wzbl(:,:,:), mbx(:)
         integer :: q
         ! Gradients with dust emission: the age sums before attenuate_batch replaces them; with
         ! smoothing, the spectra before it
@@ -472,12 +480,6 @@ contains
                 if (size(weights_bar, 1) < nt .or. size(weights_bar, 2) < n_mod) then
                     status = 3; return
                 end if
-            end if
-            ! Stages whose adjoints are not written yet
-            ! (SSP-level nebular emission, add_neb_emission = 2, is in the basis. The mass's cotangent
-            ! with ssp_ops would need the remnants' IMF derivatives)
-            if (present(mass_bar) .and. imf) then
-                status = 2; return
             end if
         end if
         given_w = present(ssp_weights)
@@ -1059,7 +1061,7 @@ contains
 #ifdef OMP_TARGET
             !$omp target update from(rout)
 #endif
-            allocate(wbl(nt, n_mod), lbx(n_mod))
+            allocate(wbl(nt, n_mod), lbx(n_mod), mbx(n_mod))
             if (zw) then
                 allocate(wzbl(nt, nzw, n_mod))
             else
@@ -1067,6 +1069,10 @@ contains
             end if
             lbx = 0.0_wp
             if (present(lbol_bar)) lbx = lbol_bar(1:n_mod)
+            ! (with ssp_ops the mass's cotangent goes through the operator's reverse pass, the IMF
+            ! parameters acting on the surviving mass and the remnants)
+            mbx = 0.0_wp
+            if (present(mass_bar) .and. imf) mbx = mass_bar(1:n_mod)
             ! The template's interpolation weights against q_PAH, U_min and gamma (dl07_indices: linear in
             ! the bracketing interval, clamped to the grid; one-sided at the nodes)
             allocate(dchain(7, n_mod))
@@ -1108,7 +1114,7 @@ contains
                                     absorbed, ysave, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
                                     neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
                                     psets(1)%min_wave_smooth, psets(1)%max_wave_smooth, &
-                                    imf, zimf, pm, wsfh, slum, ssp_ops, lbx, zw, wzbl, &
+                                    imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzbl, &
                                     mags_bar, spec_bar, params_bar, wbl)
             else
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
@@ -1116,12 +1122,12 @@ contains
                                     absorbed, yo, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
                                     neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
                                     psets(1)%min_wave_smooth, psets(1)%max_wave_smooth, &
-                                    imf, zimf, pm, wsfh, slum, ssp_ops, lbx, zw, wzbl, &
+                                    imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzbl, &
                                     mags_bar, spec_bar, params_bar, wbl)
             end if
             ! The mass output's cotangent: mass = sum over ages of w_k M_k (M interpolated in log Z with
             ! per-model metallicity, which then adds to logzsol's row)
-            if (present(mass_bar) .and. .not. zw) then
+            if (present(mass_bar) .and. .not. zw .and. .not. imf) then
 #ifdef OMP_TARGET
                 ! (the SFH weights from the device, where it computed them; with few models the host
                 ! did, and the device copy is not current)
@@ -1161,6 +1167,13 @@ contains
                 wbl = 0.0_wp
             end if
             if (present(weights_bar)) weights_bar(1:nt, 1:n_mod) = wbl
+            ! agn_tau: the template weight's slope, 1 / (the interval's width) inside the grid, zero where
+            ! agn_indices clamps it
+            if (present(params_bar)) then
+                do m = 1, n_mod
+                    params_bar(BGRAD_AGN_TAU, m) = params_bar(BGRAD_AGN_TAU, m) * agn_tau_slope(ctx, psets(m)%agn_tau)
+                end do
+            end if
             ! The SFH parameters: dL / d theta = sum over ages of dL / d w_k  d w_k / d theta, with the
             ! weights' tangents in FP64 on the host (one model per thread)
             if (present(params_bar) .and. .not. given_w) then
@@ -1587,6 +1600,19 @@ contains
         wta = (pset%agn_tau - ctx%state%agndust_tau(ita)) / (ctx%state%agndust_tau(ita + 1) - ctx%state%agndust_tau(ita))
         wta = max(0.0_wp, min(wta, 1.0_wp))
     end subroutine agn_indices
+
+    !> d wta / d agn_tau of agn_indices: 1 / (the bracketing interval's width), zero outside the grid.
+    real(WP) function agn_tau_slope(ctx, agn_tau)
+        type(opensps_context_t), intent(in) :: ctx
+        real(WP), intent(in)             :: agn_tau
+        integer :: n, ita
+        agn_tau_slope = 0.0_wp
+        n = size(ctx%state%agndust_tau)
+        if (n < 2) return
+        if (agn_tau < ctx%state%agndust_tau(1) .or. agn_tau >= ctx%state%agndust_tau(n)) return
+        ita = max(1, min(find_interval(ctx%state%agndust_tau, agn_tau), n - 1))
+        agn_tau_slope = 1.0_wp / (ctx%state%agndust_tau(ita + 1) - ctx%state%agndust_tau(ita))
+    end function agn_tau_slope
 
     !> Interpolation indices of the Draine & Li grid in q_PAH and U_min.
     subroutine dl07_indices(ctx, pset, iq, wq, iu, wu, gam)
@@ -3230,8 +3256,8 @@ contains
     subroutine batch_backward(ctx, pbuf, n_mod, nspec, nt, nbands, zred, igm_factor, mags, fband, zcm, it_tesc, &
                               zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, yo, total, &
                               emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, neb, nb, w2, lzm, tsave, &
-                              sigma, minl, maxl, imf, zimf, pm, wsfh, slum, ssp_ops, lbx, zw, wzb_out, mags_bar, spec_bar, &
-                              params_bar, weights_bar)
+                              sigma, minl, maxl, imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzb_out, mags_bar, &
+                              spec_bar, params_bar, weights_bar)
         type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in)              :: n_mod, nspec, nt, nbands
 #if !defined(__flang__)
@@ -3263,17 +3289,19 @@ contains
         real(WP), intent(in)             :: sigma, minl, maxl   ! (the smoothing window: host modes)
         ! The IMF per model (ssp_ops): its flags, parameters, masked SFH weights, L_bol per age, operators
         logical, intent(in)              :: imf, zimf
-        real(WP), intent(in), contiguous :: pm(:,:), wsfh(:,:), slum(:,:)
+        real(WP), intent(in), contiguous :: pm(:,:), wsfh(:,:), slum(:,:), smass(:,:)
         type(ssp_opset_t), intent(inout), optional :: ssp_ops
         !> dL / d(L_bol) from the lbol output's cotangent (lbol = log10 L_bol), unscaled
         real(WP), intent(in)             :: lbx(n_mod)
+        !> dL / d(mass) from the mass output's cotangent with ssp_ops (zero otherwise), unscaled
+        real(WP), intent(in)             :: mbx(n_mod)
         ! Weights over ages and metallicities (ssp_weights_z): d L / d wz (nt, nz, N; 1 x 1 x 1 otherwise)
         logical, intent(in)              :: zw
         real(WP), intent(out), contiguous :: wzb_out(:,:,:)
         real(WP), intent(in), optional   :: mags_bar(:,:), spec_bar(:,:)
         real(WP), intent(out), optional  :: params_bar(:,:), weights_bar(:,:)
 
-        real(WP), allocatable :: fb_bar(:,:), fagn_bar(:), lsum_bar(:), w_bar(:,:), cscale(:), dpar(:,:), eb(:,:)
+        real(WP), allocatable :: fb_bar(:,:), fagn_bar(:), lsum_bar(:), w_bar(:,:), cscale(:), dpar(:,:), eb(:,:), tmbar(:)
         ! Nebular: per age and model the weights' cotangent, and per model gas_logz, gas_logu, the
         ! absorbed and escaping fractions' cotangents and the metallicity weight dz's (gneb: 5 x N)
         real(WP), allocatable :: nwb(:,:), gneb(:,:)
@@ -3296,7 +3324,7 @@ contains
         real(WP), parameter :: DMAG_DF = -2.5_wp / log(10.0_wp)
 
         ! Magnitudes -> band fluxes (host: nbands x N values); bands without a magnitude are skipped
-        allocate(fb_bar(nbands, n_mod), fagn_bar(n_mod), lsum_bar(n_mod), w_bar(nt, n_mod), cscale(n_mod), &
+        allocate(fb_bar(nbands, n_mod), fagn_bar(n_mod), lsum_bar(n_mod), w_bar(nt, n_mod), cscale(n_mod), tmbar(n_mod), &
                  dpar(NDP, n_mod), gw(nspec, 2 * n_mod), part(NDP, NCHG, n_mod), eb(3, n_mod))
         allocate(dzo(n_mod), dzd(n_mod), jmx(n_mod), dsg(n_mod))
         dsg = 0.0_wp
@@ -3374,7 +3402,7 @@ contains
         noagn = 0.0_wp
 
 #ifdef OMP_TARGET
-        !$omp target data map(to: fb_bar, sbar, zcm, noagn, qb) map(alloc: fagn_bar, lsum_bar, gw, part, eb, nwb, lbar, jmx) &
+        !$omp target data map(to: fb_bar, sbar, zcm, noagn, qb) map(alloc: fagn_bar, lsum_bar, tmbar, gw, part, eb, nwb, lbar, jmx) &
         !$omp& map(from: w_bar, dpar, gneb, dzo)
 #endif
         associate (g => ctx%state%batch)
@@ -3394,12 +3422,13 @@ contains
         end if
         if (any_agn) then
             call backward_agn(n_mod, nspec, ntau, pbuf, agn_on, ita, wta, lsum, ctx%state%agndust_spec, tdiff, gw, &
-                              fagn_bar, lsum_bar)
+                              fagn_bar, lsum_bar, tmbar)
         else
             fagn_bar = 0.0_wp
             lsum_bar = 0.0_wp
+            tmbar = 0.0_wp
 #ifdef OMP_TARGET
-            !$omp target update to(fagn_bar, lsum_bar)
+            !$omp target update to(fagn_bar, lsum_bar, tmbar)
 #endif
         end if
         ! The lbol output's cotangent joins L_bol's (lbol = log10 L_bol; zero where the forward floors it)
@@ -3483,7 +3512,7 @@ contains
 #endif
             call ssp_batch_age_sums_adjoint(ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &
                                             ssp_ops, zlo, zhi, dz, pm, wsfh, it_tesc, nb%nt_neb, nb%whlylim, nb%fesc, &
-                                            gw, slum, lsum_bar, qb, wbi, imfb, fescb, zbi)
+                                            gw, slum, lsum_bar, qb, wbi, imfb, fescb, zbi, smass, mbx / cscale)
             do m = 1, n_mod
                 w_bar(:, m) = wbi(:, m)
                 if (ntn > 0) w_bar(1:ntn, m) = w_bar(1:ntn, m) + nwb(1:ntn, m)
@@ -3496,7 +3525,7 @@ contains
         end if
         end associate
 #ifdef OMP_TARGET
-        !$omp target update from(fagn_bar)
+        !$omp target update from(fagn_bar, tmbar)
         !$omp end target data
 #endif
         if (.not. ctx%on_device) call batch_grid_release(ctx%state%batch)
@@ -3518,6 +3547,9 @@ contains
                 params_bar(BGRAD_LOGZSOL, m) = gneb(5, m) * dchain(7, m) * cscale(m)
                 params_bar(BGRAD_ZRED, m) = (dzo(m) + dpar(13, m)) * cscale(m) + dzd(m)
                 params_bar(BGRAD_SIGMA_SMOOTH, m) = dsg(m) * cscale(m)
+                ! (agn_tau: d L / d wta here; compute_csp_batch applies d wta / d agn_tau)
+                params_bar(BGRAD_AGN_TAU, m) = tmbar(m) * cscale(m)
+                params_bar(BGRAD_IGM_FACTOR, m) = dpar(14, m) * cscale(m)
                 if (imf) params_bar(BGRAD_IMF1:BGRAD_MDAVE, m) = imfb(:, m) * cscale(m)
             end do
         end if
@@ -3671,7 +3703,8 @@ contains
     !> Adjoint of add_agn_batch: per model, s = sum over pixels of S_bar tmpl T_diff (compensated
     !> at FP32 kernel precision); fagn_bar = L_bol s, lsum_bar = fagn s (zero where the forward
     !> floors L_bol). S_bar passes through unchanged.
-    subroutine backward_agn(n_mod, nspec, ntau, pbuf, agn_on, ita, wta, lsum, agndust_spec, tdiff, gw, fagn_bar, lsum_bar)
+    subroutine backward_agn(n_mod, nspec, ntau, pbuf, agn_on, ita, wta, lsum, agndust_spec, tdiff, gw, fagn_bar, lsum_bar, &
+                            tmb)
         integer, intent(in)              :: n_mod, nspec, ntau
 #if !defined(__flang__)
         type(params), intent(in), target :: pbuf(n_mod)
@@ -3683,20 +3716,23 @@ contains
         real(WP), intent(in)             :: wta(n_mod), lsum(n_mod), agndust_spec(nspec, ntau)
         real(KP), intent(in)             :: tdiff(:,:), gw(nspec, 2 * n_mod)
         real(WP), intent(out)            :: fagn_bar(n_mod), lsum_bar(n_mod)
+        !> d L / d wta (the template's interpolation weight): L_bol fagn sum(S_bar (tmpl_hi - tmpl_lo) T_d)
+        real(WP), intent(out)            :: tmb(n_mod)
 
         integer  :: m, i
-        real(KP) :: sk, ck, term, tsum
+        real(KP) :: sk, ck, term, tsum, sd, cd
         real(WP) :: lb
         type(params_core), pointer :: pl
 
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do private(i, sk, ck, term, tsum, lb, pl)
+        !$omp target teams distribute parallel do private(i, sk, ck, term, tsum, sd, cd, lb, pl)
 #elif defined(_OPENMP)
-        !$omp parallel do private(i, sk, ck, term, tsum, lb, pl)
+        !$omp parallel do private(i, sk, ck, term, tsum, sd, cd, lb, pl)
 #endif
         do m = 1, n_mod
             fagn_bar(m) = 0.0_wp
             lsum_bar(m) = 0.0_wp
+            tmb(m) = 0.0_wp
             if (agn_on(m)) then
 #if !defined(__flang__)
                 pl => pbuf(m)%params_core
@@ -3705,12 +3741,19 @@ contains
 #endif
                 sk = 0.0_KP
                 ck = 0.0_KP
+                sd = 0.0_KP
+                cd = 0.0_KP
                 do i = 1, nspec
                     term = gw(i, n_mod + m) * real((1.0_wp - wta(m)) * agndust_spec(i, ita(m)) + &
                                                    wta(m) * agndust_spec(i, ita(m) + 1), KP) * tdiff(i, m) - ck
                     tsum = sk + term
                     ck = (tsum - sk) - term
                     sk = tsum
+                    term = gw(i, n_mod + m) * real(agndust_spec(i, ita(m) + 1) - agndust_spec(i, ita(m)), KP) * &
+                           tdiff(i, m) - cd
+                    tsum = sd + term
+                    cd = (tsum - sd) - term
+                    sd = tsum
                 end do
                 if (lsum(m) > SAFE_FLOOR) then
                     lb = log10(lsum(m))
@@ -3719,6 +3762,7 @@ contains
                     lb = 0.0_wp
                 end if
                 fagn_bar(m) = 10.0_wp**lb * real(sk, WP)
+                tmb(m) = 10.0_wp**lb * pl%fagn * real(sd, WP)
             end if
         end do
     end subroutine backward_agn
@@ -4161,6 +4205,8 @@ contains
                 if (em) apre = apre + dl07_shape(ctx, i, iq_m, wq_m, iu_m, wu_m, gam_m) * td * rk
                 dtz = igm_tau_dz(ctx%state%spec_lambda(max(i, jmx_m)), 1.0_wp + pl%zred)
                 d(13) = -ga * apre * real(pl%igm_factor * dtz, KP)
+                ! igm_factor: d T_IGM / d factor = -tau T_IGM, tau as the forward (capped below jmx)
+                d(14) = -ga * apre * real(igm_tau(ctx%state%spec_lambda(max(i, jmx_m)), 1.0_wp + pl%zred), KP)
             end if
             ! The curve's derivatives
             lk = real(ltab(i), KP)

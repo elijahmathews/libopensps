@@ -24,7 +24,9 @@ program test_csp_batch_grad
     !> - every smoothing mode (the device operator, the host modes);
     !> - weights over ages and metallicities (ssp_weights_z): d L / d(weights) along a random direction
     !>   and for single entries, and the dust, AGN and redshift rows;
-    !> - unsupported stages return status 2.
+    !> - with the IMF and the metallicity free per model (an operator per metallicity), the IMF rows,
+    !>   logzsol and the mass output through the operator's reverse pass;
+    !> - agn_tau and igm_factor.
     !> The spectra are linear in the weights and in fagn, so the differences are exact up to rounding
     !> and the curvature of the magnitudes (log10 of the band fluxes). FP64 builds are the
     !> validation (roadmap priority 4); FP32 builds check the same with differences sized for FP32.
@@ -39,7 +41,8 @@ program test_csp_batch_grad
                                  BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, &
                                  BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
                                  BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, &
-                                 BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, NBGRAD
+                                 BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, BGRAD_AGN_TAU, &
+                                 BGRAD_IGM_FACTOR, NBGRAD
     use opensps_ssp, only: generate_ssp_grid
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build
     use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free
@@ -66,6 +69,9 @@ program test_csp_batch_grad
     real(WP), parameter :: H_LIN = 0.5_wp
     !> Magnitude cotangents only on bands within MAG_RANGE of the model's brightest
     real(WP), parameter :: MAG_RANGE = 10.0_wp
+    !> Absolute floor of the fagn checks' relative differences: the loss's rounding over a step of 1e-5
+    !> is ~1e-8 absolute (measured: smaller steps make it larger), against fagn gradients down to ~1e-3
+    real(WP), parameter :: FAGN_FLOOR = 1.0e-2_wp
     !> Dust parameters (nonlinear): steps and tolerances of their finite differences
     !> FP32: the loss's spectrum part is not linear in them, so FP32 builds check interior points
     !> only (central differences at h = 1e-2: the offload builds' host fallback sums the forward in
@@ -74,6 +80,8 @@ program test_csp_batch_grad
     real(WP), parameter :: H_DUST = 1.0e-5_wp, H_DUST32 = 1.0e-2_wp
     !> (FP64: 3e-5, the central differences' rounding being ~1e-6 absolute against the floor of 0.1)
     real(WP), parameter :: DUST_RTOL = 3.0e-5_wp, DUST_RTOL32 = 2.0e-2_wp
+    !> (FP64, rows one-sided at their bound 0: see check_dust)
+    real(WP), parameter :: DUST_RTOL_BOUND = 3.0e-4_wp
     !> Per-model redshifts, off round values: at z = 0.5 (or 2, 3) many observed pixels fall exactly on
     !> rest-frame pixels, where the resampled spectrum has a kink in z (the gradient there is
     !> one-sided, central differences average the two sides)
@@ -173,7 +181,6 @@ program test_csp_batch_grad
     call check_grad(1, 0.0_wp, 0, 0, .true., "Kroupa IMF free (ssp_ops), z = 0, nebular, dust emission, weight matrix")
     call set_int('add_dust_emission', 0)
     call set_int('add_neb_emission', 0)
-    call check_unsupported()
     use_ops = .false.
     call ssp_opset_free(opset)
     call set_int('imf_type', 1)
@@ -191,6 +198,19 @@ program test_csp_batch_grad
     call check_weights_z(4, 0.513_wp, "Kriek & Conroy, z = 0.513, IGM, dust emission, AGN")
     call set_int('add_dust_emission', 0)
     call check_weights_z(1, 0.0_wp, "Cardelli et al., z = 0, AGN")
+    ! The IMF and the metallicity free per model: an operator per metallicity (Kroupa slopes, logzsol)
+    call set_int('imf_type', 2)
+    call build_opset_all()
+    use_ops = .true.
+    call set_int('add_neb_emission', 1)
+    call set_int('add_dust_emission', 1)
+    call check_grad(4, 0.513_wp, 1, 1, .false., "Kroupa IMF and logzsol free (ssp_ops), z = 0.513, IGM, nebular, " // &
+                    "dust emission, AGN, SFH")
+    call set_int('add_dust_emission', 0)
+    call set_int('add_neb_emission', 0)
+    use_ops = .false.
+    call ssp_opset_free(opset)
+    call set_int('imf_type', 1)
 
     call print_summary_line("Batched CSP gradients", total_tests - total_failures, total_tests)
     call tap_finish()
@@ -225,6 +245,27 @@ contains
         call ssp_opset_build(ops, opset)
     end subroutine build_opset
 
+    !> An operator per metallicity of the context (the IMF and the metallicity free per model).
+    subroutine build_opset_all()
+        type(PARAMS) :: pset
+        type(ssp_operator_t), allocatable :: ops(:)
+        integer :: z
+        call set_model(1, 0.0_wp)
+        allocate(ops(ctx%state%nz))
+        do z = 1, ctx%state%nz
+            call set_int('zmet', z)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pset)
+            call opensps_context_set_pset(ctx, pset)
+            call ssp_operator_build(ctx, pset, ops(z))
+        end do
+        call set_int('zmet', 10)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        call opensps_context_set_pset(ctx, pset)
+        call ssp_opset_build(ops, opset)
+    end subroutine build_opset_all
+
     !> compute_csp_batch, with the operator set when use_ops.
     subroutine cb(psets, mags, status, spec, ssp_weights, mags_bar, spec_bar, params_bar, weights_bar)
         type(PARAMS), intent(in) :: psets(:)
@@ -233,7 +274,7 @@ contains
         real(WP), intent(out), optional :: spec(:, :), params_bar(:, :), weights_bar(:, :)
         real(WP), intent(in), optional :: ssp_weights(:, :), mags_bar(:, :), spec_bar(:, :)
         logical :: grad
-        ! (the mass and lbol cotangents with the gradients, when drawn; the mass's not with ssp_ops)
+        ! (the mass and lbol cotangents with the gradients, when drawn)
         grad = (present(params_bar) .or. present(weights_bar)) .and. allocated(lbar_mass)
         if (use_wz .and. grad) then
             call compute_csp_batch(ctx, psets, mags, status, spec=spec, ssp_weights_z=wzg, mags_bar=mags_bar, &
@@ -244,7 +285,7 @@ contains
         else if (use_ops .and. grad) then
             call compute_csp_batch(ctx, psets, mags, status, spec=spec, ssp_weights=ssp_weights, ssp_ops=opset, &
                                    mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, weights_bar=weights_bar, &
-                                   mass=last_mass, lbol=last_lbol, lbol_bar=lbar_lbol)
+                                   mass=last_mass, lbol=last_lbol, mass_bar=lbar_mass, lbol_bar=lbar_lbol)
         else if (use_ops) then
             call compute_csp_batch(ctx, psets, mags, status, spec=spec, ssp_weights=ssp_weights, ssp_ops=opset, &
                                    mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, weights_bar=weights_bar, &
@@ -337,7 +378,11 @@ contains
         call set_float('imf1', 1.1_wp + 0.07_wp * m)
         call set_float('imf2', 2.1_wp + 0.05_wp * m)
         call set_float('imf3', 2.2_wp + 0.09_wp * m)
-        call set_float('agn_tau', 5.0_wp + 15.0_wp * mod(m, 8))
+        ! (inside the torus grid's intervals, 5 10 20 30 40 60 80 100 150: 21.7 - 96.7)
+        call set_float('agn_tau', 6.7_wp + 15.0_wp * mod(m, 8))
+        ! (the IGM's factor: one value for the batch, as the common IGM table takes it; a finite
+        ! difference of one model's factor runs the per-model IGM)
+        call set_float('igm_factor', 1.3_wp)
         call set_float('sigma_smooth', smooth_sigma)
         call set_float('zred', zred)
     end subroutine set_model
@@ -350,7 +395,7 @@ contains
         type(PARAMS) :: psets(N_MOD), pp(N_MOD)
         real(WP), allocatable :: mags(:, :), spec(:, :), mbar(:, :), sbar(:, :), pbar(:, :), wbar(:, :), wbar2(:, :)
         real(WP), allocatable :: w(:, :), wp_(:, :), wm(:, :), dir(:, :), t1(:), t2(:)
-        real(WP) :: lp, lm, l0, l3, g_fd, g_ad, h, worst, scale
+        real(WP) :: lp, lm, l0, l3, g_fd, g_ad, h, worst, scale, gwa, gwf
         integer :: m, b, i, k, nspec, nbands, nt, status, k0
 
         call print_group("Gradients: " // label)
@@ -394,7 +439,7 @@ contains
         ! (the mass and lbol outputs: O(1) cotangents; the mass's not with ssp_ops)
         allocate(lbar_mass(N_MOD), lbar_lbol(N_MOD))
         do m = 1, N_MOD
-            lbar_mass(m) = merge(0.0_wp, 2.0_wp * urand() - 1.0_wp, use_ops)
+            lbar_mass(m) = 2.0_wp * urand() - 1.0_wp
             lbar_lbol(m) = 2.0_wp * urand() - 1.0_wp
         end do
         if (given_w) then
@@ -456,7 +501,7 @@ contains
 
         ! d L / d fagn, model by model
         if (agn == 1) then
-            worst = 0.0_wp
+            worst = 0.0_wp; k0 = 0; gwa = 0.0_wp; gwf = 0.0_wp
             do m = 1, N_MOD
                 pp = psets
                 if (psets(m)%fagn > 0.0_wp) then
@@ -480,10 +525,16 @@ contains
                     g_fd = (-11.0_wp * l0 + 18.0_wp * lp - 9.0_wp * lm + 2.0_wp * l3) / (6.0_wp * h)
                 end if
                 g_ad = pbar(BGRAD_FAGN, m)
-                worst = max(worst, abs(g_ad - g_fd) / max(abs(g_fd), 1.0e-3_wp))
+                if (abs(g_ad - g_fd) / max(abs(g_fd), FAGN_FLOOR) > worst) then
+                    worst = abs(g_ad - g_fd) / max(abs(g_fd), FAGN_FLOOR)
+                    k0 = m
+                    gwa = g_ad
+                    gwf = g_fd
+                end if
             end do
-            write(*, '(A,ES10.2)') "# fagn: worst relative difference ", worst
-            ! (FP64: the differences' rounding reaches ~1e-6 where an AGN dominates a band: 5e-6)
+            write(*, '(A,ES10.2,A,I0,A,2ES16.8)') "# fagn: worst relative difference ", worst, " (model ", k0, "): ", gwa, gwf
+            ! (FP64: the differences' rounding reaches ~1e-6 where an AGN dominates a band: 5e-6; the floor
+            ! FAGN_FLOOR: the loss's rounding over the step, ~1e-8 absolute, against gradients down to ~1e-3)
             call assert_true(worst <= merge(GRAD_RTOL, 5.0e-6_wp, LINEAR_ONLY), "d L / d fagn against finite differences", &
                              total_tests, total_failures)
         end if
@@ -707,7 +758,7 @@ contains
                 call loss(pp, w, .true., lm)
             end block
             g_fd = (lp - lm) / (2.0_wp * h)
-            worst = max(worst, abs(pbar(BGRAD_FAGN, m) - g_fd) / max(abs(g_fd), 1.0e-3_wp))
+            worst = max(worst, abs(pbar(BGRAD_FAGN, m) - g_fd) / max(abs(g_fd), FAGN_FLOOR))
         end do
         write(*, '(A,ES10.2)') "# fagn: worst relative difference ", worst
         call assert_true(worst <= merge(GRAD_RTOL, 5.0e-6_wp, LINEAR_ONLY), "d L / d fagn (ssp_weights_z)", &
@@ -721,22 +772,23 @@ contains
         type(PARAMS), intent(in) :: psets(:)
         real(WP), intent(in) :: w(:, :), pbar(:, :)
         logical, intent(in) :: given_w
-        integer, parameter :: NQ = 27
+        integer, parameter :: NQ = 29
         integer, parameter :: ROWS(NQ) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
                                           BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, &
                                           BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, &
                                           BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, BGRAD_FBURST, BGRAD_TBURST, &
                                           BGRAD_SF_START, BGRAD_ZRED, BGRAD_SF_TRUNC, BGRAD_SF_SLOPE, BGRAD_IMF1, &
-                                          BGRAD_IMF2, BGRAD_IMF3]
+                                          BGRAD_IMF2, BGRAD_IMF3, BGRAD_AGN_TAU, BGRAD_IGM_FACTOR]
         character(len=12), parameter :: NAMES(NQ) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
                                                      'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb', &
                                                      'duste_qpah', 'duste_umin', 'duste_gamma', 'gas_logz', 'gas_logu', &
                                                      'logzsol', 'tage', 'tau', 'const', 'fburst', 'tburst', 'sf_start', &
-                                                     'zred', 'sf_trunc', 'sf_slope', 'imf1', 'imf2', 'imf3']
+                                                     'zred', 'sf_trunc', 'sf_slope', 'imf1', 'imf2', 'imf3', 'agn_tau', &
+                                                     'igm_factor']
         type(PARAMS) :: pp(size(psets))
         real(WP) :: g_fd(NQ, size(psets)), lp, lm, l0, l3, x, h, worst(NQ), gmax
         integer :: q, m, worst_m(NQ)
-        logical :: bound
+        logical :: bound, bnd(NQ, size(psets))
 
         do q = 1, NQ
             do m = 1, size(psets)
@@ -744,6 +796,7 @@ contains
                 x = get_par(pp(m), q)
                 ! Parameters at their bound 0 (masses of dust, fractions): one-sided, second order
                 bound = q /= 4 .and. q /= 5 .and. q /= 8 .and. q /= 9 .and. q /= 15 .and. q /= 24 .and. x <= 0.0_wp
+                bnd(q, m) = bound
                 ! (sf_trunc = 0: no truncation, not a bound of a continuous parameter; not checked)
                 if (q == 23 .and. x <= 0.0_wp) then
                     g_fd(q, m) = pbar(ROWS(q), m)
@@ -814,6 +867,13 @@ contains
                 ! 1e-7 - 2e-4)
                 if (q == 22 .and. .not. LINEAR_ONLY) x = 0.01_wp * abs(pbar(ROWS(q), m) - g_fd(q, m)) / &
                                                           max(abs(g_fd(q, m)), 1.0_wp)
+                ! (One-sided at a bound 0, FP64: tolerance DUST_RTOL_BOUND. The attenuation curves extrapolated
+                ! below ~100 A (Calzetti's polynomial, power laws) reach 1e5 - 1e7 per unit dust, so L, through
+                ! the spectrum there and the energy balance, varies on dust2 and dust3 scales of ~1e-6 near 0.
+                ! Measured with Kriek & Conroy, dust3 = 0: the third-order differences converge to the
+                ! adjoint, 8.1074e-3 at h = 1e-6, 8.1241e-3 at 1e-7, against 8.1279e-3, until rounding takes
+                ! over below 1e-8)
+                if (bnd(q, m) .and. .not. LINEAR_ONLY) x = x * DUST_RTOL / DUST_RTOL_BOUND
                 if (x > worst(q)) then
                     worst(q) = x
                     worst_m(q) = m
@@ -858,7 +918,9 @@ contains
         case (24); get_par = p%sf_slope
         case (25); get_par = p%imf1
         case (26); get_par = p%imf2
-        case default; get_par = p%imf3
+        case (27); get_par = p%imf3
+        case (28); get_par = p%agn_tau
+        case default; get_par = p%igm_factor
         end select
     end function get_par
 
@@ -893,7 +955,9 @@ contains
         case (24); p%sf_slope = x
         case (25); p%imf1 = x
         case (26); p%imf2 = x
-        case default; p%imf3 = x
+        case (27); p%imf3 = x
+        case (28); p%agn_tau = x
+        case default; p%igm_factor = x
         end select
     end subroutine set_par
 
@@ -937,24 +1001,6 @@ contains
         if (seed < 0) seed = seed + 2147483647
         urand = real(seed, WP) / 2147483647.0_wp
     end function urand
-
-    !> Gradients with stages whose adjoints are not written: status 2 (the mass output's cotangent
-    !> with the IMF free per model; called with the operator set built).
-    subroutine check_unsupported()
-        type(PARAMS) :: psets(1)
-        real(WP), allocatable :: mags(:, :), pbar(:, :)
-        real(WP) :: mbar(1)
-        integer :: status
-
-        call print_group("Gradients: unsupported stages")
-        allocate(mags(ctx%state%nbands, 1), pbar(NBGRAD, 1))
-        call set_model(1, 0.0_wp)
-        call opensps_context_prepare_pset(ctx)
-        call opensps_context_get_pset(ctx, psets(1))
-        mbar = 1.0_wp
-        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=opset, mags_bar=mags, params_bar=pbar, mass_bar=mbar)
-        call assert_true(status == 2, "mass_bar with ssp_ops: status 2", total_tests, total_failures)
-    end subroutine check_unsupported
 
     subroutine set_int(key, value)
         character(len=*), intent(in) :: key
