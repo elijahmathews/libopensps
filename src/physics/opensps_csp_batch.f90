@@ -2931,6 +2931,10 @@ contains
     !>   S = IGM * A + L fagn tmpl T_diff:  fagn_bar = L sum(S_bar tmpl T_diff), L_bar = fagn sum(...)
     !>   A = (young a_young + old T_old) D:  young_bar = A_bar a_young D, old_bar = A_bar T_old D
     !>   young / old = basis . w (split at dust_tesc), L = sum(w L_age):  w_bar = basis^T y_bar + L_bar L_age
+    !> Each model's cotangents are divided by their largest magnitude (cscale) before they are
+    !> stored at kernel precision, and the results multiplied by it in FP64: the gradient of a
+    !> magnitude of a nearly dark band (1 / F) overflows FP32 otherwise (rule 5 of
+    !> doc/MIXED_PRECISION.md).
     !> On entry yo holds nothing the backward needs (no dust emission); it is used as work space:
     !> yo(:, 1:N) the gradient of fobs, then of the young sums; yo(:, N+1:2N) the gradient of the
     !> final spectrum, then of the old sums. Long sums at FP32 kernel precision are compensated.
@@ -2954,14 +2958,14 @@ contains
         real(WP), intent(in), optional   :: mags_bar(:,:), spec_bar(:,:)
         real(WP), intent(out), optional  :: params_bar(:,:), weights_bar(:,:)
 
-        real(WP), allocatable :: fb_bar(:,:), fagn_bar(:), lsum_bar(:), w_bar(:,:)
+        real(WP), allocatable :: fb_bar(:,:), fagn_bar(:), lsum_bar(:), w_bar(:,:), cscale(:)
         real(KP), allocatable :: sbar(:,:)
         integer  :: m, b, nzb
         logical  :: have_s
         real(WP), parameter :: DMAG_DF = -2.5_wp / log(10.0_wp)
 
         ! Magnitudes -> band fluxes (host: nbands x N values); bands without a magnitude are skipped
-        allocate(fb_bar(nbands, n_mod), fagn_bar(n_mod), lsum_bar(n_mod), w_bar(nt, n_mod))
+        allocate(fb_bar(nbands, n_mod), fagn_bar(n_mod), lsum_bar(n_mod), w_bar(nt, n_mod), cscale(n_mod))
         fb_bar = 0.0_wp
         if (present(mags_bar)) then
             do m = 1, n_mod
@@ -2972,9 +2976,17 @@ contains
             end do
         end if
         have_s = present(spec_bar)
+        do m = 1, n_mod
+            cscale(m) = maxval(abs(fb_bar(:, m)))
+            if (have_s) cscale(m) = max(cscale(m), maxval(abs(spec_bar(1:nspec, m))))
+            if (.not. (cscale(m) > 0.0_wp) .or. cscale(m) > huge(1.0_wp)) cscale(m) = 1.0_wp
+            fb_bar(:, m) = fb_bar(:, m) / cscale(m)
+        end do
         if (have_s) then
             allocate(sbar(nspec, n_mod))
-            sbar = real(spec_bar(1:nspec, 1:n_mod), KP)
+            do m = 1, n_mod
+                sbar(:, m) = real(spec_bar(1:nspec, m) / cscale(m), KP)
+            end do
         else
             allocate(sbar(1, 1))
         end if
@@ -3017,10 +3029,14 @@ contains
         if (present(params_bar)) then
             do m = 1, n_mod
                 params_bar(1:NBGRAD, m) = 0.0_wp
-                params_bar(BGRAD_FAGN, m) = fagn_bar(m)
+                params_bar(BGRAD_FAGN, m) = fagn_bar(m) * cscale(m)
             end do
         end if
-        if (present(weights_bar)) weights_bar(1:nt, 1:n_mod) = w_bar
+        if (present(weights_bar)) then
+            do m = 1, n_mod
+                weights_bar(1:nt, m) = w_bar(:, m) * cscale(m)
+            end do
+        end if
     end subroutine batch_backward
 
     !> Adjoint of the observed-frame interpolation and of the band integrals: yo(:, m) = d L /
@@ -3039,9 +3055,9 @@ contains
         real(WP) :: gv, cw, v, t
 
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(gv, cw, v, target, t, il, b)
+        !$omp target teams distribute parallel do collapse(2) private(gv, cw, v, t, il, b)
 #elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(gv, cw, v, target, t, il, b)
+        !$omp parallel do collapse(2) private(gv, cw, v, t, il, b)
 #endif
         do m = 1, n_mod
             do j = 1, nspec

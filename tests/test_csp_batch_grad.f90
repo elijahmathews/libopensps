@@ -37,7 +37,13 @@ program test_csp_batch_grad
     !> magnitudes' curvature (~h^2) and rounding (~1e-12); FP32: h = 1e-2, rounding of FP32 spectra
     !> and magnitudes (~1e-6 / h) dominates
     real(WP), parameter :: H_REL = merge(1.0e-4_wp, 1.0e-2_wp, KP == WP)
-    real(WP), parameter :: GRAD_RTOL = merge(1.0e-6_wp, 2.0e-2_wp, KP == WP)
+    real(WP), parameter :: GRAD_RTOL = merge(1.0e-6_wp, 1.0e-3_wp, KP == WP)
+    !> FP32 builds check fagn and single ages with the spectrum part of the loss alone (linear in
+    !> both), at steps H_LIN
+    logical, parameter  :: LINEAR_ONLY = KP /= WP
+    real(WP), parameter :: H_LIN = 0.5_wp
+    !> FP32: magnitude cotangents only on bands within MAG_RANGE32 of the model's brightest
+    real(WP), parameter :: MAG_RANGE32 = 30.0_wp
     real(WP), parameter :: ZLIST(N_MOD) = [0.0_wp, 0.1_wp, 0.5_wp, 1.2_wp, 2.0_wp, 3.0_wp]
     type(opensps_context_t), allocatable :: ctx
     integer :: seed = 12345
@@ -154,6 +160,11 @@ contains
             do b = 1, nbands
                 mbar(b, m) = 0.0_wp
                 if (mags(b, m) == mags(b, m)) mbar(b, m) = 2.0_wp * urand() - 1.0_wp
+                ! FP32: not the bands more than 30 mag below the brightest (as tools/compare_builds; the
+                ! IGM-blanketed bands at z = 3 reach the denormal range of FP32 spectra, where their
+                ! magnitudes are not accurate either)
+                if (KP /= WP .and. mags(b, m) > minval(mags(:, m), mask=mags(:, m) == mags(:, m)) + MAG_RANGE32) &
+                    mbar(b, m) = 0.0_wp
             end do
             scale = maxval(abs(spec(:, m)))
             do i = 1, nspec
@@ -172,37 +183,8 @@ contains
         call assert_true(status == 0, "status 0 with gradients", total_tests, total_failures)
         if (status /= 0) return
 
-        ! d L / d fagn, model by model
-        if (agn == 1) then
-            worst = 0.0_wp
-            do m = 1, N_MOD
-                pp = psets
-                if (psets(m)%fagn > 0.0_wp) then
-                    h = H_REL * psets(m)%fagn
-                    pp(m)%fagn = psets(m)%fagn + h
-                    call loss(pp, w, given_w, lp)
-                    pp(m)%fagn = psets(m)%fagn - h
-                    call loss(pp, w, given_w, lm)
-                    g_fd = (lp - lm) / (2.0_wp * h)
-                else
-                    ! One-sided at fagn = 0, second order: (-3 L(0) + 4 L(h) - L(2h)) / 2h (where the
-                    ! AGN dominates a band the magnitudes' curvature is large)
-                    h = merge(1.0e-8_wp, 1.0e-3_wp, KP == WP)
-                    call loss(pp, w, given_w, l0)
-                    pp(m)%fagn = h
-                    call loss(pp, w, given_w, lp)
-                    pp(m)%fagn = 2.0_wp * h
-                    call loss(pp, w, given_w, lm)
-                    g_fd = (-3.0_wp * l0 + 4.0_wp * lp - lm) / (2.0_wp * h)
-                end if
-                g_ad = pbar(BGRAD_FAGN, m)
-                worst = max(worst, abs(g_ad - g_fd) / max(abs(g_fd), 1.0e-3_wp))
-            end do
-            write(*, '(A,ES10.2)') "# fagn: worst relative difference ", worst
-            call assert_true(worst <= GRAD_RTOL, "d L / d fagn against finite differences", total_tests, total_failures)
-        end if
-
-        ! The weights: along a random direction (relative perturbations), and single ages
+        ! The weights along a random direction (relative perturbations, so they stay positive);
+        ! with SFH parameters, the gradient with respect to the weights they give
         if (given_w) then
             do m = 1, N_MOD
                 do k = 1, nt
@@ -219,9 +201,64 @@ contains
                 ", relative ", abs(g_ad - g_fd) / abs(g_fd)
             call assert_true(abs(g_ad - g_fd) <= GRAD_RTOL * abs(g_fd), "d L / d weights along a direction", &
                              total_tests, total_failures)
+        else
+            ! The gradient with respect to the weights the SFH parameters give equals that of the
+            ! same weights given as a matrix
+            call compute_csp_batch(ctx, psets, mags, status, ssp_weights=w, mags_bar=mbar, spec_bar=sbar, &
+                                   weights_bar=wbar2)
+            worst = maxval(abs(wbar - wbar2)) / maxval(abs(wbar2))
+            write(*, '(A,ES10.2)') "# SFH parameters vs weight matrix: ", worst
+            call assert_true(status == 0 .and. worst <= merge(1.0e-12_wp, 1.0e-5_wp, KP == WP), &
+                             "weights gradient: SFH parameters = weight matrix", total_tests, total_failures)
+        end if
 
-            ! Single ages of model 2: its oldest weighted age, its youngest, and an age with zero
-            ! weight (one-sided: weights are masses, >= 0)
+        ! FP32 builds: finite differences of FP32 magnitudes are rounding noise at any step that
+        ! keeps their curvature small, so the checks below take the spectrum part of the loss
+        ! alone, which is linear in fagn and in the weights (any step is exact up to rounding)
+        if (LINEAR_ONLY) then
+            lbar_m = 0.0_wp
+            if (given_w) then
+                call compute_csp_batch(ctx, psets, mags, status, ssp_weights=w, mags_bar=lbar_m, spec_bar=sbar, &
+                                       params_bar=pbar, weights_bar=wbar)
+            else
+                call compute_csp_batch(ctx, psets, mags, status, mags_bar=lbar_m, spec_bar=sbar, &
+                                       params_bar=pbar, weights_bar=wbar)
+            end if
+        end if
+
+        ! d L / d fagn, model by model
+        if (agn == 1) then
+            worst = 0.0_wp
+            do m = 1, N_MOD
+                pp = psets
+                if (psets(m)%fagn > 0.0_wp) then
+                    h = merge(H_LIN, H_REL, LINEAR_ONLY) * psets(m)%fagn
+                    pp(m)%fagn = psets(m)%fagn + h
+                    call loss(pp, w, given_w, lp)
+                    pp(m)%fagn = psets(m)%fagn - h
+                    call loss(pp, w, given_w, lm)
+                    g_fd = (lp - lm) / (2.0_wp * h)
+                else
+                    ! One-sided at fagn = 0, second order: (-3 L(0) + 4 L(h) - L(2h)) / 2h (where the
+                    ! AGN dominates a band the magnitudes' curvature is large)
+                    h = merge(0.1_wp, 1.0e-8_wp, LINEAR_ONLY)
+                    call loss(pp, w, given_w, l0)
+                    pp(m)%fagn = h
+                    call loss(pp, w, given_w, lp)
+                    pp(m)%fagn = 2.0_wp * h
+                    call loss(pp, w, given_w, lm)
+                    g_fd = (-3.0_wp * l0 + 4.0_wp * lp - lm) / (2.0_wp * h)
+                end if
+                g_ad = pbar(BGRAD_FAGN, m)
+                worst = max(worst, abs(g_ad - g_fd) / max(abs(g_fd), 1.0e-3_wp))
+            end do
+            write(*, '(A,ES10.2)') "# fagn: worst relative difference ", worst
+            call assert_true(worst <= GRAD_RTOL, "d L / d fagn against finite differences", total_tests, total_failures)
+        end if
+
+        ! Single ages of model 2: its oldest weighted age, its youngest, and an age with zero weight
+        ! (one-sided there: weights are masses, >= 0)
+        if (given_w) then
             worst = 0.0_wp
             m = 2
             do i = 1, 3
@@ -234,7 +271,7 @@ contains
                     k0 = findloc(w(:, m) > 0.0_wp, .false., 1, back=.true.)
                 end select
                 if (k0 < 1) cycle
-                h = merge(1.0e-5_wp, H_REL, KP == WP) * maxval(w(:, m))
+                h = merge(H_LIN, 1.0e-5_wp, LINEAR_ONLY) * maxval(w(:, m))
                 wp_ = w
                 wp_(k0, m) = w(k0, m) + h
                 call loss(psets, wp_, .true., lp)
@@ -244,7 +281,6 @@ contains
                     call loss(psets, wm, .true., lm)
                     g_fd = (lp - lm) / (2.0_wp * h)
                 else
-                    ! One-sided, second order (weights are masses, >= 0)
                     call loss(psets, w, .true., l0)
                     wm = w
                     wm(k0, m) = w(k0, m) + 2.0_wp * h
@@ -254,17 +290,8 @@ contains
                 worst = max(worst, abs(wbar(k0, m) - g_fd) / max(abs(g_fd), tiny(1.0_wp)))
             end do
             write(*, '(A,ES10.2)') "# single ages: worst relative difference ", worst
-            call assert_true(worst <= merge(1.0e-5_wp, GRAD_RTOL, KP == WP), "d L / d weight, single ages", &
+            call assert_true(worst <= merge(GRAD_RTOL, 1.0e-5_wp, LINEAR_ONLY), "d L / d weight, single ages", &
                              total_tests, total_failures)
-        else
-            ! SFH parameters: the gradient with respect to the weights they give equals that of the
-            ! same weights given as a matrix
-            call compute_csp_batch(ctx, psets, mags, status, ssp_weights=w, mags_bar=mbar, spec_bar=sbar, &
-                                   weights_bar=wbar2)
-            worst = maxval(abs(wbar - wbar2)) / maxval(abs(wbar2))
-            write(*, '(A,ES10.2)') "# SFH parameters vs weight matrix: ", worst
-            call assert_true(status == 0 .and. worst <= merge(1.0e-12_wp, 1.0e-5_wp, KP == WP), &
-                             "weights gradient: SFH parameters = weight matrix", total_tests, total_failures)
         end if
     end subroutine check_grad
 
