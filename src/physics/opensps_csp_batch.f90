@@ -113,7 +113,7 @@ module opensps_csp_batch
     public :: compute_csp_batch, batch_spectra_device, batch_spectra_host
     public :: BGRAD_FAGN, BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
               BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, &
-              BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, NBGRAD
+              BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, NBGRAD
 
     !> Rows of params_bar (compute_csp_batch's gradients): the derivative of the caller's loss with
     !> respect to each parameter of the model. The list grows as the adjoints of more stages are
@@ -129,7 +129,10 @@ module opensps_csp_batch
     integer, parameter :: BGRAD_DUSTE_QPAH = 11, BGRAD_DUSTE_UMIN = 12, BGRAD_DUSTE_GAMMA = 13
     !> Nebular emission (CLOUDY grids interpolated linearly in gas_logz and gas_logu, in log space)
     integer, parameter :: BGRAD_GAS_LOGZ = 14, BGRAD_GAS_LOGU = 15
-    integer, parameter :: NBGRAD = 15
+    !> Per-model metallicity (all metallicities' bases resident: the SSPs interpolated linearly in
+    !> log Z, not clamped; zero with one basis, where logzsol does not act in the batch)
+    integer, parameter :: BGRAD_LOGZSOL = 16
+    integer, parameter :: NBGRAD = 16
     !> Rows BGRAD_DUST1 .. BGRAD_DUSTE_GAMMA, summed per model by the attenuation adjoint (the last
     !> three as derivatives with respect to the template's interpolation weights wq, wu, gamma)
     integer, parameter :: NDP = 12
@@ -998,8 +1001,15 @@ contains
             end if
             ! The template's interpolation weights against q_PAH, U_min and gamma (dl07_indices: linear in
             ! the bracketing interval, clamped to the grid; one-sided at the nodes)
-            allocate(dchain(6, n_mod))
+            allocate(dchain(7, n_mod))
             dchain = 0.0_wp
+            ! Per-model metallicity: dz / d logzsol (metallicity_interval, not clamped)
+            if (zmode) then
+                do m = 1, n_mod
+                    dchain(7, m) = 1.0_wp / (log10(ctx%state%zlegend(zhi(m)) / ctx%state%zsol) - &
+                                             log10(ctx%state%zlegend(zlo(m)) / ctx%state%zsol))
+                end do
+            end if
             ! Nebular: gas_logz and gas_logu as get_grid_indices_weights (linear in the interval,
             ! clamped to the grid), frac_obrun as the escaping fraction (clamped to [0, 1])
             if (neb) then
@@ -3084,7 +3094,7 @@ contains
         ! U_min, gamma)
         logical, intent(in)              :: emis(n_mod)
         integer, intent(in)              :: iq(n_mod), iu(n_mod)
-        real(WP), intent(in)             :: wq(n_mod), wu(n_mod), gam(n_mod), s_abs(n_mod), s_esc(n_mod), dchain(6, n_mod)
+        real(WP), intent(in)             :: wq(n_mod), wu(n_mod), gam(n_mod), s_abs(n_mod), s_esc(n_mod), dchain(7, n_mod)
         logical, intent(in)              :: smooth   ! the forward smoothed the spectra (smooth_columns)
         ! Nebular emission (add_neb_emission = 1): its setup, and the young / old SFH weights
         logical, intent(in)              :: neb
@@ -3095,7 +3105,7 @@ contains
 
         real(WP), allocatable :: fb_bar(:,:), fagn_bar(:), lsum_bar(:), w_bar(:,:), cscale(:), dpar(:,:), eb(:,:)
         ! Nebular: per age and model the weights' cotangent, and per model gas_logz, gas_logu, the
-        ! absorbed and escaping fractions' cotangents (gneb: 4 x N)
+        ! absorbed and escaping fractions' cotangents and the metallicity weight dz's (gneb: 5 x N)
         real(WP), allocatable :: nwb(:,:), gneb(:,:)
         real(KP), allocatable :: lbar(:,:)
         integer  :: ntn
@@ -3112,7 +3122,7 @@ contains
                  dpar(NDP, n_mod), gw(nspec, 2 * n_mod), part(NDP, NCHG, n_mod), eb(3, n_mod))
         ntn = 0
         if (neb) ntn = nb%nt_neb
-        allocate(nwb(max(1, ntn), n_mod), gneb(4, n_mod))
+        allocate(nwb(max(1, ntn), n_mod), gneb(5, n_mod))
         if (neb .and. nb%lines_in_spec) then
             allocate(lbar(NEMLINE, 2 * n_mod))
         else
@@ -3245,6 +3255,7 @@ contains
                 params_bar(BGRAD_GAS_LOGU, m) = gneb(2, m) * dchain(5, m) * cscale(m)
                 params_bar(BGRAD_FRAC_OBRUN, m) = params_bar(BGRAD_FRAC_OBRUN, m) + &
                                                   (gneb(4, m) * dchain(6, m) - gneb(3, m)) * cscale(m)
+                params_bar(BGRAD_LOGZSOL, m) = gneb(5, m) * dchain(7, m) * cscale(m)
             end do
         end if
         if (present(weights_bar)) then
@@ -3719,22 +3730,24 @@ contains
         real(WP), intent(in)    :: nwb(max(1, ntn), n_mod)
         logical, intent(in)     :: zmode
         real(WP), intent(out)   :: w_bar(nt, n_mod)
-        real(WP), intent(inout) :: gneb(4, n_mod)
+        real(WP), intent(inout) :: gneb(5, n_mod)   ! (4): set here; (5): added to
 
         integer  :: m, k, i, col, zl, zh, nlim
-        real(KP) :: sk, ck, term, tsum, d, bk, ek, ce, fk
-        real(WP) :: lk, sf
-        real(WP), allocatable :: euv(:,:)
+        real(KP) :: sk, ck, term, tsum, d, bk, ek, ce, fk, dk, cd, dbk
+        real(WP) :: lk, sf, sd
+        real(WP), allocatable :: euv(:,:), zd(:,:)
 
-        allocate(euv(max(1, ntn), n_mod))
+        ! zd(k, m): with per-model metallicity, d L / d dz through age k (the basis, its EUV rows and
+        ! L_bol, interpolated in log Z)
+        allocate(euv(max(1, ntn), n_mod), zd(nt, n_mod))
 #ifdef OMP_TARGET
-        !$omp target data map(alloc: euv)
+        !$omp target data map(alloc: euv, zd)
 #endif
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(i, col, zl, zh, sk, ck, term, tsum, d, bk, lk, &
-        !$omp& ek, ce, fk, nlim)
+        !$omp& ek, ce, fk, nlim, dk, cd, dbk)
 #elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(i, col, zl, zh, sk, ck, term, tsum, d, bk, lk, ek, ce, fk, nlim)
+        !$omp parallel do collapse(2) private(i, col, zl, zh, sk, ck, term, tsum, d, bk, lk, ek, ce, fk, nlim, dk, cd, dbk)
 #endif
         do m = 1, n_mod
             do k = 1, nt
@@ -3747,6 +3760,10 @@ contains
                 ck = 0.0_KP
                 ek = 0.0_KP
                 ce = 0.0_KP
+                dk = 0.0_KP
+                cd = 0.0_KP
+                fk = 1.0_KP
+                if (k <= ntn) fk = real(fesc(m), KP)
                 zl = 1; zh = 1
                 d = 0.0_KP
                 if (zmode) then
@@ -3756,6 +3773,12 @@ contains
                 do i = 1, nspec
                     if (zmode) then
                         bk = (1.0_KP - d) * basis(i, k, zl) + d * basis(i, k, zh)
+                        dbk = basis(i, k, zh) - basis(i, k, zl)
+                        if (i <= nlim) dbk = dbk * fk
+                        term = dbk * gw(i, col) - cd
+                        tsum = dk + term
+                        cd = (tsum - dk) - term
+                        dk = tsum
                     else
                         bk = basis(i, k, 1)
                     end if
@@ -3776,20 +3799,19 @@ contains
                 else
                     lk = lum_linear(k)
                 end if
-                fk = 1.0_KP
-                if (k <= ntn) then
-                    fk = real(fesc(m), KP)
-                    euv(k, m) = real(ek, WP) * real(w2(k, col), WP)
-                end if
+                if (k <= ntn) euv(k, m) = real(ek, WP) * real(w2(k, col), WP)
                 w_bar(k, m) = real(sk, WP) + real(fk, WP) * real(ek, WP) + lsum_bar(m) * lk
+                zd(k, m) = 0.0_wp
+                if (zmode) zd(k, m) = real(w2(k, col), WP) * (real(dk, WP) + lsum_bar(m) * lk * log(10.0_wp) * &
+                                                               (blbol(k, zh) - blbol(k, zl)))
                 if (k <= ntn) w_bar(k, m) = w_bar(k, m) + nwb(k, m)
             end do
         end do
         ! d L / d fesc per model
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do private(k, sf)
+        !$omp target teams distribute parallel do private(k, sf, sd)
 #elif defined(_OPENMP)
-        !$omp parallel do private(k, sf)
+        !$omp parallel do private(k, sf, sd)
 #endif
         do m = 1, n_mod
             sf = 0.0_wp
@@ -3797,6 +3819,11 @@ contains
                 sf = sf + euv(k, m)
             end do
             gneb(4, m) = sf
+            sd = 0.0_wp
+            do k = 1, nt
+                sd = sd + zd(k, m)
+            end do
+            gneb(5, m) = gneb(5, m) + sd
         end do
 #ifdef OMP_TARGET
         !$omp end target data
@@ -3825,17 +3852,18 @@ contains
         real(KP), intent(in)    :: gauss(:,:)
         real(KP), intent(inout) :: lbar(:,:)
         real(WP), intent(out)   :: nwb(max(1, ntn), n_mod)
-        real(WP), intent(inout) :: gneb(4, n_mod)
+        real(WP), intent(inout) :: gneb(5, n_mod)   ! (1:3) and (5) set here
 
         integer  :: m, t, j, i, p, c, col, a, z0, u0
         real(KP) :: sw, sz, su, cw, cz, cu, term, tsum, val, gv
         real(WP) :: qz, lnq, c00, c01, c10, c11, ra, rb, raz, rbz, rau, rbu, lg, w1, fa
         real(WP), parameter :: LN10 = log(10.0_wp)
-        real(WP), allocatable :: tz(:,:), tu(:,:), tf(:,:)
+        real(WP), allocatable :: tz(:,:), tu(:,:), tf(:,:), tq(:,:)
 
-        allocate(tz(max(1, ntn), n_mod), tu(max(1, ntn), n_mod), tf(max(1, ntn), n_mod))
+        ! (tq: per-model metallicity, d L / d dz through Q, interpolated in log Z)
+        allocate(tz(max(1, ntn), n_mod), tu(max(1, ntn), n_mod), tf(max(1, ntn), n_mod), tq(max(1, ntn), n_mod))
 #ifdef OMP_TARGET
-        !$omp target data map(alloc: tz, tu, tf)
+        !$omp target data map(alloc: tz, tu, tf, tq)
 #endif
         ! The lines' cotangents (profiles transposed: one thread per young / old column)
         if (lines) then
@@ -3878,6 +3906,7 @@ contains
                 tz(t, m) = 0.0_wp
                 tu(t, m) = 0.0_wp
                 tf(t, m) = 0.0_wp
+                tq(t, m) = 0.0_wp
                 if (qz * fa > SAFE_FLOOR) then
                     lnq = log(qz)
                     a = ia(t)
@@ -3942,6 +3971,9 @@ contains
                     tz(t, m) = real(w2(t, col), WP) * fa * real(sz, WP)
                     tu(t, m) = real(w2(t, col), WP) * fa * real(su, WP)
                     tf(t, m) = real(w2(t, col), WP) * real(sw, WP)
+                    if (zmode) tq(t, m) = real(w2(t, col), WP) * fa * real(sw, WP) / qz * &
+                                          sign(1.0_wp, (1.0_wp - dz(m)) * q0(t, zlo(m)) + dz(m) * q0(t, zhi(m))) * &
+                                          (q0(t, zhi(m)) - q0(t, zlo(m)))
                 end if
             end do
         end do
@@ -3954,10 +3986,12 @@ contains
             gneb(1, m) = 0.0_wp
             gneb(2, m) = 0.0_wp
             gneb(3, m) = 0.0_wp
+            gneb(5, m) = 0.0_wp
             do t = 1, ntn
                 gneb(1, m) = gneb(1, m) + tz(t, m)
                 gneb(2, m) = gneb(2, m) + tu(t, m)
                 gneb(3, m) = gneb(3, m) + tf(t, m)
+                gneb(5, m) = gneb(5, m) + tq(t, m)
             end do
         end do
 #ifdef OMP_TARGET
