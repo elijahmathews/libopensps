@@ -65,6 +65,30 @@ A100; it cannot measure A100 absolute speed, TF32 or FP64 tensor-core GEMMs, and
 Compute does not support Pascal (Nsight Systems and `compute-sanitizer` do). Its FP64 runs at
 half the FP32 rate, so FP32 gains there (~2x) understate those on consumer GPUs.
 
+## On the R9700 desktop (Fedora 44, AMD Radeon AI PRO R9700)
+
+Packages (Fedora's own; no AMD repository, no `amdgpu-dkms`: the in-kernel driver supports the
+card): `rocminfo amdsmi rocm-hip-devel rocm-runtime-devel rocm-omp-devel rocm-device-libs`,
+`flang flang-runtime libomp-devel clang gcc-gfortran meson ninja-build`, and for offload builds
+also `llvm` (`llvm-offload-binary`), `clang-tools-extra` (`clang-linker-wrapper`) and `lld`
+(`ld.lld`, version 22 as flang: ROCm's own lld is LLVM 20). `rocm-smi` needs `libdrm-devel`
+(use `amd-smi`).
+
+```
+export ROCR_VISIBLE_DEVICES=GPU-<UUID of the R9700 from rocminfo>   # hides the iGPU
+D=--rocm-device-lib-path=/usr/lib64/rocm/llvm/lib/clang/20/lib/amdgcn/bitcode
+LA="['$D','-Xoffload-linker','--library-path=/usr/lib64/amdgcn-amd-amdhsa']"   # a meson list
+FC=flang CC=clang meson setup b-r9700 --buildtype=release -Daccel=omp_gpu -Dgpu_arch=gfx1201 \
+    -Dfortran_args=$D -Dc_args=$D -Dfortran_link_args="$LA" -Dc_link_args="$LA"
+OMP_TARGET_OFFLOAD=MANDATORY meson test -C b-r9700 --suite unit --suite regression --num-processes 1
+```
+
+The C sources get the offload flags too, so they need the device-library path as well; a
+comma-separated `-D..._link_args` string reaches the linker as one argument (`libompdevice` not
+found). Profiling: ROCm 7.2.4 in a container (`rocm/dev-ubuntu-24.04:7.2.4-complete`, which has
+`amdflang` and `rocprofv3`; Meson >= 1.11 for LLVM flang, `libdw1` for `rocprofv3`); there the
+builds need no extra flags.
+
 ## Session goals, in order
 
 ### 1. Baseline the existing OpenACC build on the A100
