@@ -85,6 +85,10 @@ module opensps_csp_batch
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings, batch_out_reserve, &
                                      batch_grid_release
     use, intrinsic :: iso_c_binding, only: c_ptr, c_null_ptr, c_loc, c_int, c_size_t, c_intptr_t, c_f_pointer
+#ifdef OMP_TARGET
+    use omp_lib, only: omp_target_is_present, omp_get_default_device, omp_get_num_devices, omp_get_initial_device
+    use, intrinsic :: iso_fortran_env, only: error_unit
+#endif
     use, intrinsic :: iso_fortran_env, only: int64
     use opensps_context, only: opensps_context_move_to_device
     use opensps_sfh, only: sfh_weights_core
@@ -1756,10 +1760,10 @@ contains
         real(WP), intent(in)             :: nb_wa(max(1, nb_nt_neb)), nb_dwa(max(1, nb_nt_neb)), nb_wz(n_mod)
         real(WP), intent(in)             :: nb_wu(n_mod), nb_fesc(n_mod), nb_fabs(n_mod)
         logical, intent(in)              :: nb_newr(max(1, nb_nt_neb))
-        real(WP), intent(inout)          :: nb_q0(max(1, nb_nt_neb), nzb)
-        real(KP), intent(inout)          :: nb_cy(max(1, nb_nt_neb), n_mod), nb_co(max(1, nb_nt_neb), n_mod)
-        real(WP), intent(inout)          :: nb_lns(n_mod)
-        real(KP), intent(inout)          :: nb_lum(NEMLINE, 2 * n_mod)
+        real(WP), intent(inout), target  :: nb_q0(max(1, nb_nt_neb), nzb)
+        real(KP), intent(inout), target  :: nb_cy(max(1, nb_nt_neb), n_mod), nb_co(max(1, nb_nt_neb), n_mod)
+        real(WP), intent(inout), target  :: nb_lns(n_mod)
+        real(KP), intent(inout), target  :: nb_lum(NEMLINE, 2 * n_mod)
         real(KP), intent(inout)          :: yo(nspec, 2 * n_mod)
         real(KP), intent(out)            :: eml(NEMLINE, n_mod)
         logical, intent(in)              :: q_model
@@ -1773,6 +1777,15 @@ contains
         nt_neb = nb_nt_neb
         whlylim = nb_whlylim
         xrb = nb_xrb
+#ifdef OMP_TARGET
+        ! (the work arrays of the nebular setup, mapped by compute_csp_batch for the whole call: a
+        ! missing mapping stops here instead of a kernel reading the host's unfilled copy)
+        call require_mapped(c_loc(nb_q0), 'nb%q0', 'nebular_kernels (entry)')
+        call require_mapped(c_loc(nb_cy), 'nb%cy', 'nebular_kernels (entry)')
+        call require_mapped(c_loc(nb_co), 'nb%co', 'nebular_kernels (entry)')
+        call require_mapped(c_loc(nb_lns), 'nb%lns', 'nebular_kernels (entry)')
+        call require_mapped(c_loc(nb_lum), 'nb%lum', 'nebular_kernels (entry)')
+#endif
         if (nt_neb < 1) then
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do collapse(2)
@@ -1939,6 +1952,11 @@ contains
                 end do
             end do
 
+#ifdef OMP_TARGET
+            call require_mapped(c_loc(nb_lns), 'nb%lns', 'nebular_kernels (continuum)')
+            call require_mapped(c_loc(nb_cy), 'nb%cy', 'nebular_kernels (continuum)')
+            call require_mapped(c_loc(nb_co), 'nb%co', 'nebular_kernels (continuum)')
+#endif
 #if defined(OMP_TARGET) && defined(__flang__)
             if (xrb) then
                 call nebular_continuum_tiled(n_mod, nspec, size(ctx%state%xnebem_cont, 1), nt_neb, &
@@ -2495,6 +2513,22 @@ contains
         end do
         end associate
     end subroutine add_agn_batch
+
+#ifdef OMP_TARGET
+    !> Stops with a message when the host array at p has no device mapping (a kernel would otherwise
+    !> map it implicitly and read the host's copy).
+    subroutine require_mapped(p, what, where)
+        type(c_ptr), intent(in)      :: p
+        character(len=*), intent(in) :: what, where
+        ! (only with a device in use: with the offload disabled the kernels run on the host)
+        if (omp_get_num_devices() == 0 .or. omp_get_default_device() == omp_get_initial_device()) return
+        if (omp_target_is_present(p, omp_get_default_device()) == 0) then
+            write(error_unit, '(5A)') 'compute_csp_batch: ', what, ' is not mapped on the device at ', where, &
+                ' (it is mapped for the whole call: an OpenMP runtime or mapping error)'
+            error stop 'compute_csp_batch: device mapping missing'
+        end if
+    end subroutine require_mapped
+#endif
 
     !> Interval and weight of log Z = logzsol in the context's metallicities, as
     !> compute_interpolated_ssp (the weight is not clamped: outside the grid it extrapolates).
