@@ -204,8 +204,9 @@ contains
 
     !> Isochrone sets without a nebular grid (here Geneva + BaSeL; also BaSTI) get no nebular
     !> emission with add_neb_emission = 1, as in legacy FSPS, whose tables stay zero there: every
-    !> line luminosity is zero, and spectra and magnitudes equal those of add_neb_emission = 0 bit
-    !> for bit. Runs on a context of its own (the test's context is parked meanwhile).
+    !> line luminosity is zero, the spectra equal those of add_neb_emission = 0 bit for bit and
+    !> the magnitudes to rounding (GPU band sums are not reduced in a fixed order). Runs on a
+    !> context of its own (the test's context is parked meanwhile).
     subroutine check_nebular_without_grid()
         type(opensps_context_t), allocatable :: saved
         type(PARAMS) :: psets(N_MOD)
@@ -239,8 +240,11 @@ contains
         call assert_true(all(eml == 0.0_wp), "every line luminosity is zero", total_tests, total_failures)
         call assert_true(all(spec(:, :, 1) == spec(:, :, 0)), "spectra = add_neb_emission 0, bit for bit", &
                          total_tests, total_failures)
-        call assert_true(all(mags(:, :, 1) == mags(:, :, 0)), "magnitudes = add_neb_emission 0, bit for bit", &
-                         total_tests, total_failures)
+        ! Magnitudes to rounding only: on NVIDIA GPUs the band sums are not reduced in a fixed order
+        ! (1 to 4 of the entries differ by 1e-14 mag from run to run in FP64).
+        call assert_true(all(abs(mags(:, :, 1) - mags(:, :, 0)) <= &
+                             100.0_wp * real(epsilon(1.0_KP), WP) * maxval(abs(mags(:, :, 0)))), &
+                         "magnitudes = add_neb_emission 0 to rounding", total_tests, total_failures)
         call opensps_destroy(ctx)
         deallocate(ctx)
         call move_alloc(saved, ctx)

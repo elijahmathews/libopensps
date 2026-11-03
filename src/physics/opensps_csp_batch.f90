@@ -2327,10 +2327,13 @@ contains
         integer, intent(in)   :: nspec
         real(KP), intent(out) :: ttab(nspec, 0:3)
         real(WP), intent(out) :: ltab(nspec)
-        real(WP), parameter :: R_BIG = 1.0e30_wp   ! 1/R_V = 1e-30: the terms without 1/R_V
         integer :: i, dt
 
         dt = ctx%dust_type_val
+        ! The pixel's work in a routine of its own: its locals (a params_core among them) are then
+        ! plain locals on every compiler. A BLOCK in the loop is rejected by nvfortran inside a
+        ! parallel directive, and private(<derived type>) makes LLVM flang map it through an
+        ! implicit mapper that the offload runtime rejects (illegal mapping)
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do &
         !$omp& map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ttab, ltab)
@@ -2338,9 +2341,23 @@ contains
         !$omp parallel do
 #endif
         do i = 1, nspec
-          block
-            type(params_core) :: pc
-            real(WP) :: lam, f00, f10, f01, f11
+            call attenuation_table_row(ctx, nspec, i, dt, ttab, ltab)
+        end do
+    end subroutine attenuation_tables
+
+    !> One pixel of attenuation_tables.
+    subroutine attenuation_table_row(ctx, nspec, i, dt, ttab, ltab)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)   :: nspec, i, dt
+        real(KP), intent(inout) :: ttab(nspec, 0:3)
+        real(WP), intent(inout) :: ltab(nspec)
+        real(WP), parameter :: R_BIG = 1.0e30_wp   ! 1/R_V = 1e-30: the terms without 1/R_V
+        type(params_core) :: pc
+        real(WP) :: lam, f00, f10, f01, f11
+
             lam = ctx%state%spec_lambda(i)
             ltab(i) = log(lam / V_BAND_ANGSTROMS)
             ttab(i, :) = 0.0_KP
@@ -2370,9 +2387,7 @@ contains
                 ttab(i, 0) = real(f00, KP)
                 ttab(i, 1) = real(f10 - f00, KP)
             end select
-          end block
-        end do
-    end subroutine attenuation_tables
+    end subroutine attenuation_table_row
 
     !> Attenuation and absorbed light per (pixel, model). For models with dust emission the age
     !> sums are then replaced by what the emission stages need: yo(:, m) = diffuse transmission
