@@ -111,13 +111,23 @@ module opensps_csp_batch
     private
 
     public :: compute_csp_batch, batch_spectra_device, batch_spectra_host
-    public :: BGRAD_FAGN, NBGRAD
+    public :: BGRAD_FAGN, BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
+              BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, NBGRAD
 
     !> Rows of params_bar (compute_csp_batch's gradients): the derivative of the caller's loss with
     !> respect to each parameter of the model. The list grows as the adjoints of more stages are
     !> written; callers index it by these names and size it with NBGRAD.
     integer, parameter :: BGRAD_FAGN = 1
-    integer, parameter :: NBGRAD = 1
+    !> The dust parameters of attenuate_batch (mwr and uvb act with dust_type 1 only; a caller with
+    !> dust1 = dust_ratio * dust2 chains the two rows itself)
+    integer, parameter :: BGRAD_DUST1 = 2, BGRAD_DUST2 = 3, BGRAD_DUST3 = 4, BGRAD_DUST_INDEX = 5, &
+                          BGRAD_DUST1_INDEX = 6, BGRAD_FRAC_OBRUN = 7, BGRAD_FRAC_NODUST = 8, BGRAD_MWR = 9, &
+                          BGRAD_UVB = 10
+    integer, parameter :: NBGRAD = 10
+    !> Dust rows (BGRAD_DUST1 .. BGRAD_UVB) summed per model by the attenuation adjoint
+    integer, parameter :: NDP = 9
+    !> Pixel chunks per model of the attenuation adjoint (each thread takes every NCHG-th pixel)
+    integer, parameter :: NCHG = 64
 
 #if defined(__flang__)
 #define PBUF_ARG pbuf
@@ -2694,7 +2704,7 @@ contains
 
         integer  :: m, i, dt
         real(KP) :: young, old, tau_b, tau_o, tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust
-        real(KP) :: one_m_tb, one_m_to, one_m_td, a_young, spec_sum
+        real(KP) :: one_m_tb, one_m_to, one_m_td, a_young, spec_sum, curve
         type(params_core), pointer :: pl
 
         dt = ctx%dust_type_val
@@ -2703,12 +2713,12 @@ contains
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(young, old, tau_b, tau_o, &
         !$omp& tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust, one_m_tb, one_m_to, &
-        !$omp& one_m_td, a_young, spec_sum, pl) &
+        !$omp& one_m_td, a_young, spec_sum, curve, pl) &
         !$omp& map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%dustem2_dustem, ttab, ltab)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(young, old, tau_b, tau_o, &
         !$omp& tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust, one_m_tb, one_m_to, &
-        !$omp& one_m_td, a_young, spec_sum, pl)
+        !$omp& one_m_td, a_young, spec_sum, curve, pl)
 #endif
         do m = 1, n_mod
             do i = 1, nspec
@@ -2723,7 +2733,7 @@ contains
                 frac_obrun = real(pl%frac_obrun, KP)
                 frac_nodust = real(pl%frac_nodust, KP)
                 call pixel_transmissions(ctx, pl, nspec, i, dt, ttab, ltab, tau_d, trans_d, tau_b, trans_birth, &
-                                         tau_o, trans_old)
+                                         tau_o, trans_old, curve)
                 if (agn_on(m)) tdiff(i, m) = trans_d
 
                 spec_sum = (young * trans_birth * (1.0_KP - frac_obrun) + young * frac_obrun) + old * trans_old
@@ -2758,7 +2768,8 @@ contains
     !> batch_backward): diffuse (tau_d, trans_d), birth cloud (tau_b, trans_birth) and the old
     !> stars' extra screen (tau_o, trans_old), at kernel precision from the grid-only tables
     !> (ttab, ltab: attenuation_tables_cached).
-    subroutine pixel_transmissions(ctx, pl, nspec, i, dt, ttab, ltab, tau_d, trans_d, tau_b, trans_birth, tau_o, trans_old)
+    subroutine pixel_transmissions(ctx, pl, nspec, i, dt, ttab, ltab, tau_d, trans_d, tau_b, trans_birth, tau_o, trans_old, &
+                                   curve)
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
@@ -2768,7 +2779,8 @@ contains
         real(KP), intent(in)             :: ttab(nspec, 0:3)
         real(WP), intent(in)             :: ltab(nspec)
         real(KP), intent(out)            :: tau_d, trans_d, tau_b, trans_birth, tau_o, trans_old
-        real(KP) :: curve, s1, s2, s3
+        real(KP), intent(out)            :: curve   ! the diffuse curve (tau_d / dust2, or tau_d for dust type 3)
+        real(KP) :: s1, s2, s3
         real(WP) :: ed
 
         ! Diffuse curve and optical depth (as diffuse_transmission)
@@ -2925,19 +2937,21 @@ contains
     !> magnitudes and spectra -> observed frame -> AGN -> IGM -> attenuation -> age sums. Every stage
     !> before the magnitudes is linear in the spectrum it receives, so the adjoint is the transpose of
     !> each map, evaluated with the forward's own transmissions (pixel_transmissions, recomputed) and
-    !> interpolation weights:
+    !> interpolation weights; the parameters enter through the transmissions:
     !>   F(b) = trapezoid integral of band(b) * fobs,  mag = -2.5 log10 F + const:  F_bar = -2.5 / (F ln 10) mag_bar
     !>   fobs(j) = max(v(j), 0) / lambda(j),  v(j) = (1 - t) S(il) + t S(il + 1):  scatter to S_bar
-    !>   S = IGM * A + L fagn tmpl T_diff:  fagn_bar = L sum(S_bar tmpl T_diff), L_bar = fagn sum(...)
-    !>   A = (young a_young + old T_old) D:  young_bar = A_bar a_young D, old_bar = A_bar T_old D
+    !>   S = T_IGM A + L fagn tmpl T_d:  fagn_bar = L sum(S_bar tmpl T_d), L_bar = fagn sum(...)
+    !>   A = (young a_young + old T_old) D,  a_young = T_birth (1 - frac_obrun) + frac_obrun,
+    !>   D = T_d (1 - frac_nodust) + frac_nodust:  young_bar = A_bar a_young D, old_bar = A_bar T_old D,
+    !>   and the dust parameters through T_d = exp(-dust2 curve), T_old = exp(-dust3 curve),
+    !>   T_birth = exp(-dust1 (lambda / lambda_V)^dust1_index) (atten_adjoint_chunk)
     !>   young / old = basis . w (split at dust_tesc), L = sum(w L_age):  w_bar = basis^T y_bar + L_bar L_age
     !> Each model's cotangents are divided by their largest magnitude (cscale) before they are
     !> stored at kernel precision, and the results multiplied by it in FP64: the gradient of a
     !> magnitude of a nearly dark band (1 / F) overflows FP32 otherwise (rule 5 of
-    !> doc/MIXED_PRECISION.md).
-    !> On entry yo holds nothing the backward needs (no dust emission); it is used as work space:
-    !> yo(:, 1:N) the gradient of fobs, then of the young sums; yo(:, N+1:2N) the gradient of the
-    !> final spectrum, then of the old sums. Long sums at FP32 kernel precision are compensated.
+    !> doc/MIXED_PRECISION.md). Work space gw (pixels x 2N): the gradient of fobs (1:N), of the
+    !> final spectrum (N+1:2N), then of the young (1:N) and old (N+1:2N) age sums; yo (the
+    !> forward's age sums) is read.
     subroutine batch_backward(ctx, pbuf, n_mod, nspec, nt, nbands, zred, igm_factor, mags, fband, zcm, it_tesc, &
                               zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, yo, total, &
                               mags_bar, spec_bar, params_bar, weights_bar)
@@ -2954,18 +2968,19 @@ contains
         real(WP), intent(in)             :: dz(n_mod), wta(n_mod), lsum(n_mod), lum_linear(nt)
         logical, intent(in)              :: zmode, igm, zvar, agn_on(n_mod)
         real(KP), intent(in)             :: tdiff(:,:), tau(nspec, n_mod), total(nspec, n_mod)
-        real(KP), intent(inout)          :: yo(nspec, 2 * n_mod)
+        real(KP), intent(in)             :: yo(nspec, 2 * n_mod)
         real(WP), intent(in), optional   :: mags_bar(:,:), spec_bar(:,:)
         real(WP), intent(out), optional  :: params_bar(:,:), weights_bar(:,:)
 
-        real(WP), allocatable :: fb_bar(:,:), fagn_bar(:), lsum_bar(:), w_bar(:,:), cscale(:)
-        real(KP), allocatable :: sbar(:,:)
-        integer  :: m, b, nzb
-        logical  :: have_s
+        real(WP), allocatable :: fb_bar(:,:), fagn_bar(:), lsum_bar(:), w_bar(:,:), cscale(:), dpar(:,:)
+        real(KP), allocatable :: sbar(:,:), gw(:,:), part(:,:,:)
+        integer  :: m, b, nzb, ntau
+        logical  :: have_s, any_agn
         real(WP), parameter :: DMAG_DF = -2.5_wp / log(10.0_wp)
 
         ! Magnitudes -> band fluxes (host: nbands x N values); bands without a magnitude are skipped
-        allocate(fb_bar(nbands, n_mod), fagn_bar(n_mod), lsum_bar(n_mod), w_bar(nt, n_mod), cscale(n_mod))
+        allocate(fb_bar(nbands, n_mod), fagn_bar(n_mod), lsum_bar(n_mod), w_bar(nt, n_mod), cscale(n_mod), &
+                 dpar(NDP, n_mod), gw(nspec, 2 * n_mod), part(NDP, NCHG, n_mod))
         fb_bar = 0.0_wp
         if (present(mags_bar)) then
             do m = 1, n_mod
@@ -2999,16 +3014,20 @@ contains
             call prepare_batch_grid(ctx, zred, igm_factor)
         end if
         nzb = size(ctx%state%ssp_basis_spec, 3)
+        any_agn = any(agn_on)
+        ntau = 1
+        if (any_agn) ntau = size(ctx%state%agndust_spec, 2)
 
 #ifdef OMP_TARGET
-        !$omp target data map(to: fb_bar, sbar, zcm) map(alloc: fagn_bar, lsum_bar) map(from: w_bar)
+        !$omp target data map(to: fb_bar, sbar, zcm) map(alloc: fagn_bar, lsum_bar, gw, part) &
+        !$omp& map(from: w_bar, dpar)
 #endif
         associate (g => ctx%state%batch)
         call backward_observed_frame(n_mod, nspec, nbands, fb_bar, g%bands_t, g%j_lo, g%j_hi, g%wtl, g%wl, &
-                                     ctx%state%spec_lambda, zcm, total, have_s, sbar, yo)
-        if (any(agn_on)) then
-            call backward_agn(n_mod, nspec, size(ctx%state%agndust_spec, 2), pbuf, agn_on, ita, wta, lsum, &
-                              ctx%state%agndust_spec, tdiff, yo, fagn_bar, lsum_bar)
+                                     ctx%state%spec_lambda, zcm, total, have_s, sbar, gw)
+        if (any_agn) then
+            call backward_agn(n_mod, nspec, ntau, pbuf, agn_on, ita, wta, lsum, ctx%state%agndust_spec, tdiff, gw, &
+                              fagn_bar, lsum_bar)
         else
             fagn_bar = 0.0_wp
             lsum_bar = 0.0_wp
@@ -3016,9 +3035,16 @@ contains
             !$omp target update to(fagn_bar, lsum_bar)
 #endif
         end if
-        call backward_attenuation(ctx, pbuf, n_mod, nspec, igm, zvar, g%igm_t, tau, yo)
+        if (any_agn) then
+            call backward_attenuation(ctx, pbuf, n_mod, nspec, ntau, igm, zvar, g%igm_t, tau, yo, agn_on, ita, wta, &
+                                      lsum, ctx%state%agndust_spec, gw, part, dpar)
+        else
+            ! (no AGN: a 1 x 1 placeholder for its template)
+            call backward_attenuation(ctx, pbuf, n_mod, nspec, 1, igm, zvar, g%igm_t, tau, yo, agn_on, ita, wta, &
+                                      lsum, fb_bar(1:1, 1:1), gw, part, dpar)
+        end if
         call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, ctx%state%ssp_basis_lbol, zmode, &
-                               it_tesc, zlo, zhi, dz, lum_linear, lsum_bar, yo, w_bar)
+                               it_tesc, zlo, zhi, dz, lum_linear, lsum_bar, gw, w_bar)
         end associate
 #ifdef OMP_TARGET
         !$omp target update from(fagn_bar)
@@ -3030,6 +3056,7 @@ contains
             do m = 1, n_mod
                 params_bar(1:NBGRAD, m) = 0.0_wp
                 params_bar(BGRAD_FAGN, m) = fagn_bar(m) * cscale(m)
+                params_bar(BGRAD_DUST1:BGRAD_DUST1 + NDP - 1, m) = dpar(:, m) * cscale(m)
             end do
         end if
         if (present(weights_bar)) then
@@ -3039,17 +3066,17 @@ contains
         end if
     end subroutine batch_backward
 
-    !> Adjoint of the observed-frame interpolation and of the band integrals: yo(:, m) = d L /
+    !> Adjoint of the observed-frame interpolation and of the band integrals: gw(:, m) = d L /
     !> d fobs (per pixel j, the band weights of the trapezoid rule, as band_fluxes sums them), then
-    !> yo(:, N + m) = spec_bar + the transposed interpolation (one thread per model, serial over the
+    !> gw(:, N + m) = spec_bar + the transposed interpolation (one thread per model, serial over the
     !> pixels: each rest-frame pixel collects from its observed-frame neighbours).
     subroutine backward_observed_frame(n_mod, nspec, nbands, fb_bar, bands_t, j_lo, j_hi, wtl, wl, lam, zcm, total, &
-                                       have_s, sbar, yo)
+                                       have_s, sbar, gw)
         integer, intent(in)     :: n_mod, nspec, nbands, j_lo(nbands), j_hi(nbands)
         real(WP), intent(in)    :: fb_bar(nbands, n_mod), lam(nspec), zcm(n_mod)
         real(KP), intent(in)    :: bands_t(nbands, nspec), wtl(nspec), wl(nspec), total(nspec, n_mod), sbar(:,:)
         logical, intent(in)     :: have_s
-        real(KP), intent(inout) :: yo(nspec, 2 * n_mod)
+        real(KP), intent(inout) :: gw(nspec, 2 * n_mod)
 
         integer  :: m, j, b, il
         real(WP) :: gv, cw, v, t
@@ -3073,7 +3100,7 @@ contains
                 v = (1.0_wp - t) * real(total(il, m), WP)
                 if (t /= 0.0_wp) v = v + t * real(total(il + 1, m), WP)
                 if (.not. (v > 0.0_wp)) gv = 0.0_wp
-                yo(j, m) = real(gv * real(wl(j), WP), KP)
+                gw(j, m) = real(gv * real(wl(j), WP), KP)
             end do
         end do
 
@@ -3085,15 +3112,15 @@ contains
         do m = 1, n_mod
             do j = 1, nspec
                 if (have_s) then
-                    yo(j, n_mod + m) = sbar(j, m)
+                    gw(j, n_mod + m) = sbar(j, m)
                 else
-                    yo(j, n_mod + m) = 0.0_KP
+                    gw(j, n_mod + m) = 0.0_KP
                 end if
             end do
             do j = 1, nspec
                 call frame_point(nspec, lam, zcm(m), j, il, t)
-                yo(il, n_mod + m) = yo(il, n_mod + m) + real((1.0_wp - t) * real(yo(j, m), WP), KP)
-                if (t /= 0.0_wp) yo(il + 1, n_mod + m) = yo(il + 1, n_mod + m) + real(t * real(yo(j, m), WP), KP)
+                gw(il, n_mod + m) = gw(il, n_mod + m) + real((1.0_wp - t) * real(gw(j, m), WP), KP)
+                if (t /= 0.0_wp) gw(il + 1, n_mod + m) = gw(il + 1, n_mod + m) + real(t * real(gw(j, m), WP), KP)
             end do
         end do
     end subroutine backward_observed_frame
@@ -3123,7 +3150,7 @@ contains
     !> Adjoint of add_agn_batch: per model, s = sum over pixels of S_bar tmpl T_diff (compensated
     !> at FP32 kernel precision); fagn_bar = L_bol s, lsum_bar = fagn s (zero where the forward
     !> floors L_bol). S_bar passes through unchanged.
-    subroutine backward_agn(n_mod, nspec, ntau, pbuf, agn_on, ita, wta, lsum, agndust_spec, tdiff, yo, fagn_bar, lsum_bar)
+    subroutine backward_agn(n_mod, nspec, ntau, pbuf, agn_on, ita, wta, lsum, agndust_spec, tdiff, gw, fagn_bar, lsum_bar)
         integer, intent(in)              :: n_mod, nspec, ntau
 #if !defined(__flang__)
         type(params), intent(in), target :: pbuf(n_mod)
@@ -3133,7 +3160,7 @@ contains
         logical, intent(in)              :: agn_on(n_mod)
         integer, intent(in)              :: ita(n_mod)
         real(WP), intent(in)             :: wta(n_mod), lsum(n_mod), agndust_spec(nspec, ntau)
-        real(KP), intent(in)             :: tdiff(:,:), yo(nspec, 2 * n_mod)
+        real(KP), intent(in)             :: tdiff(:,:), gw(nspec, 2 * n_mod)
         real(WP), intent(out)            :: fagn_bar(n_mod), lsum_bar(n_mod)
 
         integer  :: m, i
@@ -3158,7 +3185,7 @@ contains
                 sk = 0.0_KP
                 ck = 0.0_KP
                 do i = 1, nspec
-                    term = yo(i, n_mod + m) * real((1.0_wp - wta(m)) * agndust_spec(i, ita(m)) + &
+                    term = gw(i, n_mod + m) * real((1.0_wp - wta(m)) * agndust_spec(i, ita(m)) + &
                                                    wta(m) * agndust_spec(i, ita(m) + 1), KP) * tdiff(i, m) - ck
                     tsum = sk + term
                     ck = (tsum - sk) - term
@@ -3175,71 +3202,195 @@ contains
         end do
     end subroutine backward_agn
 
-    !> Adjoint of the IGM transmission and of attenuate_batch (without dust emission): from
-    !> S_bar in yo(:, N + m), young_bar = S_bar T_IGM a_young D into yo(:, m) and old_bar =
-    !> S_bar T_IGM T_old D into yo(:, N + m), with the forward's transmissions.
-    subroutine backward_attenuation(ctx, pbuf, n_mod, nspec, igm, zvar, igm_t, tau, yo)
+    !> Adjoint of the IGM transmission and of attenuate_batch (without dust emission): from S_bar in
+    !> gw(:, N + m), young_bar = S_bar T_IGM a_young D into gw(:, m) and old_bar = S_bar T_IGM T_old D
+    !> into gw(:, N + m), and the dust parameters' gradients dpar (NDP x N), summed per model over
+    !> NCHG chunks of pixels (atten_adjoint_chunk; one thread per model and chunk, consecutive
+    !> threads on consecutive pixels), then over the chunks in FP64.
+    subroutine backward_attenuation(ctx, pbuf, n_mod, nspec, ntau, igm, zvar, igm_t, tau, yo, agn_on, ita, wta, lsum, &
+                                    agndust_spec, gw, part, dpar)
         type(opensps_context_t), intent(in) :: ctx
-        integer, intent(in)              :: n_mod, nspec
+        integer, intent(in)              :: n_mod, nspec, ntau
 #if !defined(__flang__)
         type(params), intent(in), target :: pbuf(n_mod)
 #else
         integer(int64), intent(in), target :: pbuf(NPW, n_mod)
 #endif
-        logical, intent(in)              :: igm, zvar
-        real(KP), intent(in)             :: igm_t(nspec), tau(nspec, n_mod)
-        real(KP), intent(inout)          :: yo(nspec, 2 * n_mod)
+        logical, intent(in)              :: igm, zvar, agn_on(n_mod)
+        integer, intent(in)              :: ita(n_mod)
+        real(WP), intent(in)             :: wta(n_mod), lsum(n_mod), agndust_spec(:,:)
+        real(KP), intent(in)             :: igm_t(nspec), tau(nspec, n_mod), yo(nspec, 2 * n_mod)
+        real(KP), intent(inout)          :: gw(nspec, 2 * n_mod)
+        real(KP), intent(out)            :: part(NDP, NCHG, n_mod)
+        real(WP), intent(out)            :: dpar(NDP, n_mod)
 
-        integer  :: m, i, dt
-        real(KP) :: gs, tau_d, trans_d, tau_b, trans_birth, tau_o, trans_old, dfac, frac_obrun, frac_nodust
+        integer  :: m, c, dt, q
+        real(WP) :: sw
         type(params_core), pointer :: pl
 
         dt = ctx%dust_type_val
         associate (ttab => ctx%state%att_tab, ltab => ctx%state%att_ltab)
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(gs, tau_d, trans_d, tau_b, trans_birth, &
-        !$omp& tau_o, trans_old, dfac, frac_obrun, frac_nodust, pl) &
+        !$omp target teams distribute parallel do collapse(2) private(pl) &
         !$omp& map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%dustem2_dustem, ttab, ltab)
 #elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(gs, tau_d, trans_d, tau_b, trans_birth, &
-        !$omp& tau_o, trans_old, dfac, frac_obrun, frac_nodust, pl)
+        !$omp parallel do collapse(2) private(pl)
 #endif
         do m = 1, n_mod
-            do i = 1, nspec
+            do c = 1, NCHG
 #if !defined(__flang__)
                 pl => pbuf(m)%params_core
 #else
                 call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
-                gs = yo(i, n_mod + m)
-                if (igm .and. zvar) then
-                    if (pl%zred > SAFE_FLOOR) gs = gs * real(exp(-real(tau(i, m), WP) * pl%igm_factor), KP)
-                else if (igm) then
-                    gs = gs * igm_t(i)
-                end if
-                frac_obrun = real(pl%frac_obrun, KP)
-                frac_nodust = real(pl%frac_nodust, KP)
-                call pixel_transmissions(ctx, pl, nspec, i, dt, ttab, ltab, tau_d, trans_d, tau_b, trans_birth, &
-                                         tau_o, trans_old)
-                if (1.0_wp - pl%frac_nodust <= SAFE_FLOOR) then
-                    dfac = 1.0_KP
-                else
-                    dfac = trans_d * (1.0_KP - frac_nodust) + frac_nodust
-                end if
-                yo(i, m) = gs * (trans_birth * (1.0_KP - frac_obrun) + frac_obrun) * dfac
-                yo(i, n_mod + m) = gs * trans_old * dfac
+                call atten_adjoint_chunk(ctx, pl, n_mod, nspec, ntau, m, c, dt, ttab, ltab, igm, zvar, igm_t, tau, yo, &
+                                         agn_on(m), ita(m), wta(m), lsum(m), agndust_spec, gw, part)
             end do
         end do
         end associate
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(c, q, sw)
+#elif defined(_OPENMP)
+        !$omp parallel do private(c, q, sw)
+#endif
+        do m = 1, n_mod
+            do q = 1, NDP
+                sw = 0.0_wp
+                do c = 1, NCHG
+                    sw = sw + real(part(q, c, m), WP)
+                end do
+                dpar(q, m) = sw
+            end do
+        end do
     end subroutine backward_attenuation
+
+    !> One chunk of backward_attenuation: pixels c, c + NCHG, ... of model m. Per pixel, with
+    !> A_bar = S_bar T_IGM:
+    !>   D_bar = A_bar (young a_young + old T_old),  T_d_bar = D_bar (1 - frac_nodust) + S_bar L fagn tmpl,
+    !>   T_birth_bar = A_bar young (1 - frac_obrun) D,  T_old_bar = A_bar old D,
+    !>   frac_obrun: A_bar young (1 - T_birth) D,  frac_nodust: D_bar (1 - T_d),
+    !> and through T = exp(-tau): d T / d theta = -T d tau / d theta, with d curve / d dust_index =
+    !> curve L (power law), T1 exp(e L) + curve L (Kriek & Conroy); d curve / d uvb = T2 + T3 / R_V
+    !> and d curve / d R_V = -(T1 + uvb T3) / R_V^2 (Cardelli et al.); tau_birth = dust1 p,
+    !> p = exp(dust1_index L). At dust1 = 0 or dust3 = 0 (where the forward skips the screen) the
+    !> derivative is the one-sided one. Sums compensated at FP32 kernel precision.
+    subroutine atten_adjoint_chunk(ctx, pl, n_mod, nspec, ntau, m, c, dt, ttab, ltab, igm, zvar, igm_t, tau, yo, &
+                                   agn_m, ita_m, wta_m, lsum_m, agndust_spec, gw, part)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        type(opensps_context_t), intent(in) :: ctx
+        type(params_core), intent(in)    :: pl
+        integer, intent(in)              :: n_mod, nspec, ntau, m, c, dt, ita_m
+        real(KP), intent(in)             :: ttab(nspec, 0:3)
+        real(WP), intent(in)             :: ltab(nspec), wta_m, lsum_m, agndust_spec(nspec, ntau)
+        logical, intent(in)              :: igm, zvar, agn_m
+        real(KP), intent(in)             :: igm_t(nspec), tau(nspec, n_mod), yo(nspec, 2 * n_mod)
+        real(KP), intent(inout)          :: gw(nspec, 2 * n_mod)
+        real(KP), intent(inout)          :: part(NDP, NCHG, n_mod)
+
+        integer  :: i, q
+        real(KP) :: acc(NDP), cmp(NDP), d(NDP)
+        real(KP) :: y, o, gs, ga, tau_d, td, tau_b, tb, tau_o, to, curve, fo, fn, dfac, ay, gd, gtd, gtb, gto
+        real(KP) :: lk, pb, dc_idx, dc_mwr, dc_uvb, s1, dust2k, dust3k, term, tsum, tmpl, lagn
+        real(WP) :: lb
+        logical  :: nodust
+
+        acc = 0.0_KP
+        cmp = 0.0_KP
+        fo = real(pl%frac_obrun, KP)
+        fn = real(pl%frac_nodust, KP)
+        nodust = 1.0_wp - pl%frac_nodust > SAFE_FLOOR
+        dust2k = real(pl%dust2, KP)
+        if (dt == 3) dust2k = 1.0_KP   ! tau_d = curve
+        dust3k = real(pl%dust3, KP)
+        lagn = 0.0_KP
+        if (agn_m) then
+            lb = 0.0_wp
+            if (lsum_m > SAFE_FLOOR) lb = log10(lsum_m)
+            lagn = real(10.0_wp**lb * pl%fagn, KP)
+        end if
+        do i = c, nspec, NCHG
+            y = yo(i, m)
+            o = yo(i, n_mod + m)
+            gs = gw(i, n_mod + m)
+            ga = gs
+            if (igm .and. zvar) then
+                if (pl%zred > SAFE_FLOOR) ga = gs * real(exp(-real(tau(i, m), WP) * pl%igm_factor), KP)
+            else if (igm) then
+                ga = gs * igm_t(i)
+            end if
+            call pixel_transmissions(ctx, pl, nspec, i, dt, ttab, ltab, tau_d, td, tau_b, tb, tau_o, to, curve)
+            if (nodust) then
+                dfac = td * (1.0_KP - fn) + fn
+            else
+                dfac = 1.0_KP
+            end if
+            ay = tb * (1.0_KP - fo) + fo
+            ! The age sums' gradients
+            gw(i, m) = ga * ay * dfac
+            gw(i, n_mod + m) = ga * to * dfac
+            ! The transmissions' gradients
+            gd = ga * (y * ay + o * to)
+            gtd = 0.0_KP
+            if (nodust) gtd = gd * (1.0_KP - fn)
+            if (agn_m) then
+                tmpl = real((1.0_wp - wta_m) * agndust_spec(i, ita_m) + wta_m * agndust_spec(i, ita_m + 1), KP)
+                gtd = gtd + gs * lagn * tmpl
+            end if
+            gtb = ga * y * (1.0_KP - fo) * dfac
+            gto = ga * o * dfac
+            ! The curve's derivatives
+            lk = real(ltab(i), KP)
+            dc_idx = 0.0_KP; dc_mwr = 0.0_KP; dc_uvb = 0.0_KP
+            if (dt == 0) then
+                dc_idx = curve * lk
+            else if (dt == 4) then
+                dc_idx = ttab(i, 1) * exp_kp(pl%dust_index * ltab(i)) + curve * lk
+            else if (dt == 1) then
+                s1 = 1.0_KP / real(pl%mwr, KP)
+                dc_uvb = ttab(i, 2) + s1 * ttab(i, 3)
+                dc_mwr = -(ttab(i, 1) + real(pl%uvb, KP) * ttab(i, 3)) * s1 * s1
+            end if
+            d = 0.0_KP
+            ! dust1 and dust1_index (the birth-cloud screen)
+            pb = exp_kp(pl%dust1_index * ltab(i))
+            if (pl%dust1 <= SAFE_FLOOR .or. 1.0_wp - pl%frac_obrun <= SAFE_FLOOR) then
+                d(1) = -gtb * pb
+            else
+                d(1) = -gtb * pb * tb
+                d(5) = -gtb * real(pl%dust1, KP) * pb * lk * tb
+            end if
+            ! dust2 (diffuse; not with dust type 3, whose optical depth is the curve itself)
+            if (dt /= 3) d(2) = -gtd * td * curve
+            ! dust3 (the old stars' extra screen; one-sided at dust3 = 0, where T_old = 1)
+            d(3) = -gto * to * curve
+            ! dust_index, R_V and uvb, through the curve of both screens
+            d(4) = -(gtd * td * dust2k + gto * to * dust3k) * dc_idx
+            d(8) = -(gtd * td * dust2k + gto * to * dust3k) * dc_mwr
+            d(9) = -(gtd * td * dust2k + gto * to * dust3k) * dc_uvb
+            ! frac_obrun and frac_nodust
+            d(6) = ga * y * (1.0_KP - tb) * dfac
+            if (nodust) d(7) = gd * (1.0_KP - td)
+            do q = 1, NDP
+                term = d(q) - cmp(q)
+                tsum = acc(q) + term
+                cmp(q) = (tsum - acc(q)) - term
+                acc(q) = tsum
+            end do
+        end do
+        do q = 1, NDP
+            part(q, c, m) = acc(q)
+        end do
+    end subroutine atten_adjoint_chunk
 
     !> Adjoint of the age sums and of L_bol: w_bar(k, m) = sum over pixels of basis(:, k) times
     !> young_bar (k <= dust_tesc) or old_bar, plus lsum_bar L_bol(k) (compensated at FP32 kernel
     !> precision). Per-model metallicity: the basis interpolated as age_sums_z interpolates it.
     subroutine backward_age_sums(n_mod, nspec, nt, nzb, basis, blbol, zmode, it_tesc, zlo, zhi, dz, lum_linear, &
-                                 lsum_bar, yo, w_bar)
+                                 lsum_bar, gw, w_bar)
         integer, intent(in)     :: n_mod, nspec, nt, nzb, it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
-        real(KP), intent(in)    :: basis(nspec, nt, nzb), yo(nspec, 2 * n_mod)
+        real(KP), intent(in)    :: basis(nspec, nt, nzb), gw(nspec, 2 * n_mod)
         real(WP), intent(in)    :: blbol(nt, nzb), dz(n_mod), lum_linear(nt), lsum_bar(n_mod)
         logical, intent(in)     :: zmode
         real(WP), intent(out)   :: w_bar(nt, n_mod)
@@ -3264,7 +3415,7 @@ contains
                     d = real(dz(m), KP)
                     do i = 1, nspec
                         bk = (1.0_KP - d) * basis(i, k, zl) + d * basis(i, k, zh)
-                        term = bk * yo(i, col) - ck
+                        term = bk * gw(i, col) - ck
                         tsum = sk + term
                         ck = (tsum - sk) - term
                         sk = tsum
@@ -3272,7 +3423,7 @@ contains
                     lk = 10.0_wp**((1.0_wp - dz(m)) * blbol(k, zl) + dz(m) * blbol(k, zh))
                 else
                     do i = 1, nspec
-                        term = basis(i, k, 1) * yo(i, col) - ck
+                        term = basis(i, k, 1) * gw(i, col) - ck
                         tsum = sk + term
                         ck = (tsum - sk) - term
                         sk = tsum

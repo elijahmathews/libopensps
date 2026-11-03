@@ -6,6 +6,8 @@ program test_csp_batch_grad
     !> attenuation, age sums):
     !> - d L / d fagn per model (central differences; one-sided at fagn = 0, where the AGN stage of
     !>   the forward model switches on);
+    !> - d L / d (dust1, dust2, dust3, dust_index, dust1_index, frac_obrun, frac_nodust, mwr, uvb) per
+    !>   model (one-sided, second order, where a parameter sits at its bound 0);
     !> - d L / d(SSP weights) along a random direction (relative perturbations of the weights, so
     !>   they stay positive), and for single ages, including an age whose weight is zero;
     !> - the weights' gradient of a parametric SFH equals that of the same weights given as a matrix;
@@ -19,7 +21,9 @@ program test_csp_batch_grad
     use opensps_types, only: PARAMS
     use opensps_api, only: opensps_create, opensps_setup
     use opensps_csp, only: sfh_weights_core
-    use opensps_csp_batch, only: compute_csp_batch, BGRAD_FAGN, NBGRAD
+    use opensps_csp_batch, only: compute_csp_batch, BGRAD_FAGN, BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, &
+                                 BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, &
+                                 BGRAD_MWR, BGRAD_UVB, NBGRAD
     use opensps_ssp, only: generate_ssp_grid
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                                opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
@@ -42,8 +46,11 @@ program test_csp_batch_grad
     !> both), at steps H_LIN
     logical, parameter  :: LINEAR_ONLY = KP /= WP
     real(WP), parameter :: H_LIN = 0.5_wp
-    !> FP32: magnitude cotangents only on bands within MAG_RANGE32 of the model's brightest
-    real(WP), parameter :: MAG_RANGE32 = 30.0_wp
+    !> Magnitude cotangents only on bands within MAG_RANGE of the model's brightest
+    real(WP), parameter :: MAG_RANGE = 10.0_wp
+    !> Dust parameters (nonlinear): steps and tolerances of their finite differences
+    real(WP), parameter :: H_DUST = 1.0e-5_wp, H_DUST32 = 1.0e-2_wp
+    real(WP), parameter :: DUST_RTOL = 1.0e-5_wp, DUST_RTOL32 = 1.0e-2_wp
     real(WP), parameter :: ZLIST(N_MOD) = [0.0_wp, 0.1_wp, 0.5_wp, 1.2_wp, 2.0_wp, 3.0_wp]
     type(opensps_context_t), allocatable :: ctx
     integer :: seed = 12345
@@ -114,8 +121,10 @@ contains
         call set_float('dust2', dust2(m))
         call set_float('dust_index', dindex(m))
         call set_float('dust_tesc', merge(7.5_wp, 7.0_wp, mod(m, 2) == 0))
-        call set_float('frac_obrun', merge(0.2_wp, 0.0_wp, mod(m, 3) == 1))
-        call set_float('frac_nodust', merge(0.1_wp, 0.0_wp, mod(m, 4) == 2))
+        ! (interior values: at frac_nodust = 0 a band attenuated by ~10 mag has a curvature in
+        ! frac_nodust that no finite difference resolves)
+        call set_float('frac_obrun', 0.02_wp + 0.1_wp * mod(m, 3))
+        call set_float('frac_nodust', 0.01_wp + 0.05_wp * mod(m, 4))
         call set_float('dust3', merge(0.3_wp, 0.0_wp, m == 3))
         call set_float('mwr', merge(4.0_wp, 3.1_wp, mod(m, 2) == 1))
         call set_float('uvb', merge(0.5_wp, 1.0_wp, mod(m, 3) == 2))
@@ -160,11 +169,11 @@ contains
             do b = 1, nbands
                 mbar(b, m) = 0.0_wp
                 if (mags(b, m) == mags(b, m)) mbar(b, m) = 2.0_wp * urand() - 1.0_wp
-                ! FP32: not the bands more than 30 mag below the brightest (as tools/compare_builds; the
-                ! IGM-blanketed bands at z = 3 reach the denormal range of FP32 spectra, where their
-                ! magnitudes are not accurate either)
-                if (KP /= WP .and. mags(b, m) > minval(mags(:, m), mask=mags(:, m) == mags(:, m)) + MAG_RANGE32) &
-                    mbar(b, m) = 0.0_wp
+                ! Only bands within MAG_RANGE of the brightest: a band attenuated to nearly nothing has
+                ! a derivative that is right but local (d mag / d frac_nodust ~ unattenuated / attenuated
+                ! flux, 1e25 here), which finite differences cannot resolve; FP32 spectra of the
+                ! IGM-blanketed bands at z = 3 also reach the denormal range
+                if (mags(b, m) > minval(mags(:, m), mask=mags(:, m) == mags(:, m)) + MAG_RANGE) mbar(b, m) = 0.0_wp
             end do
             scale = maxval(abs(spec(:, m)))
             do i = 1, nspec
@@ -256,6 +265,8 @@ contains
             call assert_true(worst <= GRAD_RTOL, "d L / d fagn against finite differences", total_tests, total_failures)
         end if
 
+        call check_dust(psets, w, given_w, pbar)
+
         ! Single ages of model 2: its oldest weighted age, its youngest, and an age with zero weight
         ! (one-sided there: weights are masses, >= 0)
         if (given_w) then
@@ -294,6 +305,99 @@ contains
                              total_tests, total_failures)
         end if
     end subroutine check_grad
+
+    !> d L / d(dust parameter) of every model against finite differences of L.
+    subroutine check_dust(psets, w, given_w, pbar)
+        type(PARAMS), intent(in) :: psets(:)
+        real(WP), intent(in) :: w(:, :), pbar(:, :)
+        logical, intent(in) :: given_w
+        integer, parameter :: ROWS(9) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
+                                         BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB]
+        character(len=12), parameter :: NAMES(9) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
+                                                    'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb']
+        type(PARAMS) :: pp(size(psets))
+        real(WP) :: g_fd(9, size(psets)), lp, lm, l0, x, h, worst(9), gmax
+        integer :: q, m, worst_m(9)
+        logical :: bound
+
+        do q = 1, 9
+            do m = 1, size(psets)
+                pp = psets
+                x = get_par(pp(m), q)
+                ! Parameters at their bound 0 (masses of dust, fractions): one-sided, second order
+                bound = q /= 4 .and. q /= 5 .and. q /= 8 .and. q /= 9 .and. x <= 0.0_wp
+                h = merge(H_DUST32, H_DUST, LINEAR_ONLY) * max(abs(x), 1.0_wp)
+                if (bound) then
+                    call loss(pp, w, given_w, l0)
+                    call set_par(pp(m), q, x + h)
+                    call loss(pp, w, given_w, lp)
+                    call set_par(pp(m), q, x + 2.0_wp * h)
+                    call loss(pp, w, given_w, lm)
+                    g_fd(q, m) = (-3.0_wp * l0 + 4.0_wp * lp - lm) / (2.0_wp * h)
+                else
+                    call set_par(pp(m), q, x + h)
+                    call loss(pp, w, given_w, lp)
+                    call set_par(pp(m), q, x - h)
+                    call loss(pp, w, given_w, lm)
+                    g_fd(q, m) = (lp - lm) / (2.0_wp * h)
+                end if
+            end do
+        end do
+        ! Relative to the larger of |g_fd| and 1e-3 of the largest gradient of that model (the
+        ! differences' rounding, ~1e-8 absolute, on gradients of ~1e-5; rows that do not act, mwr and
+        ! uvb outside dust type 1, are zero both ways)
+        worst = 0.0_wp
+        worst_m = 0
+        do m = 1, size(psets)
+            gmax = maxval(abs(g_fd(:, m)))
+            do q = 1, 9
+                x = abs(pbar(ROWS(q), m) - g_fd(q, m)) / max(abs(g_fd(q, m)), 1.0e-3_wp * gmax, tiny(1.0_wp))
+                if (x > worst(q)) then
+                    worst(q) = x
+                    worst_m(q) = m
+                end if
+            end do
+        end do
+        do q = 1, 9
+            write(*, '(A,A12,A,ES10.2,A,I0,A,2ES14.6)') "# ", NAMES(q), ": worst relative difference ", worst(q), &
+                " (model ", worst_m(q), "): ", pbar(ROWS(q), max(worst_m(q), 1)), g_fd(q, max(worst_m(q), 1))
+        end do
+        call assert_true(maxval(worst) <= merge(DUST_RTOL32, DUST_RTOL, LINEAR_ONLY), &
+                         "d L / d(dust parameters) against finite differences", total_tests, total_failures)
+    end subroutine check_dust
+
+    real(WP) function get_par(p, q)
+        type(PARAMS), intent(in) :: p
+        integer, intent(in) :: q
+        select case (q)
+        case (1); get_par = p%dust1
+        case (2); get_par = p%dust2
+        case (3); get_par = p%dust3
+        case (4); get_par = p%dust_index
+        case (5); get_par = p%dust1_index
+        case (6); get_par = p%frac_obrun
+        case (7); get_par = p%frac_nodust
+        case (8); get_par = p%mwr
+        case default; get_par = p%uvb
+        end select
+    end function get_par
+
+    subroutine set_par(p, q, x)
+        type(PARAMS), intent(inout) :: p
+        integer, intent(in) :: q
+        real(WP), intent(in) :: x
+        select case (q)
+        case (1); p%dust1 = x
+        case (2); p%dust2 = x
+        case (3); p%dust3 = x
+        case (4); p%dust_index = x
+        case (5); p%dust1_index = x
+        case (6); p%frac_obrun = x
+        case (7); p%frac_nodust = x
+        case (8); p%mwr = x
+        case default; p%uvb = x
+        end select
+    end subroutine set_par
 
     !> The loss L of a batch (and, on request, its magnitudes and spectra).
     subroutine loss(psets, w, given_w, l, mags_out, spec_out)
