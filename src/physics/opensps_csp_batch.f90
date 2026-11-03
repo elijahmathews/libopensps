@@ -1115,7 +1115,9 @@ contains
             ! per-model metallicity, which then adds to logzsol's row)
             if (present(mass_bar)) then
 #ifdef OMP_TARGET
-                if (zmode) then
+                ! (the SFH weights from the device, where it computed them; with few models the host
+                ! did, and the device copy is not current)
+                if (zmode .and. .not. host_m) then
                     !$omp target update from(weights)
                 end if
 #endif
@@ -2177,7 +2179,13 @@ contains
         real(KP) :: ly, lo_
         type(params_core), pointer :: pl
 
-#ifdef OMP_TARGET
+#if defined(OMP_TARGET) && defined(__flang__)
+        ! (LLVM flang: one thread per model, the lines summed serially; the result of a parallel do
+        ! reduction nested in a teams distribute loop is lost there, which left s_line wrong on AMD GPUs)
+        !$omp target teams distribute parallel do private(si, sa, fob, fnd, pl, lo, t_lo, t_hi, curve, tau_d, &
+        !$omp& trans, td, birth, ay, ao, ly, lo_, pos) &
+        !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%nebem_line_pos)
+#elif defined(OMP_TARGET)
         !$omp target teams distribute private(si, sa, fob, fnd, pl) &
         !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%nebem_line_pos)
 #endif
@@ -2191,7 +2199,7 @@ contains
             sa = 0.0_wp
             fob = pl%frac_obrun
             fnd = pl%frac_nodust
-#ifdef OMP_TARGET
+#if defined(OMP_TARGET) && !defined(__flang__)
             !$omp parallel do reduction(+:si, sa) private(lo, t_lo, t_hi, curve, tau_d, trans, td, birth, &
             !$omp& ay, ao, ly, lo_, pos)
 #endif
@@ -3784,117 +3792,139 @@ contains
         real(KP), intent(out)            :: lbar(NEMLINE, 2 * n_mod)
         real(WP), intent(inout)          :: dpar(NDP, n_mod)
 
-        integer  :: m, i, lo, k, dt
-        real(WP) :: sb, pos, fob, fnd, fr, tpix(2), dtp(2, 4), td, dtd(4), birth, pb, ay, dfac, ly, lo_, lk
-        real(WP) :: curve, tau_d, trans, c, dc(3), d1, d2, d4, d5, d6, d7, d8, d9, s1
+        integer  :: m, dt
         type(params_core), pointer :: pl
 
         dt = ctx%dust_type_val
         associate (ttab => ctx%state%att_tab, ltab => ctx%state%att_ltab)
+        ! (the model's work in a routine of its own: its arrays are then plain locals; LLVM flang maps
+        ! private arrays of a target loop)
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do private(i, lo, k, sb, pos, fob, fnd, fr, tpix, dtp, td, dtd, birth, &
-        !$omp& pb, ay, dfac, ly, lo_, lk, curve, tau_d, trans, c, dc, d1, d2, d4, d5, d6, d7, d8, d9, s1, pl) &
+        !$omp target teams distribute parallel do private(pl) &
         !$omp& map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%nebem_line_pos, ttab, ltab)
 #elif defined(_OPENMP)
-        !$omp parallel do private(i, lo, k, sb, pos, fob, fnd, fr, tpix, dtp, td, dtd, birth, pb, ay, dfac, ly, lo_, &
-        !$omp& lk, curve, tau_d, trans, c, dc, d1, d2, d4, d5, d6, d7, d8, d9, s1, pl)
+        !$omp parallel do private(pl)
 #endif
         do m = 1, n_mod
-            do i = 1, NEMLINE
-                lbar(i, m) = 0.0_KP
-                lbar(i, n_mod + m) = 0.0_KP
-            end do
-            if (.not. emis(m)) cycle
-            sb = eb(1, m)
-            if (sb == 0.0_wp) cycle
 #if !defined(__flang__)
             pl => pbuf(m)%params_core
 #else
             call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
-            fob = pl%frac_obrun
-            fnd = pl%frac_nodust
-            d1 = 0.0_wp; d2 = 0.0_wp; d4 = 0.0_wp; d5 = 0.0_wp; d6 = 0.0_wp; d7 = 0.0_wp; d8 = 0.0_wp; d9 = 0.0_wp
-            do i = 1, NEMLINE
-                pos = ctx%state%nebem_line_pos(i)
-                ! T_d at the line (and its derivatives in dust2, dust_index, R_V, uvb: dtd(1:4))
-                td = 1.0_wp
-                dtd = 0.0_wp
-                if (1.0_wp - fnd > SAFE_FLOOR) then
-                    lo = nb_llo(i)
-                    do k = 1, 2
-                        call diffuse_transmission(ctx, pl, lo + k - 1, curve, tau_d, trans)
-                        tpix(k) = real(real(trans, KP), WP)
-                        ! The curve's derivatives from its tables (as atten_adjoint_chunk)
-                        c = real(ttab(lo + k - 1, 0), WP)
-                        dc = 0.0_wp
-                        lk = ltab(lo + k - 1)
-                        if (dt == 0) then
-                            dc(1) = curve * lk
-                        else if (dt == 4) then
-                            dc(1) = real(ttab(lo + k - 1, 1), WP) * exp(pl%dust_index * lk) + curve * lk
-                        else if (dt == 1) then
-                            s1 = 1.0_wp / pl%mwr
-                            dc(3) = real(ttab(lo + k - 1, 2), WP) + s1 * real(ttab(lo + k - 1, 3), WP)
-                            dc(2) = -(real(ttab(lo + k - 1, 1), WP) + pl%uvb * real(ttab(lo + k - 1, 3), WP)) * s1 * s1
-                        end if
-                        if (dt /= 3) then
-                            dtp(k, 1) = -tpix(k) * curve
-                            dtp(k, 2) = -tpix(k) * pl%dust2 * dc(1)
-                            dtp(k, 3) = -tpix(k) * pl%dust2 * dc(2)
-                            dtp(k, 4) = -tpix(k) * pl%dust2 * dc(3)
-                        else
-                            dtp(k, :) = 0.0_wp
-                        end if
-                    end do
-                    fr = (pos - ctx%state%spec_lambda(lo)) / (ctx%state%spec_lambda(lo + 1) - ctx%state%spec_lambda(lo))
-                    td = tpix(1) + (tpix(2) - tpix(1)) * fr
-                    dtd(:) = dtp(1, :) * (1.0_wp - fr) + dtp(2, :) * fr
-                end if
-                if (td /= td) then
-                    td = 1.0_wp
-                    dtd = 0.0_wp
-                end if
-                pb = (pos / V_BAND_ANGSTROMS)**pl%dust1_index
-                if (pl%dust1 <= SAFE_FLOOR .or. 1.0_wp - fob <= SAFE_FLOOR) then
-                    birth = 1.0_wp
-                else
-                    birth = exp(-pl%dust1 * pb)
-                end if
-                ay = birth * (1.0_wp - fob) + fob
-                dfac = 1.0_wp
-                if (1.0_wp - fnd > SAFE_FLOOR) dfac = td * (1.0_wp - fnd) + fnd
-                ly = real(nb_lum(i, m), WP)
-                lo_ = real(nb_lum(i, n_mod + m), WP)
-                lbar(i, m) = real(sb * (1.0_wp - ay * dfac), KP)
-                lbar(i, n_mod + m) = real(sb * (1.0_wp - dfac), KP)
-                ! s_line's dust derivatives (minus the attenuated lines')
-                if (1.0_wp - fnd > SAFE_FLOOR) then
-                    d2 = d2 - sb * (ly * ay + lo_) * (1.0_wp - fnd) * dtd(1)
-                    d4 = d4 - sb * (ly * ay + lo_) * (1.0_wp - fnd) * dtd(2)
-                    d8 = d8 - sb * (ly * ay + lo_) * (1.0_wp - fnd) * dtd(3)
-                    d9 = d9 - sb * (ly * ay + lo_) * (1.0_wp - fnd) * dtd(4)
-                    d7 = d7 - sb * (ly * ay + lo_) * (1.0_wp - td)
-                end if
-                d6 = d6 - sb * ly * (1.0_wp - birth) * dfac
-                if (pl%dust1 <= SAFE_FLOOR .or. 1.0_wp - fob <= SAFE_FLOOR) then
-                    d1 = d1 + sb * ly * (1.0_wp - fob) * pb * dfac
-                else
-                    d1 = d1 + sb * ly * (1.0_wp - fob) * pb * birth * dfac
-                    d5 = d5 + sb * ly * (1.0_wp - fob) * pl%dust1 * pb * log(pos / V_BAND_ANGSTROMS) * birth * dfac
-                end if
-            end do
-            dpar(1, m) = dpar(1, m) + d1
-            dpar(2, m) = dpar(2, m) + d2
-            dpar(4, m) = dpar(4, m) + d4
-            dpar(5, m) = dpar(5, m) + d5
-            dpar(6, m) = dpar(6, m) + d6
-            dpar(7, m) = dpar(7, m) + d7
-            dpar(8, m) = dpar(8, m) + d8
-            dpar(9, m) = dpar(9, m) + d9
+            call line_absorption_model(ctx, pl, n_mod, nspec, m, dt, emis(m), eb(1, m), nb_lum, nb_llo, ttab, ltab, &
+                                       lbar, dpar)
         end do
         end associate
     end subroutine backward_line_absorption
+
+    !> One model of backward_line_absorption.
+    subroutine line_absorption_model(ctx, pl, n_mod, nspec, m, dt, emis_m, sb, nb_lum, nb_llo, ttab, ltab, lbar, dpar)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        type(opensps_context_t), intent(in) :: ctx
+        type(params_core), intent(in)    :: pl
+        integer, intent(in)              :: n_mod, nspec, m, dt
+        logical, intent(in)              :: emis_m
+        real(WP), intent(in)             :: sb
+        real(KP), intent(in)             :: nb_lum(NEMLINE, 2 * n_mod)
+        integer, intent(in)              :: nb_llo(NEMLINE)
+        real(KP), intent(in)             :: ttab(nspec, 0:3)
+        real(WP), intent(in)             :: ltab(nspec)
+        real(KP), intent(inout)          :: lbar(NEMLINE, 2 * n_mod)
+        real(WP), intent(inout)          :: dpar(NDP, n_mod)
+
+        integer  :: i, lo, k
+        real(WP) :: pos, fob, fnd, fr, tpix(2), dtp(2, 4), td, dtd(4), birth, pb, ay, dfac, ly, lo_, lk
+        real(WP) :: curve, tau_d, trans, dc(3), d1, d2, d4, d5, d6, d7, d8, d9, s1
+
+        do i = 1, NEMLINE
+            lbar(i, m) = 0.0_KP
+            lbar(i, n_mod + m) = 0.0_KP
+        end do
+        if (.not. emis_m .or. sb == 0.0_wp) return
+        fob = pl%frac_obrun
+        fnd = pl%frac_nodust
+        d1 = 0.0_wp; d2 = 0.0_wp; d4 = 0.0_wp; d5 = 0.0_wp; d6 = 0.0_wp; d7 = 0.0_wp; d8 = 0.0_wp; d9 = 0.0_wp
+        do i = 1, NEMLINE
+            pos = ctx%state%nebem_line_pos(i)
+            ! T_d at the line (and its derivatives in dust2, dust_index, R_V, uvb: dtd(1:4))
+            td = 1.0_wp
+            dtd = 0.0_wp
+            if (1.0_wp - fnd > SAFE_FLOOR) then
+                lo = nb_llo(i)
+                do k = 1, 2
+                    call diffuse_transmission(ctx, pl, lo + k - 1, curve, tau_d, trans)
+                    tpix(k) = real(real(trans, KP), WP)
+                    ! The curve's derivatives from its tables (as atten_adjoint_chunk)
+                    dc = 0.0_wp
+                    lk = ltab(lo + k - 1)
+                    if (dt == 0) then
+                        dc(1) = curve * lk
+                    else if (dt == 4) then
+                        dc(1) = real(ttab(lo + k - 1, 1), WP) * exp(pl%dust_index * lk) + curve * lk
+                    else if (dt == 1) then
+                        s1 = 1.0_wp / pl%mwr
+                        dc(3) = real(ttab(lo + k - 1, 2), WP) + s1 * real(ttab(lo + k - 1, 3), WP)
+                        dc(2) = -(real(ttab(lo + k - 1, 1), WP) + pl%uvb * real(ttab(lo + k - 1, 3), WP)) * s1 * s1
+                    end if
+                    if (dt /= 3) then
+                        dtp(k, 1) = -tpix(k) * curve
+                        dtp(k, 2) = -tpix(k) * pl%dust2 * dc(1)
+                        dtp(k, 3) = -tpix(k) * pl%dust2 * dc(2)
+                        dtp(k, 4) = -tpix(k) * pl%dust2 * dc(3)
+                    else
+                        dtp(k, 1) = 0.0_wp; dtp(k, 2) = 0.0_wp; dtp(k, 3) = 0.0_wp; dtp(k, 4) = 0.0_wp
+                    end if
+                end do
+                fr = (pos - ctx%state%spec_lambda(lo)) / (ctx%state%spec_lambda(lo + 1) - ctx%state%spec_lambda(lo))
+                td = tpix(1) + (tpix(2) - tpix(1)) * fr
+                do k = 1, 4
+                    dtd(k) = dtp(1, k) * (1.0_wp - fr) + dtp(2, k) * fr
+                end do
+            end if
+            if (td /= td) then
+                td = 1.0_wp
+                dtd = 0.0_wp
+            end if
+            pb = (pos / V_BAND_ANGSTROMS)**pl%dust1_index
+            if (pl%dust1 <= SAFE_FLOOR .or. 1.0_wp - fob <= SAFE_FLOOR) then
+                birth = 1.0_wp
+            else
+                birth = exp(-pl%dust1 * pb)
+            end if
+            ay = birth * (1.0_wp - fob) + fob
+            dfac = 1.0_wp
+            if (1.0_wp - fnd > SAFE_FLOOR) dfac = td * (1.0_wp - fnd) + fnd
+            ly = real(nb_lum(i, m), WP)
+            lo_ = real(nb_lum(i, n_mod + m), WP)
+            lbar(i, m) = real(sb * (1.0_wp - ay * dfac), KP)
+            lbar(i, n_mod + m) = real(sb * (1.0_wp - dfac), KP)
+            ! s_line's dust derivatives (minus the attenuated lines')
+            if (1.0_wp - fnd > SAFE_FLOOR) then
+                d2 = d2 - sb * (ly * ay + lo_) * (1.0_wp - fnd) * dtd(1)
+                d4 = d4 - sb * (ly * ay + lo_) * (1.0_wp - fnd) * dtd(2)
+                d8 = d8 - sb * (ly * ay + lo_) * (1.0_wp - fnd) * dtd(3)
+                d9 = d9 - sb * (ly * ay + lo_) * (1.0_wp - fnd) * dtd(4)
+                d7 = d7 - sb * (ly * ay + lo_) * (1.0_wp - td)
+            end if
+            d6 = d6 - sb * ly * (1.0_wp - birth) * dfac
+            if (pl%dust1 <= SAFE_FLOOR .or. 1.0_wp - fob <= SAFE_FLOOR) then
+                d1 = d1 + sb * ly * (1.0_wp - fob) * pb * dfac
+            else
+                d1 = d1 + sb * ly * (1.0_wp - fob) * pb * birth * dfac
+                d5 = d5 + sb * ly * (1.0_wp - fob) * pl%dust1 * pb * log(pos / V_BAND_ANGSTROMS) * birth * dfac
+            end if
+        end do
+        dpar(1, m) = dpar(1, m) + d1
+        dpar(2, m) = dpar(2, m) + d2
+        dpar(4, m) = dpar(4, m) + d4
+        dpar(5, m) = dpar(5, m) + d5
+        dpar(6, m) = dpar(6, m) + d6
+        dpar(7, m) = dpar(7, m) + d7
+        dpar(8, m) = dpar(8, m) + d8
+        dpar(9, m) = dpar(9, m) + d9
+    end subroutine line_absorption_model
 
     !> Adjoint of the IGM transmission and of attenuate_batch (with the dust emission's second pass): from S_bar in
     !> gw(:, N + m), young_bar = S_bar T_IGM a_young D into gw(:, m) and old_bar = S_bar T_IGM T_old D
