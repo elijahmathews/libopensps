@@ -6,6 +6,8 @@
 #   LEGACY_SRC       legacy FSPS src/ directory (built MIST + MILES, the defaults in sps_vars.f90)
 #   LEGACY_SPS_HOME  legacy-layout data tree whose files match this fork's data/ tree
 #   OUTDIR           scratch directory (default: ./legacy_parity_out)
+# Environment: BUILD (fork build directory, default build), DATA_HOME (the fork's data root,
+#              default OPENSPS_DATA_HOME)
 
 set -euo pipefail
 
@@ -13,6 +15,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 LEGACY_SRC="$(realpath "${1:?usage: $0 LEGACY_SRC LEGACY_SPS_HOME [OUTDIR]}")"
 LEGACY_HOME="$(realpath "${2:?usage: $0 LEGACY_SRC LEGACY_SPS_HOME [OUTDIR]}")"
+DATA_HOME="$(realpath "${DATA_HOME:-${OPENSPS_DATA_HOME:?set DATA_HOME or OPENSPS_DATA_HOME to the fork data root}}")"
 OUT="$(realpath -m "${3:-legacy_parity_out}")"
 IMF_TYPE=1
 AGB_DUST=0
@@ -35,7 +38,7 @@ cp "$HERE/ssp_dump.f90" "$OUT/src/"
 
 # 2. Fork
 meson compile -C "$ROOT/${BUILD:-build}" generate_opensps_fixtures > /dev/null
-(cd "$OUT" && OPENSPS_DATA_HOME="$ROOT" SPS_HOME="$ROOT" FSPS_DATA_HOME="$ROOT" "$ROOT/${BUILD:-build}/generate_opensps_fixtures" \
+(cd "$OUT" && OPENSPS_DATA_HOME="$DATA_HOME" SPS_HOME="$DATA_HOME" FSPS_DATA_HOME="$DATA_HOME" "$ROOT/${BUILD:-build}/generate_opensps_fixtures" \
     --isoc mist --spec miles --dust DL07 --out fork_ssp.opsf \
     zmet=10 imf_type="$IMF_TYPE" add_agb_dust_model="$AGB_DUST" > fork.log 2>&1)
 
