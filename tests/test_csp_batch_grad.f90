@@ -609,7 +609,10 @@ contains
                 ! (relative to the age's own weight: a young age that dominates a UV band makes its
                 ! magnitude strongly curved in that weight)
                 if (w(k0, m) > 0.0_wp .and. .not. LINEAR_ONLY) then
-                    h = 1.0e-5_wp * w(k0, m)
+                    ! (at least 1e-2 of the model's largest weight: for the youngest age, weight 1.1e-5, a
+                    ! step of 1e-5 of its own weight moved L by 2.6e-9, where rounding of L reached 1e-4 of
+                    ! the difference with gfortran 13; 1.7e-8 is still 0.16% of that weight)
+                    h = 1.0e-5_wp * max(w(k0, m), 1.0e-2_wp * maxval(w(:, m)))
                 else
                     ! (FP32: the check is linear, so any step is exact; relative to the model's largest
                     ! weight, L changes well above the FP32 rounding of the forward's sums, which a step of
