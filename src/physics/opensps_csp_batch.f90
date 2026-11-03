@@ -97,7 +97,8 @@ module opensps_csp_batch
     use opensps_spectral_indices, only: compute_spectral_indices_columns
     use opensps_smoothing, only: apply_smoothing
     use opensps_batch_photometry, only: compute_magnitudes_columns, prepare_batch_grid, smoothing_on_device, &
-                                     prepare_smoothing_kernel, smooth_columns, smooth_columns_adjoint, distance_term_dz
+                                     prepare_smoothing_kernel, smooth_columns, smooth_columns_adjoint, distance_term_dz, &
+                                     smooth_sigma_adjoint
     use opensps_ssp, only: configure_imf_parameters
     use opensps_imf, only: imf_pack_params, IMF_NPAR, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE
     use opensps_ssp_operator, only: ssp_op_mod_signature
@@ -115,7 +116,7 @@ module opensps_csp_batch
     public :: BGRAD_FAGN, BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
               BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, &
               BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
-              BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, NBGRAD
+              BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, NBGRAD
 
     !> Rows of params_bar (compute_csp_batch's gradients): the derivative of the caller's loss with
     !> respect to each parameter of the model. The list grows as the adjoints of more stages are
@@ -141,7 +142,10 @@ module opensps_csp_batch
     !> The redshift: the observed-frame resampling and distance of the magnitudes (unless zred_mags
     !> gives their redshift), and the IGM absorption. At z = 0 (rest frame, no IGM) it is zero
     integer, parameter :: BGRAD_ZRED = 23
-    integer, parameter :: NBGRAD = 23
+    !> sigma_smooth (the device smoothing operator), per model: the batch shares one sigma, so the
+    !> row is that model's own sensitivity (a sampler with one sigma for all sums the rows)
+    integer, parameter :: BGRAD_SIGMA_SMOOTH = 24
+    integer, parameter :: NBGRAD = 24
     !> Rows BGRAD_DUST1 .. BGRAD_DUSTE_GAMMA, summed per model by the attenuation adjoint (10-12 as
     !> derivatives with respect to the template's interpolation weights wq, wu, gamma), and (13) the
     !> IGM's part of d / d zred
@@ -268,7 +272,7 @@ contains
     !>                       Gradients are not yet available (status 2) with SSP-level nebular
     !>                       emission (add_neb_emission = 2) or lines outside the spectrum with dust
     !>                       emission (nebemlineinspec = 0), the host smoothing modes (smooth_velocity = 0 or smoothspec_fast = 0), ssp_ops
-    !>                       or ssp_weights_z; sigma_smooth itself is not differentiated.
+    !>                       or ssp_weights_z.
     subroutine compute_csp_batch(ctx, psets, mags, status, spec, mass, lbol, mdust, sfr, emlines, indx, ssp_weights, &
                                  spec_young, spec_old, mass_young, mass_old, lbol_young, lbol_old, zred_mags, &
                                  ssp_weights_z, ssp_ops, mags_bar, spec_bar, params_bar, weights_bar)
@@ -300,8 +304,9 @@ contains
         ! Gradients: dL / d(SSP weights) of every model, and the SFH weights' tangents (opensps_sfh_tangent)
         real(WP), allocatable :: wbl(:,:), tw(:,:), tdw(:,:), tsc(:,:,:)
         integer :: q
-        ! Gradients with dust emission: the age sums before attenuate_batch replaces them
-        real(KP), allocatable :: ysave(:,:)
+        ! Gradients with dust emission: the age sums before attenuate_batch replaces them; with
+        ! smoothing, the spectra before it
+        real(KP), allocatable :: ysave(:,:), tsave(:,:)
         ! IMF per model (ssp_ops): IMF parameters (IMF_NPAR x N), per age and model the surviving mass
         ! and linear L_bol, the SFH weights (FP64, masked as w2), and a placeholder basis
         real(WP), allocatable :: pm(:,:), smass(:,:), slum(:,:), wsfh(:,:)
@@ -701,6 +706,11 @@ contains
         else
             allocate(ysave(1, 1))
         end if
+        if (grad .and. smooth) then
+            allocate(tsave(nspec, n_mod))
+        else
+            allocate(tsave(1, 1))
+        end if
         ! The spectra: the context's persistent batch output (on the device; columns 1:n_mod)
         call batch_out_reserve(ctx%state%batch_out, nspec, n_mod, ctx%on_device)
         ! Diffuse-dust transmission kept from the attenuation for the AGN emission
@@ -723,7 +733,7 @@ contains
 #else
         !$omp target data map(to: psets, ipk, rpk, lpk) &
 #endif
-        !$omp map(alloc: w2, wz, weights, tmp1, tmp2, yo, absorbed, tdiff, ysave) &
+        !$omp map(alloc: w2, wz, weights, tmp1, tmp2, yo, absorbed, tdiff, ysave, tsave) &
         !$omp map(from: rout, eml)
 #endif
 #ifdef OMP_TARGET
@@ -981,6 +991,19 @@ contains
             call apply_igm(n_mod, nspec, ctx%state%batch%igm_t, total)
         end if
         if (agn) call add_agn_batch(ctx, PBUF_ARG, n_mod, nspec, agn_on, ita, wta, lsum, tdiff, total)
+        if (grad .and. smooth) then
+            ! (the reverse pass of sigma_smooth needs the spectra before smoothing)
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2)
+#endif
+            do m = 1, n_mod
+                do k = 1, nspec
+                    tsave(k, m) = total(k, m)
+                end do
+            end do
+        end if
         if (smooth .and. smoothing_on_device(ctx)) then
             call smooth_columns(ctx, total, n_mod)
         else if (smooth) then
@@ -1063,13 +1086,13 @@ contains
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
                                     it_tesc, zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
                                     absorbed, ysave, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
-                                    neb, nb, w2, present(zred_mags), &
+                                    neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
                                     mags_bar, spec_bar, params_bar, wbl)
             else
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
                                     it_tesc, zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
                                     absorbed, yo, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
-                                    neb, nb, w2, present(zred_mags), &
+                                    neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
                                     mags_bar, spec_bar, params_bar, wbl)
             end if
             if (present(weights_bar)) weights_bar(1:nt, 1:n_mod) = wbl
@@ -3114,8 +3137,8 @@ contains
     !> forward's age sums) is read.
     subroutine batch_backward(ctx, pbuf, n_mod, nspec, nt, nbands, zred, igm_factor, mags, fband, zcm, it_tesc, &
                               zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, yo, total, &
-                              emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, neb, nb, w2, lzm, &
-                              mags_bar, spec_bar, params_bar, weights_bar)
+                              emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, neb, nb, w2, lzm, tsave, &
+                              sigma, mags_bar, spec_bar, params_bar, weights_bar)
         type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in)              :: n_mod, nspec, nt, nbands
 #if !defined(__flang__)
@@ -3142,6 +3165,9 @@ contains
         type(nebular_setup_t), intent(in) :: nb
         real(KP), intent(in)             :: w2(nt, 2 * n_mod)
         logical, intent(in)              :: lzm   ! the magnitudes at zred_mags (not at zred)
+        ! Smoothing: the spectra before it (nspec x N when smooth), and sigma_smooth
+        real(KP), intent(in), contiguous :: tsave(:,:)
+        real(WP), intent(in)             :: sigma
         real(WP), intent(in), optional   :: mags_bar(:,:), spec_bar(:,:)
         real(WP), intent(out), optional  :: params_bar(:,:), weights_bar(:,:)
 
@@ -3152,7 +3178,7 @@ contains
         real(KP), allocatable :: lbar(:,:)
         integer  :: ntn
         ! The redshift: the observed frame's part (dzo), the distance's (host), the IGM's pixel cap
-        real(WP), allocatable :: dzo(:), dzd(:)
+        real(WP), allocatable :: dzo(:), dzd(:), dsg(:)
         integer, allocatable  :: jmx(:)
         real(WP) :: msum_bar
         real(KP), allocatable :: sbar(:,:), gw(:,:), part(:,:,:)
@@ -3166,7 +3192,8 @@ contains
         ! Magnitudes -> band fluxes (host: nbands x N values); bands without a magnitude are skipped
         allocate(fb_bar(nbands, n_mod), fagn_bar(n_mod), lsum_bar(n_mod), w_bar(nt, n_mod), cscale(n_mod), &
                  dpar(NDP, n_mod), gw(nspec, 2 * n_mod), part(NDP, NCHG, n_mod), eb(3, n_mod))
-        allocate(dzo(n_mod), dzd(n_mod), jmx(n_mod))
+        allocate(dzo(n_mod), dzd(n_mod), jmx(n_mod), dsg(n_mod))
+        dsg = 0.0_wp
         ! The distance term (every magnitude of the model; not with zred_mags)
         dzd = 0.0_wp
         if (present(mags_bar) .and. .not. lzm) then
@@ -3238,8 +3265,12 @@ contains
                                      ctx%state%spec_lambda, zcm, total, have_s, sbar, gw, .not. lzm, dzo)
         ! The IGM's short-wavelength cap: per model, the pixel whose optical depth caps the bluer ones
         if (igm) call igm_cap_pixels(n_mod, nspec, pbuf, ctx%state%spec_lambda, jmx)
-        ! Velocity smoothing (the last stage of the spectrum): its transpose
-        if (smooth) call smooth_columns_adjoint(ctx, gw(:, n_mod + 1:2 * n_mod), n_mod)
+        ! Velocity smoothing (the last stage of the spectrum): sigma_smooth's gradient (from the
+        ! smoothed spectra's cotangents and the spectra before smoothing), then the transpose
+        if (smooth) then
+            call smooth_sigma_adjoint(ctx, sigma, tsave, gw(:, n_mod + 1:2 * n_mod), n_mod, dsg)
+            call smooth_columns_adjoint(ctx, gw(:, n_mod + 1:2 * n_mod), n_mod)
+        end if
         if (any_agn) then
             call backward_agn(n_mod, nspec, ntau, pbuf, agn_on, ita, wta, lsum, ctx%state%agndust_spec, tdiff, gw, &
                               fagn_bar, lsum_bar)
@@ -3317,6 +3348,7 @@ contains
                                                   (gneb(4, m) * dchain(6, m) - gneb(3, m)) * cscale(m)
                 params_bar(BGRAD_LOGZSOL, m) = gneb(5, m) * dchain(7, m) * cscale(m)
                 params_bar(BGRAD_ZRED, m) = (dzo(m) + dpar(13, m)) * cscale(m) + dzd(m)
+                params_bar(BGRAD_SIGMA_SMOOTH, m) = dsg(m) * cscale(m)
             end do
         end if
         if (present(weights_bar)) then

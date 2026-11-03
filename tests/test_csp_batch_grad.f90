@@ -16,6 +16,7 @@ program test_csp_batch_grad
     !> - the weights' gradient of a parametric SFH equals that of the same weights given as a matrix;
     !> - with SFH parameters, d L / d(tage, tau, const, fburst, tburst, sf_start);
     !> - d L / d zred above z = 0 (resampling, distance, IGM);
+    !> - with smoothing, d L / d sigma_smooth (shared by the batch: the sum of the models' rows);
     !> - unsupported stages return status 2.
     !> The spectra are linear in the weights and in fagn, so the differences are exact up to rounding
     !> and the curvature of the magnitudes (log10 of the band fluxes). FP64 builds are the
@@ -30,7 +31,7 @@ program test_csp_batch_grad
                                  BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, &
                                  BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, &
                                  BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
-                                 BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, NBGRAD
+                                 BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, NBGRAD
     use opensps_ssp, only: generate_ssp_grid
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                                opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
@@ -358,6 +359,25 @@ contains
         end if
 
         call check_dust(psets, w, given_w, pbar)
+
+        ! sigma_smooth: one value for the batch, so the total derivative (all models' sigma moved)
+        ! against the sum of the rows. (The forward jumps by ~3e-4 of a window's edge coefficient
+        ! where a window edge crosses a pixel, at N_SIGMA_RANGE sigma; relative steps of 1e-5 balance
+        ! those against rounding: 5e-6 measured)
+        if (smooth_sigma > 0.0_wp) then
+            h = merge(1.0e-2_wp, 1.0e-5_wp, LINEAR_ONLY) * smooth_sigma
+            pp = psets
+            pp(:)%sigma_smooth = smooth_sigma + h
+            call loss(pp, w, given_w, lp)
+            pp(:)%sigma_smooth = smooth_sigma - h
+            call loss(pp, w, given_w, lm)
+            g_fd = (lp - lm) / (2.0_wp * h)
+            g_ad = sum(pbar(BGRAD_SIGMA_SMOOTH, :))
+            write(*, '(A,2ES16.8,A,ES10.2)') "# sigma_smooth (adjoint, differences): ", g_ad, g_fd, ", relative ", &
+                abs(g_ad - g_fd) / abs(g_fd)
+            call assert_true(abs(g_ad - g_fd) <= merge(2.0e-2_wp, 1.0e-4_wp, LINEAR_ONLY) * abs(g_fd), &
+                             "d L / d sigma_smooth against finite differences", total_tests, total_failures)
+        end if
 
         ! Single ages of model 2: its oldest weighted age, its youngest, and an age with zero weight
         ! (one-sided there: weights are masses, >= 0)
