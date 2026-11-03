@@ -671,7 +671,8 @@ contains
     !>   number: k sigma sqrt(pi/2) [erf((x2 - a)/(sigma sqrt 2)) - erf((x1 - a)/(sigma sqrt 2))], a = log_mc
     !>   mass:   the same about b = a + k sigma^2, times exp(k a + k^2 sigma^2 / 2)
     !> Bins narrower than NARROW_DZ in the erf argument are integrated by Gauss-Legendre instead (no
-    !> cancellation).
+    !> cancellation); wide bins on one side of the centre take erfc differences (no cancellation in
+    !> the tails).
     pure function integrate_lognormal(m1, m2, log_mc, sigma2, mass_weighted) result(val)
 #ifdef OMP_TARGET
         !$omp declare target
@@ -706,6 +707,14 @@ contains
                 + GL_W1 * (exp(-(zc - zh * GL_X1)**2) + exp(-(zc + zh * GL_X1)**2)) &
                 + GL_W2 * (exp(-(zc - zh * GL_X2)**2) + exp(-(zc + zh * GL_X2)**2))
             val = scale * K * sig * sqrt(2.0_wp) * zh * q
+        else if (z1 >= 0.0_wp) then
+            ! Wide bins in the upper tail: erfc(z1) - erfc(z2), the same integral without the
+            ! cancellation of erf near 1 (erf(z2) - erf(z1) loses 3e-5 of the bin at z ~ 5: it put
+            ! a 1-ulp difference between device and host erf at 6.4e-10 of van Dokkum spectra)
+            val = scale * K * sig * sqrt(0.5_wp * acos(-1.0_wp)) * (erfc(z1) - erfc(z2))
+        else if (z2 <= 0.0_wp) then
+            ! (and in the lower tail, by symmetry)
+            val = scale * K * sig * sqrt(0.5_wp * acos(-1.0_wp)) * (erfc(-z2) - erfc(-z1))
         else
             val = scale * K * sig * sqrt(0.5_wp * acos(-1.0_wp)) * (erf(z2) - erf(z1))
         end if
