@@ -17,6 +17,8 @@ program test_csp_batch_grad
     !> - with SFH parameters, d L / d(tage, tau, const, fburst, tburst, sf_start, sf_trunc, sf_slope);
     !> - d L / d zred above z = 0 (resampling, distance, IGM);
     !> - with smoothing, d L / d sigma_smooth (shared by the batch: the sum of the models' rows);
+    !> - with the IMF free per model (ssp_ops), d L / d(imf1, imf2, imf3) and every other row through
+    !>   the operator's reverse pass;
     !> - unsupported stages return status 2.
     !> The spectra are linear in the weights and in fagn, so the differences are exact up to rounding
     !> and the curvature of the magnitudes (log10 of the band fluxes). FP64 builds are the
@@ -32,8 +34,10 @@ program test_csp_batch_grad
                                  BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, &
                                  BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
                                  BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, &
-                                 BGRAD_SF_SLOPE, NBGRAD
+                                 BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, NBGRAD
     use opensps_ssp, only: generate_ssp_grid
+    use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build
+    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                                opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
                                opensps_context_set_param_int, opensps_context_set_param_float
@@ -72,6 +76,9 @@ program test_csp_batch_grad
     integer :: seed = 12345
     logical :: zred_per_model = .false.
     real(WP) :: smooth_sigma = 0.0_wp   ! sigma_smooth of every model
+    !> The IMF free per model: the batch takes the operator set opset (cb)
+    logical :: use_ops = .false.
+    type(ssp_opset_t) :: opset
     !> The cotangents of the current check (the loss L is formed with them)
     real(WP), allocatable :: lbar_m(:, :), lbar_s(:, :)
 
@@ -113,6 +120,19 @@ program test_csp_batch_grad
     call set_int('add_dust_emission', 0)
     call set_int('add_neb_emission', 0)
     call check_unsupported()
+    ! The IMF free per model (Kroupa slopes through the SSP operator), with full physics
+    call set_int('imf_type', 2)
+    call build_opset()
+    use_ops = .true.
+    call set_int('add_neb_emission', 1)
+    call set_int('add_dust_emission', 1)
+    call check_grad(2, 0.513_wp, 1, 1, .false., "Kroupa IMF free (ssp_ops), z = 0.513, IGM, nebular, dust emission, AGN, SFH")
+    call check_grad(1, 0.0_wp, 0, 0, .true., "Kroupa IMF free (ssp_ops), z = 0, nebular, dust emission, weight matrix")
+    call set_int('add_dust_emission', 0)
+    call set_int('add_neb_emission', 0)
+    use_ops = .false.
+    call ssp_opset_free(opset)
+    call set_int('imf_type', 1)
     ! Per-model metallicity: every metallicity's basis resident (the SSPs interpolated in log Z)
     call opensps_setup(ctx, 0, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
     call opensps_context_move_to_device(ctx)
@@ -144,6 +164,34 @@ contains
                                               reshape(mass_ssp, [size(mass_ssp), 1]), &
                                               reshape(lbol_ssp, [size(lbol_ssp), 1]), 1)
     end subroutine build_basis
+
+    !> The operator set of the context's metallicity (zmet 10) and IMF type, for the IMF free per model.
+    subroutine build_opset()
+        type(PARAMS) :: pset
+        type(ssp_operator_t), allocatable :: ops(:)
+        call set_model(1, 0.0_wp)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        allocate(ops(1))
+        call ssp_operator_build(ctx, pset, ops(1))
+        call ssp_opset_build(ops, opset)
+    end subroutine build_opset
+
+    !> compute_csp_batch, with the operator set when use_ops.
+    subroutine cb(psets, mags, status, spec, ssp_weights, mags_bar, spec_bar, params_bar, weights_bar)
+        type(PARAMS), intent(in) :: psets(:)
+        real(WP), intent(out) :: mags(:, :)
+        integer, intent(out) :: status
+        real(WP), intent(out), optional :: spec(:, :), params_bar(:, :), weights_bar(:, :)
+        real(WP), intent(in), optional :: ssp_weights(:, :), mags_bar(:, :), spec_bar(:, :)
+        if (use_ops) then
+            call compute_csp_batch(ctx, psets, mags, status, spec=spec, ssp_weights=ssp_weights, ssp_ops=opset, &
+                                   mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, weights_bar=weights_bar)
+        else
+            call compute_csp_batch(ctx, psets, mags, status, spec=spec, ssp_weights=ssp_weights, mags_bar=mags_bar, &
+                                   spec_bar=spec_bar, params_bar=params_bar, weights_bar=weights_bar)
+        end if
+    end subroutine cb
 
     !> The bases of every metallicity of the context (per-model logzsol).
     subroutine build_basis_all()
@@ -218,6 +266,10 @@ contains
         call set_float('gas_logz', glogz(m))
         call set_float('gas_logu', glogu(m))
         call set_float('logzsol', logz(m))
+        ! (Kroupa slopes, used with the IMF free per model)
+        call set_float('imf1', 1.1_wp + 0.07_wp * m)
+        call set_float('imf2', 2.1_wp + 0.05_wp * m)
+        call set_float('imf3', 2.2_wp + 0.09_wp * m)
         call set_float('agn_tau', 5.0_wp + 15.0_wp * mod(m, 8))
         call set_float('sigma_smooth', smooth_sigma)
         call set_float('zred', zred)
@@ -273,10 +325,10 @@ contains
         lbar_m = mbar
         lbar_s = sbar
         if (given_w) then
-            call compute_csp_batch(ctx, psets, mags, status, spec=spec, ssp_weights=w, mags_bar=mbar, spec_bar=sbar, &
+            call cb(psets, mags, status, spec=spec, ssp_weights=w, mags_bar=mbar, spec_bar=sbar, &
                                    params_bar=pbar, weights_bar=wbar)
         else
-            call compute_csp_batch(ctx, psets, mags, status, spec=spec, mags_bar=mbar, spec_bar=sbar, &
+            call cb(psets, mags, status, spec=spec, mags_bar=mbar, spec_bar=sbar, &
                                    params_bar=pbar, weights_bar=wbar)
         end if
         call assert_true(status == 0, "status 0 with gradients", total_tests, total_failures)
@@ -303,7 +355,7 @@ contains
         else
             ! The gradient with respect to the weights the SFH parameters give equals that of the
             ! same weights given as a matrix
-            call compute_csp_batch(ctx, psets, mags, status, ssp_weights=w, mags_bar=mbar, spec_bar=sbar, &
+            call cb(psets, mags, status, ssp_weights=w, mags_bar=mbar, spec_bar=sbar, &
                                    weights_bar=wbar2)
             worst = maxval(abs(wbar - wbar2)) / maxval(abs(wbar2))
             write(*, '(A,ES10.2)') "# SFH parameters vs weight matrix: ", worst
@@ -317,10 +369,10 @@ contains
         if (LINEAR_ONLY) then
             lbar_m = 0.0_wp
             if (given_w) then
-                call compute_csp_batch(ctx, psets, mags, status, ssp_weights=w, mags_bar=lbar_m, spec_bar=sbar, &
+                call cb(psets, mags, status, ssp_weights=w, mags_bar=lbar_m, spec_bar=sbar, &
                                        params_bar=pbar, weights_bar=wbar)
             else
-                call compute_csp_batch(ctx, psets, mags, status, mags_bar=lbar_m, spec_bar=sbar, &
+                call cb(psets, mags, status, mags_bar=lbar_m, spec_bar=sbar, &
                                        params_bar=pbar, weights_bar=wbar)
             end if
         end if
@@ -436,17 +488,18 @@ contains
         type(PARAMS), intent(in) :: psets(:)
         real(WP), intent(in) :: w(:, :), pbar(:, :)
         logical, intent(in) :: given_w
-        integer, parameter :: NQ = 24
+        integer, parameter :: NQ = 27
         integer, parameter :: ROWS(NQ) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
                                           BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, &
                                           BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, &
                                           BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, BGRAD_FBURST, BGRAD_TBURST, &
-                                          BGRAD_SF_START, BGRAD_ZRED, BGRAD_SF_TRUNC, BGRAD_SF_SLOPE]
+                                          BGRAD_SF_START, BGRAD_ZRED, BGRAD_SF_TRUNC, BGRAD_SF_SLOPE, BGRAD_IMF1, &
+                                          BGRAD_IMF2, BGRAD_IMF3]
         character(len=12), parameter :: NAMES(NQ) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
                                                      'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb', &
                                                      'duste_qpah', 'duste_umin', 'duste_gamma', 'gas_logz', 'gas_logu', &
                                                      'logzsol', 'tage', 'tau', 'const', 'fburst', 'tburst', 'sf_start', &
-                                                     'zred', 'sf_trunc', 'sf_slope']
+                                                     'zred', 'sf_trunc', 'sf_slope', 'imf1', 'imf2', 'imf3']
         type(PARAMS) :: pp(size(psets))
         real(WP) :: g_fd(NQ, size(psets)), lp, lm, l0, l3, x, h, worst(NQ), gmax
         integer :: q, m, worst_m(NQ)
@@ -484,6 +537,9 @@ contains
                 ! the spectrum part, smooth in z (the IGM))
                 if (q == 22) h = merge(1.0e-4_wp, 1.0e-9_wp, LINEAR_ONLY) * (1.0_wp + x)
                 if (bound) then
+                    ! (h / 3: at dust2 = 0 the curvature of the UV screen leaves the third-order formula a
+                    ! truncation of ~4e-5 at h = 1e-5; the rounding floor is far below)
+                    h = h / 3.0_wp
                     ! One-sided, third order: (-11 L0 + 18 L1 - 9 L2 + 2 L3) / 6h (at dust2 = 0 the UV
                     ! curve makes L strongly curved; second order needed h ~ 1e-6, below the
                     ! rounding floor of the smaller gradients)
@@ -563,7 +619,10 @@ contains
         case (21); get_par = p%sf_start
         case (22); get_par = p%zred
         case (23); get_par = p%sf_trunc
-        case default; get_par = p%sf_slope
+        case (24); get_par = p%sf_slope
+        case (25); get_par = p%imf1
+        case (26); get_par = p%imf2
+        case default; get_par = p%imf3
         end select
     end function get_par
 
@@ -595,7 +654,10 @@ contains
         case (21); p%sf_start = x
         case (22); p%zred = x
         case (23); p%sf_trunc = x
-        case default; p%sf_slope = x
+        case (24); p%sf_slope = x
+        case (25); p%imf1 = x
+        case (26); p%imf2 = x
+        case default; p%imf3 = x
         end select
     end subroutine set_par
 
@@ -611,9 +673,9 @@ contains
 
         allocate(mags(ctx%state%nbands, size(psets)), spec(ctx%state%nspec, size(psets)))
         if (given_w) then
-            call compute_csp_batch(ctx, psets, mags, status, spec=spec, ssp_weights=w)
+            call cb(psets, mags, status, spec=spec, ssp_weights=w)
         else
-            call compute_csp_batch(ctx, psets, mags, status, spec=spec)
+            call cb(psets, mags, status, spec=spec)
         end if
         if (status /= 0) then
             write(*, *) 'ERROR: compute_csp_batch returned status ', status
