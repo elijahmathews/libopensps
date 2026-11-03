@@ -175,8 +175,9 @@ and L_bol with the IMF per model).
   (e.g. blocked, then sequential) reductions.
 - **Large optical depths.** A transmission e**(-tau) computed in FP32 carries a relative error of
   ~tau eps (tau itself is rounded at KP). Since the attenuation runs in KP (2026-11), pixels behind
-  optical depths of several differ from FP64 by up to ~7e-7 (stress cases: dust2 = 6, a 5 Myr
-  population behind dust1 = 3), and GPU and CPU FP32 builds by as much; magnitudes stay within
+  optical depths of several differ from FP64 by up to ~9e-7 (stress cases: dust2 = 6, a 5 Myr
+  population behind dust1 = 3), and GPU and CPU FP32 builds by as much (8.4e-7 measured on the A100,
+  6.9e-7 on the R9700); magnitudes stay within
   3e-7 mag. Such pixels are suppressed by e**-5 or more, so this is far below any observational
   uncertainty; forming tau in FP64 would bring back the FP64 power laws the change removed.
 - **Coverage.** The evidence is the matrix cases and the stress cases above

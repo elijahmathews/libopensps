@@ -61,7 +61,7 @@ format, conversion, packing; format and workflows in `doc/DATA_FORMAT.md`).
 - Physics changes are checked against legacy FSPS (`tools/legacy_parity/run_matrix.sh`); every
   deliberate difference is listed with its cause in `tools/legacy_parity/README.md`.
 - GPU builds match the CPU build: FP64 to ~1e-10 per pixel, FP32 to ~5e-7 (`tools/compare_builds`
-  over `tests/data/param_cases.psv`; up to ~7e-7 in pixels behind optical depths of several, as in
+  over `tests/data/param_cases.psv`; up to ~9e-7 in pixels behind optical depths of several (A100 8.4e-7, R9700 6.9e-7), as in
   `tools/compare_builds/stress_cases.psv`: `doc/MIXED_PRECISION.md`, Caveats).
 - Data format changes keep reading the previous format (a documented transition alias) and
   keep the parity suite bit-identical.

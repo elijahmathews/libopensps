@@ -1488,6 +1488,12 @@ contains
                 !$omp target exit data map(delete: s%gaussnebarr)
 #endif
             end if
+            if (s%att_on_device) then
+#ifdef OMP_TARGET
+                !$omp target exit data map(delete: s%att_tab, s%att_ltab)
+#endif
+                s%att_on_device = .false.
+            end if
             if (associated(s%neb_res_min)) then
 #ifdef OMP_TARGET
                 !$omp target exit data map(delete: s%neb_res_min)

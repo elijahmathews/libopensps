@@ -831,6 +831,7 @@ contains
             end do
         end if
         associate(total => ctx%state%batch_out%spec)
+        call attenuation_tables_cached(ctx, nspec)
         call attenuate_batch(ctx, PBUF_ARG, n_mod, nspec, iq, iu, wq, wu, gam, emis, agn_on, yo, total, absorbed, tdiff)
         if (any_emis) then
             call dust_emission_reductions(n_mod, nspec, emis, ctx%state%batch%wt, yo, absorbed, s_abs, s_norm, s_esc)
@@ -2505,7 +2506,8 @@ contains
     end subroutine age_sums
 
     !> Grid-only factors of the diffuse attenuation curve, per pixel (rule 4 of
-    !> doc/MIXED_PRECISION.md: formed in FP64 once per call, stored in kernel precision). Every
+    !> doc/MIXED_PRECISION.md: formed in FP64 once per context and dust type, stored in kernel
+    !> precision, kept in the context: ctx%state%att_tab, att_ltab). Every
     !> dust type with a closed form is, per model m,
     !>     curve(i, m) = (T0(i) + s1 T1(i) + s2 T2(i) + s3 T3(i)) * exp(e L(i)),  L = ln(lambda / lambda_V)
     !> with model scalars (s1, s2, s3, e): power law (0): T0 = 1, e = dust_index; Cardelli et al. (1):
@@ -2514,28 +2516,35 @@ contains
     !> is factored out, s1 = e = delta. The tables come from the curve functions themselves at a few
     !> parameter values (no second copy of their constants). Types 3 and 5 are table lookups and are
     !> read directly. L stays in FP64 (it is exponentiated, rule 3).
-    subroutine attenuation_tables(ctx, nspec, ttab, ltab)
-        type(opensps_context_t), intent(in) :: ctx
-        integer, intent(in)   :: nspec
-        real(KP), intent(out) :: ttab(nspec, 0:3)
-        real(WP), intent(out) :: ltab(nspec)
+    subroutine attenuation_tables_cached(ctx, nspec)
+        type(opensps_context_t), intent(inout) :: ctx
+        integer, intent(in) :: nspec
         integer :: i, dt
+        logical :: fresh
 
         dt = ctx%dust_type_val
-        ! The pixel's work in a routine of its own: its locals (a params_core among them) are then
-        ! plain locals on every compiler. A BLOCK in the loop is rejected by nvfortran inside a
-        ! parallel directive, and private(<derived type>) makes LLVM flang map it through an
-        ! implicit mapper that the offload runtime rejects (illegal mapping)
+        fresh = .not. allocated(ctx%state%att_tab)
+        if (fresh) allocate(ctx%state%att_tab(nspec, 0:3), ctx%state%att_ltab(nspec))
+        if (fresh .or. ctx%state%att_dust_type /= dt) then
+            ! On the host, once per dust type: nspec x (up to 4) curve evaluations, ~1 ms
+            do i = 1, nspec
+                call attenuation_table_row(ctx, nspec, i, dt, ctx%state%att_tab, ctx%state%att_ltab)
+            end do
+            ctx%state%att_dust_type = dt
+        else if (.not. ctx%on_device .or. ctx%state%att_on_device) then
+            return   ! current, and on the device whenever the context is
+        end if
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do &
-        !$omp& map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ttab, ltab)
-#elif defined(_OPENMP)
-        !$omp parallel do
+        if (ctx%on_device) then
+            if (ctx%state%att_on_device) then
+                !$omp target update to(ctx%state%att_tab, ctx%state%att_ltab)
+            else
+                !$omp target enter data map(to: ctx%state%att_tab, ctx%state%att_ltab)
+                ctx%state%att_on_device = .true.
+            end if
+        end if
 #endif
-        do i = 1, nspec
-            call attenuation_table_row(ctx, nspec, i, dt, ttab, ltab)
-        end do
-    end subroutine attenuation_tables
+    end subroutine attenuation_tables_cached
 
     !> One pixel of attenuation_tables.
     subroutine attenuation_table_row(ctx, nspec, i, dt, ttab, ltab)
@@ -2610,16 +2619,11 @@ contains
         real(KP) :: young, old, curve, tau_b, tau_o, tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust
         real(KP) :: one_m_tb, one_m_to, one_m_td, a_young, spec_sum, s1, s2, s3
         real(WP) :: ed
-        real(KP), allocatable :: ttab(:,:)
-        real(WP), allocatable :: ltab(:)
         type(params_core), pointer :: pl
 
         dt = ctx%dust_type_val
-        allocate(ttab(nspec, 0:3), ltab(nspec))
-#if defined(OMP_TARGET)
-        !$omp target data map(alloc: ttab, ltab)
-#endif
-        call attenuation_tables(ctx, nspec, ttab, ltab)
+        ! The grid-only curve tables of the context (attenuation_tables_cached, built once per dust type)
+        associate (ttab => ctx%state%att_tab, ltab => ctx%state%att_ltab)
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(young, old, curve, tau_b, tau_o, &
         !$omp& tau_d, trans_birth, trans_old, trans_d, frac_obrun, frac_nodust, one_m_tb, one_m_to, &
@@ -2707,10 +2711,7 @@ contains
                 end if
             end do
         end do
-#if defined(OMP_TARGET)
-        !$omp end target data
-#endif
-        deallocate(ttab, ltab)
+        end associate
     end subroutine attenuate_batch
 
     !> Per model: absorbed luminosity, template normalization and escaped template fraction.
