@@ -45,8 +45,8 @@ module opensps_context_types
         !> on the device too (prepare_smoothing_kernel); released with the rest
         logical  :: sm_ready = .false.
         real(WP) :: sm_sigma = 0.0_wp, sm_minl = 0.0_wp, sm_maxl = 0.0_wp
-        integer,  allocatable :: sm_lo(:), sm_hi(:), sm_off(:)
-        real(WP), allocatable :: sm_coef(:)
+        integer,  allocatable :: sm_lo(:), sm_hi(:), sm_off(:), sm_t_lo(:), sm_t_hi(:)
+        real(WP), allocatable :: sm_coef(:), sm_dcoef(:)
     end type batch_grid_t
 
     !> Spectra of the last batched CSP (kernel precision, nspec x models), kept on the device
@@ -352,12 +352,13 @@ contains
         g%ready = .false.
         if (g%sm_ready) then
 #ifdef OMP_TARGET
-            associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef)
-                !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef)
+            associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef, &
+                       d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef)
+                !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef)
             end associate
 #endif
         end if
-        if (allocated(g%sm_lo)) deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef)
+        if (allocated(g%sm_lo)) deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef, g%sm_t_lo, g%sm_t_hi, g%sm_dcoef)
         g%sm_ready = .false.
     end subroutine batch_grid_release
 

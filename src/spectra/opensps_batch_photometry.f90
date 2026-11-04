@@ -345,30 +345,68 @@ contains
         type(opensps_context_t), intent(inout) :: ctx
         real(WP), intent(in)                :: sigma, minl, maxl
         type(velocity_kernel_t) :: kern
+        integer :: nspec, i, k, il, ih, off
+        real(WP) :: x2, x2m
+        real(WP), allocatable :: ll(:)
 
         associate(g => ctx%state%batch)
         if (g%sm_ready) then
             if (g%sm_sigma == sigma .and. g%sm_minl == minl .and. g%sm_maxl == maxl) return
 #ifdef OMP_TARGET
-            associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef)
-                !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef)
+            associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef, &
+                       d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef)
+                !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef)
             end associate
 #endif
-            deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef)
+            deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef, g%sm_t_lo, g%sm_t_hi, g%sm_dcoef)
             g%sm_ready = .false.
         end if
-        call build_velocity_kernel(ctx%state%spec_lambda(1:ctx%state%nspec), sigma, minl, maxl, kern)
+        nspec = ctx%state%nspec
+        call build_velocity_kernel(ctx%state%spec_lambda(1:nspec), sigma, minl, maxl, kern)
         call move_alloc(kern%lo, g%sm_lo)
         call move_alloc(kern%hi, g%sm_hi)
         call move_alloc(kern%off, g%sm_off)
         if (size(kern%coef) == 0) then
-            allocate(g%sm_coef(1)); g%sm_coef = 0.0_wp
+            allocate(g%sm_coef(1), g%sm_dcoef(1))
+            g%sm_coef = 0.0_wp
+            g%sm_dcoef = 0.0_wp
         else
             call move_alloc(kern%coef, g%sm_coef)
+            allocate(g%sm_dcoef(size(g%sm_coef)))
+            g%sm_dcoef = 0.0_wp
+            allocate(ll(nspec))
+            ll = log(ctx%state%spec_lambda(1:nspec))
+            do i = 1, nspec
+                if (g%sm_lo(i) == 0) cycle
+                il = g%sm_lo(i)
+                ih = g%sm_hi(i)
+                off = g%sm_off(i) - il
+                x2m = 0.0_wp
+                do k = il, ih
+                    x2m = x2m + g%sm_coef(off + k) * (ll(i) - ll(k))**2
+                end do
+                do k = il, ih
+                    x2 = (ll(i) - ll(k))**2
+                    g%sm_dcoef(off + k) = g%sm_coef(off + k) * (x2 - x2m)
+                end do
+            end do
+            deallocate(ll)
         end if
+        allocate(g%sm_t_lo(nspec), g%sm_t_hi(nspec))
+        g%sm_t_lo = nspec + 1
+        g%sm_t_hi = 0
+        do i = 1, nspec
+            if (g%sm_lo(i) > 0) then
+                do k = g%sm_lo(i), g%sm_hi(i)
+                    if (i < g%sm_t_lo(k)) g%sm_t_lo(k) = i
+                    if (i > g%sm_t_hi(k)) g%sm_t_hi(k) = i
+                end do
+            end if
+        end do
 #ifdef OMP_TARGET
-        associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef)
-            !$omp target enter data map(to: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef)
+        associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef, &
+                   d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef)
+            !$omp target enter data map(to: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef)
         end associate
 #endif
         g%sm_sigma = sigma
@@ -400,7 +438,8 @@ contains
         integer, intent(in)                 :: n_col
 
         call smooth_kernel_t(ctx%state%nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
-                             ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_coef, spec_bar)
+                             ctx%state%batch%sm_off, ctx%state%batch%sm_coef, ctx%state%batch%sm_t_lo, &
+                             ctx%state%batch%sm_t_hi, spec_bar)
     end subroutine smooth_columns_adjoint
 
     !> d L / d sigma_smooth per column, for the prepared operator (smooth_columns): with
@@ -416,38 +455,33 @@ contains
         integer, intent(in)                 :: n_col
         real(WP), intent(out)               :: ds(n_col)
         real(WP) :: sb, kfac
-        real(WP), allocatable :: ll(:)
         integer :: nspec
 
         nspec = ctx%state%nspec
         sb = sigma / (C_LIGHT * 1.0e-13_wp)
         kfac = 1.0_wp / (sb**3 * C_LIGHT * 1.0e-13_wp)
-        allocate(ll(nspec))
-        ll = log(ctx%state%spec_lambda(1:nspec))
-        call smooth_sigma_kernel(nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
-                                 ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_coef, ll, kfac, &
+        call smooth_sigma_kernel(nspec, n_col, size(ctx%state%batch%sm_dcoef), ctx%state%batch%sm_lo, &
+                                 ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_dcoef, kfac, &
                                  spec, spec_bar, ds)
     end subroutine smooth_sigma_adjoint
 
-    subroutine smooth_sigma_kernel(nspec, n_col, ncoef, sm_lo, sm_hi, sm_off, sm_coef, ll, kfac, spec, spec_bar, ds)
+    subroutine smooth_sigma_kernel(nspec, n_col, ncoef, sm_lo, sm_hi, sm_off, sm_dcoef, kfac, spec, spec_bar, ds)
         integer, intent(in)     :: nspec, n_col, ncoef
         integer, intent(in)     :: sm_lo(nspec), sm_hi(nspec), sm_off(nspec)
-        real(WP), intent(in)    :: sm_coef(ncoef), ll(nspec), kfac
+        real(WP), intent(in)    :: sm_dcoef(ncoef), kfac
         real(KP), intent(in)    :: spec(nspec, n_col), spec_bar(nspec, n_col)
         real(WP), intent(out)   :: ds(n_col)
         integer, parameter :: NCH = 64
         real(WP), allocatable :: part(:,:)
         integer  :: m, c, i, k, lo, off
-        real(WP) :: s, x2m, sx, sxx, x2
+        real(WP) :: s, sx, sxx
 
         allocate(part(NCH, n_col))
 #ifdef OMP_TARGET
-        !$omp target data map(to: ll) map(alloc: part) map(from: ds)
-#endif
-#if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(s, i, k, lo, off, x2m, sx, sxx, x2)
+        !$omp target data map(alloc: part) map(from: ds)
+        !$omp target teams distribute parallel do collapse(2) private(s, i, k, lo, off, sx)
 #elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(s, i, k, lo, off, x2m, sx, sxx, x2)
+        !$omp parallel do collapse(2) private(s, i, k, lo, off, sx)
 #endif
         do m = 1, n_col
             do c = 1, NCH
@@ -456,15 +490,9 @@ contains
                     lo = sm_lo(i)
                     if (lo == 0) cycle
                     off = sm_off(i) - lo
-                    ! <x^2>, then sum C (x^2 - <x^2>) S
-                    x2m = 0.0_wp
-                    do k = lo, sm_hi(i)
-                        x2m = x2m + sm_coef(off + k) * (ll(i) - ll(k))**2
-                    end do
                     sx = 0.0_wp
                     do k = lo, sm_hi(i)
-                        x2 = (ll(i) - ll(k))**2
-                        sx = sx + sm_coef(off + k) * (x2 - x2m) * real(spec(k, m), WP)
+                        sx = sx + sm_dcoef(off + k) * real(spec(k, m), WP)
                     end do
                     s = s + real(spec_bar(i, m), WP) * sx
                 end do
@@ -488,40 +516,34 @@ contains
 #endif
     end subroutine smooth_sigma_kernel
 
-    !> smooth_kernel transposed: one thread per column, serial over the pixels (each output pixel
-    !> scatters into its window), the sums in FP64.
-    subroutine smooth_kernel_t(nspec, n_col, ncoef, sm_lo, sm_hi, sm_off, sm_coef, spec)
+    !> smooth_kernel transposed: gather per pixel and column in parallel.
+    subroutine smooth_kernel_t(nspec, n_col, ncoef, sm_lo, sm_off, sm_coef, sm_t_lo, sm_t_hi, spec)
         integer, intent(in)                 :: nspec, n_col, ncoef
-        integer, intent(in)                 :: sm_lo(nspec), sm_hi(nspec), sm_off(nspec)
+        integer, intent(in)                 :: sm_lo(nspec), sm_off(nspec), sm_t_lo(nspec), sm_t_hi(nspec)
         real(WP), intent(in)                :: sm_coef(ncoef)
         real(KP), intent(inout)             :: spec(nspec, n_col)
 
-        real(WP), allocatable :: sm(:,:)
-        integer  :: m, i, k, lo, off
+        real(KP), allocatable :: sm(:,:)
+        integer  :: m, k, i, lo, hi
+        real(WP) :: s
 
         allocate(sm(nspec, n_col))
 #ifdef OMP_TARGET
         !$omp target data map(alloc: sm)
-#endif
-#if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do private(i, k, lo, off)
+        !$omp target teams distribute parallel do collapse(2) private(s, lo, hi, i)
 #elif defined(_OPENMP)
-        !$omp parallel do private(i, k, lo, off)
+        !$omp parallel do collapse(2) private(s, lo, hi, i)
 #endif
         do m = 1, n_col
-            do i = 1, nspec
-                sm(i, m) = 0.0_wp
-            end do
-            do i = 1, nspec
-                lo = sm_lo(i)
-                if (lo == 0) then
-                    sm(i, m) = sm(i, m) + real(spec(i, m), WP)
-                else
-                    off = sm_off(i) - lo
-                    do k = lo, sm_hi(i)
-                        sm(k, m) = sm(k, m) + sm_coef(off + k) * real(spec(i, m), WP)
-                    end do
-                end if
+            do k = 1, nspec
+                s = 0.0_wp
+                if (sm_lo(k) == 0) s = real(spec(k, m), WP)
+                lo = sm_t_lo(k)
+                hi = sm_t_hi(k)
+                do i = lo, hi
+                    s = s + sm_coef(sm_off(i) + k - sm_lo(i)) * real(spec(i, m), WP)
+                end do
+                sm(k, m) = real(s, KP)
             end do
         end do
 #if defined(OMP_TARGET)
@@ -530,8 +552,8 @@ contains
         !$omp parallel do collapse(2)
 #endif
         do m = 1, n_col
-            do i = 1, nspec
-                spec(i, m) = real(sm(i, m), KP)
+            do k = 1, nspec
+                spec(k, m) = sm(k, m)
             end do
         end do
 #ifdef OMP_TARGET
