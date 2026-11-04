@@ -225,6 +225,7 @@ module opensps_context_types
 
         ! --- Persistent CSP Workspace ---
         real(KP), allocatable :: ssp_basis_spec(:, :, :)
+        real(KP), allocatable :: ssp_basis_spec_t(:, :, :)
         real(WP), allocatable :: ssp_basis_mass(:, :)
         real(WP), allocatable :: ssp_basis_lbol(:, :)
         logical :: ssp_basis_is_dirty = .true.
@@ -513,6 +514,7 @@ contains
 
         ! --- Persistent CSP Workspace ---
         if (allocated(state%ssp_basis_spec)) deallocate (state%ssp_basis_spec)
+        if (allocated(state%ssp_basis_spec_t)) deallocate (state%ssp_basis_spec_t)
         if (allocated(state%ssp_basis_mass)) deallocate (state%ssp_basis_mass)
         if (allocated(state%ssp_basis_lbol)) deallocate (state%ssp_basis_lbol)
 

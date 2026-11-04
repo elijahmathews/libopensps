@@ -3669,6 +3669,7 @@ contains
                                       ctx%state%nebem_cont, ctx%state%nebem_line, lbar, gw, lbar, nwb, gneb, imf, qb, lgiven)
             end if
             if (.not. imf) call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, &
+                                                  ctx%state%ssp_basis_spec_t, &
                                                   ctx%state%ssp_basis_lbol, zmode, it_tesc, zlo, zhi, dz, lum_linear, &
                                                   lsum_bar, gw, w_bar, ntn, nb%whlylim, nb%fesc, w2, nwb, gneb)
         else
@@ -3678,7 +3679,8 @@ contains
             !$omp target update to(nwb, gneb)
 #endif
             if (zw) then
-                call backward_age_sums_w(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, ctx%state%ssp_basis_lbol, &
+                call backward_age_sums_w(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, &
+                                         ctx%state%ssp_basis_spec_t, ctx%state%ssp_basis_lbol, &
                                          it_tesc, lsum_bar, gw, wzb_out)
                 w_bar = 0.0_wp
 #ifdef OMP_TARGET
@@ -3686,6 +3688,7 @@ contains
 #endif
             else if (.not. imf) then
                 call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, &
+                                       ctx%state%ssp_basis_spec_t, &
                                        ctx%state%ssp_basis_lbol, zmode, it_tesc, zlo, zhi, dz, lum_linear, &
                                        lsum_bar, gw, w_bar, 0, 0, nb%fesc, w2, nwb, gneb)
             end if
@@ -4637,9 +4640,9 @@ contains
     !> Adjoint of age_sums_w (weights over ages and metallicities, ssp_weights_z) and of L_bol:
     !> wzb(k, z, m) = sum over pixels of basis(:, k, z) times young_bar (k <= dust_tesc) or old_bar,
     !> plus lsum_bar 10^lbol(k, z) (compensated at FP32 kernel precision).
-    subroutine backward_age_sums_w(n_mod, nspec, nt, nz, basis, blbol, it_tesc, lsum_bar, gw, wzb)
+    subroutine backward_age_sums_w(n_mod, nspec, nt, nz, basis, basis_t, blbol, it_tesc, lsum_bar, gw, wzb)
         integer, intent(in)     :: n_mod, nspec, nt, nz, it_tesc(n_mod)
-        real(KP), intent(in)    :: basis(nspec, nt, nz), gw(nspec, 2 * n_mod)
+        real(KP), intent(in)    :: basis(nspec, nt, nz), basis_t(nt, nspec, nz), gw(nspec, 2 * n_mod)
         real(WP), intent(in)    :: blbol(nt, nz), lsum_bar(n_mod)
         real(WP), intent(out)   :: wzb(nt, nz, n_mod)
         integer  :: m, k, z, i, col
@@ -4658,7 +4661,11 @@ contains
                     sk = 0.0_KP
                     ck = 0.0_KP
                     do i = 1, nspec
+#if defined(OMP_TARGET)
+                        term = basis_t(k, i, z) * gw(i, col) - ck
+#else
                         term = basis(i, k, z) * gw(i, col) - ck
+#endif
                         tsum = sk + term
                         ck = (tsum - sk) - term
                         sk = tsum
@@ -4675,10 +4682,10 @@ contains
     !> Nebular emission (ntn nebular ages): the EUV rows (pixels <= whlylim) of the nebular ages
     !> carry the escaping fraction fesc, as nebular_kernels redoes them; gneb(4, m) = d L / d fesc;
     !> nwb (the nebular continuum's and lines' part) is added for the nebular ages.
-    subroutine backward_age_sums(n_mod, nspec, nt, nzb, basis, blbol, zmode, it_tesc, zlo, zhi, dz, lum_linear, &
+    subroutine backward_age_sums(n_mod, nspec, nt, nzb, basis, basis_t, blbol, zmode, it_tesc, zlo, zhi, dz, lum_linear, &
                                  lsum_bar, gw, w_bar, ntn, whlylim, fesc, w2, nwb, gneb)
         integer, intent(in)     :: n_mod, nspec, nt, nzb, it_tesc(n_mod), zlo(n_mod), zhi(n_mod), ntn, whlylim
-        real(KP), intent(in)    :: basis(nspec, nt, nzb), gw(nspec, 2 * n_mod), w2(nt, 2 * n_mod)
+        real(KP), intent(in)    :: basis(nspec, nt, nzb), basis_t(nt, nspec, nzb), gw(nspec, 2 * n_mod), w2(nt, 2 * n_mod)
         real(WP), intent(in)    :: blbol(nt, nzb), dz(n_mod), lum_linear(nt), lsum_bar(n_mod), fesc(n_mod)
         real(WP), intent(in)    :: nwb(max(1, ntn), n_mod)
         logical, intent(in)     :: zmode
@@ -4764,15 +4771,15 @@ contains
                 end if
                 do i = 1, nspec
                     if (zmode) then
-                        bk = (1.0_KP - d) * basis(i, k, zl) + d * basis(i, k, zh)
-                        dbk = basis(i, k, zh) - basis(i, k, zl)
+                        bk = (1.0_KP - d) * basis_t(k, i, zl) + d * basis_t(k, i, zh)
+                        dbk = basis_t(k, i, zh) - basis_t(k, i, zl)
                         if (i <= nlim) dbk = dbk * fk
                         term = dbk * gw(i, col) - cd
                         tsum = dk + term
                         cd = (tsum - dk) - term
                         dk = tsum
                     else
-                        bk = basis(i, k, 1)
+                        bk = basis_t(k, i, 1)
                     end if
                     if (i <= nlim) then
                         term = bk * gw(i, col) - ce
