@@ -212,6 +212,20 @@ void opensps_context_evaluate_ssp_op(
 ```
 When `ssp_ops` is active on a context, IMF parameters (`imf1`, `imf2`, `imf3`, `vdmc`, `mdave`) can vary per model in `opensps_context_compute_csp_batch` and `opensps_context_compute_csp_batch_grad`.
 
+### Zero-Copy GPU Memory Pointers
+
+When OpenSPS is built with GPU acceleration (`-Daccel=omp_gpu`), the batch spectra reside directly in accelerator VRAM. To minimize PCIe host-device crosstalk (for example, when downstream likelihoods or neural networks consume spectra directly on the device):
+
+```c
+// Direct pointer to on-device batch spectra matrix [nspec x n_models] (column-major).
+// Pass spec = NULL in the batch call to avoid transferring spectra across PCIe.
+// *ptr is the device memory address (host address in CPU builds).
+void opensps_context_batch_spec_device(int handle, void **ptr, int *nspec, int *n, int *bytes, int *status);
+
+// Page-locked host buffer address in kernel precision (fast DMA transfer, skips conversion to double).
+void opensps_context_batch_spec_host(int handle, void **ptr, int *nspec, int *n, int *bytes, int *status);
+```
+
 ### SSP grid
 
 ```c
