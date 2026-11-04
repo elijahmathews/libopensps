@@ -37,6 +37,22 @@ int main(void) {
         failures++;
     }
 
+    /* Test all 33 parameter names */
+    for (int idx = 0; idx < OPENSPS_NBGRAD; idx++) {
+        name_buf[0] = '\0';
+        opensps_get_grad_param_name(idx, name_buf, 64, &status);
+        if (status != 0 || strlen(name_buf) == 0) {
+            printf("FAIL: opensps_get_grad_param_name for idx=%d (status=%d, name='%s')\n", idx, status, name_buf);
+            failures++;
+        }
+    }
+
+    /* Error handling: out of range indices */
+    opensps_get_grad_param_name(-1, name_buf, 64, &status);
+    if (status != 1) { printf("FAIL: expected status 1 for idx=-1\n"); failures++; }
+    opensps_get_grad_param_name(OPENSPS_NBGRAD, name_buf, 64, &status);
+    if (status != 1) { printf("FAIL: expected status 1 for idx=%d\n", OPENSPS_NBGRAD); failures++; }
+
     /* 2. Setup context */
     opensps_context_create(&h, &status);
     opensps_context_setup(-1, "mist", "miles", "DL07", h, &status);
@@ -210,6 +226,47 @@ int main(void) {
                 failures++;
             }
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // Test 5: Enrichment history weights (ssp_weights_z and weights_z_bar)
+    // ------------------------------------------------------------------------
+    {
+        /* Free ssp_ops because ssp_weights_z requires standard grid evaluation */
+        opensps_context_free_ssp_ops(h, &status);
+
+        int nz = 0, ntfull = 0;
+        opensps_context_get_nz(h, &nz, &status);
+        opensps_context_get_ntfull(h, &ntfull, &status);
+        int wz_len = ntfull * nz * N_MOD;
+        double *wz = (double *)calloc(wz_len, sizeof(double));
+        double *wz_bar = (double *)calloc(wz_len, sizeof(double));
+        // Put some weights on the first age and first metallicity
+        for (int m = 0; m < N_MOD; m++) {
+            wz[m * (ntfull * nz)] = 1.0;
+        }
+
+        opensps_batch_options_t opts = {0};
+        opts.n = N_MOD;
+        opts.n_params = 2;
+        opts.names = names;
+        opts.values = values;
+        opts.ssp_weights_z = wz;
+        opts.mags_bar = mags_bar;
+
+        opensps_batch_results_t res = {0};
+        res.mags = mags;
+        res.weights_z_bar = wz_bar;
+
+        status = 0;
+        opensps_context_compute_csp_batch_ext(h, &opts, &res, &status);
+        if (status != 0) {
+            printf("FAIL: ssp_weights_z batch failed with status %d\n", status);
+            failures++;
+        }
+
+        free(wz);
+        free(wz_bar);
     }
 
     free(mags);

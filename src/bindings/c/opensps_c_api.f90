@@ -861,8 +861,6 @@ contains
         status = 0
         if (c_idx >= 0 .and. c_idx < NBGRAD) then
             f_idx = c_idx + 1
-        else if (c_idx >= 1 .and. c_idx <= NBGRAD) then
-            f_idx = c_idx
         else
             status = 1
             call opensps_set_error(1, 'opensps_get_grad_param_name: index out of range')
