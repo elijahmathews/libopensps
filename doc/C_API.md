@@ -181,6 +181,18 @@ void opensps_context_compute_csp_batch_grad(
   * `opensps_get_nbgrad(int *nbgrad);` returns 33.
   * `opensps_get_grad_param_name(int grad_idx, char *name, int max_len, int *status);` returns the parameter name for each row.
 
+A struct-based entry point `opensps_context_compute_csp_batch_ext` is also provided for clean C/C++ usage:
+```c
+opensps_batch_options_t opts = {
+    .n = n, .n_params = n_params, .names = names, .values = values,
+    .mags_bar = mags_bar
+};
+opensps_batch_results_t res = {
+    .mags = mags, .params_bar = params_bar
+};
+opensps_context_compute_csp_batch_ext(handle, &opts, &res, &status);
+```
+
 ### Batched SSP Operator (Fast IMFs)
 
 Decouples the isochrone integration from the IMF, allowing IMF slopes, characteristic masses, and limits to vary per model in batches, or fast direct evaluation:

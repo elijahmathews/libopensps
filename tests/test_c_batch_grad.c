@@ -183,6 +183,35 @@ int main(void) {
         }
     }
 
+    // ------------------------------------------------------------------------
+    // Test 4: Struct-based entry point opensps_context_compute_csp_batch_ext
+    // ------------------------------------------------------------------------
+    {
+        opensps_batch_options_t opts = {0};
+        opts.n = N_MOD;
+        opts.n_params = 3;
+        opts.names = imf_names;
+        opts.values = imf_values;
+        opts.mags_bar = mags_bar;
+
+        opensps_batch_results_t res = {0};
+        res.mags = mags;
+        res.params_bar = params_bar;
+
+        status = 0;
+        opensps_context_compute_csp_batch_ext(h, &opts, &res, &status);
+        if (status != 0) {
+            printf("FAIL: opensps_context_compute_csp_batch_ext failed with status %d\n", status);
+            failures++;
+        } else {
+            double g_imf1 = res.params_bar[OPENSPS_BGRAD_IMF1];
+            if (isnan(g_imf1) || isinf(g_imf1) || g_imf1 == 0.0) {
+                printf("FAIL: opensps_context_compute_csp_batch_ext returned invalid gradient\n");
+                failures++;
+            }
+        }
+    }
+
     free(mags);
     free(mags_bar);
     free(params_bar);

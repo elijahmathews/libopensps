@@ -244,6 +244,61 @@ void opensps_context_compute_csp_batch_grad(
     int *status
 );
 
+// Struct-based configuration options for batched CSP computation with gradients
+typedef struct {
+    int n;                          // Number of models
+    int n_params;                   // Number of parameters in names / values
+    const char *const *names;       // Parameter names (n_params)
+    const double *const *values;    // Parameter values (n_params x n)
+    const double *ssp_weights;      // ntfull x n, or NULL
+    const double *ssp_weights_z;    // ntfull x nz x n, or NULL
+    const double *zred_mags;        // n, or NULL
+    // Adjoint cotangents (inputs for gradient computation)
+    const double *mags_bar;         // nbands x n, or NULL
+    const double *spec_bar;         // nspec x n, or NULL
+    const double *mass_bar;         // n, or NULL
+    const double *lbol_bar;         // n, or NULL
+} opensps_batch_options_t;
+
+// Struct-based result buffers for batched CSP computation and gradients
+typedef struct {
+    // Forward outputs (any may be NULL)
+    double *mags;                   // nbands x n
+    double *spec;                   // nspec x n
+    double *mass;                   // n
+    double *lbol;                   // n
+    double *mdust;                  // n
+    double *sfr;                    // n
+    double *emlines;                // nemline x n
+    double *indx;                   // nindx x n
+    // Gradient adjoint outputs (any may be NULL)
+    double *params_bar;             // NBGRAD x n
+    double *weights_bar;            // ntfull x n
+    double *weights_z_bar;          // ntfull x nz x n
+} opensps_batch_results_t;
+
+// Struct-based entry point for batch calculation and adjoint gradients
+static inline void opensps_context_compute_csp_batch_ext(
+    int handle,
+    const opensps_batch_options_t *opts,
+    opensps_batch_results_t *res,
+    int *status
+) {
+    if (!opts || !res || !status) {
+        if (status) *status = 1;
+        return;
+    }
+    opensps_context_compute_csp_batch_grad(
+        handle, opts->n, opts->n_params, opts->names, opts->values,
+        opts->ssp_weights, opts->ssp_weights_z, opts->zred_mags,
+        opts->mags_bar, opts->spec_bar, opts->mass_bar, opts->lbol_bar,
+        res->mags, res->spec, res->mass, res->lbol,
+        res->mdust, res->sfr, res->emlines, res->indx,
+        res->params_bar, res->weights_bar, res->weights_z_bar,
+        status
+    );
+}
+
 // ----------------------------------------------------------------------------
 // SSP Operator Management (Batched IMF and direct evaluation)
 // ----------------------------------------------------------------------------
