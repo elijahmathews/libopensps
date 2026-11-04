@@ -38,9 +38,9 @@ module opensps_context_types
         real(WP) :: zred = 0.0_wp
         real(WP) :: igm_factor = 0.0_wp
         real(WP) :: dist_term = 0.0_wp
-        integer,  allocatable :: i_lo(:), j_lo(:), j_hi(:)
+        integer,  allocatable :: i_lo(:), j_lo(:), j_hi(:), jr0(:), bp(:), bi(:)
         real(WP), allocatable :: t_obs(:)
-        real(KP), allocatable :: wt(:), wtl(:), wl(:), bands_t(:,:), cmat(:,:), igm_t(:)
+        real(KP), allocatable :: wt(:), wtl(:), wl(:), bands_t(:,:), cmat(:,:), igm_t(:), bk(:)
         !> Velocity smoothing operator (build_velocity_kernel) for sm_sigma, sm_minl, sm_maxl,
         !> on the device too (prepare_smoothing_kernel); released with the rest
         logical  :: sm_ready = .false.
@@ -335,8 +335,10 @@ contains
             ! Associate names, not g%component: on LLVM flang a delete of parent%component also
             ! deletes the mapping of the parent, and g lives inside the mapped context
             associate (d_i_lo => g%i_lo, d_j_lo => g%j_lo, d_j_hi => g%j_hi, d_t_obs => g%t_obs, d_wt => g%wt, &
-                       d_wtl => g%wtl, d_wl => g%wl, d_bands_t => g%bands_t, d_igm_t => g%igm_t)
-                !$omp target exit data map(delete: d_i_lo, d_j_lo, d_j_hi, d_t_obs, d_wt, d_wtl, d_wl, d_bands_t, d_igm_t)
+                       d_wtl => g%wtl, d_wl => g%wl, d_bands_t => g%bands_t, d_igm_t => g%igm_t, &
+                       d_jr0 => g%jr0, d_bp => g%bp, d_bi => g%bi, d_bk => g%bk)
+                !$omp target exit data map(delete: d_i_lo, d_j_lo, d_j_hi, d_t_obs, d_wt, d_wtl, d_wl, d_bands_t, d_igm_t, &
+                !$omp& d_jr0, d_bp, d_bi, d_bk)
             end associate
 #endif
             if (allocated(g%cmat)) then
@@ -347,7 +349,8 @@ contains
 #endif
             end if
         end if
-        if (allocated(g%i_lo)) deallocate(g%i_lo, g%j_lo, g%j_hi, g%t_obs, g%wt, g%wtl, g%wl, g%bands_t, g%igm_t)
+        if (allocated(g%i_lo)) deallocate(g%i_lo, g%j_lo, g%j_hi, g%t_obs, g%wt, g%wtl, g%wl, g%bands_t, g%igm_t, &
+                                          g%jr0, g%bp, g%bi, g%bk)
         if (allocated(g%cmat)) deallocate(g%cmat)
         g%ready = .false.
         if (g%sm_ready) then

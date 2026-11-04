@@ -3588,7 +3588,8 @@ contains
 #endif
         associate (g => ctx%state%batch)
         call backward_observed_frame(n_mod, nspec, nbands, fb_bar, g%bands_t, g%j_lo, g%j_hi, g%wtl, g%wl, &
-                                     ctx%state%spec_lambda, zcm, total, have_s, sbar, gw, .not. lzm, dzo)
+                                     ctx%state%spec_lambda, zcm, total, have_s, sbar, gw, .not. lzm, dzo, &
+                                     g%bp, g%bi, g%bk, g%i_lo, g%t_obs, g%jr0)
         ! The IGM's short-wavelength cap: per model, the pixel whose optical depth caps the bluer ones
         if (igm) call igm_cap_pixels(n_mod, nspec, pbuf, ctx%state%spec_lambda, jmx)
         ! Velocity smoothing (the last stage of the spectrum): sigma_smooth's gradient (from the
@@ -3755,7 +3756,7 @@ contains
     !> gw(:, N + m) = spec_bar + the transposed interpolation (one thread per model, serial over the
     !> pixels: each rest-frame pixel collects from its observed-frame neighbours).
     subroutine backward_observed_frame(n_mod, nspec, nbands, fb_bar, bands_t, j_lo, j_hi, wtl, wl, lam, zcm, total, &
-                                       have_s, sbar, gw, dzon, dzo)
+                                       have_s, sbar, gw, dzon, dzo, bp, bi, bk, g_i_lo, g_t_obs, g_jr0)
         integer, intent(in)     :: n_mod, nspec, nbands, j_lo(nbands), j_hi(nbands)
         real(WP), intent(in)    :: fb_bar(nbands, n_mod), lam(nspec), zcm(n_mod)
         real(KP), intent(in)    :: bands_t(nbands, nspec), wtl(nspec), wl(nspec), total(nspec, n_mod), sbar(:,:)
@@ -3765,80 +3766,23 @@ contains
         !> (S(il + 1) - S(il)) dt / dz (computed when dzon)
         logical, intent(in)     :: dzon
         real(WP), intent(out)   :: dzo(n_mod)
+        integer, intent(in)     :: bp(nspec + 1), bi(:)
+        real(KP), intent(in)    :: bk(:)
+        integer, intent(in)     :: g_i_lo(nspec), g_jr0(nspec)
+        real(WP), intent(in)    :: g_t_obs(nspec)
 
         integer, parameter :: NZC = 32
-        integer  :: m, j, b, il, k, nnz, c, j0, j1, nbz, i, jlo, jhi, jm
-        real(WP) :: gv, cw, v, t, sz
+        integer  :: m, j, il, k, c, j0, j1, nbz, i, jlo, jhi, jm
+        real(WP) :: t, sz
         real(KP) :: vk
         real(WP), allocatable :: zp(:,:)
-        ! One redshift for the batch (the usual fit): the pixels' rest-frame intervals ilc, tc once
-        ! (frame_point's values, so the same arithmetic) and, per rest pixel i, the first observed
-        ! pixel jr0(i) that reaches it (il >= i - 1)
         logical  :: zsame
-        integer, allocatable  :: ilc(:), jr0(:)
-        real(WP), allocatable :: tc(:)
-        ! The band integrals' transpose as a sparse matrix by pixel (each band covers a few hundred of
-        ! the pixels): bp(j) .. bp(j + 1) - 1 index the bands of pixel j (in band order, as the dense
-        ! loop summed them), bands_t(b, j) and the pixel's weight wtl(j) [j in band] + wtl(j - 1)
-        ! [j - 1 in band], multiplied as the dense loop did (the same sums, bit for bit)
-        integer, allocatable  :: bp(:), bi(:)
-        real(WP), allocatable :: bv(:), bc(:)
-        real(KP), allocatable :: bk(:)
         real(KP) :: gk, tk
 
         zsame = all(zcm(1:n_mod) == zcm(1))
-        if (zsame) then
-            allocate(ilc(nspec), tc(nspec), jr0(nspec))
-            il = 1
-            do j = 1, nspec
-                call frame_point(nspec, lam, zcm(1), j, ilc(j), tc(j))
-            end do
-            k = 1
-            do i = 1, nspec
-                do while (k <= nspec)
-                    if (ilc(k) >= i - 1) exit
-                    k = k + 1
-                end do
-                jr0(i) = k
-            end do
-        else
-            allocate(ilc(1), tc(1), jr0(1))
-        end if
-#if defined(OMP_TARGET)
-        !$omp target data map(to: ilc, tc, jr0)
-#endif
-        allocate(bp(nspec + 1))
-        nnz = 0
-        do j = 1, nspec
-            bp(j) = nnz + 1
-            do b = 1, nbands
-                if ((j >= j_lo(b) .and. j <= j_hi(b)) .or. (j - 1 >= j_lo(b) .and. j - 1 <= j_hi(b))) nnz = nnz + 1
-            end do
-        end do
-        bp(nspec + 1) = nnz + 1
-        allocate(bi(max(nnz, 1)), bv(max(nnz, 1)), bc(max(nnz, 1)), bk(max(nnz, 1)))
-        k = 0
-        do j = 1, nspec
-            do b = 1, nbands
-                cw = 0.0_wp
-                if (j >= j_lo(b) .and. j <= j_hi(b)) cw = cw + real(wtl(j), WP)
-                if (j - 1 >= j_lo(b) .and. j - 1 <= j_hi(b)) cw = cw + real(wtl(j - 1), WP)
-                if ((j >= j_lo(b) .and. j <= j_hi(b)) .or. (j - 1 >= j_lo(b) .and. j - 1 <= j_hi(b))) then
-                    k = k + 1
-                    bi(k) = b
-                    bv(k) = real(bands_t(b, j), WP)
-                    bc(k) = cw
-                end if
-            end do
-        end do
 
-        ! (at kernel precision: a dozen terms per pixel, stored at kernel precision; FP64 arithmetic
-        ! here ran at the R9700's FP64 rate, 12 ms per call of 1000 models)
-        do k = 1, nnz
-            bk(k) = real(bv(k) * bc(k), KP)
-        end do
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(gk, vk, tk, t, il, k) map(to: bp, bi, bk)
+        !$omp target teams distribute parallel do collapse(2) private(gk, vk, tk, t, il, k)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(gk, vk, tk, t, il, k)
 #endif
@@ -3850,8 +3794,8 @@ contains
                 end do
                 ! The clamp of the forward (max(v, 0), NaN -> 0): no gradient where it acts
                 if (zsame) then
-                    il = ilc(j)
-                    t = tc(j)
+                    il = g_i_lo(j)
+                    t = g_t_obs(j)
                 else
                     call frame_point(nspec, lam, zcm(m), j, il, t)
                 end if
@@ -3883,8 +3827,8 @@ contains
                     il = 1
                     do j = j0, j1
                         if (zsame) then
-                            il = ilc(j)
-                            t = tc(j)
+                            il = g_i_lo(j)
+                            t = g_t_obs(j)
                         else
                             call frame_point_h(nspec, lam, zcm(m), j, il, t)
                         end if
@@ -3930,7 +3874,7 @@ contains
                 jlo = 1
                 jhi = nspec + 1
                 if (zsame) then
-                    jlo = jr0(i)
+                    jlo = g_jr0(i)
                     jhi = jlo
                 end if
                 do while (jlo < jhi)
@@ -3945,8 +3889,8 @@ contains
                 il = 1
                 do j = jlo, nspec
                     if (zsame) then
-                        il = ilc(j)
-                        t = tc(j)
+                        il = g_i_lo(j)
+                        t = g_t_obs(j)
                     else
                         call frame_point(nspec, lam, zcm(m), j, il, t)
                     end if
@@ -3976,8 +3920,8 @@ contains
             il = 1
             do j = 1, nspec
                 if (zsame) then
-                    il = ilc(j)
-                    t = tc(j)
+                    il = g_i_lo(j)
+                    t = g_t_obs(j)
                 else
                     call frame_point_h(nspec, lam, zcm(m), j, il, t)
                 end if
@@ -3985,9 +3929,6 @@ contains
                 if (t /= 0.0_wp) gw(il + 1, n_mod + m) = gw(il + 1, n_mod + m) + real(t * real(gw(j, m), WP), KP)
             end do
         end do
-#endif
-#if defined(OMP_TARGET)
-        !$omp end target data
 #endif
     end subroutine backward_observed_frame
 

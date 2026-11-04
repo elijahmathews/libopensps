@@ -220,8 +220,8 @@ contains
         type(opensps_context_t), intent(inout) :: ctx
         real(WP), intent(in)                :: zred, igm_factor
 
-        integer  :: nspec, nbands, j, b, ilo, ihi, npad
-        real(WP) :: z_factor, target, dm, sw
+        integer  :: nspec, nbands, j, b, ilo, ihi, npad, k, nnz
+        real(WP) :: z_factor, target, dm, sw, cw
         logical  :: igm
 
         nspec = ctx%state%nspec
@@ -288,12 +288,58 @@ contains
             end if
         end do
         g%igm_t = 1.0_KP
+
+        ! Per rest pixel i, the first observed pixel that reaches it (i_lo >= i - 1)
+        allocate(g%jr0(nspec))
+        k = 1
+        do j = 1, nspec
+            do while (k <= nspec)
+                if (g%i_lo(k) >= j - 1) exit
+                k = k + 1
+            end do
+            g%jr0(j) = k
+        end do
+
+        ! Band integrals' transpose as a sparse matrix by pixel
+        allocate(g%bp(nspec + 1))
+        nnz = 0
+        if (nbands > 0) then
+            do j = 1, nspec
+                g%bp(j) = nnz + 1
+                do b = 1, nbands
+                    if ((j >= g%j_lo(b) .and. j <= g%j_hi(b)) .or. (j - 1 >= g%j_lo(b) .and. j - 1 <= g%j_hi(b))) nnz = nnz + 1
+                end do
+            end do
+            g%bp(nspec + 1) = nnz + 1
+            allocate(g%bi(max(nnz, 1)), g%bk(max(nnz, 1)))
+            k = 0
+            do j = 1, nspec
+                do b = 1, nbands
+                    cw = 0.0_wp
+                    if (j >= g%j_lo(b) .and. j <= g%j_hi(b)) cw = cw + real(g%wtl(j), WP)
+                    if (j - 1 >= g%j_lo(b) .and. j - 1 <= g%j_hi(b)) cw = cw + real(g%wtl(j - 1), WP)
+                    if ((j >= g%j_lo(b) .and. j <= g%j_hi(b)) .or. (j - 1 >= g%j_lo(b) .and. j - 1 <= g%j_hi(b))) then
+                        k = k + 1
+                        g%bi(k) = b
+                        g%bk(k) = real(real(g%bands_t(b, j), WP) * cw, KP)
+                    end if
+                end do
+            end do
+        else
+            g%bp = 1
+            allocate(g%bi(1), g%bk(1))
+            g%bi = 1
+            g%bk = 0.0_KP
+        end if
+
 #ifdef OMP_TARGET
         ! Associate names, not g%component: on LLVM flang a map of parent%component takes the parent
         ! (here part of the mapped context) with it when it is deleted again
         associate (d_i_lo => g%i_lo, d_j_lo => g%j_lo, d_j_hi => g%j_hi, d_t_obs => g%t_obs, d_wt => g%wt, &
-                   d_wtl => g%wtl, d_wl => g%wl, d_bands_t => g%bands_t, d_igm_t => g%igm_t)
-            !$omp target enter data map(to: d_i_lo, d_j_lo, d_j_hi, d_t_obs, d_wt, d_wtl, d_wl, d_bands_t, d_igm_t)
+                   d_wtl => g%wtl, d_wl => g%wl, d_bands_t => g%bands_t, d_igm_t => g%igm_t, &
+                   d_jr0 => g%jr0, d_bp => g%bp, d_bi => g%bi, d_bk => g%bk)
+            !$omp target enter data map(to: d_i_lo, d_j_lo, d_j_hi, d_t_obs, d_wt, d_wtl, d_wl, d_bands_t, d_igm_t, &
+            !$omp& d_jr0, d_bp, d_bi, d_bk)
         end associate
 #endif
         if (igm) call compute_igm_transmission(ctx%state%spec_lambda, zred, igm_factor, g%igm_t)
