@@ -624,6 +624,7 @@ contains
         real(WP), intent(in) :: mass_ssp(:, :)
         real(WP), intent(in) :: lbol_ssp(:, :)
         integer, intent(in) :: nzin
+        integer :: iz
         logical :: mapped_new, needs_realloc
 
         mapped_new = .false.
@@ -633,12 +634,14 @@ contains
         if (size(spec_ssp, 3) < nzin .or. size(mass_ssp, 2) < nzin .or. size(lbol_ssp, 2) < nzin) return
 
         if (.not. allocated(ctx%state%ssp_basis_spec) .or. &
+            .not. allocated(ctx%state%ssp_basis_spec_t) .or. &
             .not. allocated(ctx%state%ssp_basis_mass) .or. &
             .not. allocated(ctx%state%ssp_basis_lbol)) then
             needs_realloc = .true.
         else
             ! Safe to check shape because we know they are all allocated
             if (any(shape(ctx%state%ssp_basis_spec) /= shape(spec_ssp)) .or. &
+                any(shape(ctx%state%ssp_basis_spec_t) /= [size(spec_ssp, 2), size(spec_ssp, 1), size(spec_ssp, 3)]) .or. &
                 any(shape(ctx%state%ssp_basis_mass) /= shape(mass_ssp)) .or. &
                 any(shape(ctx%state%ssp_basis_lbol) /= shape(lbol_ssp))) then
                 needs_realloc = .true.
@@ -650,13 +653,14 @@ contains
 #ifdef OMP_TARGET
                     ! Associate names, not ctx%state%component: on LLVM flang a delete of
                     ! parent%component also deletes the mapping of the parent (the context)
-                    associate (d_spec => ctx%state%ssp_basis_spec, d_mass => ctx%state%ssp_basis_mass, &
-                               d_lbol => ctx%state%ssp_basis_lbol)
-                        !$omp target exit data if(ctx%on_device) map(delete: d_spec, d_mass, d_lbol)
+                    associate (d_spec => ctx%state%ssp_basis_spec, d_spec_t => ctx%state%ssp_basis_spec_t, &
+                               d_mass => ctx%state%ssp_basis_mass, d_lbol => ctx%state%ssp_basis_lbol)
+                        !$omp target exit data if(ctx%on_device) map(delete: d_spec, d_spec_t, d_mass, d_lbol)
                     end associate
 #endif
                 end if
                 if (allocated(ctx%state%ssp_basis_spec)) deallocate(ctx%state%ssp_basis_spec)
+                if (allocated(ctx%state%ssp_basis_spec_t)) deallocate(ctx%state%ssp_basis_spec_t)
                 if (allocated(ctx%state%ssp_basis_mass)) deallocate(ctx%state%ssp_basis_mass)
                 if (allocated(ctx%state%ssp_basis_lbol)) deallocate(ctx%state%ssp_basis_lbol)
             ctx%state%ssp_basis_is_dirty = .true.
@@ -664,6 +668,7 @@ contains
 
         if (.not. allocated(ctx%state%ssp_basis_spec)) then
             allocate(ctx%state%ssp_basis_spec(size(spec_ssp, 1), size(spec_ssp, 2), size(spec_ssp, 3)))
+            allocate(ctx%state%ssp_basis_spec_t(size(spec_ssp, 2), size(spec_ssp, 1), size(spec_ssp, 3)))
             allocate(ctx%state%ssp_basis_mass(size(mass_ssp, 1), size(mass_ssp, 2)))
             allocate(ctx%state%ssp_basis_lbol(size(lbol_ssp, 1), size(lbol_ssp, 2)))
             mapped_new = .true.
@@ -671,9 +676,9 @@ contains
 
         if (mapped_new) then
 #ifdef OMP_TARGET
-            associate (d_spec => ctx%state%ssp_basis_spec, d_mass => ctx%state%ssp_basis_mass, &
-                       d_lbol => ctx%state%ssp_basis_lbol)
-                !$omp target enter data if(ctx%on_device) map(to: d_spec, d_mass, d_lbol)
+            associate (d_spec => ctx%state%ssp_basis_spec, d_spec_t => ctx%state%ssp_basis_spec_t, &
+                       d_mass => ctx%state%ssp_basis_mass, d_lbol => ctx%state%ssp_basis_lbol)
+                !$omp target enter data if(ctx%on_device) map(to: d_spec, d_spec_t, d_mass, d_lbol)
             end associate
 #endif
             ctx%state%ssp_basis_is_dirty = .true.
@@ -681,13 +686,16 @@ contains
 
         if (ctx%state%ssp_basis_is_dirty) then
             ctx%state%ssp_basis_spec(:, :, 1:nzin) = spec_ssp(:, :, 1:nzin)
+            do iz = 1, nzin
+                ctx%state%ssp_basis_spec_t(:, :, iz) = transpose(ctx%state%ssp_basis_spec(:, :, iz))
+            end do
             ctx%state%ssp_basis_mass(:, 1:nzin) = mass_ssp(:, 1:nzin)
             ctx%state%ssp_basis_lbol(:, 1:nzin) = lbol_ssp(:, 1:nzin)
 
 #ifdef OMP_TARGET
-            associate (d_spec => ctx%state%ssp_basis_spec, d_mass => ctx%state%ssp_basis_mass, &
-                       d_lbol => ctx%state%ssp_basis_lbol)
-                !$omp target update if(ctx%on_device) to(d_spec, d_mass, d_lbol)
+            associate (d_spec => ctx%state%ssp_basis_spec, d_spec_t => ctx%state%ssp_basis_spec_t, &
+                       d_mass => ctx%state%ssp_basis_mass, d_lbol => ctx%state%ssp_basis_lbol)
+                !$omp target update if(ctx%on_device) to(d_spec, d_spec_t, d_mass, d_lbol)
             end associate
 #endif
             ctx%state%ssp_basis_is_dirty = .false.
@@ -864,9 +872,9 @@ contains
         ! contexts on the device)
         if (allocated(ctx%state%ssp_basis_spec)) then
 #ifdef OMP_TARGET
-            associate (d_spec => ctx%state%ssp_basis_spec, d_mass => ctx%state%ssp_basis_mass, &
-                       d_lbol => ctx%state%ssp_basis_lbol)
-                !$omp target enter data map(to: d_spec, d_mass, d_lbol)
+            associate (d_spec => ctx%state%ssp_basis_spec, d_spec_t => ctx%state%ssp_basis_spec_t, &
+                       d_mass => ctx%state%ssp_basis_mass, d_lbol => ctx%state%ssp_basis_lbol)
+                !$omp target enter data map(to: d_spec, d_spec_t, d_mass, d_lbol)
             end associate
 #endif
         end if
@@ -1298,7 +1306,10 @@ contains
         if (.not. ctx%on_device) return
         if (allocated(ctx%state%ssp_basis_spec)) then
 #ifdef OMP_TARGET
-            !$omp target exit data map(delete: ctx%state%ssp_basis_spec, ctx%state%ssp_basis_mass, ctx%state%ssp_basis_lbol)
+            associate (d_spec => ctx%state%ssp_basis_spec, d_spec_t => ctx%state%ssp_basis_spec_t, &
+                       d_mass => ctx%state%ssp_basis_mass, d_lbol => ctx%state%ssp_basis_lbol)
+                !$omp target exit data map(delete: d_spec, d_spec_t, d_mass, d_lbol)
+            end associate
 #endif
         end if
 
@@ -1673,7 +1684,9 @@ contains
             ! --- Permanent CSP Workspace ---
             if (allocated(s%ssp_basis_spec)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%ssp_basis_spec)
+                associate (d_spec => s%ssp_basis_spec, d_spec_t => s%ssp_basis_spec_t)
+                    !$omp target exit data map(delete: d_spec, d_spec_t)
+                end associate
 #endif
             end if
             if (allocated(s%ssp_basis_mass)) then

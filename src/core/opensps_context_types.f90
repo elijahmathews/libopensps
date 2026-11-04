@@ -38,15 +38,15 @@ module opensps_context_types
         real(WP) :: zred = 0.0_wp
         real(WP) :: igm_factor = 0.0_wp
         real(WP) :: dist_term = 0.0_wp
-        integer,  allocatable :: i_lo(:), j_lo(:), j_hi(:)
+        integer,  allocatable :: i_lo(:), j_lo(:), j_hi(:), jr0(:), bp(:), bi(:)
         real(WP), allocatable :: t_obs(:)
-        real(KP), allocatable :: wt(:), wtl(:), wl(:), bands_t(:,:), cmat(:,:), igm_t(:)
+        real(KP), allocatable :: wt(:), wtl(:), wl(:), bands_t(:,:), cmat(:,:), igm_t(:), bk(:)
         !> Velocity smoothing operator (build_velocity_kernel) for sm_sigma, sm_minl, sm_maxl,
         !> on the device too (prepare_smoothing_kernel); released with the rest
         logical  :: sm_ready = .false.
         real(WP) :: sm_sigma = 0.0_wp, sm_minl = 0.0_wp, sm_maxl = 0.0_wp
-        integer,  allocatable :: sm_lo(:), sm_hi(:), sm_off(:)
-        real(WP), allocatable :: sm_coef(:)
+        integer,  allocatable :: sm_lo(:), sm_hi(:), sm_off(:), sm_t_lo(:), sm_t_hi(:)
+        real(WP), allocatable :: sm_coef(:), sm_dcoef(:)
     end type batch_grid_t
 
     !> Spectra of the last batched CSP (kernel precision, nspec x models), kept on the device
@@ -225,6 +225,7 @@ module opensps_context_types
 
         ! --- Persistent CSP Workspace ---
         real(KP), allocatable :: ssp_basis_spec(:, :, :)
+        real(KP), allocatable :: ssp_basis_spec_t(:, :, :)
         real(WP), allocatable :: ssp_basis_mass(:, :)
         real(WP), allocatable :: ssp_basis_lbol(:, :)
         logical :: ssp_basis_is_dirty = .true.
@@ -232,9 +233,11 @@ module opensps_context_types
         ! --- Replacements for csp_buffer_t ---
 
         ! --- Persistent Physics Workspaces (Dust & Gas) ---
-        real(WP), allocatable :: gas_neb_cont_reduced(:,:)   ! log10 values: kept in WP (an FP32 log loses ln(10)*|x|*eps ~ 5e-6 in 10**x)
+        ! log10 values: kept in WP (an FP32 log loses ln(10)*|x|*eps ~ 5e-6 in 10**x)
+        real(WP), allocatable :: gas_neb_cont_reduced(:,:)
         real(WP), allocatable :: gas_neb_line_reduced(:,:)
-        real(WP), allocatable :: gas_current_step_cont(:)   ! log10 values: kept in WP (an FP32 log loses ln(10)*|x|*eps ~ 5e-6 in 10**x)
+        ! log10 values: kept in WP (see gas_neb_cont_reduced)
+        real(WP), allocatable :: gas_current_step_cont(:)
         real(WP), allocatable :: gas_current_step_lines(:)
         real(WP), allocatable :: sfh_t_calc(:)
         real(WP), allocatable :: sfh_sfr_calc(:)
@@ -335,8 +338,10 @@ contains
             ! Associate names, not g%component: on LLVM flang a delete of parent%component also
             ! deletes the mapping of the parent, and g lives inside the mapped context
             associate (d_i_lo => g%i_lo, d_j_lo => g%j_lo, d_j_hi => g%j_hi, d_t_obs => g%t_obs, d_wt => g%wt, &
-                       d_wtl => g%wtl, d_wl => g%wl, d_bands_t => g%bands_t, d_igm_t => g%igm_t)
-                !$omp target exit data map(delete: d_i_lo, d_j_lo, d_j_hi, d_t_obs, d_wt, d_wtl, d_wl, d_bands_t, d_igm_t)
+                       d_wtl => g%wtl, d_wl => g%wl, d_bands_t => g%bands_t, d_igm_t => g%igm_t, &
+                       d_jr0 => g%jr0, d_bp => g%bp, d_bi => g%bi, d_bk => g%bk)
+                !$omp target exit data map(delete: d_i_lo, d_j_lo, d_j_hi, d_t_obs, d_wt, d_wtl, d_wl, d_bands_t, d_igm_t, &
+                !$omp& d_jr0, d_bp, d_bi, d_bk)
             end associate
 #endif
             if (allocated(g%cmat)) then
@@ -347,17 +352,19 @@ contains
 #endif
             end if
         end if
-        if (allocated(g%i_lo)) deallocate(g%i_lo, g%j_lo, g%j_hi, g%t_obs, g%wt, g%wtl, g%wl, g%bands_t, g%igm_t)
+        if (allocated(g%i_lo)) deallocate(g%i_lo, g%j_lo, g%j_hi, g%t_obs, g%wt, g%wtl, g%wl, g%bands_t, g%igm_t, &
+                                          g%jr0, g%bp, g%bi, g%bk)
         if (allocated(g%cmat)) deallocate(g%cmat)
         g%ready = .false.
         if (g%sm_ready) then
 #ifdef OMP_TARGET
-            associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef)
-                !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef)
+            associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef, &
+                       d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef)
+                !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef)
             end associate
 #endif
         end if
-        if (allocated(g%sm_lo)) deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef)
+        if (allocated(g%sm_lo)) deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef, g%sm_t_lo, g%sm_t_hi, g%sm_dcoef)
         g%sm_ready = .false.
     end subroutine batch_grid_release
 
@@ -509,6 +516,7 @@ contains
 
         ! --- Persistent CSP Workspace ---
         if (allocated(state%ssp_basis_spec)) deallocate (state%ssp_basis_spec)
+        if (allocated(state%ssp_basis_spec_t)) deallocate (state%ssp_basis_spec_t)
         if (allocated(state%ssp_basis_mass)) deallocate (state%ssp_basis_mass)
         if (allocated(state%ssp_basis_lbol)) deallocate (state%ssp_basis_lbol)
 

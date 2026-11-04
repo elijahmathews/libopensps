@@ -153,7 +153,7 @@ module opensps_ssp_operator
         !> row_eff maps each row to its column (0: the mass and L_bol rows).
         integer :: n_eff = 0
         integer,  allocatable :: row_eff(:), eff_age0(:)
-        real(KP), allocatable :: etpl(:,:)
+        real(KP), allocatable :: etpl(:,:), etpl_t(:,:)
         !> Batch form (compute_csp_batch with the IMF per model, opensps_ssp_batch): the template
         !> rows of S by effective template, over the points in age order (CSR: eff_ptr, eff_pt,
         !> eff_val); per point its age and its coefficients of the age's surviving mass (pt_cm),
@@ -680,6 +680,8 @@ contains
             end select
             op%etpl(:, e) = real(col, KP)
         end do
+        allocate(op%etpl_t(max(n, 1), nspec))
+        op%etpl_t = transpose(op%etpl)
         call build_batch_form(ctx, op)
     end subroutine build_effective_templates
 
@@ -812,7 +814,7 @@ contains
         type(ssp_operator_t), intent(inout) :: op
 #ifdef OMP_TARGET
         if (op%on_device) return
-        !$omp target enter data map(to: op%etpl, op%eff_ptr, op%eff_pt, op%eff_val, op%pt_age, op%pt_cm, &
+        !$omp target enter data map(to: op%etpl, op%etpl_t, op%eff_ptr, op%eff_pt, op%eff_val, op%pt_age, op%pt_cm, &
         !$omp     op%pt_cl, op%pt_q, op%pt_mini, op%pt_m1, op%pt_m2, op%pt_first, op%age_mmax, op%k_age, op%pt_ptr, &
         !$omp     op%seg_ptr, op%seg_first, op%pc_ptr, op%age_pc)
         op%on_device = .true.
@@ -824,7 +826,7 @@ contains
         type(ssp_operator_t), intent(inout) :: op
 #ifdef OMP_TARGET
         if (.not. op%on_device) return
-        !$omp target exit data map(delete: op%etpl, op%eff_ptr, op%eff_pt, op%eff_val, op%pt_age, op%pt_cm, &
+        !$omp target exit data map(delete: op%etpl, op%etpl_t, op%eff_ptr, op%eff_pt, op%eff_val, op%pt_age, op%pt_cm, &
         !$omp     op%pt_cl, op%pt_q, op%pt_mini, op%pt_m1, op%pt_m2, op%pt_first, op%age_mmax, op%k_age, op%pt_ptr, &
         !$omp     op%seg_ptr, op%seg_first, op%pc_ptr, op%age_pc)
         op%on_device = .false.
@@ -1017,6 +1019,7 @@ contains
         if (allocated(op%row_eff)) deallocate(op%row_eff)
         if (allocated(op%eff_age0)) deallocate(op%eff_age0)
         if (allocated(op%etpl)) deallocate(op%etpl)
+        if (allocated(op%etpl_t)) deallocate(op%etpl_t)
         if (allocated(op%k_age)) deallocate(op%k_age)
         if (allocated(op%seg_ptr)) deallocate(op%seg_ptr)
         if (allocated(op%pc_ptr)) deallocate(op%pc_ptr)
