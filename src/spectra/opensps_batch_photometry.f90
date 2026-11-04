@@ -28,7 +28,8 @@ module opensps_batch_photometry
     private
 
     public :: compute_magnitudes_columns, prepare_batch_grid
-    public :: smoothing_on_device, prepare_smoothing_kernel, smooth_columns
+    public :: smoothing_on_device, prepare_smoothing_kernel, smooth_columns, smooth_columns_adjoint
+    public :: distance_term_dz, smooth_sigma_adjoint
 #ifdef FSPS_CUBLAS
     public :: blas, blas_init
 #endif
@@ -54,8 +55,10 @@ contains
 
     !> @brief Magnitudes of spec(:, 1:n_col) (present on the device, L_sun/Hz) at redshift zred,
     !> as compute_magnitudes(ctx, zred, spec(:, i), mags(:, i), mag_compute) for each column; with
-    !> zred_col, column i at redshift zred_col(i) (zred is then ignored).
-    subroutine compute_magnitudes_columns(ctx, zred, igm_factor, spec, n_col, mags, mag_compute, zred_col)
+    !> zred_col, column i at redshift zred_col(i) (zred is then ignored). fband_out: the band fluxes
+    !> (filter integrals of the observed spectrum / lambda, before the distance term), for the
+    !> adjoint of the magnitudes.
+    subroutine compute_magnitudes_columns(ctx, zred, igm_factor, spec, n_col, mags, mag_compute, zred_col, fband_out)
         type(opensps_context_t), intent(inout) :: ctx
         real(WP), intent(in)                :: zred, igm_factor
         real(KP), intent(in)                :: spec(:,:)
@@ -63,6 +66,7 @@ contains
         real(WP), intent(out)               :: mags(:,:)
         integer, intent(in), optional       :: mag_compute(:)
         real(WP), intent(in), optional      :: zred_col(:)
+        real(WP), intent(out), optional     :: fband_out(:,:)
 
         integer  :: nspec, nbands, b, m
         integer, allocatable  :: do_band(:)
@@ -129,6 +133,9 @@ contains
             call band_fluxes_gemm(n_col, npad, nbands, g%cmat, fobs, fband)
             call magnitudes_from_fluxes(ctx, n_col, nbands, do_band, dist, fband, mags_l)
 #ifdef OMP_TARGET
+            if (present(fband_out)) then
+                !$omp target update from(fband)
+            end if
             !$omp end target data
 #endif
             done = .true.
@@ -147,6 +154,9 @@ contains
             call band_fluxes(n_col, nspec, nbands, g%bands_t, g%j_lo, g%j_hi, do_band, g%wtl, fobs, fband)
             call magnitudes_from_fluxes(ctx, n_col, nbands, do_band, dist, fband, mags_l)
 #ifdef OMP_TARGET
+            if (present(fband_out)) then
+                !$omp target update from(fband)
+            end if
             !$omp end target data
 #endif
         end if
@@ -157,6 +167,7 @@ contains
         if (.not. ctx%on_device) call batch_grid_release(ctx%state%batch)
 
         mags(1:nbands, 1:n_col) = mags_l
+        if (present(fband_out)) fband_out(1:nbands, 1:n_col) = fband
     end subroutine compute_magnitudes_columns
 
     !> Magnitudes from band fluxes (fband, present), as compute_magnitudes: AB, the distance term,
@@ -380,6 +391,154 @@ contains
                            ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_coef, spec)
     end subroutine smooth_columns
 
+    !> The transpose of smooth_columns, in place: spec_bar(k) = sum over pixels i of C(i, k)
+    !> spec_bar_out(i) (pixels outside the smoothing window pass through), for the gradients of
+    !> compute_csp_batch.
+    subroutine smooth_columns_adjoint(ctx, spec_bar, n_col)
+        type(opensps_context_t), intent(inout) :: ctx
+        real(KP), intent(inout), contiguous :: spec_bar(:,:)
+        integer, intent(in)                 :: n_col
+
+        call smooth_kernel_t(ctx%state%nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
+                             ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_coef, spec_bar)
+    end subroutine smooth_columns_adjoint
+
+    !> d L / d sigma_smooth per column, for the prepared operator (smooth_columns): with
+    !> C(i, k) = c_k exp(-a x_k^2) / sum_k (...), x_k = ln lambda_i - ln lambda_k, a = 1 / (2 sigma_beta^2),
+    !> d C / d sigma = C (x_k^2 - <x^2>_i) / (sigma_beta^3 c 1e-13) (<>: the C-weighted mean over the
+    !> window; the window's edges, at N_SIGMA_RANGE sigma, do not move continuously). spec: the
+    !> spectra before smoothing; spec_bar: the cotangents of the smoothed spectra. One thread per
+    !> (column, chunk of NCH pixels), FP64 sums.
+    subroutine smooth_sigma_adjoint(ctx, sigma, spec, spec_bar, n_col, ds)
+        type(opensps_context_t), intent(inout) :: ctx
+        real(WP), intent(in)                :: sigma
+        real(KP), intent(in), contiguous    :: spec(:,:), spec_bar(:,:)
+        integer, intent(in)                 :: n_col
+        real(WP), intent(out)               :: ds(n_col)
+        real(WP) :: sb, kfac
+        real(WP), allocatable :: ll(:)
+        integer :: nspec
+
+        nspec = ctx%state%nspec
+        sb = sigma / (C_LIGHT * 1.0e-13_wp)
+        kfac = 1.0_wp / (sb**3 * C_LIGHT * 1.0e-13_wp)
+        allocate(ll(nspec))
+        ll = log(ctx%state%spec_lambda(1:nspec))
+        call smooth_sigma_kernel(nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
+                                 ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_coef, ll, kfac, &
+                                 spec, spec_bar, ds)
+    end subroutine smooth_sigma_adjoint
+
+    subroutine smooth_sigma_kernel(nspec, n_col, ncoef, sm_lo, sm_hi, sm_off, sm_coef, ll, kfac, spec, spec_bar, ds)
+        integer, intent(in)     :: nspec, n_col, ncoef
+        integer, intent(in)     :: sm_lo(nspec), sm_hi(nspec), sm_off(nspec)
+        real(WP), intent(in)    :: sm_coef(ncoef), ll(nspec), kfac
+        real(KP), intent(in)    :: spec(nspec, n_col), spec_bar(nspec, n_col)
+        real(WP), intent(out)   :: ds(n_col)
+        integer, parameter :: NCH = 64
+        real(WP), allocatable :: part(:,:)
+        integer  :: m, c, i, k, lo, off
+        real(WP) :: s, x2m, sx, sxx, x2
+
+        allocate(part(NCH, n_col))
+#ifdef OMP_TARGET
+        !$omp target data map(to: ll) map(alloc: part) map(from: ds)
+#endif
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(s, i, k, lo, off, x2m, sx, sxx, x2)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(s, i, k, lo, off, x2m, sx, sxx, x2)
+#endif
+        do m = 1, n_col
+            do c = 1, NCH
+                s = 0.0_wp
+                do i = c, nspec, NCH
+                    lo = sm_lo(i)
+                    if (lo == 0) cycle
+                    off = sm_off(i) - lo
+                    ! <x^2>, then sum C (x^2 - <x^2>) S
+                    x2m = 0.0_wp
+                    do k = lo, sm_hi(i)
+                        x2m = x2m + sm_coef(off + k) * (ll(i) - ll(k))**2
+                    end do
+                    sx = 0.0_wp
+                    do k = lo, sm_hi(i)
+                        x2 = (ll(i) - ll(k))**2
+                        sx = sx + sm_coef(off + k) * (x2 - x2m) * real(spec(k, m), WP)
+                    end do
+                    s = s + real(spec_bar(i, m), WP) * sx
+                end do
+                part(c, m) = s
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(c, sxx)
+#elif defined(_OPENMP)
+        !$omp parallel do private(c, sxx)
+#endif
+        do m = 1, n_col
+            sxx = 0.0_wp
+            do c = 1, NCH
+                sxx = sxx + part(c, m)
+            end do
+            ds(m) = kfac * sxx
+        end do
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine smooth_sigma_kernel
+
+    !> smooth_kernel transposed: one thread per column, serial over the pixels (each output pixel
+    !> scatters into its window), the sums in FP64.
+    subroutine smooth_kernel_t(nspec, n_col, ncoef, sm_lo, sm_hi, sm_off, sm_coef, spec)
+        integer, intent(in)                 :: nspec, n_col, ncoef
+        integer, intent(in)                 :: sm_lo(nspec), sm_hi(nspec), sm_off(nspec)
+        real(WP), intent(in)                :: sm_coef(ncoef)
+        real(KP), intent(inout)             :: spec(nspec, n_col)
+
+        real(WP), allocatable :: sm(:,:)
+        integer  :: m, i, k, lo, off
+
+        allocate(sm(nspec, n_col))
+#ifdef OMP_TARGET
+        !$omp target data map(alloc: sm)
+#endif
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(i, k, lo, off)
+#elif defined(_OPENMP)
+        !$omp parallel do private(i, k, lo, off)
+#endif
+        do m = 1, n_col
+            do i = 1, nspec
+                sm(i, m) = 0.0_wp
+            end do
+            do i = 1, nspec
+                lo = sm_lo(i)
+                if (lo == 0) then
+                    sm(i, m) = sm(i, m) + real(spec(i, m), WP)
+                else
+                    off = sm_off(i) - lo
+                    do k = lo, sm_hi(i)
+                        sm(k, m) = sm(k, m) + sm_coef(off + k) * real(spec(i, m), WP)
+                    end do
+                end if
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2)
+#endif
+        do m = 1, n_col
+            do i = 1, nspec
+                spec(i, m) = real(sm(i, m), KP)
+            end do
+        end do
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine smooth_kernel_t
+
     subroutine smooth_kernel(nspec, n_col, ncoef, sm_lo, sm_hi, sm_off, sm_coef, spec)
         ! Explicit-shape arguments: no array descriptors to map in every launch
         integer, intent(in)                 :: nspec, n_col, ncoef
@@ -443,6 +602,25 @@ contains
         if (dm /= dm .or. dm <= SAFE_FLOOR) return
         dist = 5.0_wp * log10(dm / 10.0_wp) + mag_from_flux(1.0_wp + zred)
     end function distance_term
+
+    !> d distance_term / dz: 5 / ln 10 (d d_L / dz) / d_L - 2.5 / (ln 10 (1 + z)), d_L linear in the
+    !> context's table (zero at z = 0, where the term is 0: absolute magnitudes).
+    function distance_term_dz(ctx, zred) result(dd)
+        type(opensps_context_t), intent(in) :: ctx
+        real(WP), intent(in)             :: zred
+        real(WP) :: dd, dm, slope
+        integer  :: i, n
+
+        dd = 0.0_wp
+        if (abs(zred) <= SAFE_FLOOR) return
+        dm = interpolate_linear(ctx%state%cosmospl(:,1), ctx%state%cosmospl(:,3), zred)
+        if (dm /= dm .or. dm <= SAFE_FLOOR) return
+        n = size(ctx%state%cosmospl, 1)
+        i = max(1, min(find_interval(ctx%state%cosmospl(:,1), zred), n - 1))
+        slope = (ctx%state%cosmospl(i + 1, 3) - ctx%state%cosmospl(i, 3)) / &
+                (ctx%state%cosmospl(i + 1, 1) - ctx%state%cosmospl(i, 1))
+        dd = 5.0_wp / log(10.0_wp) * slope / dm - 2.5_wp / (log(10.0_wp) * (1.0_wp + zred))
+    end function distance_term_dz
 
     !> Observed-frame spectrum / lambda with a redshift per column (zc, present): per (pixel,
     !> column) the rest-frame interval and position as prepare_batch_grid finds them for one

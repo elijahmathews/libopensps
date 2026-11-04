@@ -178,6 +178,7 @@ lib_sources = files(
     'src/physics/opensps_gas.f90',
     'src/physics/opensps_imf.f90',
     'src/physics/opensps_sfh.f90',
+    'src/physics/opensps_sfh_tangent.f90',
     'src/physics/opensps_ssp.f90',
     'src/physics/opensps_ssp_operator.f90',
     'src/physics/opensps_ssp_batch.f90',
@@ -400,6 +401,18 @@ csp_batch_exe = executable('test_csp_batch', 'tests/test_csp_batch.f90',
     link_language : 'fortran'
 )
 test('csp_batch', csp_batch_exe,
+    protocol : 'tap',
+    env : regression_env,
+    suite : 'regression',
+    timeout : 900
+)
+
+# Integration test: the gradients of the batched CSP (reverse pass) against finite differences
+csp_batch_grad_exe = executable('test_csp_batch_grad', 'tests/test_csp_batch_grad.f90',
+    dependencies : [opensps_dep, test_utils_dep],
+    link_language : 'fortran'
+)
+test('csp_batch_grad', csp_batch_grad_exe,
     protocol : 'tap',
     env : regression_env,
     suite : 'regression',

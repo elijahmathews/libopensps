@@ -16,7 +16,7 @@ module opensps_imf
     public :: compute_imf_weights
     public :: get_imf_value
     public :: integrate_imf_interval_analytic, imf_integral, imf_integral_p, imf_pack_params
-    public :: imf_bin_weights, imf_bin_weights_tab, imf_bin_logs
+    public :: imf_bin_weights, imf_bin_weights_tab, imf_bin_logs, imf_integral_dp, integrate_powerlaw, powerlaw_dj_de
     public :: IMF_NPAR, IMF_P_SALP, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE, IMF_P_LOWER_LIMIT, &
               IMF_P_UPPER_LIMIT, IMF_P_LOWER_BOUND, IMF_P_MLIM_BH, IMF_P_MLIM_NS, IMF_P_NUSER, IMF_P_USER
     public :: CHAB_MC, CHAB_SIGMA2, CHAB_IND
@@ -789,6 +789,107 @@ contains
             val = plo * (exp(y) - 1.0_wp) / e
         end if
     end function powerlaw_bin
+
+    !> d J / d e of J(e) = integral from lo to hi of m**(e - 1) dm = lo**e expm1(e L) / e, L = ln(hi / lo):
+    !> lo**e (ln(lo) g + g'), g = expm1(e L) / e and g' its derivative in e, by series below |e L| = 1/2
+    !> (narrow bins and e near 0, where the closed form cancels) and in closed form above.
+    pure function powerlaw_dj_de(lo, hi, e) result(d)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(WP), intent(in) :: lo, hi, e
+        real(WP) :: d, el, g, gp, x, ex, term, ln_lo
+        integer  :: n
+
+        ! (ln(hi / lo) = log1p((hi - lo) / lo) in Kahan's form, as powerlaw_bin: narrow bins)
+        x = (hi - lo) / lo
+        term = 1.0_wp + x
+        if (term /= 1.0_wp) x = log(term) * x / (term - 1.0_wp)
+        el = e * x
+        ln_lo = log(lo)
+        if (abs(el) < 0.5_wp) then
+            ! g = sum_{n>=1} v_n, v_n = x (e x)^(n-1) / n!; g' = sum_{n>=2} (n - 1) u_n, u_n = x^2 (e x)^(n-2) / n!
+            g = x
+            term = x
+            gp = 0.5_wp * x * x
+            ex = gp
+            do n = 2, 24
+                term = term * el / n
+                g = g + term
+                if (n >= 3) then
+                    ex = ex * el / n
+                    gp = gp + (n - 1) * ex
+                end if
+            end do
+        else
+            ex = exp(el)
+            g = (ex - 1.0_wp) / e
+            gp = (x * ex - g) / e
+        end if
+        d = exp(e * ln_lo) * (ln_lo * g + gp)
+    end function powerlaw_dj_de
+
+    !> d / d p(row) of imf_integral_p(imf_type, p, m1, m2, mass_weighted) for the power-law IMFs whose
+    !> parameters are slopes and break masses: Kroupa (row IMF_P_ALPHA .. +2) and Dave (IMF_P_ALPHA,
+    !> +1, IMF_P_MDAVE); zero otherwise. Each segment c J: c' J + c dJ/d alpha (dJ/d alpha = -dJ/de,
+    !> e = 1 - alpha or 2 - alpha mass-weighted); the continuity coefficients 0.5**(a2 - a1) and
+    !> mdave**(a2 - a1). At Dave's break the moving segment edges add f1(mdave) - c f2(mdave) = 0 (the
+    !> IMF is continuous there).
+    pure function imf_integral_dp(imf_type, p, m1, m2, mass_weighted, row) result(d)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        integer, intent(in)  :: imf_type, row
+        real(WP), intent(in) :: p(IMF_NPAR), m1, m2
+        logical, intent(in)  :: mass_weighted
+        real(WP) :: d
+        real(WP) :: lo, hi, a1, a2, a3, c2, md, base, sl, sh, j2, ln05, lmd
+
+        d = 0.0_wp
+        lo = min(m1, m2)
+        hi = max(m1, m2)
+        if (hi <= lo) return
+        base = 1.0_wp
+        if (mass_weighted) base = 2.0_wp
+        select case (mod(imf_type, 10))
+        case (2)
+            a1 = p(IMF_P_ALPHA)
+            a2 = p(IMF_P_ALPHA + 1)
+            a3 = p(IMF_P_ALPHA + 2)
+            c2 = 0.5_wp**(-a1 + a2)
+            ln05 = log(0.5_wp)
+            sl = max(lo, 0.08_wp); sh = min(hi, 0.5_wp)
+            if (sh > sl .and. row == IMF_P_ALPHA) d = d - powerlaw_dj_de(sl, sh, base - a1)
+            sl = max(lo, 0.5_wp); sh = min(hi, 1.0_wp)
+            if (sh > sl) then
+                j2 = integrate_powerlaw(sl, sh, a2, mass_weighted, 1.0_wp)
+                if (row == IMF_P_ALPHA) d = d - ln05 * c2 * j2
+                if (row == IMF_P_ALPHA + 1) d = d + ln05 * c2 * j2 - c2 * powerlaw_dj_de(sl, sh, base - a2)
+            end if
+            sl = max(lo, 1.0_wp); sh = hi
+            if (sh > sl) then
+                j2 = integrate_powerlaw(sl, sh, a3, mass_weighted, 1.0_wp)
+                if (row == IMF_P_ALPHA) d = d - ln05 * c2 * j2
+                if (row == IMF_P_ALPHA + 1) d = d + ln05 * c2 * j2
+                if (row == IMF_P_ALPHA + 2) d = d - c2 * powerlaw_dj_de(sl, sh, base - a3)
+            end if
+        case (4)
+            a1 = p(IMF_P_ALPHA)
+            a2 = p(IMF_P_ALPHA + 1)
+            md = p(IMF_P_MDAVE)
+            c2 = md**(-a1 + a2)
+            lmd = log(md)
+            sl = max(lo, 0.08_wp); sh = min(hi, md)
+            if (sh > sl .and. row == IMF_P_ALPHA) d = d - powerlaw_dj_de(sl, sh, base - a1)
+            sl = max(lo, md); sh = hi
+            if (sh > sl) then
+                j2 = integrate_powerlaw(sl, sh, a2, mass_weighted, 1.0_wp)
+                if (row == IMF_P_ALPHA) d = d - lmd * c2 * j2
+                if (row == IMF_P_ALPHA + 1) d = d + lmd * c2 * j2 - c2 * powerlaw_dj_de(sl, sh, base - a2)
+                if (row == IMF_P_MDAVE) d = d + c2 * (a2 - a1) / md * j2
+            end if
+        end select
+    end function imf_integral_dp
 
     ! ------------------------------------------------------------------------
     ! CORE IMF LOGIC

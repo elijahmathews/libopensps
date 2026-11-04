@@ -232,6 +232,69 @@ offload; Tapenade does not handle OpenACC / OpenMP) and a re-implementation in a
 
 Why after priorities 2 and 3: the adjoints are written once, on the final hot path.
 
+Status (2026-11-02, PRs #50-#56 and their successors, stacked on #44): `compute_csp_batch` takes the
+gradient of the caller's loss with respect to its magnitudes and spectra (`mags_bar`, `spec_bar`)
+and returns `params_bar(NBGRAD, N)` (rows `BGRAD_*`) and `weights_bar(ntfull, N)` (dL / d(SSP
+weight), the non-parametric SFH), by a reverse pass in the same call (`batch_backward`). Each stage's
+adjoint is the transpose of its forward map, evaluated with the forward's own transmissions,
+tables and interpolation weights:
+
+| Rows | Through |
+|---|---|
+| SSP weights, `fagn` | age sums, AGN (L_bol), magnitudes and the observed-frame resampling |
+| `agn_tau` | the torus templates' interpolation (one-sided at the grid's nodes, zero outside it) |
+| weights over ages and metallicities (`ssp_weights_z`: `weights_z_bar`) | the age sums over every resident basis, L_bol and the mass |
+| `dust1`, `dust2`, `dust3`, `dust_index`, `dust1_index`, `frac_obrun`, `frac_nodust`, `mwr`, `uvb` | the three transmissions (the curve tables' derivatives), AGN's diffuse transmission |
+| `duste_qpah`, `duste_umin`, `duste_gamma` | the energy balance (absorbed light, escaping fraction) and the Draine & Li interpolation |
+| `gas_logz`, `gas_logu` (and `frac_obrun`) | the nebular continuum and lines (CLOUDY grids in log space), the EUV rows |
+| `logzsol` | the bases (and L_bol, Q) interpolated in log Z, with every metallicity resident |
+| `tage`, `tau`, `const`, `fburst`, `tburst`, `sf_start`, `sf_trunc`, `sf_slope` | the SFH weights' tangents (`opensps_sfh_tangent`; sfh = 0, 1, 4, 5) |
+| `zred` | the resampling, the distance term, the IGM (`igm_tau_dz`) |
+| `igm_factor` | the IGM transmission (-tau T, the forward's capped optical depth); per model, as `sigma_smooth` |
+| `imf1`, `imf2`, `imf3`, `vdmc`, `mdave` (with `ssp_ops`) | the SSP operator in reverse (`ssp_batch_age_sums_adjoint`: templates transposed, the fold as gathers, L_bol and Q per point); the point weights' derivatives analytic for Kroupa and Dave (`imf_integral_dp`, `powerlaw_j_dj`), by central differences of their FP64 closed forms for van Dokkum (`vdmc`); only the rows each IMF type reads |
+| `sigma_smooth` | the smoothing kernels' coefficients, every mode (the device operator; on the host the exact log-linear and the constant-width convolutions); one sigma per batch: per-model sensitivities |
+
+Kinks are one-sided: interpolation nodes of the dust-emission and nebular grids, grid ages for
+tage, observed pixels coinciding with rest-frame pixels for zred, z = 0. Precision: each model's
+cotangents are scaled to unit maximum before they are stored at kernel precision (a magnitude of a
+nearly dark band has a gradient of 1 / F), long sums are compensated in FP32 builds. Validation:
+`tests/test_csp_batch_grad` against finite differences of the loss in FP64 (every row, every model,
+20 configurations; agreement 1e-8 - 1e-5, limited by the differences), with linear-only checks in
+FP32 builds.
+
+Cotangents of the outputs `mass` and `lbol` are taken too (`mass_bar`, `lbol_bar`; with `ssp_ops` the
+surviving mass, remnants included, is differentiated in the IMF parameters and logzsol by the
+operator's central differences). SSP-level nebular emission
+(`add_neb_emission = 2`) is in the basis, so its gas parameters do not act in the batch (rows zero).
+
+Every gradient case is supported (no status 2). Not differentiated: `emlines`, `mdust`, indices as outputs.
+Parameters without a row, and why: `dust_tesc` (the young/old split falls on a grid age, so the
+model is a step function of it: zero gradient almost everywhere); the isochrone and SSP-build
+parameters (`dell`, `delt`, `fbhb`, `sbss`, `pagb`, `redgb`, `agb`, `agb_dust`, `masscut`, `fcstar`,
+`pmetals`, `frac_xrb`), which are in the bases or operators; `dust_clumps`, which no physics reads;
+the smoothing window's edges; integer switches.
+
+Cost (2026-11-03, after a first tuning pass; full physics: nebular, dust emission, AGN, IGM, SFH
+parameters; forward / with gradients, per model):
+
+| | forward | with gradients |
+|---|---|---|
+| gfortran FP64, one CPU thread, N = 100 | 1.35 ms | 3.50 ms (2.6x) |
+| gfortran FP64, one CPU thread, IMF free (Kroupa, `ssp_ops`), N = 100 | 5.9 ms | 15.6 ms (2.6x) |
+| R9700 FP32 (LLVM flang 22), N = 100 | 49 us | 181 us (3.7x) |
+| R9700 FP32, N = 1000 | 24 us | 85 us (3.5x; 95 with amdflang 7.2.4 before the last change) |
+| R9700 FP32, IMF free (Kroupa, `ssp_ops`), N = 1000 | 73 us | 417 us (5.7x) |
+
+What the tuning found (rocprofv3 kernel traces on the R9700, stage timers on both): FP64 atomics in
+the IMF operator's fold (4 s per call of 100 models: now gathers), FP64 arithmetic at the consumer
+GPU's FP64 rate (the template transpose, the band integrals' transpose: now kernel precision,
+compensated where the sums are long), accumulator arrays spilled to scratch memory (now scalar register tiles), passes
+serial per model (observed frame, IGM cap, AGN, line profiles), a single-threaded host pass over the
+cotangents, the IMF rows' finite differences (now analytic for Kroupa and Dave), and on CPUs
+unvectorized running sums (now lane-vectorized dot products). Remaining: the nebular continuum's
+table reads, the age sums' adjoint on GPUs (one basis column per thread), host-side setup, and the
+SFH tangents on the host.
+
 ### 5. AMD and Intel GPUs (future work)
 
 Deferred (2026-10-22). LLVM flang (22, with ROCm 7.1) builds `-Daccel=omp_gpu` for the Radeon

@@ -10,16 +10,18 @@ program benchmark_csp_batch
     !> "full_smooth": the same with velocity smoothing, sigma_smooth = 150 km/s; "full_z" and
     !> "full_smooth_z": with the bases of all metallicities resident and logzsol varying per model;
     !> any config ending in "_imf": the IMF free per model (Kroupa, imf1-3 varied; the batch
-    !> from the template operator, built once and timed).
+    !> from the template operator, built once and timed); any config with "_grad": also the
+    !> gradients (params_bar, with cotangents of the magnitudes, the spectra, mass and lbol).
     !> Prints one line per metric: name, value: one compute_csp_scenario call per model, one
     !> all-ages call (tage = 0, every age of the grid) and, per batch size: magnitudes only; with spectra
-    !> copied back to a host array (reused, as in a fitting loop); with spectra left on the device.
+    !> copied back to a host array (reused, as in a fitting loop); with spectra left on the device;
+    !> with "_grad", the forward with spectra and the gradients (batch_N_grad_us_per_model).
 
     use opensps_precision, only: WP
     use opensps_types, only: PARAMS, COMPSPOUT
     use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
     use opensps_csp, only: compute_csp_scenario
-    use opensps_csp_batch, only: compute_csp_batch, batch_spectra_device, batch_spectra_host
+    use opensps_csp_batch, only: compute_csp_batch, batch_spectra_device, batch_spectra_host, NBGRAD
     use, intrinsic :: iso_c_binding, only: c_ptr, c_associated
     use opensps_ssp, only: generate_ssp_grid
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
@@ -36,7 +38,8 @@ program benchmark_csp_batch
     type(COMPSPOUT), allocatable :: results(:)
     real(WP), allocatable :: spec_ssp(:, :), mass_ssp(:), lbol_ssp(:), mags(:, :), spec(:, :)
     character(len=32) :: arg, config = 'basic'
-    logical :: full, zvar = .false., imf = .false.
+    logical :: full, zvar = .false., imf = .false., grad = .false.
+    real(WP), allocatable :: mbar(:, :), sbar(:, :), pbar(:, :), massv(:), lbolv(:), massb(:), lbolb(:)
     type(ssp_operator_t), allocatable :: ops(:)
     type(ssp_opset_t) :: opset
     real(WP), allocatable :: spec_z(:, :, :), mass_z(:, :), lbol_z(:, :)
@@ -60,6 +63,7 @@ program benchmark_csp_batch
     full =index(config, 'full') == 1
     zvar = index(config, '_z') > 0
     imf = index(config, '_imf') > 0
+    grad = index(config, '_grad') > 0
     call system_clock(count_rate=rate)
 
     allocate(ctx)
@@ -231,6 +235,33 @@ program benchmark_csp_batch
         dt = real(t1 - t0, WP) / rate / n_rep
         if (.not. c_associated(dptr) .or. k_n /= n) stop 4
         write(*, '(A,I0,A,F14.3)') 'batch_', n, '_spec_host_kp_us_per_model ', 1.0e6_wp * dt / n
+
+        ! The gradients: cotangents of every output (fixed, O(1) per band, the spectra's scaled by
+        ! their peak), params_bar
+        if (grad) then
+            allocate(spec(nspec, n), mbar(ctx%state%nbands, n), sbar(nspec, n), pbar(NBGRAD, n), massv(n), lbolv(n), &
+                     massb(n), lbolb(n))
+            call batch(n, .true.)
+            do i = 1, n
+                do rep = 1, ctx%state%nbands
+                    mbar(rep, i) = merge(sin(real(rep + 7 * i, WP)), 0.0_wp, mags(rep, i) == mags(rep, i))
+                end do
+                sbar(:, i) = cos(real([(rep, rep = 1, nspec)], WP) + i) / (maxval(abs(spec(:, i))) * nspec)
+                massb(i) = 0.3_wp
+                lbolb(i) = -0.2_wp
+            end do
+            call grad_batch(n)   ! warm-up
+            if (status /= 0) stop 5
+            call system_clock(t0)
+            do rep = 1, n_rep
+                call grad_batch(n)
+            end do
+            call system_clock(t1)
+            dt = real(t1 - t0, WP) / rate / n_rep
+            write(*, '(A,I0,A,F14.3)') 'batch_', n, '_grad_us_per_model ', 1.0e6_wp * dt / n
+            total = total + pbar(1, 1)
+            deallocate(spec, mbar, sbar, pbar, massv, lbolv, massb, lbolb)
+        end if
     end do
     if (total /= total) write(*, *) total   ! keep the results live
 
@@ -261,6 +292,18 @@ contains
             call compute_csp_batch(ctx, psets(1:n), mags, status)
         end if
     end subroutine batch
+
+    !> The batch of the first n models with its gradients (spectra, mass and lbol, and params_bar).
+    subroutine grad_batch(n)
+        integer, intent(in) :: n
+        if (imf) then
+            call compute_csp_batch(ctx, psets(1:n), mags, status, spec=spec, mass=massv, lbol=lbolv, ssp_ops=opset, &
+                                   mags_bar=mbar, spec_bar=sbar, params_bar=pbar, mass_bar=massb, lbol_bar=lbolb)
+        else
+            call compute_csp_batch(ctx, psets(1:n), mags, status, spec=spec, mass=massv, lbol=lbolv, &
+                                   mags_bar=mbar, spec_bar=sbar, params_bar=pbar, mass_bar=massb, lbol_bar=lbolb)
+        end if
+    end subroutine grad_batch
 
     !> Model i: tau, age and dust vary over a fitting-like range ("full": the dust is fixed and
     !> gas_logu varies instead).
