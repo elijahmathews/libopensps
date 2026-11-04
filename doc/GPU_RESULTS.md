@@ -95,6 +95,22 @@ builds, `ddf2a2d`) and LLVM flang offload on the 780M (`2468916`). GPU vs CPU ov
 8.4e-7 (A100) on the stress cases. The IMF oracles against per-model `generate_ssp_grid` agree to
 ~1e-14 in FP64 on CPU.
 
+## Accelerated BLAS: rocBLAS, hipBLAS, and cuBLAS (2026-11-04)
+
+Vendor-independent accelerated BLAS interface via `opensps_accel_blas` (`-Daccel_blas=rocblas|hipblas|cublas`).
+Replaces portable loops for GEMM and batched GEMM kernels in:
+- CSP age sums (`age_sums`: basis x w2)
+- Batch photometry (`band_fluxes_gemm`: split-K filter integration)
+- Batched SSP operator (`gemm_columns`, `gemm_columns_batched`)
+
+**AMD Radeon AI PRO R9700 (gfx1201) results** (FP32, LLVM flang 22.1.8 + ROCm 7.1.1):
+- `basic` batch photometry at $N = 10^4$: **5.474 µs -> 3.190 µs** per model (**41.7% speedup**, saving 22.8 ms per 10k batch).
+- `basic` batch photometry at $N = 1000$: **6.835 µs -> 5.562 µs** per model (**18.6% speedup**).
+- `basic` spectra on-device at $N = 1000$: **7.408 µs -> 5.733 µs** per model (**22.6% speedup**).
+- `full_smooth` (full SED fitting pipeline with dust & smoothing) at $N = 10^4$: **21.20 µs -> 16.96 µs** per model (**20.0% speedup** overall).
+- Single call ($N = 1$): 4.815 ms -> **3.762 ms** (**21.9% speedup**).
+- Correctness gates: 23/23 unit tests pass, 16/16 regression tests pass (`OMP_TARGET_OFFLOAD=MANDATORY`), `test_ssp_operator` 42/42 pass (max relative error 1.19e-7), `test_csp_batch` 366/366 pass, `test_csp_batch_grad` 97/97 pass.
+
 ## AMD Radeon AI PRO R9700 desktop (2026-11-02)
 
 Fedora 44, LLVM flang 22.1.8 + Fedora ROCm 7.1.1 (recipe: `doc/GPU_PLAN.md`, "On the R9700

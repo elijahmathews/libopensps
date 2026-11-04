@@ -104,7 +104,10 @@ module opensps_csp_batch
     use opensps_ssp_operator, only: ssp_op_mod_signature
     use opensps_ssp_batch, only: ssp_batch_age_sums_z, ssp_opset_t, ssp_batch_age_sums_adjoint, NIMFG, dot_lanes
     use opensps_sfh_tangent, only: sfh_weights_tangent, sfh_tangent_supported, NSFHT
-#ifdef FSPS_CUBLAS
+#if defined(OPENSPS_ACCEL_BLAS)
+    use opensps_accel_blas, only: accel_blas_init, accel_blas_gemm, ACCEL_BLAS_OP_N
+    use, intrinsic :: iso_c_binding, only: c_loc
+#elif defined(FSPS_CUBLAS)
     use opensps_batch_photometry, only: blas, blas_init
     use cublas
 #endif
@@ -2910,10 +2913,20 @@ contains
     !> Age sums of all models: yo = basis . w2 (pixels x ages . ages x 2N), plain sums over the ages
     !> at kernel precision as in compute_csp_scenario.
     subroutine age_sums(nspec, nt, n_mod, basis, w2, it_tesc, yo)
-        integer, intent(in)              :: nspec, nt, n_mod, it_tesc(:)
-        real(KP), intent(in), contiguous :: basis(:,:), w2(:,:)
-        real(KP), intent(out)            :: yo(:,:)
-#if defined(FSPS_CUBLAS)
+        integer, intent(in)                      :: nspec, nt, n_mod, it_tesc(:)
+        real(KP), intent(in), contiguous, target :: basis(:,:), w2(:,:)
+        real(KP), intent(inout), contiguous, target :: yo(:,:)
+#if defined(OPENSPS_ACCEL_BLAS)
+        call accel_blas_init()
+#ifdef OMP_TARGET
+        !$omp target data use_device_addr(basis, w2, yo)
+#endif
+        call accel_blas_gemm(ACCEL_BLAS_OP_N, ACCEL_BLAS_OP_N, nspec, 2 * n_mod, nt, 1.0_KP, &
+                             c_loc(basis), nspec, c_loc(w2), nt, 0.0_KP, c_loc(yo), nspec)
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+#elif defined(FSPS_CUBLAS)
         integer :: istat
 
         call blas_init()

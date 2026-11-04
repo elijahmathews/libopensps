@@ -18,7 +18,10 @@ module opensps_batch_photometry
     use opensps_special_functions, only: mag_from_flux
     use opensps_smoothing, only: velocity_kernel_t, build_velocity_kernel
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
-#ifdef FSPS_CUBLAS
+#if defined(OPENSPS_ACCEL_BLAS)
+    use opensps_accel_blas, only: accel_blas_init, accel_blas_gemm, ACCEL_BLAS_OP_T, ACCEL_BLAS_OP_N
+    use, intrinsic :: iso_c_binding, only: c_loc
+#elif defined(FSPS_CUBLAS)
     use cublas
     use omp_lib, only: omp_get_default_device
     use, intrinsic :: iso_c_binding, only: c_ptr, c_int, c_intptr_t
@@ -30,7 +33,7 @@ module opensps_batch_photometry
     public :: compute_magnitudes_columns, prepare_batch_grid
     public :: smoothing_on_device, prepare_smoothing_kernel, smooth_columns, smooth_columns_adjoint
     public :: distance_term_dz, smooth_sigma_adjoint
-#ifdef FSPS_CUBLAS
+#if defined(FSPS_CUBLAS)
     public :: blas, blas_init
 #endif
 
@@ -39,7 +42,7 @@ module opensps_batch_photometry
     !> Pixels per block of the split-K band product (cuBLAS path): each block is a plain FP32 sum
     !> of at most 256 positive terms; the blocks are added in FP64
     integer, parameter :: BAND_BLOCK = 256
-#ifdef FSPS_CUBLAS
+#if defined(FSPS_CUBLAS)
     type(cublasHandle), save :: blas
     logical, save :: blas_ready = .false.
     interface
@@ -78,7 +81,7 @@ contains
         real(KP), allocatable :: fobs(:,:)
         real(WP) :: flux
         logical  :: done
-#ifdef FSPS_CUBLAS
+#if defined(OPENSPS_ACCEL_BLAS) || defined(FSPS_CUBLAS)
         integer :: npad
         integer, parameter :: GEMM_MIN_COLS = 16
 #endif
@@ -116,8 +119,8 @@ contains
 
         associate(g => ctx%state%batch)
         done = .false.
-#ifdef FSPS_CUBLAS
-        ! cuBLAS for many spectra; a few (single CSP calls) take the compensated kernels below,
+#if defined(OPENSPS_ACCEL_BLAS) || defined(FSPS_CUBLAS)
+        ! Accelerated BLAS for many spectra; a few (single CSP calls) take the compensated kernels below,
         ! which are more accurate (no plain FP32 block sums) and as fast there
         if (n_col >= GEMM_MIN_COLS) then
             npad = BAND_BLOCK * ((nspec + BAND_BLOCK - 1) / BAND_BLOCK)
@@ -350,7 +353,7 @@ contains
         end associate
 #endif
 
-#ifdef FSPS_CUBLAS
+#if defined(OPENSPS_ACCEL_BLAS) || defined(FSPS_CUBLAS)
         ! Filter matrix of the split-K band product, padded to whole pixel blocks
         npad = BAND_BLOCK * ((nspec + BAND_BLOCK - 1) / BAND_BLOCK)
         allocate(g%cmat(npad, nbands))
@@ -798,27 +801,37 @@ contains
         end do
     end subroutine observed_frame_t
 
-#ifdef FSPS_CUBLAS
+#if defined(OPENSPS_ACCEL_BLAS) || defined(FSPS_CUBLAS)
     !> Band fluxes as a split-K matrix product: per block of BAND_BLOCK pixels,
     !> partial = C^T . fobs with C(j, b) = (dl(j-1) + dl(j)) / 2 * band(j, b) (the trapezoid rule
     !> regrouped by pixel, formed in FP64; prepare_batch_grid); the blocks are summed in FP64.
     subroutine band_fluxes_gemm(n_mod, npad, nbands, cmat, fobs, fband)
-        integer, intent(in)     :: n_mod, npad, nbands
-        real(KP), intent(in)    :: cmat(:,:), fobs(:,:)
-        real(WP), intent(out)   :: fband(:,:)
+        integer, intent(in)                      :: n_mod, npad, nbands
+        real(KP), intent(in), contiguous, target :: cmat(:,:), fobs(:,:)
+        real(WP), intent(out)                    :: fband(:,:)
 
-        real(KP), allocatable :: partial(:,:,:)
+        real(KP), allocatable, target :: partial(:,:,:)
         integer  :: b, m, q, nkb, istat
         real(WP) :: sw
 
         nkb = npad / BAND_BLOCK
         allocate(partial(nbands, n_mod, nkb))
+#if defined(OPENSPS_ACCEL_BLAS)
+        call accel_blas_init()
+#elif defined(FSPS_CUBLAS)
         call blas_init()
+#endif
 #ifdef OMP_TARGET
         !$omp target data map(alloc: partial)
         !$omp target data use_device_addr(cmat, fobs, partial)
 #endif
         do q = 1, nkb
+#if defined(OPENSPS_ACCEL_BLAS)
+            call accel_blas_gemm(ACCEL_BLAS_OP_T, ACCEL_BLAS_OP_N, nbands, n_mod, BAND_BLOCK, 1.0_KP, &
+                                 c_loc(cmat((q - 1) * BAND_BLOCK + 1, 1)), npad, &
+                                 c_loc(fobs((q - 1) * BAND_BLOCK + 1, 1)), npad, &
+                                 0.0_KP, c_loc(partial(1, 1, q)), nbands)
+#elif defined(FSPS_CUBLAS)
 #ifdef KERNEL_SINGLE_PRECISION
             istat = cublasSgemm_v2(blas, CUBLAS_OP_T, CUBLAS_OP_N, nbands, n_mod, BAND_BLOCK, 1.0_KP, &
                                    cmat((q - 1) * BAND_BLOCK + 1, 1), npad, fobs((q - 1) * BAND_BLOCK + 1, 1), npad, &
@@ -829,11 +842,14 @@ contains
                                    0.0_KP, partial(1, 1, q), nbands)
 #endif
             if (istat /= 0) exit
+#endif
         end do
 #ifdef OMP_TARGET
         !$omp end target data
 #endif
+#if defined(FSPS_CUBLAS)
         if (istat /= 0) error stop 'compute_csp_batch: cuBLAS GEMM failed'
+#endif
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(sw, q)
 #elif defined(_OPENMP)
@@ -853,6 +869,7 @@ contains
 #endif
     end subroutine band_fluxes_gemm
 
+#if defined(FSPS_CUBLAS)
     !> The cuBLAS handle, on the stream of the OpenMP target regions. Experiment switch (NVIDIA only):
     !> FSPS_CUBLAS_MATH = tf32 lets the FP32 products use TF32 tensor cores (A100 and newer;
     !> 10-bit mantissa inputs), pedantic forbids tensor cores and reduced-precision paths (the
@@ -875,6 +892,7 @@ contains
         end select
         blas_ready = .true.
     end subroutine blas_init
+#endif
 #endif
 
     !> Band fluxes: the trapezoid filter integral of fobs over each band's support, compensated at

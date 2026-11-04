@@ -48,6 +48,13 @@ datadir = get_option('datadir')
 accel_target = get_option('accel')
 accel_args = []
 accel_defs = []
+# Accelerated BLAS (cuBLAS on NVIDIA, rocBLAS / hipBLAS on AMD)
+accel_blas_choice = get_option('accel_blas')
+if get_option('cublas') and accel_blas_choice == 'none'
+    accel_blas_choice = 'cublas'
+endif
+
+blas_dep = []
 if accel_target == 'omp_gpu' and fc_id in ['llvm-flang', 'flang']
     # LLVM flang (AMD and other GPUs): -Dgpu_arch is an offload target such as gfx1103 or gfx942.
     # flang assumes OpenMP 3.1 unless told otherwise and then rejects the 5.x clauses the
@@ -62,6 +69,18 @@ if accel_target == 'omp_gpu' and fc_id in ['llvm-flang', 'flang']
     # map-type modifier of the kernels' map clauses for data that is already on the device
     # (OMP_MAP_PRESENT_ALLOC; OpenMP 5.1): flang checks presence, nvfortran 25.1 does not parse it
     accel_defs = ['-DOMP_TARGET', '-DOMP_MAP_PRESENT_ALLOC=present,alloc']
+    if accel_blas_choice in ['rocblas', 'hipblas']
+        accel_defs += ['-DOPENSPS_ACCEL_BLAS', '-DOPENSPS_' + accel_blas_choice.to_upper()]
+        blas_lib = meson.get_compiler('c').find_library(accel_blas_choice, required : true)
+        hip_lib = meson.get_compiler('c').find_library('amdhip64', required : false)
+        if hip_lib.found()
+            blas_dep = [blas_lib, hip_lib]
+        else
+            blas_dep = [blas_lib]
+        endif
+    elif accel_blas_choice != 'none'
+        error('accel_blas=' + accel_blas_choice + ' is not supported with LLVM flang (use rocblas or hipblas)')
+    endif
 elif accel_target == 'omp_gpu'
     if fc_id != 'nvidia_hpc'
         error('-Daccel=omp_gpu needs nvfortran or LLVM flang')
@@ -71,9 +90,11 @@ elif accel_target == 'omp_gpu'
     # Run with OMP_TARGET_OFFLOAD=MANDATORY to catch a silent host fallback.
     accel_args = ['-mp=gpu', '-gpu=' + get_option('gpu_arch')]
     accel_defs = ['-DOMP_TARGET', '-DFSPS_PINNED', '-DOMP_MAP_PRESENT_ALLOC=alloc']
-    if get_option('cublas')
+    if accel_blas_choice == 'cublas'
         accel_args += ['-cudalib=cublas']
-        accel_defs += ['-DFSPS_CUBLAS']
+        accel_defs += ['-DOPENSPS_ACCEL_BLAS', '-DOPENSPS_CUBLAS']
+    elif accel_blas_choice != 'none'
+        error('accel_blas=' + accel_blas_choice + ' is not supported with nvfortran (use cublas)')
     endif
 endif
 
@@ -90,7 +111,8 @@ endif
 # to both compile and link stages across all consuming targets.
 accel_dep = declare_dependency(
     compile_args : accel_args + accel_defs,
-    link_args : accel_args
+    link_args : accel_args,
+    dependencies : blas_dep
 )
 
 # -----------------------------------
@@ -165,6 +187,7 @@ lib_sources = files(
     'src/io/opensps_datalib.f90',
 
     # Math Modules
+    'src/math/opensps_accel_blas.f90',
     'src/math/opensps_integration.f90',
     'src/math/opensps_interpolation.f90',
     'src/math/opensps_special_functions.f90',

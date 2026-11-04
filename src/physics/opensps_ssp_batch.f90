@@ -46,7 +46,7 @@ module opensps_ssp_batch
     logical, parameter :: ON_DEV = .false.
 #endif
 
-#ifdef FSPS_CUBLAS
+#if defined(OPENSPS_ACCEL_BLAS) || defined(FSPS_CUBLAS)
 #ifdef KERNEL_SINGLE_PRECISION
     !> Column counts up to which the FP32 cuBLAS product uses the batched form (gemm_columns_batched),
     !> and its work array (pixels x NC_BATCHED x blocks, on the device once allocated)
@@ -1888,7 +1888,7 @@ contains
         end if
 
         if (dev) then
-#ifdef FSPS_CUBLAS
+#if defined(OPENSPS_ACCEL_BLAS) || defined(FSPS_CUBLAS)
             call gemm_columns(np, nspec, n_eff, k, nc, etpl, v, v0, yo, c0)
             return
 #endif
@@ -1994,20 +1994,18 @@ contains
         end do
     end subroutine template_columns
 
-#ifdef FSPS_CUBLAS
+#if defined(OPENSPS_ACCEL_BLAS) || defined(FSPS_CUBLAS)
 #ifdef KERNEL_SINGLE_PRECISION
     !> gemm_columns for few columns (FP32 kernels): the full blocks of KB templates in one strided
     !> batched GEMM into a work array, the remainder block in one more, then each (pixel, column)
     !> adds the blocks in order with compensation (the arithmetic of gemm_columns).
     subroutine gemm_columns_batched(np, nspec, n_eff, k, nc, etpl, v, v0, yo, c0)
-        use opensps_batch_photometry, only: blas
-        use cublas
         use, intrinsic :: iso_c_binding, only: c_long_long
         integer, intent(in) :: np, nspec, n_eff, k, nc, v0, c0
         real(KP), intent(in), contiguous, target :: etpl(:,:), v(:,:)
         real(KP), intent(inout), contiguous, target :: yo(:,:)
         integer, parameter :: KB = 256
-        integer :: istat, nfull, rem, nb, i, j, b
+        integer :: nfull, rem, nb, i, j, b
         real(KP) :: term, tsum, acc, cmp
 
         nfull = k / KB
@@ -2022,20 +2020,12 @@ contains
             !$omp target enter data map(alloc: gtmp)
         end if
         if (nfull > 0) then
-            !$omp target data use_device_addr(etpl, v, gtmp)
-            istat = cublasSgemmStridedBatched(blas, CUBLAS_OP_N, CUBLAS_OP_N, np, nc, KB, 1.0_KP, etpl, nspec, &
-                                              int(KB, c_long_long) * nspec, v(1, v0 + 1), n_eff, int(KB, c_long_long), &
-                                              0.0_KP, gtmp, size(gtmp, 1), int(size(gtmp, 1), c_long_long) * size(gtmp, 2), &
-                                              nfull)
-            !$omp end target data
-            if (istat /= 0) error stop 'ssp batch: cuBLAS batched GEMM failed'
+            call run_batched(np, nc, KB, etpl, nspec, v, n_eff, v0, gtmp, size(gtmp, 1), &
+                             int(size(gtmp, 1), c_long_long) * size(gtmp, 2), nfull)
         end if
         if (rem > 0) then
-            !$omp target data use_device_addr(etpl, v, gtmp)
-            istat = cublasSgemm_v2(blas, CUBLAS_OP_N, CUBLAS_OP_N, np, nc, rem, 1.0_KP, etpl(1, nfull * KB + 1), nspec, &
-                                   v(nfull * KB + 1, v0 + 1), n_eff, 0.0_KP, gtmp(1, 1, nb), size(gtmp, 1))
-            !$omp end target data
-            if (istat /= 0) error stop 'ssp batch: cuBLAS GEMM failed'
+            call run_rem(np, nc, rem, etpl, nspec, nfull * KB, v, n_eff, v0, &
+                         gtmp, size(gtmp, 1), nb)
         end if
         !$omp target teams distribute parallel do collapse(2) private(acc, cmp, term, tsum, b)
         do j = 1, nc
@@ -2053,6 +2043,72 @@ contains
         end do
     end subroutine gemm_columns_batched
 
+    subroutine run_batched(np, nc, kb, etpl, nspec, v, n_eff, v0, gtmp, ld_gtmp, stride_gtmp, nfull)
+        use, intrinsic :: iso_c_binding, only: c_long_long
+#if defined(OPENSPS_ACCEL_BLAS)
+        use opensps_accel_blas, only: accel_blas_gemm_strided_batched, ACCEL_BLAS_OP_N
+        use, intrinsic :: iso_c_binding, only: c_loc
+#elif defined(FSPS_CUBLAS)
+        use opensps_batch_photometry, only: blas
+        use cublas
+#endif
+        integer, intent(in) :: np, nc, kb, nspec, n_eff, v0, ld_gtmp, nfull
+        integer(c_long_long), intent(in) :: stride_gtmp
+        real(KP), intent(in), contiguous, target :: etpl(:,:), v(:,:)
+        real(KP), intent(inout), contiguous, target :: gtmp(:,:,:)
+#if defined(FSPS_CUBLAS)
+        integer :: istat
+#endif
+#ifdef OMP_TARGET
+        !$omp target data use_device_addr(etpl, v, gtmp)
+#endif
+#if defined(OPENSPS_ACCEL_BLAS)
+        call accel_blas_gemm_strided_batched(ACCEL_BLAS_OP_N, ACCEL_BLAS_OP_N, np, nc, kb, 1.0_KP, &
+                                             c_loc(etpl), nspec, int(kb, c_long_long) * nspec, &
+                                             c_loc(v(1, v0 + 1)), n_eff, int(kb, c_long_long), &
+                                             0.0_KP, c_loc(gtmp), ld_gtmp, stride_gtmp, nfull)
+#elif defined(FSPS_CUBLAS)
+        istat = cublasSgemmStridedBatched(blas, CUBLAS_OP_N, CUBLAS_OP_N, np, nc, kb, 1.0_KP, etpl, nspec, &
+                                          int(kb, c_long_long) * nspec, v(1, v0 + 1), n_eff, int(kb, c_long_long), &
+                                          0.0_KP, gtmp, ld_gtmp, stride_gtmp, nfull)
+        if (istat /= 0) error stop 'ssp batch: cuBLAS batched GEMM failed'
+#endif
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine run_batched
+
+    subroutine run_rem(np, nc, rem, etpl, nspec, e_off, v, n_eff, v0, gtmp, ld_gtmp, b_off)
+#if defined(OPENSPS_ACCEL_BLAS)
+        use opensps_accel_blas, only: accel_blas_gemm, ACCEL_BLAS_OP_N
+        use, intrinsic :: iso_c_binding, only: c_loc
+#elif defined(FSPS_CUBLAS)
+        use opensps_batch_photometry, only: blas
+        use cublas
+#endif
+        integer, intent(in) :: np, nc, rem, nspec, e_off, n_eff, v0, ld_gtmp, b_off
+        real(KP), intent(in), contiguous, target :: etpl(:,:), v(:,:)
+        real(KP), intent(inout), contiguous, target :: gtmp(:,:,:)
+#if defined(FSPS_CUBLAS)
+        integer :: istat
+#endif
+#ifdef OMP_TARGET
+        !$omp target data use_device_addr(etpl, v, gtmp)
+#endif
+#if defined(OPENSPS_ACCEL_BLAS)
+        call accel_blas_gemm(ACCEL_BLAS_OP_N, ACCEL_BLAS_OP_N, np, nc, rem, 1.0_KP, &
+                             c_loc(etpl(1, e_off + 1)), nspec, c_loc(v(e_off + 1, v0 + 1)), n_eff, &
+                             0.0_KP, c_loc(gtmp(1, 1, b_off)), ld_gtmp)
+#elif defined(FSPS_CUBLAS)
+        istat = cublasSgemm_v2(blas, CUBLAS_OP_N, CUBLAS_OP_N, np, nc, rem, 1.0_KP, etpl(1, e_off + 1), nspec, &
+                               v(e_off + 1, v0 + 1), n_eff, 0.0_KP, gtmp(1, 1, b_off), ld_gtmp)
+        if (istat /= 0) error stop 'ssp batch: cuBLAS GEMM failed'
+#endif
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine run_rem
+
     subroutine free_gtmp()
         if (allocated(gtmp)) then
             if (size(gtmp) > 1) then
@@ -2066,17 +2122,24 @@ contains
     !> template_columns with cuBLAS (arrays on the device). FP64: one GEMM. FP32: a GEMM per
     !> block of KB templates into a work array, each added to yo with a compensation term.
     subroutine gemm_columns(np, nspec, n_eff, k, nc, etpl, v, v0, yo, c0)
-        use opensps_batch_photometry, only: blas, blas_init
-        use cublas
+#if defined(OPENSPS_ACCEL_BLAS)
+        use opensps_accel_blas, only: accel_blas_init
+#elif defined(FSPS_CUBLAS)
+        use opensps_batch_photometry, only: blas_init
+#endif
         integer, intent(in) :: np, nspec, n_eff, k, nc, v0, c0
         real(KP), intent(in), contiguous, target :: etpl(:,:), v(:,:)
         real(KP), intent(inout), contiguous, target :: yo(:,:)
         integer, parameter :: KB = 256
-        integer :: istat, e0, kb1, i, j
-        real(KP), allocatable :: tmp(:,:), cmp(:,:)
+        integer :: e0, kb1, i, j
+        real(KP), allocatable, target :: tmp(:,:), cmp(:,:)
         real(KP) :: term, tsum
 
+#if defined(OPENSPS_ACCEL_BLAS)
+        call accel_blas_init()
+#elif defined(FSPS_CUBLAS)
         call blas_init()
+#endif
 #ifdef KERNEL_SINGLE_PRECISION
         if (nc <= NC_BATCHED .and. k > KB) then
             ! Small column counts (the runs of one metallicity in a small batch): the blocks of KB
@@ -2096,11 +2159,7 @@ contains
         end do
         do e0 = 1, k, KB
             kb1 = min(KB, k - e0 + 1)
-            !$omp target data use_device_addr(etpl, v, tmp)
-            istat = cublasSgemm_v2(blas, CUBLAS_OP_N, CUBLAS_OP_N, np, nc, kb1, 1.0_KP, etpl(1, e0), nspec, &
-                                   v(e0, v0 + 1), n_eff, 0.0_KP, tmp, np)
-            !$omp end target data
-            if (istat /= 0) error stop 'ssp batch: cuBLAS GEMM failed'
+            call run_block(np, nc, kb1, etpl, nspec, e0, v, n_eff, v0, tmp, np)
             !$omp target teams distribute parallel do collapse(2) private(term, tsum)
             do j = 1, nc
                 do i = 1, np
@@ -2113,13 +2172,73 @@ contains
         end do
         !$omp end target data
 #else
-        !$omp target data use_device_addr(etpl, v, yo)
-        istat = cublasDgemm_v2(blas, CUBLAS_OP_N, CUBLAS_OP_N, np, nc, k, 1.0_KP, etpl, nspec, &
-                               v(1, v0 + 1), n_eff, 0.0_KP, yo(1, c0 + 1), size(yo, 1))
-        !$omp end target data
-        if (istat /= 0) error stop 'ssp batch: cuBLAS GEMM failed'
+        call run_fp64(np, nc, k, etpl, nspec, v, n_eff, v0, yo, size(yo, 1), c0)
 #endif
     end subroutine gemm_columns
+
+#ifdef KERNEL_SINGLE_PRECISION
+    subroutine run_block(np, nc, kb1, etpl, nspec, e0, v, n_eff, v0, tmp, ld_tmp)
+#if defined(OPENSPS_ACCEL_BLAS)
+        use opensps_accel_blas, only: accel_blas_gemm, ACCEL_BLAS_OP_N
+        use, intrinsic :: iso_c_binding, only: c_loc
+#elif defined(FSPS_CUBLAS)
+        use opensps_batch_photometry, only: blas
+        use cublas
+#endif
+        integer, intent(in) :: np, nc, kb1, nspec, e0, n_eff, v0, ld_tmp
+        real(KP), intent(in), contiguous, target :: etpl(:,:), v(:,:)
+        real(KP), intent(inout), contiguous, target :: tmp(:,:)
+#if defined(FSPS_CUBLAS)
+        integer :: istat
+#endif
+#ifdef OMP_TARGET
+        !$omp target data use_device_addr(etpl, v, tmp)
+#endif
+#if defined(OPENSPS_ACCEL_BLAS)
+        call accel_blas_gemm(ACCEL_BLAS_OP_N, ACCEL_BLAS_OP_N, np, nc, kb1, 1.0_KP, &
+                             c_loc(etpl(1, e0)), nspec, c_loc(v(e0, v0 + 1)), n_eff, &
+                             0.0_KP, c_loc(tmp), ld_tmp)
+#elif defined(FSPS_CUBLAS)
+        istat = cublasSgemm_v2(blas, CUBLAS_OP_N, CUBLAS_OP_N, np, nc, kb1, 1.0_KP, etpl(1, e0), nspec, &
+                               v(e0, v0 + 1), n_eff, 0.0_KP, tmp, ld_tmp)
+        if (istat /= 0) error stop 'ssp batch: cuBLAS GEMM failed'
+#endif
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine run_block
+#else
+    subroutine run_fp64(np, nc, k, etpl, nspec, v, n_eff, v0, yo, ld_yo, c0)
+#if defined(OPENSPS_ACCEL_BLAS)
+        use opensps_accel_blas, only: accel_blas_gemm, ACCEL_BLAS_OP_N
+        use, intrinsic :: iso_c_binding, only: c_loc
+#elif defined(FSPS_CUBLAS)
+        use opensps_batch_photometry, only: blas
+        use cublas
+#endif
+        integer, intent(in) :: np, nc, k, nspec, n_eff, v0, ld_yo, c0
+        real(KP), intent(in), contiguous, target :: etpl(:,:), v(:,:)
+        real(KP), intent(inout), contiguous, target :: yo(:,:)
+#if defined(FSPS_CUBLAS)
+        integer :: istat
+#endif
+#ifdef OMP_TARGET
+        !$omp target data use_device_addr(etpl, v, yo)
+#endif
+#if defined(OPENSPS_ACCEL_BLAS)
+        call accel_blas_gemm(ACCEL_BLAS_OP_N, ACCEL_BLAS_OP_N, np, nc, k, 1.0_KP, &
+                             c_loc(etpl), nspec, c_loc(v(1, v0 + 1)), n_eff, &
+                             0.0_KP, c_loc(yo(1, c0 + 1)), ld_yo)
+#elif defined(FSPS_CUBLAS)
+        istat = cublasDgemm_v2(blas, CUBLAS_OP_N, CUBLAS_OP_N, np, nc, k, 1.0_KP, etpl, nspec, &
+                               v(1, v0 + 1), n_eff, 0.0_KP, yo(1, c0 + 1), ld_yo)
+        if (istat /= 0) error stop 'ssp batch: cuBLAS GEMM failed'
+#endif
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine run_fp64
+#endif
 #endif
 
 end module opensps_ssp_batch

@@ -1,8 +1,8 @@
 # GPU plan: first GPU session (A100 or P100)
 
 > **OpenACC was removed (roadmap priority 2).** GPU builds are OpenMP target offload only:
-> `FC=nvfortran CC=nvc meson setup b -Daccel=omp_gpu -Dgpu_arch=cc80` (`-Dcublas=true` for
-> the cuBLAS products; LLVM flang with `-Dgpu_arch=gfx1103` etc. for AMD), run with
+> `FC=nvfortran CC=nvc meson setup b -Daccel=omp_gpu -Dgpu_arch=cc80` (`-Daccel_blas=cublas` for
+> cuBLAS; LLVM flang with `-Dgpu_arch=gfx1103` etc. and `-Daccel_blas=rocblas` or `hipblas` for AMD), run with
 > `OMP_TARGET_OFFLOAD=MANDATORY`; CPU threads with `-Denable_openmp=true`. The OpenACC
 > commands and notes below (`-Daccel=gpu`, `-Daccel=multicore`, `!$acc` directives) are the
 > history of the sessions that built the GPU path; "Rules learned so far" still applies,
