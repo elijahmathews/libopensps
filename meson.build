@@ -716,6 +716,26 @@ test('c_csp', test_c_csp_exe,
     timeout : 600
 )
 
+test_c_ssp_operator_exe = executable('test_c_ssp_operator', 'tests/test_c_ssp_operator.c',
+    dependencies : [opensps_dep, meson.get_compiler('c').find_library('m', required : false)],
+    include_directories : include_directories('include')
+)
+test('c_ssp_operator', test_c_ssp_operator_exe,
+    env : regression_env,
+    suite : 'regression',
+    timeout : 600
+)
+
+test_c_batch_grad_exe = executable('test_c_batch_grad', 'tests/test_c_batch_grad.c',
+    dependencies : [opensps_dep, meson.get_compiler('c').find_library('m', required : false)],
+    include_directories : include_directories('include')
+)
+test('c_batch_grad', test_c_batch_grad_exe,
+    env : regression_env,
+    suite : 'regression',
+    timeout : 600
+)
+
 endif # tests
 
 # ===================================

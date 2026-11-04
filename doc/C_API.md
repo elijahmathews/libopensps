@@ -156,6 +156,50 @@ the log10 stellar L_bol of the two parts (they add up to `mass` and `lbol`); the
 `NULL`, `young` and `old` may not (status 3). Tested in `tests/test_c_batch_parts.c`, which
 rebuilds the full spectrum from the parts.
 
+### Batched CSP with Gradients (Adjoint Mode)
+
+Reverse-mode automatic differentiation / analytical adjoints of `compute_csp_batch`:
+
+```c
+void opensps_context_compute_csp_batch_grad(
+    int handle, int n, int n_params, const char *const *names,
+    const double *const *values, const double *ssp_weights,
+    const double *ssp_weights_z, const double *zred_mags,
+    const double *mags_bar, const double *spec_bar, const double *mass_bar, const double *lbol_bar,
+    double *mags, double *spec, double *mass, double *lbol,
+    double *mdust, double *sfr, double *emlines, double *indx,
+    double *params_bar, double *weights_bar, double *weights_z_bar,
+    int *status
+);
+```
+
+* `params_bar`: `[NBGRAD, n]` column-major array receiving exact analytical gradients of the loss $L$ with respect to physical parameters. Indexed by `OPENSPS_BGRAD_*` (0 to `OPENSPS_NBGRAD - 1`).
+* `weights_bar`: `[ntfull, n]` receiving $dL / d(weights)$ when `ssp_weights` is used.
+* `weights_z_bar`: `[ntfull, nz, n]` receiving $dL / d(weights\_z)$ when `ssp_weights_z` is used.
+* `mags_bar`, `spec_bar`, `mass_bar`, `lbol_bar`: incoming cotangents (derivatives of loss with respect to outputs). Any may be `NULL`.
+* Metadata:
+  * `opensps_get_nbgrad(int *nbgrad);` returns 33.
+  * `opensps_get_grad_param_name(int grad_idx, char *name, int max_len, int *status);` returns the parameter name for each row.
+
+### Batched SSP Operator (Fast IMFs)
+
+Decouples the isochrone integration from the IMF, allowing IMF slopes, characteristic masses, and limits to vary per model in batches, or fast direct evaluation:
+
+```c
+// Context operator management
+void opensps_context_build_ssp_ops(int handle, int all_metallicities, int *status);
+void opensps_context_free_ssp_ops(int handle, int *status);
+void opensps_context_has_ssp_ops(int handle, int *has_ops, int *status);
+
+// Direct SSP evaluation from operator
+void opensps_context_evaluate_ssp_op(
+    int handle, int imf_type, const double *imf_params,
+    double *mass_grid, double *lbol_grid, double *spec_grid,
+    int *status
+);
+```
+When `ssp_ops` is active on a context, IMF parameters (`imf1`, `imf2`, `imf3`, `vdmc`, `mdave`) can vary per model in `opensps_context_compute_csp_batch` and `opensps_context_compute_csp_batch_grad`.
+
 ### SSP grid
 
 ```c
