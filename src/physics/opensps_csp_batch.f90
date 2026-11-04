@@ -1732,23 +1732,33 @@ contains
         ! The kernels take the components as plain arrays: device code never refers to the
         ! derived type itself, which is mapped only through its components (mapping it whole and
         ! by component, or implicitly through a dummy, conflicts in LLVM's offload runtime)
-        call nebular_kernels(ctx, n_mod, nspec, nt, nzb, basis, w2, it_tesc, zlo, zhi, dz, &
+        ! (the shapes of basis and nb%q0 as they are: with the IMF per model, basis is a placeholder
+        ! and q0 has a column per model, not per metallicity)
+        call nebular_kernels(ctx, n_mod, nspec, nt, nzb, size(basis, 1), size(basis, 2), size(basis, 3), &
+                             size(nb%q0, 2), basis, w2, it_tesc, zlo, zhi, dz, &
                              nb%nt_neb, nb%whlylim, nb%cont, nb%lines_in_spec, nb%xrb, nb%ia, nb%wa, nb%dwa, &
                              nb%newr, nb%q0, nb%iz, nb%wz, nb%iu, nb%wu, nb%fesc, nb%fabs, nb%cy, nb%co, nb%lns, &
                              nb%lum, nb%lptr, nb%lid, yo, eml, q_model)
     end subroutine add_nebular_batch
 
     !> The kernels of add_nebular_batch, on the components of its nebular_setup_t.
-    subroutine nebular_kernels(ctx, n_mod, nspec, nt, nzb, basis, w2, it_tesc, zlo, zhi, dz, &
+    subroutine nebular_kernels(ctx, n_mod, nspec, nt, nzb, nb1, nb2, nb3, nq0, basis, w2, it_tesc, zlo, zhi, dz, &
                                nb_nt_neb, nb_whlylim, nb_cont, nb_lines_in_spec, nb_xrb, nb_ia, nb_wa, nb_dwa, &
                                nb_newr, nb_q0, nb_iz, nb_wz, nb_iu, nb_wu, nb_fesc, nb_fabs, nb_cy, nb_co, nb_lns, &
                                nb_lum, nb_lptr, nb_lid, yo, eml, q_model)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)              :: n_mod, nspec, nt, nzb, nb_nt_neb, nb_whlylim
+        ! The actual shapes of basis (nb1, nb2, nb3) and of nb_q0's second dimension (nq0): with the
+        ! IMF per model basis is a 1 x 1 x 1 placeholder and q0 has n_mod columns while nzb counts
+        ! the metallicities. Declared larger than the actual arrays, the dummies made device kernels
+        ! map past them: on the A100 (nvfortran) a stale, partially present entry of nb%q0 then
+        ! outlived its target data region, and later allocations landing on it were skipped
+        ! (wrong spectra) or aborted ("partially present")
+        integer, intent(in)              :: nb1, nb2, nb3, nq0
         ! Explicit-shape arguments (no descriptors to map per launch), except nb_lid, whose size is not
         ! known here (the pixels' line lists)
         integer, intent(in)              :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
-        real(KP), intent(in)             :: basis(nspec, nt, nzb), w2(nt, 2 * n_mod)
+        real(KP), intent(in)             :: basis(nb1, nb2, nb3), w2(nt, 2 * n_mod)
         real(WP), intent(in)             :: dz(n_mod)
         logical, intent(in)              :: nb_cont, nb_lines_in_spec, nb_xrb
         integer, intent(in)              :: nb_ia(max(1, nb_nt_neb)), nb_iz(n_mod), nb_iu(n_mod), nb_lptr(nspec + 1)
@@ -1756,7 +1766,7 @@ contains
         real(WP), intent(in)             :: nb_wa(max(1, nb_nt_neb)), nb_dwa(max(1, nb_nt_neb)), nb_wz(n_mod)
         real(WP), intent(in)             :: nb_wu(n_mod), nb_fesc(n_mod), nb_fabs(n_mod)
         logical, intent(in)              :: nb_newr(max(1, nb_nt_neb))
-        real(WP), intent(inout)          :: nb_q0(max(1, nb_nt_neb), nzb)
+        real(WP), intent(inout)          :: nb_q0(max(1, nb_nt_neb), nq0)
         real(KP), intent(inout)          :: nb_cy(max(1, nb_nt_neb), n_mod), nb_co(max(1, nb_nt_neb), n_mod)
         real(WP), intent(inout)          :: nb_lns(n_mod)
         real(KP), intent(inout)          :: nb_lum(NEMLINE, 2 * n_mod)
