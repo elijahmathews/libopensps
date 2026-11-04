@@ -452,7 +452,7 @@ contains
         integer, allocatable :: perm(:), viz(:), ptr(:), cnt(:)
         real(WP), allocatable :: cz(:), ones(:), w(:,:), wm(:,:), tot(:), pps(:,:,:), slz(:,:), sqz(:,:), wpb(:,:), &
                                  vb(:,:,:), dsm(:,:), dsl(:,:), dsq(:,:), pmp(:,:), part(:,:), zsg(:), dsp(:,:), sxa(:,:), &
-                                 sea(:,:), apt(:,:,:), amp(:,:,:), dtt(:,:), remp(:,:), remm(:,:)
+                                 sea(:,:), apt(:,:), amp(:,:,:), dtt(:,:), remp(:,:), remm(:,:), agt(:,:,:)
         real(KP), allocatable :: wk(:,:)
         real(WP) :: sgn
 
@@ -467,12 +467,12 @@ contains
                  pps(nc_max, 3, set%n_pc_max), slz(nt, nc_max), sqz(nt, nc_max), wpb(nc_max, set%n_pts_max), &
                  vb(set%n_eff_max, 4, nc_max), dsm(nt, n_mod), dsl(nt, n_mod), dsq(nt, n_mod), pmp(size(pm, 1), n_mod), &
                  part(set%n_pc_max, nc_max), dsp(nt, n_mod), sxa(nt, nc_max), sea(nt, nc_max), &
-                 apt(NIMFG, set%n_pc_max, nc_max), amp(NIMFG, set%n_pc_max, nc_max), dtt(NIMFG, nc_max), &
-                 remp(nt, nc_max), remm(nt, nc_max))
+                 apt(NIMFG, nc_max), amp(NIMFG, nt, nc_max), dtt(NIMFG, nc_max), &
+                 remp(nt, nc_max), remm(nt, nc_max), agt(NIMFG, nt, nc_max))
         ones = 1.0_wp
 #ifdef OMP_TARGET
         !$omp target data map(alloc: w, wm, wk, tot, pps, slz, sqz, wpb, vb, dsm, dsl, dsq, part, dsp, sxa, sea) &
-        !$omp& map(alloc: apt, amp, dtt, remp, remm) &
+        !$omp& map(alloc: apt, amp, dtt, remp, remm, agt) &
         !$omp& map(to: pm, ones, msum_bar) map(from: wbar, imf_bar, fesc_bar, zbar) map(alloc: perm, viz, cz, zsg, pmp)
 #endif
 #if defined(OMP_TARGET)
@@ -565,7 +565,7 @@ contains
                                           set%pc_off, set%pc_ptr, set%age_pc, set%pt_ptr, set%pt_mini, set%pt_m1, &
                                           set%pt_m2, set%pt_llo, set%pt_dl, set%pt_first, set%pt_cm, set%age_mmax, perm, &
                                           viz, cz, wsfh, pm, &
-                                          pmp, tot, size(wk, 1), wk, size(wpb, 1), wpb, msum_bar, apt, amp, dtt, &
+                                          pmp, tot, size(wk, 1), wk, size(wpb, 1), wpb, msum_bar, apt, amp, agt, dtt, &
                                           remp, remm, imf_bar)
                     cycle
                 end if
@@ -624,7 +624,7 @@ contains
     !> of the surviving mass (a scalar per age and model) by central differences, as before.
     subroutine adj_imf_analytic(imf_type, remnants, m0, nc, nt, n_pc_max, n_pc, pt_off, pc_off, pc_ptr, age_pc, &
                                 pt_ptr, pt_mini, pt_m1, pt_m2, pt_llo, pt_dl, pt_first, pt_cm, age_mmax, perm, viz, cz, &
-                                wsfh, pm, pmp, tot, ldk, wk, ldw, wpb, msum_bar, apt, amp, dtt, remp, remm, imf_bar)
+                                wsfh, pm, pmp, tot, ldk, wk, ldw, wpb, msum_bar, apt, amp, agt, dtt, remp, remm, imf_bar)
         integer, intent(in) :: imf_type, m0, nc, nt, n_pc_max, ldk, ldw
         logical, intent(in) :: remnants
         integer, intent(in), contiguous :: n_pc(:), pt_off(:), pc_off(:), pc_ptr(:), age_pc(:), pt_ptr(:), pt_first(:), &
@@ -634,9 +634,9 @@ contains
         ! (explicit leading dimensions: a point's row is passed by its first element, as imf_pieces_multi)
         real(KP), intent(in) :: wk(ldk, *)
         real(WP), intent(in) :: wpb(ldw, *)
-        real(WP), intent(inout), contiguous :: pmp(:,:), apt(:,:,:), amp(:,:,:), dtt(:,:), remp(:,:), remm(:,:), imf_bar(:,:)
-        integer  :: j, q, m, iz, o, k0, n, ig, t, isg, i, npar
-        real(WP) :: s, sm, sgn, h
+        real(WP), intent(inout), contiguous :: pmp(:,:), apt(:,:), amp(:,:,:), agt(:,:,:), dtt(:,:), remp(:,:), remm(:,:), imf_bar(:,:)
+        integer  :: j, q, m, iz, o, k0, n, ig, t, isg, i, npar, q1, q2
+        real(WP) :: s, sm, sgn, h, p_apt(NIMFG), p_amp(NIMFG)
 
         npar = size(pm, 1)
         ! dM / d theta per model of the chunk
@@ -654,36 +654,45 @@ contains
                                                  pm(IMF_P_UPPER_LIMIT, m), .true., imf_row_param(ig))
             end do
         end do
-        ! Per (piece, model): the sums (pieces outer: consecutive threads take consecutive models)
+        ! Per (age, model): compute piece gradients and accumulate into agt (per age) and amp (per age)
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(m, iz, o, k0, n, ig)
+        !$omp target teams distribute parallel do collapse(2) private(m, iz, o, q1, q2, q, k0, n, ig, p_apt, p_amp)
 #elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(m, iz, o, k0, n, ig)
+        !$omp parallel do collapse(2) private(m, iz, o, q1, q2, q, k0, n, ig, p_apt, p_amp)
 #endif
-        do q = 1, n_pc_max
+        do t = 1, nt
             do j = 1, nc
                 iz = viz(m0 + j - 1)
-                do ig = 1, NIMFG
-                    apt(ig, q, j) = 0.0_wp
-                    amp(ig, q, j) = 0.0_wp
-                end do
-                if (q > n_pc(iz)) cycle
                 m = perm(m0 + j - 1)
                 o = pt_off(iz)
-                k0 = pc_ptr(pc_off(iz) + q)
-                n = pc_ptr(pc_off(iz) + q + 1) - k0
-                call imf_piece_grad(imf_type, pm(:, m), tot(j), dtt(:, j), n, pt_mini(k0:k0 + n - 1), &
-                                    pt_m1(k0:k0 + n - 1), pt_m2(k0:k0 + n - 1), pt_llo(k0:k0 + n - 1), &
-                                    pt_dl(k0:k0 + n - 1), pt_first(k0:k0 + n - 1), &
-                                    pt_cm(k0:k0 + n - 1), wk(j, k0 - o), ldk, wpb(j, k0 - o), ldw, &
-                                    apt(:, q, j), amp(:, q, j))
+                q1 = age_pc((iz - 1) * (nt + 1) + t)
+                q2 = age_pc((iz - 1) * (nt + 1) + t + 1) - 1
+                do ig = 1, NIMFG
+                    agt(ig, t, j) = 0.0_wp
+                    amp(ig, t, j) = 0.0_wp
+                end do
+                do q = q1, q2
+                    k0 = pc_ptr(pc_off(iz) + q)
+                    n = pc_ptr(pc_off(iz) + q + 1) - k0
+                    call imf_piece_grad(imf_type, pm(:, m), tot(j), dtt(:, j), n, pt_mini(k0:k0 + n - 1), &
+                                        pt_m1(k0:k0 + n - 1), pt_m2(k0:k0 + n - 1), pt_llo(k0:k0 + n - 1), &
+                                        pt_dl(k0:k0 + n - 1), pt_first(k0:k0 + n - 1), &
+                                        pt_cm(k0:k0 + n - 1), wk(j, k0 - o), ldk, wpb(j, k0 - o), ldw, &
+                                        p_apt, p_amp)
+                    do ig = 1, NIMFG
+                        if (imf_row_acts(imf_type, ig)) then
+                            agt(ig, t, j) = agt(ig, t, j) + p_apt(ig)
+                            if (msum_bar(m) /= 0.0_wp) amp(ig, t, j) = amp(ig, t, j) + p_amp(ig)
+                        end if
+                    end do
+                end do
             end do
         end do
         ! Per model: the rows (the mass output's part over each age's pieces, weighted by the SFH)
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do private(m, iz, ig, q, t, s, sm)
+        !$omp target teams distribute parallel do private(m, iz, ig, t, s, sm)
 #elif defined(_OPENMP)
-        !$omp parallel do private(m, iz, ig, q, t, s, sm)
+        !$omp parallel do private(m, iz, ig, t, s, sm)
 #endif
         do j = 1, nc
             m = perm(m0 + j - 1)
@@ -691,15 +700,13 @@ contains
             do ig = 1, NIMFG
                 if (.not. imf_row_acts(imf_type, ig)) cycle
                 s = 0.0_wp
-                do q = 1, n_pc(iz)
-                    s = s + apt(ig, q, j)
+                do t = 1, nt
+                    s = s + agt(ig, t, j)
                 end do
                 if (msum_bar(m) /= 0.0_wp) then
                     sm = 0.0_wp
                     do t = 1, nt
-                        do q = age_pc((iz - 1) * (nt + 1) + t), age_pc((iz - 1) * (nt + 1) + t + 1) - 1
-                            sm = sm + wsfh(m, t) * amp(ig, q, j)
-                        end do
+                        sm = sm + wsfh(m, t) * amp(ig, t, j)
                     end do
                     s = s + msum_bar(m) * cz(m0 + j - 1) * sm
                 end if
