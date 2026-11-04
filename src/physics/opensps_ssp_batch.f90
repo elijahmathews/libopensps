@@ -548,7 +548,7 @@ contains
                     end do
                     ky = set%ops(iz)%k_age(max(1, min(nt, ky)))
                     call adj_template_bar(nspec, set%ops(iz)%n_eff, ky, neb_cols * whl, n_mod, m0, j0, jr, perm, &
-                                          set%ops(iz)%etpl, gw, set%n_eff_max, nc_max, vb)
+                                          set%ops(iz)%etpl, set%ops(iz)%etpl_t, gw, set%n_eff_max, nc_max, vb)
                     j0 = jr + 1
                 end do
                 ! (w, wm: free until the IMF rows' differences below)
@@ -1123,10 +1123,10 @@ contains
         end do
     end function dot_lanes
 
-    subroutine adj_template_bar(nspec, n_eff, ky, nwhl, n_mod, m0, j0, jr, perm, etpl, gw, n_eff_max, nc_max, vb)
+    subroutine adj_template_bar(nspec, n_eff, ky, nwhl, n_mod, m0, j0, jr, perm, etpl, etpl_t, gw, n_eff_max, nc_max, vb)
         integer, intent(in) :: nspec, n_eff, ky, nwhl, n_mod, m0, j0, jr, n_eff_max, nc_max
         integer, intent(in), contiguous :: perm(:)
-        real(KP), intent(in) :: etpl(nspec, *), gw(nspec, 2 * n_mod)
+        real(KP), intent(in) :: etpl(nspec, *), etpl_t(n_eff, *), gw(nspec, 2 * n_mod)
         real(WP), intent(inout) :: vb(n_eff_max, 4, nc_max)
         ! Register tile: each thread one template and 4 models (the template's pixels read once for all
         ! of them; models clamped at the end of the run, duplicates written twice with the same value).
@@ -1210,7 +1210,7 @@ contains
                 ceo3 = 0.0_KP
                 ceo4 = 0.0_KP
                 do i = 1, nwhl
-                    ev = etpl(i, e)
+                    ev = etpl_t(e, i)
                     if (KP == WP) then
                         ey1 = ey1 + ev * gw(i, m1)
                         eo1 = eo1 + ev * gw(i, n_mod + m1)
@@ -1256,7 +1256,7 @@ contains
                     end if
                 end do
                 do i = nwhl + 1, nspec
-                    ev = etpl(i, e)
+                    ev = etpl_t(e, i)
                     if (KP == WP) then
                         sy1 = sy1 + ev * gw(i, m1)
                         so1 = so1 + ev * gw(i, n_mod + m1)
