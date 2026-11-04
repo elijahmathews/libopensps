@@ -235,6 +235,9 @@ module opensps_csp_batch
         real(KP), allocatable :: lum(:,:)       !< line luminosities (lines, 2N): young, then old
         integer,  pointer, contiguous :: lptr(:) => null(), lid(:) => null() !< per pixel (CSR): lines whose profile reaches it
         integer,  pointer, contiguous :: llo(:) => null()    !< per line: pixel interval of its wavelength
+        integer :: nrun = 0
+        integer,  pointer, contiguous :: rs(:) => null(), rl(:) => null(), rt(:) => null()
+        integer,  pointer, contiguous :: lj_lo(:) => null(), lj_hi(:) => null()
     end type nebular_setup_t
 
 
@@ -1454,6 +1457,27 @@ contains
         do t = 1, nb%nt_neb
             call get_grid_indices_weights(ctx%state%nebem_age, ctx%state%time_full(t), NEBNAGE, nb%ia(t), nb%wa(t))
         end do
+        allocate(nb%rs(n), nb%rl(n), nb%rt(n))
+        nb%nrun = 0
+        do t = 1, nb%nt_neb
+            if (nb%nrun > 0) then
+                if (nb%ia(t) == nb%ia(nb%rs(nb%nrun)) .and. nb%rl(nb%nrun) < NEB_RUN) then
+                    nb%rl(nb%nrun) = nb%rl(nb%nrun) + 1
+                    nb%rt(t) = nb%nrun
+                    cycle
+                end if
+            end if
+            nb%nrun = nb%nrun + 1
+            nb%rs(nb%nrun) = t
+            nb%rl(nb%nrun) = 1
+            nb%rt(t) = nb%nrun
+        end do
+        if (nb%nrun == 0) then
+            nb%nrun = 1
+            nb%rs(1) = 1
+            nb%rl(1) = 1
+            nb%rt(1) = 1
+        end if
         ! Steps of wa within each interval (constant on the uniform log-age grid, zero where wa is
         ! clamped), and where a new step starts
         allocate(nb%dwa(n), nb%newr(n))
@@ -1500,6 +1524,9 @@ contains
         ! whose window contains it, in line order (CSR)
         allocate(nb%lptr(nspec + 1))
         nb%lptr = 1
+        allocate(nb%lj_lo(NEMLINE), nb%lj_hi(NEMLINE))
+        nb%lj_lo = 1
+        nb%lj_hi = 0
         if (.not. nb%lines_in_spec) then
             allocate(nb%lid(1)); nb%lid = 1
             call pack_nebular(nb)
@@ -1526,13 +1553,16 @@ contains
             end do
             cnt(j_lo(i):j_hi(i)) = cnt(j_lo(i):j_hi(i)) + 1
         end do
+        nb%lj_lo = j_lo
+        nb%lj_hi = j_hi
+        deallocate(j_lo, j_hi)
         do j = 1, nspec
             nb%lptr(j + 1) = nb%lptr(j) + cnt(j)
         end do
         allocate(nb%lid(max(1, nb%lptr(nspec + 1) - 1)))
         cnt = 0
         do i = 1, NEMLINE
-            do j = j_lo(i), j_hi(i)
+            do j = nb%lj_lo(i), nb%lj_hi(i)
                 p = nb%lptr(j) + cnt(j)
                 nb%lid(p) = i
                 cnt(j) = cnt(j) + 1
@@ -1547,12 +1577,15 @@ contains
         type(nebular_setup_t), intent(inout), target :: nb
         integer :: oi, orr, ol
 
-        allocate(nb%ipk(size(nb%ia) + size(nb%iz) + size(nb%iu) + size(nb%lptr) + size(nb%lid) + size(nb%llo)))
+        allocate(nb%ipk(size(nb%ia) + size(nb%iz) + size(nb%iu) + size(nb%lptr) + size(nb%lid) + size(nb%llo) + &
+                        size(nb%rs) + size(nb%rl) + size(nb%rt) + size(nb%lj_lo) + size(nb%lj_hi)))
         allocate(nb%rpk(size(nb%wa) + size(nb%dwa) + size(nb%wz) + size(nb%wu) + size(nb%fesc) + size(nb%fabs)))
         allocate(nb%lpk(size(nb%newr)))
         oi = 0; orr = 0; ol = 0
         call move_i(nb%ia); call move_i(nb%iz); call move_i(nb%iu)
         call move_i(nb%lptr); call move_i(nb%lid); call move_i(nb%llo)
+        call move_i(nb%rs); call move_i(nb%rl); call move_i(nb%rt)
+        call move_i(nb%lj_lo); call move_i(nb%lj_hi)
         call move_r(nb%wa); call move_r(nb%dwa); call move_r(nb%wz)
         call move_r(nb%wu); call move_r(nb%fesc); call move_r(nb%fabs)
         nb%lpk = nb%newr
@@ -1689,6 +1722,51 @@ contains
             dsq = 0.0_KP; dsu = 0.0_KP; dsg = 0.0_KP
         end if
     end subroutine dl07_shape_grad
+
+    !> dl07_shape and its derivatives in one pass with a single set of table lookups.
+    subroutine dl07_shape_and_grad(ctx, i, iq, wq, iu, wu, gam, shape, dsq, dsu, dsg)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)              :: i, iq, iu
+        real(WP), intent(in)             :: wq, wu, gam
+        real(KP), intent(out)            :: shape, dsq, dsu, dsg
+        real(WP) :: lo, hi, lq, hq, lu, hu, val
+        integer  :: kl, kh
+        real(WP) :: d00, d10, d11, d01, e00, e10, e11, e01
+
+        kl = 2 * iu - 1
+        kh = 2 * (iu + 1) - 1
+        associate (dd => ctx%state%dustem2_dustem)
+        d00 = dd(i, iq, kl)
+        d10 = dd(i, iq+1, kl)
+        d11 = dd(i, iq+1, kh)
+        d01 = dd(i, iq, kh)
+        e00 = dd(i, iq, kl+1)
+        e10 = dd(i, iq+1, kl+1)
+        e11 = dd(i, iq+1, kh+1)
+        e01 = dd(i, iq, kh+1)
+        end associate
+
+        lo = (1.0_wp - wq)*(1.0_wp - wu) * d00 + wq*(1.0_wp - wu) * d10 + wq*wu * d11 + (1.0_wp - wq)*wu * d01
+        hi = (1.0_wp - wq)*(1.0_wp - wu) * e00 + wq*(1.0_wp - wu) * e10 + wq*wu * e11 + (1.0_wp - wq)*wu * e01
+
+        val = (1.0_wp - gam) * lo + gam * hi
+        shape = max(real(val, KP), tiny(1.0_KP))
+
+        if (val > real(tiny(1.0_KP), WP)) then
+            lq = (1.0_wp - wu) * (d10 - d00) + wu * (d11 - d01)
+            hq = (1.0_wp - wu) * (e10 - e00) + wu * (e11 - e01)
+            lu = (1.0_wp - wq) * (d01 - d00) + wq * (d11 - d10)
+            hu = (1.0_wp - wq) * (e01 - e00) + wq * (e11 - e10)
+            dsq = real((1.0_wp - gam) * lq + gam * hq, KP)
+            dsu = real((1.0_wp - gam) * lu + gam * hu, KP)
+            dsg = real(hi - lo, KP)
+        else
+            dsq = 0.0_KP; dsu = 0.0_KP; dsg = 0.0_KP
+        end if
+    end subroutine dl07_shape_and_grad
 
     !> Diffuse-dust transmission of model pset at pixel i (and its optical depth).
     subroutine diffuse_transmission(ctx, pset, i, curve, tau_d, trans)
@@ -3172,6 +3250,45 @@ contains
         end if
     end subroutine pixel_transmissions
 
+    !> Diffuse transmission at pixel i only (skips birth-cloud and old-stars screens).
+    subroutine pixel_diffuse_transmission(ctx, pl, nspec, i, dt, ttab, ltab, trans_d)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        type(opensps_context_t), intent(in) :: ctx
+        type(params_core), intent(in)    :: pl
+        integer, intent(in)              :: nspec, i, dt
+        real(KP), intent(in)             :: ttab(nspec, 0:3)
+        real(WP), intent(in)             :: ltab(nspec)
+        real(KP), intent(out)            :: trans_d
+        real(KP) :: s1, s2, s3, curve, tau_d
+        real(WP) :: ed
+
+        if (dt == 3 .or. dt == 5) then
+            curve = real(compute_attenuation_curve_point(ctx%state%spec_lambda(i), i, dt, pl, ctx), KP)
+        else
+            s1 = 0.0_KP; s2 = 0.0_KP; s3 = 0.0_KP; ed = 0.0_wp
+            if (dt == 0) then
+                ed = pl%dust_index
+            else if (dt == 1) then
+                s1 = 1.0_KP / real(pl%mwr, KP)
+                s2 = real(pl%uvb, KP)
+                s3 = s2 * s1
+            else if (dt == 4) then
+                ed = pl%dust_index
+                s1 = real(ed, KP)
+            end if
+            curve = ttab(i, 0) + s1 * ttab(i, 1) + s2 * ttab(i, 2) + s3 * ttab(i, 3)
+            if (ed /= 0.0_wp) curve = curve * exp_kp(ed * ltab(i))
+        end if
+        if (dt == 3) then
+            tau_d = curve
+        else
+            tau_d = real(pl%dust2, KP) * curve
+        end if
+        trans_d = exp(-tau_d)
+    end subroutine pixel_diffuse_transmission
+
     !> Per model: absorbed luminosity, template normalization and escaped template fraction.
     subroutine dust_emission_reductions(n_mod, nspec, emis, wt, yo, absorbed, s_abs, s_norm, s_esc)
         integer, intent(in)              :: n_mod, nspec
@@ -3526,24 +3643,28 @@ contains
             if (nb%xrb .and. nb%lines_in_spec) then
                 call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, .true., it_tesc, zlo, zhi, dz, &
                                       zmode .and. .not. imf, &
-                                      nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, nb%lptr, nb%lid, w2, &
+                                      nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, &
+                                      nb%lj_lo, nb%lj_hi, nb%nrun, nb%rs, nb%rl, nb%rt, w2, &
                                       ctx%state%xnebem_cont, ctx%state%xnebem_line, ctx%state%gaussnebarr, gw, lbar, nwb, gneb, &
                                       imf, qb, lgiven)
             else if (nb%xrb) then
                 call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, lgiven, it_tesc, zlo, zhi, dz, &
                                       zmode .and. .not. imf, &
-                                      nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, nb%lptr, nb%lid, w2, &
+                                      nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, &
+                                      nb%lj_lo, nb%lj_hi, nb%nrun, nb%rs, nb%rl, nb%rt, w2, &
                                       ctx%state%xnebem_cont, ctx%state%xnebem_line, lbar, gw, lbar, nwb, gneb, imf, qb, lgiven)
             else if (nb%lines_in_spec) then
                 call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, .true., it_tesc, zlo, zhi, dz, &
                                       zmode .and. .not. imf, &
-                                      nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, nb%lptr, nb%lid, w2, &
+                                      nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, &
+                                      nb%lj_lo, nb%lj_hi, nb%nrun, nb%rs, nb%rl, nb%rt, w2, &
                                       ctx%state%nebem_cont, ctx%state%nebem_line, ctx%state%gaussnebarr, gw, lbar, nwb, gneb, &
                                       imf, qb, lgiven)
             else
                 call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, lgiven, it_tesc, zlo, zhi, dz, &
                                       zmode .and. .not. imf, &
-                                      nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, nb%lptr, nb%lid, w2, &
+                                      nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, &
+                                      nb%lj_lo, nb%lj_hi, nb%nrun, nb%rs, nb%rl, nb%rt, w2, &
                                       ctx%state%nebem_cont, ctx%state%nebem_line, lbar, gw, lbar, nwb, gneb, imf, qb, lgiven)
             end if
             if (.not. imf) call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, &
@@ -4112,18 +4233,17 @@ contains
         real(WP), intent(out)            :: eb(3, n_mod)
 
         integer  :: m, c, i, dt
-        real(KP) :: sk, ck, term, tsum, ga, tau_d, td, tau_b, tb, tau_o, to, curve
+        real(KP) :: sk, ck, term, tsum, ga, td
         real(WP) :: rb
         type(params_core), pointer :: pl
 
         dt = ctx%dust_type_val
         associate (ttab => ctx%state%att_tab, ltab => ctx%state%att_ltab)
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(i, sk, ck, term, tsum, ga, tau_d, td, tau_b, &
-        !$omp& tb, tau_o, to, curve, pl) &
+        !$omp target teams distribute parallel do collapse(2) private(i, sk, ck, term, tsum, ga, td, pl) &
         !$omp& map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda, ctx%state%dustem2_dustem, ttab, ltab)
 #elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(i, sk, ck, term, tsum, ga, tau_d, td, tau_b, tb, tau_o, to, curve, pl)
+        !$omp parallel do collapse(2) private(i, sk, ck, term, tsum, ga, td, pl)
 #endif
         do m = 1, n_mod
             do c = 1, NCHG
@@ -4142,8 +4262,7 @@ contains
                         else if (igm) then
                             ga = ga * igm_t(i)
                         end if
-                        call pixel_transmissions(ctx, pl, nspec, i, dt, ttab, ltab, tau_d, td, tau_b, tb, tau_o, to, &
-                                                 curve)
+                        call pixel_diffuse_transmission(ctx, pl, nspec, i, dt, ttab, ltab, td)
                         term = ga * dl07_shape(ctx, i, iq(m), wq(m), iu(m), wu(m), gam(m)) * td - ck
                         tsum = sk + term
                         ck = (tsum - sk) - term
@@ -4497,11 +4616,10 @@ contains
                 ! The pixel's weight in s_abs and s_esc (wt(i) (x_i + x_i+1) summed over i)
                 cwt = wt(i)
                 if (i > 1) cwt = cwt + wt(i - 1)
-                shape = dl07_shape(ctx, i, iq_m, wq_m, iu_m, wu_m, gam_m)
+                call dl07_shape_and_grad(ctx, i, iq_m, wq_m, iu_m, wu_m, gam_m, shape, dsq, dsu, dsg)
                 ! E = shape T_d R, and s_esc = sum c shape T_d
                 gtd = gtd + ga * shape * rk + sesk * cwt * shape
                 gshape = ga * td * rk + sesk * cwt * td
-                call dl07_shape_grad(ctx, i, iq_m, wq_m, iu_m, wu_m, gam_m, dsq, dsu, dsg)
                 d(10) = gshape * dsq
                 d(11) = gshape * dsu
                 d(12) = gshape * dsg
@@ -4526,7 +4644,7 @@ contains
             ! taking the cap pixel's d tau / dz
             if (igm .and. pl%zred > SAFE_FLOOR) then
                 apre = (y * ay + o * to) * dfac
-                if (em) apre = apre + dl07_shape(ctx, i, iq_m, wq_m, iu_m, wu_m, gam_m) * td * rk
+                if (em) apre = apre + shape * td * rk
                 dtz = igm_tau_dz(ctx%state%spec_lambda(max(i, jmx_m)), 1.0_wp + pl%zred)
                 d(13) = -ga * apre * real(pl%igm_factor * dtz, KP)
                 ! igm_factor: d T_IGM / d factor = -tau T_IGM, tau as the forward (capped below jmx)
@@ -4775,11 +4893,13 @@ contains
     !> One thread per (model, nebular age), serial over pixels and lines, sums compensated at FP32
     !> kernel precision; 10^lg q as exp_kp(lg ln 10 + ln q) (exponent formed in FP64, rule 3).
     subroutine backward_nebular(n_mod, nspec, nt, nzb, ntn, cont, lines, it_tesc, zlo, zhi, dz, zmode, ia, wa, iz, wz, &
-                                iu, wu, fabs, q0, lptr, lid, w2, ctab, ltab, gauss, gw, lbar, nwb, gneb, qmod, qb, lgiven)
+                                iu, wu, fabs, q0, lj_lo, lj_hi, nrun, rs, rl, rt, w2, ctab, ltab, gauss, gw, lbar, &
+                                nwb, gneb, qmod, qb, lgiven)
         integer, intent(in)     :: n_mod, nspec, nt, nzb, ntn, it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
         logical, intent(in)     :: cont, lines, zmode
-        integer, intent(in)     :: ia(max(1, ntn)), iz(n_mod), iu(n_mod), lptr(nspec + 1)
-        integer, intent(in), contiguous :: lid(:)
+        integer, intent(in)     :: ia(max(1, ntn)), iz(n_mod), iu(n_mod)
+        integer, intent(in)     :: lj_lo(NEMLINE), lj_hi(NEMLINE), nrun
+        integer, intent(in)     :: rs(max(1, ntn)), rl(max(1, ntn)), rt(max(1, ntn))
         real(WP), intent(in)    :: dz(n_mod), wa(max(1, ntn)), wz(n_mod), wu(n_mod), fabs(n_mod), q0(max(1, ntn), nzb)
         real(KP), intent(in)    :: w2(nt, 2 * n_mod), gw(nspec, 2 * n_mod)
         real(WP), intent(in)    :: ctab(nspec, NEBNZ, NEBNAGE, NEBNIP), ltab(:,:,:,:)
@@ -4793,7 +4913,7 @@ contains
         !> lbar given (the lines' absorbed part, backward_line_absorption), not from the profiles
         logical, intent(in)     :: lgiven
 
-        integer  :: m, t, j, i, p, c, col, a, z0, u0, r, nrun, k
+        integer  :: m, t, j, i, p, c, col, a, z0, u0, r, k
         real(KP) :: sw, sz, su, cw, cz, cu, term, tsum, val, gv
         real(WP) :: qz, lnq, c00, c01, c10, c11, ra, rb, raz, rbz, rau, rbu, lg, w1, fa, qf, s1, s2, s3, s4, s5
         real(WP), parameter :: LN10 = log(10.0_wp)
@@ -4806,28 +4926,12 @@ contains
         ! (npb pixel blocks per (model, run): GPUs, enough threads to fill the device (~64k), at most 64
         ! blocks and at least 8; CPUs 8)
         integer :: npb
-        integer, allocatable  :: rs(:), rl(:), rt(:)
-        integer :: ljr(2, NEMLINE)
         real(WP), allocatable :: qzt(:,:), lref(:,:)
         real(KP), allocatable :: cpart(:,:,:,:)
 
         ! (tq: per-model metallicity, d L / d dz through Q, interpolated in log Z)
         allocate(tz(max(1, ntn), n_mod), tu(max(1, ntn), n_mod), tf(max(1, ntn), n_mod), tq(max(1, ntn), n_mod))
-        allocate(rs(max(1, ntn)), rl(max(1, ntn)), rt(max(1, ntn)), qzt(max(1, ntn), n_mod), lref(max(1, ntn), n_mod))
-        nrun = 0
-        do t = 1, ntn
-            if (nrun > 0) then
-                if (ia(t) == ia(rs(nrun)) .and. rl(nrun) < NEB_RUN) then
-                    rl(nrun) = rl(nrun) + 1
-                    rt(t) = nrun
-                    cycle
-                end if
-            end if
-            nrun = nrun + 1
-            rs(nrun) = t
-            rl(nrun) = 1
-            rt(t) = nrun
-        end do
+        allocate(qzt(max(1, ntn), n_mod), lref(max(1, ntn), n_mod))
 #if defined(OMP_TARGET)
         npb = max(8, min(64, 65536 / max(1, n_mod * nrun)))
 #else
@@ -4839,7 +4943,7 @@ contains
             allocate(cpart(5, 1, 1, 1))
         end if
 #ifdef OMP_TARGET
-        !$omp target data map(alloc: tz, tu, tf, tq, qzt, lref, cpart) map(to: rs, rl, rt)
+        !$omp target data map(alloc: tz, tu, tf, tq, qzt, lref, cpart)
 #endif
         ! Q per (age, model)
 #if defined(OMP_TARGET)
@@ -4884,30 +4988,19 @@ contains
             end do
         end if
         ! The lines' cotangents (profiles transposed): one thread per (line, young / old column), over
-        ! the pixels whose profile lists include the line (ljr: its first and last such pixel), in
+        ! the pixels whose profile lists include the line (lj_lo(i) to lj_hi(i)), in
         ! pixel order as a pass over the pixels would add them
         if (lines .and. .not. lgiven) then
-            ljr(1, :) = nspec + 1
-            ljr(2, :) = 0
-            do j = 1, nspec
-                do p = lptr(j), lptr(j + 1) - 1
-                    i = lid(p)
-                    ljr(1, i) = min(ljr(1, i), j)
-                    ljr(2, i) = max(ljr(2, i), j)
-                end do
-            end do
 #if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do collapse(2) private(j, p, val) map(to: ljr)
+            !$omp target teams distribute parallel do collapse(2) private(j, val)
 #elif defined(_OPENMP)
-            !$omp parallel do collapse(2) private(j, p, val)
+            !$omp parallel do collapse(2) private(j, val)
 #endif
             do c = 1, 2 * n_mod
                 do i = 1, NEMLINE
                     val = 0.0_KP
-                    do j = ljr(1, i), ljr(2, i)
-                        do p = lptr(j), lptr(j + 1) - 1
-                            if (lid(p) == i) val = val + gauss(j, i) * gw(j, c)
-                        end do
+                    do j = lj_lo(i), lj_hi(i)
+                        val = val + gauss(j, i) * gw(j, c)
                     end do
                     lbar(i, c) = val
                 end do
