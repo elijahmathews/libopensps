@@ -3583,7 +3583,8 @@ contains
         noagn = 0.0_wp
 
 #ifdef OMP_TARGET
-        !$omp target data map(to: fb_bar, sbar, zcm, noagn, qb) map(alloc: fagn_bar, lsum_bar, tmbar, gw, part, eb, nwb, lbar, jmx) &
+        !$omp target data map(to: fb_bar, sbar, zcm, noagn, qb) &
+        !$omp& map(alloc: fagn_bar, lsum_bar, tmbar, gw, part, eb, nwb, lbar, jmx) &
         !$omp& map(from: w_bar, dpar, gneb, dzo)
 #endif
         associate (g => ctx%state%batch)

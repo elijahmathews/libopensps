@@ -634,7 +634,8 @@ contains
         ! (explicit leading dimensions: a point's row is passed by its first element, as imf_pieces_multi)
         real(KP), intent(in) :: wk(ldk, *)
         real(WP), intent(in) :: wpb(ldw, *)
-        real(WP), intent(inout), contiguous :: pmp(:,:), apt(:,:), amp(:,:,:), agt(:,:,:), dtt(:,:), remp(:,:), remm(:,:), imf_bar(:,:)
+        real(WP), intent(inout), contiguous :: pmp(:,:), apt(:,:), amp(:,:,:), agt(:,:,:), dtt(:,:), remp(:,:), remm(:,:), &
+            imf_bar(:,:)
         integer  :: j, q, m, iz, o, k0, n, ig, t, isg, i, npar, q1, q2
         real(WP) :: s, sm, sgn, h, p_apt(NIMFG), p_amp(NIMFG)
 

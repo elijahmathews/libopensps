@@ -233,9 +233,11 @@ module opensps_context_types
         ! --- Replacements for csp_buffer_t ---
 
         ! --- Persistent Physics Workspaces (Dust & Gas) ---
-        real(WP), allocatable :: gas_neb_cont_reduced(:,:)   ! log10 values: kept in WP (an FP32 log loses ln(10)*|x|*eps ~ 5e-6 in 10**x)
+        ! log10 values: kept in WP (an FP32 log loses ln(10)*|x|*eps ~ 5e-6 in 10**x)
+        real(WP), allocatable :: gas_neb_cont_reduced(:,:)
         real(WP), allocatable :: gas_neb_line_reduced(:,:)
-        real(WP), allocatable :: gas_current_step_cont(:)   ! log10 values: kept in WP (an FP32 log loses ln(10)*|x|*eps ~ 5e-6 in 10**x)
+        ! log10 values: kept in WP (see gas_neb_cont_reduced)
+        real(WP), allocatable :: gas_current_step_cont(:)
         real(WP), allocatable :: gas_current_step_lines(:)
         real(WP), allocatable :: sfh_t_calc(:)
         real(WP), allocatable :: sfh_sfr_calc(:)
