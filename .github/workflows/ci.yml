@@ -42,7 +42,8 @@ jobs:
   test:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # (the coverage build runs the tests several-fold slower: the gradient test alone ~20 min there)
+    timeout-minutes: ${{ matrix.coverage && 60 || 30 }}
     strategy:
       fail-fast: false
       matrix:

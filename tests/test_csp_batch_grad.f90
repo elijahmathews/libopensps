@@ -26,7 +26,8 @@ program test_csp_batch_grad
     !>   and for single entries, and the dust, AGN and redshift rows;
     !> - with the IMF and the metallicity free per model (an operator per metallicity), the IMF rows,
     !>   logzsol and the mass output through the operator's reverse pass;
-    !> - agn_tau and igm_factor.
+    !> - agn_tau and igm_factor;
+    !> - van Dokkum's vdmc and Dave's mdave (and slopes) with those IMF types free.
     !> The spectra are linear in the weights and in fagn, so the differences are exact up to rounding
     !> and the curvature of the magnitudes (log10 of the band fluxes). FP64 builds are the
     !> validation (roadmap priority 4); FP32 builds check the same with differences sized for FP32.
@@ -42,7 +43,7 @@ program test_csp_batch_grad
                                  BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
                                  BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, &
                                  BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, BGRAD_AGN_TAU, &
-                                 BGRAD_IGM_FACTOR, NBGRAD
+                                 BGRAD_IGM_FACTOR, BGRAD_VDMC, BGRAD_MDAVE, NBGRAD
     use opensps_ssp, only: generate_ssp_grid
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build
     use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free
@@ -181,6 +182,16 @@ program test_csp_batch_grad
     call check_grad(1, 0.0_wp, 0, 0, .true., "Kroupa IMF free (ssp_ops), z = 0, nebular, dust emission, weight matrix")
     call set_int('add_dust_emission', 0)
     call set_int('add_neb_emission', 0)
+    call ssp_opset_free(opset)
+    ! van Dokkum (vdmc) and Dave (imf1, imf2, mdave) through the operator: their rows against finite
+    ! differences, and the rows each type does not read zero (the reverse pass skips their differences)
+    call set_int('imf_type', 3)
+    call build_opset()
+    call check_grad(2, 0.0_wp, 0, 0, .true., "van Dokkum IMF free (ssp_ops), z = 0, weight matrix")
+    call ssp_opset_free(opset)
+    call set_int('imf_type', 4)
+    call build_opset()
+    call check_grad(1, 0.0_wp, 0, 0, .true., "Dave IMF free (ssp_ops), z = 0, weight matrix")
     use_ops = .false.
     call ssp_opset_free(opset)
     call set_int('imf_type', 1)
@@ -378,6 +389,9 @@ contains
         call set_float('imf1', 1.1_wp + 0.07_wp * m)
         call set_float('imf2', 2.1_wp + 0.05_wp * m)
         call set_float('imf3', 2.2_wp + 0.09_wp * m)
+        ! (van Dokkum's characteristic mass, Dave's break mass: used with those IMF types free)
+        call set_float('vdmc', 0.25_wp + 0.05_wp * m)
+        call set_float('mdave', 0.35_wp + 0.1_wp * m)
         ! (inside the torus grid's intervals, 5 10 20 30 40 60 80 100 150: 21.7 - 96.7)
         call set_float('agn_tau', 6.7_wp + 15.0_wp * mod(m, 8))
         ! (the IGM's factor: one value for the batch, as the common IGM table takes it; a finite
@@ -559,8 +573,8 @@ contains
             ! (An absolute floor of 1e-5. FP32: the spectrum part's FP32 rounding over the step is ~1e-7,
             ! and its sigma gradient can be ~1e-9. FP64: the window-edge jumps leave the differences
             ! ~1e-10 absolute; the random cotangents can make the batch's sigma gradient ~1e-6, as with
-            ! LLVM flang's draws at 5.37 A: 2.4e-10 = 1e-4 relative)
-            call assert_true(abs(g_ad - g_fd) <= merge(2.0e-2_wp, 1.0e-4_wp, LINEAR_ONLY) * max(abs(g_fd), 1.0e-5_wp), &
+            ! LLVM flang's draws at 5.37 A: 2.4e-10 = 1e-4 relative; nvfortran 1.3e-9: the floor is 3e-5)
+            call assert_true(abs(g_ad - g_fd) <= merge(2.0e-2_wp, 1.0e-4_wp, LINEAR_ONLY) * max(abs(g_fd), 3.0e-5_wp), &
                              "d L / d sigma_smooth against finite differences", total_tests, total_failures)
         end if
 
@@ -595,7 +609,10 @@ contains
                 ! (relative to the age's own weight: a young age that dominates a UV band makes its
                 ! magnitude strongly curved in that weight)
                 if (w(k0, m) > 0.0_wp .and. .not. LINEAR_ONLY) then
-                    h = 1.0e-5_wp * w(k0, m)
+                    ! (at least 1e-2 of the model's largest weight: for the youngest age, weight 1.1e-5, a
+                    ! step of 1e-5 of its own weight moved L by 2.6e-9, where rounding of L reached 1e-4 of
+                    ! the difference with gfortran 13; 1.7e-8 is still 0.16% of that weight)
+                    h = 1.0e-5_wp * max(w(k0, m), 1.0e-2_wp * maxval(w(:, m)))
                 else
                     ! (FP32: the check is linear, so any step is exact; relative to the model's largest
                     ! weight, L changes well above the FP32 rounding of the forward's sums, which a step of
@@ -617,11 +634,14 @@ contains
                     call loss(psets, wm, .true., lm)
                     g_fd = (-3.0_wp * l0 + 4.0_wp * lp - lm) / (2.0_wp * h)
                 end if
-                ! (FP32: an absolute floor of 1e-4 of the model's largest weight gradient: an old age with
-                ! zero weight can have a gradient 1e-7 of that, below the FP32 rounding of L over any step)
+                ! (An absolute floor, a fraction of the model's largest weight gradient: the differences'
+                ! rounding scales with L / h, not with the age's own gradient. FP32 1e-4: an old age with zero
+                ! weight can have a gradient 1e-7 of the largest, below the FP32 rounding of L over any step.
+                ! FP64 1e-6: a small age's step is relative to its own weight; 1.3e-4 relative in the -O0
+                ! coverage build)
                 worst = max(worst, abs(wbar(k0, m) - g_fd) / max(abs(g_fd), &
-                                                               merge(1.0e-4_wp * maxval(abs(wbar(:, m))), &
-                                                                     tiny(1.0_wp), LINEAR_ONLY)))
+                                                               merge(1.0e-4_wp, 1.0e-6_wp, LINEAR_ONLY) * &
+                                                               maxval(abs(wbar(:, m)))))
             end do
             write(*, '(A,ES10.2)') "# single ages: worst relative difference ", worst
             ! (FP64: the step is relative to the age's own weight, so for the smallest weights the
@@ -792,19 +812,20 @@ contains
         type(PARAMS), intent(in) :: psets(:)
         real(WP), intent(in) :: w(:, :), pbar(:, :)
         logical, intent(in) :: given_w
-        integer, parameter :: NQ = 29
+        integer, parameter :: NQ = 31
         integer, parameter :: ROWS(NQ) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
                                           BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, &
                                           BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, &
                                           BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, BGRAD_FBURST, BGRAD_TBURST, &
                                           BGRAD_SF_START, BGRAD_ZRED, BGRAD_SF_TRUNC, BGRAD_SF_SLOPE, BGRAD_IMF1, &
-                                          BGRAD_IMF2, BGRAD_IMF3, BGRAD_AGN_TAU, BGRAD_IGM_FACTOR]
+                                          BGRAD_IMF2, BGRAD_IMF3, BGRAD_AGN_TAU, BGRAD_IGM_FACTOR, &
+                                          BGRAD_VDMC, BGRAD_MDAVE]
         character(len=12), parameter :: NAMES(NQ) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
                                                      'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb', &
                                                      'duste_qpah', 'duste_umin', 'duste_gamma', 'gas_logz', 'gas_logu', &
                                                      'logzsol', 'tage', 'tau', 'const', 'fburst', 'tburst', 'sf_start', &
                                                      'zred', 'sf_trunc', 'sf_slope', 'imf1', 'imf2', 'imf3', 'agn_tau', &
-                                                     'igm_factor']
+                                                     'igm_factor', 'vdmc', 'mdave']
         type(PARAMS) :: pp(size(psets))
         real(WP) :: g_fd(NQ, size(psets)), lp, lm, l0, l3, x, h, worst(NQ), gmax
         integer :: q, m, worst_m(NQ)
@@ -845,6 +866,11 @@ contains
                 ! avoid them, and the differences' rounding is then ~1e-5 relative. FP32 builds check
                 ! the spectrum part, smooth in z (the IGM))
                 if (q == 22) h = merge(1.0e-4_wp, 1.0e-9_wp, LINEAR_ONLY) * (1.0_wp + x)
+                ! (vdmc: van Dokkum's break from the lognormal to the power law, at a mass proportional to vdmc,
+                ! crosses isochrone mass points ~1e-5 apart in relative terms, each a kink of L; steps of
+                ! 1e-6 relative resolve the local derivative. Measured: central differences -0.2770633 at
+                ! 1e-6, -0.2770529 at 1e-5 and 1e-4, -0.2770666 at 1e-3, against the adjoint's -0.2770632)
+                if (q == 30 .and. .not. LINEAR_ONLY) h = 1.0e-6_wp * max(abs(x), 1.0e-2_wp)
                 if (bound) then
                     ! (h / 10: at dust2 or dust3 = 0 the curvature of the UV screen leaves the third-order
                     ! formula a truncation of up to ~2e-4 at h = 1e-5 (as h^3); the rounding floor is below)
@@ -940,7 +966,9 @@ contains
         case (26); get_par = p%imf2
         case (27); get_par = p%imf3
         case (28); get_par = p%agn_tau
-        case default; get_par = p%igm_factor
+        case (29); get_par = p%igm_factor
+        case (30); get_par = p%vdmc
+        case default; get_par = p%mdave
         end select
     end function get_par
 
@@ -977,7 +1005,9 @@ contains
         case (26); p%imf2 = x
         case (27); p%imf3 = x
         case (28); p%agn_tau = x
-        case default; p%igm_factor = x
+        case (29); p%igm_factor = x
+        case (30); p%vdmc = x
+        case default; p%mdave = x
         end select
     end subroutine set_par
 
