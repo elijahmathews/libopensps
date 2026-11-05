@@ -544,6 +544,183 @@ __global__ void __launch_bounds__(256, 4) nebular_continuum_tiled_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// Adjoint Nebular Continuum Kernel
+// ---------------------------------------------------------------------------
+
+template <typename T>
+__global__ void __launch_bounds__(256, 4) adj_nebular_continuum_kernel(
+    int n_mod,
+    int nspec,
+    int ntab,
+    int ntn,
+    int nrun,
+    const double* __restrict__ d_tab,
+    const T* __restrict__ d_gw,
+    const int* __restrict__ d_it_tesc,
+    const int* __restrict__ d_ia,
+    const double* __restrict__ d_wa,
+    const int* __restrict__ d_rs,
+    const int* __restrict__ d_rl,
+    const int* __restrict__ d_iz,
+    const double* __restrict__ d_wz,
+    const int* __restrict__ d_iu,
+    const double* __restrict__ d_wu,
+    const double* __restrict__ d_fabs,
+    const double* __restrict__ d_qzt,
+    double* __restrict__ d_lref,
+    T* __restrict__ d_csum
+) {
+    int r = blockIdx.x; // 0 .. nrun - 1
+    int m = blockIdx.y; // 0 .. n_mod - 1
+    if (m >= n_mod || r >= nrun) return;
+
+    int ts = d_rs[r] - 1; // 0-based
+    int tl = d_rl[r];
+    int a = d_ia[ts] - 1; // 0-based
+    int z0 = d_iz[m] - 1;
+    int u0 = d_iu[m] - 1;
+    double wzm = d_wz[m];
+    double wum = d_wu[m];
+    double fabsm = fabs(d_fabs[m]);
+    int it_tesc_m = d_it_tesc[m]; // 1-based, comparing with ts + step + 1
+
+    const double SAFE_FLOOR = 1.0e-30;
+    const double LN10 = 2.30258509299404568402;
+
+    double lnq = 1.0e30;
+    bool ok[4] = {false, false, false, false};
+    for (int step = 0; step < tl && step < 4; ++step) {
+        double q = d_qzt[ts + step + (size_t)m * ntn];
+        if (q * fabsm > SAFE_FLOOR) {
+            ok[step] = true;
+            if (lnq >= 1.0e30) {
+                lnq = log(q);
+            }
+        }
+    }
+
+    if (threadIdx.x == 0) {
+        d_lref[r + (size_t)m * nrun] = lnq;
+    }
+
+    T a_sum[20];
+    T k_comp[20];
+    #pragma unroll
+    for (int i = 0; i < 20; ++i) {
+        a_sum[i] = 0.0;
+        k_comp[i] = 0.0;
+    }
+
+    if (lnq < 1.0e30) {
+        double c00 = (1.0 - wzm) * (1.0 - wum);
+        double c01 = (1.0 - wzm) * wum;
+        double c10 = wzm * (1.0 - wum);
+        double c11 = wzm * wum;
+
+        long long s_z = ntab;
+        long long s_a = ntab * 11;
+        long long s_u = ntab * 11 * 10;
+        long long base_00 = s_z * z0 + s_a * a + s_u * u0;
+        long long base_b  = s_z * z0 + s_a * (a + 1) + s_u * u0;
+
+        double wa_ts = d_wa[ts];
+        size_t off_gy = (size_t)m * nspec;
+        size_t off_go = ((size_t)n_mod + m) * nspec;
+
+        for (int j = threadIdx.x; j < nspec; j += blockDim.x) {
+            T gy = d_gw[j + off_gy];
+            T go = d_gw[j + off_go];
+            if (gy == 0.0 && go == 0.0) continue;
+
+            long long idx00 = j + base_00;
+            double t00 = d_tab[idx00];
+            double t01 = d_tab[idx00 + s_u];
+            double t10 = d_tab[idx00 + s_z];
+            double t11 = d_tab[idx00 + s_z + s_u];
+
+            double ra = c00 * t00 + c01 * t01 + c10 * t10 + c11 * t11;
+            double raz = (1.0 - wum) * (t10 - t00) + wum * (t11 - t01);
+            double rau = (1.0 - wzm) * (t01 - t00) + wzm * (t11 - t10);
+
+            long long idxb = j + base_b;
+            double tb00 = d_tab[idxb];
+            double tb01 = d_tab[idxb + s_u];
+            double tb10 = d_tab[idxb + s_z];
+            double tb11 = d_tab[idxb + s_z + s_u];
+
+            double rb = c00 * tb00 + c01 * tb01 + c10 * tb10 + c11 * tb11;
+            double rbz = (1.0 - wum) * (tb10 - tb00) + wum * (tb11 - tb01);
+            double rbu = (1.0 - wzm) * (tb01 - tb00) + wzm * (tb11 - tb10);
+
+            T rz_a = (T)raz;
+            T rz_b = (T)rbz;
+            T ru_a = (T)rau;
+            T rbu_k = (T)rbu;
+
+            double dl = (rb - ra) * LN10;
+            T e = exp_kp<T>(ra * LN10 + wa_ts * dl + lnq);
+            T rr = 1.0;
+            double dwp = 0.0;
+
+            for (int step = 0; step < tl && step < 4; ++step) {
+                if (step > 0) {
+                    double dw = d_wa[ts + step] - d_wa[ts + step - 1];
+                    if (dw != dwp) {
+                        rr = exp_kp<T>(dw * dl);
+                        dwp = dw;
+                    }
+                    e = e * rr;
+                }
+                if (ok[step]) {
+                    T g = (ts + step + 1 <= it_tesc_m) ? (gy * e) : (go * e);
+                    int b = step * 5;
+                    kahan_add(g,         a_sum[b + 0], k_comp[b + 0]);
+                    kahan_add(g * rz_a,  a_sum[b + 1], k_comp[b + 1]);
+                    kahan_add(g * rz_b,  a_sum[b + 2], k_comp[b + 2]);
+                    kahan_add(g * ru_a,  a_sum[b + 3], k_comp[b + 3]);
+                    kahan_add(g * rbu_k, a_sum[b + 4], k_comp[b + 4]);
+                }
+            }
+        }
+    }
+
+    // Intra-block reduction across 256 threads (8 warps)
+    __shared__ double s_red[20][8];
+    int lane = threadIdx.x % warpSize;
+    int wave = threadIdx.x / warpSize;
+
+    #pragma unroll
+    for (int i = 0; i < 20; ++i) {
+        double val = (double)a_sum[i];
+        #pragma unroll
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            val += __shfl_down(val, offset, warpSize);
+        }
+        if (lane == 0) {
+            s_red[i][wave] = val;
+        }
+    }
+    __syncthreads();
+
+    if (threadIdx.x < 20) {
+        int i = threadIdx.x;
+        int step = i / 5;
+        int q = i % 5;
+        if (step < tl) {
+            double total = 0.0;
+            if (ok[step]) {
+                int num_waves = blockDim.x / warpSize;
+                for (int w = 0; w < num_waves; ++w) {
+                    total += s_red[i][w];
+                }
+            }
+            size_t out_idx = q + 5 * ((size_t)(ts + step) + (size_t)ntn * m);
+            d_csum[out_idx] = (T)total;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
 // Adjoint IMF Analytic (Kroupa & Dave)
 // ---------------------------------------------------------------------------
@@ -947,6 +1124,74 @@ void opensps_hip_nebular_continuum_dp(
     nebular_continuum_tiled_kernel<double><<<grid, block, 0, s>>>(
         n_mod, nspec, ntab, nt_neb, d_tab, d_ia, d_wa, d_dwa, d_newr,
         d_cy, d_co, d_lns, d_iz, d_wz, d_iu, d_wu, d_yo
+    );
+    hipDeviceSynchronize();
+}
+
+void opensps_hip_adj_nebular_continuum_sp(
+    int n_mod,
+    int nspec,
+    int ntab,
+    int ntn,
+    int nrun,
+    const double* __restrict__ d_tab,
+    const float*  __restrict__ d_gw,
+    const int*    __restrict__ d_it_tesc,
+    const int*    __restrict__ d_ia,
+    const double* __restrict__ d_wa,
+    const int*    __restrict__ d_rs,
+    const int*    __restrict__ d_rl,
+    const int*    __restrict__ d_iz,
+    const double* __restrict__ d_wz,
+    const int*    __restrict__ d_iu,
+    const double* __restrict__ d_wu,
+    const double* __restrict__ d_fabs,
+    const double* __restrict__ d_qzt,
+    double*       __restrict__ d_lref,
+    float*        __restrict__ d_csum,
+    void* stream
+) {
+    if (n_mod <= 0 || nrun <= 0 || nspec <= 0 || ntn <= 0) return;
+    dim3 block(256);
+    dim3 grid(nrun, n_mod);
+    hipStream_t s = (hipStream_t)stream;
+    adj_nebular_continuum_kernel<float><<<grid, block, 0, s>>>(
+        n_mod, nspec, ntab, ntn, nrun, d_tab, d_gw, d_it_tesc, d_ia, d_wa,
+        d_rs, d_rl, d_iz, d_wz, d_iu, d_wu, d_fabs, d_qzt, d_lref, d_csum
+    );
+    hipDeviceSynchronize();
+}
+
+void opensps_hip_adj_nebular_continuum_dp(
+    int n_mod,
+    int nspec,
+    int ntab,
+    int ntn,
+    int nrun,
+    const double* __restrict__ d_tab,
+    const double* __restrict__ d_gw,
+    const int*    __restrict__ d_it_tesc,
+    const int*    __restrict__ d_ia,
+    const double* __restrict__ d_wa,
+    const int*    __restrict__ d_rs,
+    const int*    __restrict__ d_rl,
+    const int*    __restrict__ d_iz,
+    const double* __restrict__ d_wz,
+    const int*    __restrict__ d_iu,
+    const double* __restrict__ d_wu,
+    const double* __restrict__ d_fabs,
+    const double* __restrict__ d_qzt,
+    double*       __restrict__ d_lref,
+    double*       __restrict__ d_csum,
+    void* stream
+) {
+    if (n_mod <= 0 || nrun <= 0 || nspec <= 0 || ntn <= 0) return;
+    dim3 block(256);
+    dim3 grid(nrun, n_mod);
+    hipStream_t s = (hipStream_t)stream;
+    adj_nebular_continuum_kernel<double><<<grid, block, 0, s>>>(
+        n_mod, nspec, ntab, ntn, nrun, d_tab, d_gw, d_it_tesc, d_ia, d_wa,
+        d_rs, d_rl, d_iz, d_wz, d_iu, d_wu, d_fabs, d_qzt, d_lref, d_csum
     );
     hipDeviceSynchronize();
 }
