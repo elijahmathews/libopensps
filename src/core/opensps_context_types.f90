@@ -53,7 +53,7 @@ module opensps_context_types
     !> between calls: the batch's working array, so it is allocated (and its host copy page-locked
     !> in NVIDIA GPU builds) only when a batch outgrows it, and callers working on the device can
     !> use the spectra there (batch_spectra_device) without copying them back.
-#ifdef FSPS_PINNED
+#if defined(OPENSPS_PINNED) || defined(FSPS_PINNED)
     !> Page-locking of host buffers (src/core/opensps_pinned.c)
     interface
         integer(c_int) function opensps_host_register(ptr, bytes) bind(C, name="opensps_host_register")
@@ -386,7 +386,7 @@ contains
         end if
         call batch_out_release(o, on_device)
         allocate(o%spec(nspec, cap))
-#ifdef FSPS_PINNED
+#if defined(OPENSPS_PINNED) || defined(FSPS_PINNED)
         ! Page-locked host copy: the copy-back runs at the PCIe rate instead of through the
         ! driver's staging buffers (~2.4 GB/s on the A100 node)
         o%pinned = opensps_host_register(c_loc(o%spec), int(storage_size(o%spec) / 8, c_size_t) * &
@@ -414,7 +414,7 @@ contains
             end associate
 #endif
         end if
-#ifdef FSPS_PINNED
+#if defined(OPENSPS_PINNED) || defined(FSPS_PINNED)
         if (o%pinned) then
             if (opensps_host_unregister(c_loc(o%spec)) /= 0) continue
         end if

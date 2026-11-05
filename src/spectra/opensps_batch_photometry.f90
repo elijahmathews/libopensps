@@ -21,10 +21,6 @@ module opensps_batch_photometry
 #if defined(OPENSPS_ACCEL_BLAS)
     use opensps_accel_blas, only: accel_blas_init, accel_blas_gemm, ACCEL_BLAS_OP_T, ACCEL_BLAS_OP_N
     use, intrinsic :: iso_c_binding, only: c_loc
-#elif defined(FSPS_CUBLAS)
-    use cublas
-    use omp_lib, only: omp_get_default_device
-    use, intrinsic :: iso_c_binding, only: c_ptr, c_int, c_intptr_t
 #endif
 
     implicit none
@@ -33,27 +29,13 @@ module opensps_batch_photometry
     public :: compute_magnitudes_columns, prepare_batch_grid
     public :: smoothing_on_device, prepare_smoothing_kernel, smooth_columns, smooth_columns_adjoint
     public :: distance_term_dz, smooth_sigma_adjoint, free_smooth_work
-#if defined(FSPS_CUBLAS)
-    public :: blas, blas_init
-#endif
 
     real(WP), parameter :: AB_ZEROPOINT = 48.60_wp
     integer, parameter  :: IDX_V_BAND = 1
-    !> Pixels per block of the split-K band product (cuBLAS path): each block is a plain FP32 sum
+    !> Pixels per block of the split-K band product: each block is a plain FP32 sum
     !> of at most 256 positive terms; the blocks are added in FP64
     integer, parameter :: BAND_BLOCK = 256
     real(KP), allocatable, save, target :: smooth_work(:,:)
-#if defined(FSPS_CUBLAS)
-    type(cublasHandle), save :: blas
-    logical, save :: blas_ready = .false.
-    interface
-        !> The CUDA stream of the NVIDIA OpenMP runtime's target regions (synchronous: nowait = 0)
-        type(c_ptr) function ompx_get_cuda_stream(device, nowait) bind(C, name="ompx_get_cuda_stream")
-            import :: c_ptr, c_int
-            integer(c_int), value :: device, nowait
-        end function ompx_get_cuda_stream
-    end interface
-#endif
 
 contains
 
@@ -82,7 +64,7 @@ contains
         real(KP), allocatable :: fobs(:,:)
         real(WP) :: flux
         logical  :: done
-#if defined(OPENSPS_ACCEL_BLAS) || defined(FSPS_CUBLAS)
+#if defined(OPENSPS_ACCEL_BLAS)
         integer :: npad
         integer, parameter :: GEMM_MIN_COLS = 16
 #endif
@@ -120,7 +102,7 @@ contains
 
         associate(g => ctx%state%batch)
         done = .false.
-#if defined(OPENSPS_ACCEL_BLAS) || defined(FSPS_CUBLAS)
+#if defined(OPENSPS_ACCEL_BLAS)
         ! Accelerated BLAS for many spectra; a few (single CSP calls) take the compensated kernels below,
         ! which are more accurate (no plain FP32 block sums) and as fast there
         if (n_col >= GEMM_MIN_COLS) then
@@ -354,7 +336,7 @@ contains
         end associate
 #endif
 
-#if defined(OPENSPS_ACCEL_BLAS) || defined(FSPS_CUBLAS)
+#if defined(OPENSPS_ACCEL_BLAS)
         ! Filter matrix of the split-K band product, padded to whole pixel blocks
         npad = BAND_BLOCK * ((nspec + BAND_BLOCK - 1) / BAND_BLOCK)
         allocate(g%cmat(npad, nbands))
@@ -813,7 +795,7 @@ contains
         end do
     end subroutine observed_frame_t
 
-#if defined(OPENSPS_ACCEL_BLAS) || defined(FSPS_CUBLAS)
+#if defined(OPENSPS_ACCEL_BLAS)
     !> Band fluxes as a split-K matrix product: per block of BAND_BLOCK pixels,
     !> partial = C^T . fobs with C(j, b) = (dl(j-1) + dl(j)) / 2 * band(j, b) (the trapezoid rule
     !> regrouped by pixel, formed in FP64; prepare_batch_grid); the blocks are summed in FP64.
@@ -823,44 +805,24 @@ contains
         real(WP), intent(out)                    :: fband(:,:)
 
         real(KP), allocatable, target :: partial(:,:,:)
-        integer  :: b, m, q, nkb, istat
+        integer  :: b, m, q, nkb
         real(WP) :: sw
 
         nkb = npad / BAND_BLOCK
         allocate(partial(nbands, n_mod, nkb))
-#if defined(OPENSPS_ACCEL_BLAS)
         call accel_blas_init()
-#elif defined(FSPS_CUBLAS)
-        call blas_init()
-#endif
 #ifdef OMP_TARGET
         !$omp target data map(alloc: partial)
         !$omp target data use_device_addr(cmat, fobs, partial)
 #endif
         do q = 1, nkb
-#if defined(OPENSPS_ACCEL_BLAS)
             call accel_blas_gemm(ACCEL_BLAS_OP_T, ACCEL_BLAS_OP_N, nbands, n_mod, BAND_BLOCK, 1.0_KP, &
                                  c_loc(cmat((q - 1) * BAND_BLOCK + 1, 1)), npad, &
                                  c_loc(fobs((q - 1) * BAND_BLOCK + 1, 1)), npad, &
                                  0.0_KP, c_loc(partial(1, 1, q)), nbands)
-#elif defined(FSPS_CUBLAS)
-#ifdef KERNEL_SINGLE_PRECISION
-            istat = cublasSgemm_v2(blas, CUBLAS_OP_T, CUBLAS_OP_N, nbands, n_mod, BAND_BLOCK, 1.0_KP, &
-                                   cmat((q - 1) * BAND_BLOCK + 1, 1), npad, fobs((q - 1) * BAND_BLOCK + 1, 1), npad, &
-                                   0.0_KP, partial(1, 1, q), nbands)
-#else
-            istat = cublasDgemm_v2(blas, CUBLAS_OP_T, CUBLAS_OP_N, nbands, n_mod, BAND_BLOCK, 1.0_KP, &
-                                   cmat((q - 1) * BAND_BLOCK + 1, 1), npad, fobs((q - 1) * BAND_BLOCK + 1, 1), npad, &
-                                   0.0_KP, partial(1, 1, q), nbands)
-#endif
-            if (istat /= 0) exit
-#endif
         end do
 #ifdef OMP_TARGET
         !$omp end target data
-#endif
-#if defined(FSPS_CUBLAS)
-        if (istat /= 0) error stop 'compute_csp_batch: cuBLAS GEMM failed'
 #endif
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(sw, q)
@@ -880,31 +842,6 @@ contains
         !$omp end target data
 #endif
     end subroutine band_fluxes_gemm
-
-#if defined(FSPS_CUBLAS)
-    !> The cuBLAS handle, on the stream of the OpenMP target regions. Experiment switch (NVIDIA only):
-    !> FSPS_CUBLAS_MATH = tf32 lets the FP32 products use TF32 tensor cores (A100 and newer;
-    !> 10-bit mantissa inputs), pedantic forbids tensor cores and reduced-precision paths (the
-    !> FP64 products then run without the A100's FP64 tensor cores); unset: cuBLAS default math
-    !> (FP32 on FP32 units, FP64 on FP64 tensor cores where available).
-    subroutine blas_init()
-        integer :: istat
-        character(len=16) :: mode
-        if (blas_ready) return
-        istat = cublasCreate(blas)
-        ! The products run on the stream of the kernels around them, so they are ordered with them
-        istat = cublasSetStream(blas, int(transfer(ompx_get_cuda_stream(int(omp_get_default_device(), c_int), 0_c_int), &
-                                                   0_c_intptr_t), 8))
-        call get_environment_variable('FSPS_CUBLAS_MATH', mode)
-        select case (trim(mode))
-        case ('tf32')
-            istat = cublasSetMathMode(blas, CUBLAS_TF32_TENSOR_OP_MATH)
-        case ('pedantic')
-            istat = cublasSetMathMode(blas, CUBLAS_PEDANTIC_MATH)
-        end select
-        blas_ready = .true.
-    end subroutine blas_init
-#endif
 #endif
 
     !> Band fluxes: the trapezoid filter integral of fobs over each band's support, compensated at

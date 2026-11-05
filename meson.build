@@ -89,7 +89,7 @@ elif accel_target == 'omp_gpu'
     # (compute_csp_batch, batch photometry and indices; compute_csp_scenario runs as a batch).
     # Run with OMP_TARGET_OFFLOAD=MANDATORY to catch a silent host fallback.
     accel_args = ['-mp=gpu', '-gpu=' + get_option('gpu_arch')]
-    accel_defs = ['-DOMP_TARGET', '-DFSPS_PINNED', '-DOMP_MAP_PRESENT_ALLOC=alloc']
+    accel_defs = ['-DOMP_TARGET', '-DOPENSPS_PINNED', '-DOMP_MAP_PRESENT_ALLOC=alloc']
     if accel_blas_choice == 'cublas'
         accel_args += ['-cudalib=cublas']
         accel_defs += ['-DOPENSPS_ACCEL_BLAS', '-DOPENSPS_CUBLAS']
@@ -102,7 +102,7 @@ endif
 # the CUDA driver resolved at run time)
 pinned_sources = []
 dl_dep = []
-if accel_defs.contains('-DFSPS_PINNED')
+if accel_defs.contains('-DOPENSPS_PINNED') or accel_defs.contains('-DFSPS_PINNED')
     pinned_sources = files('src/core/opensps_pinned.c')
     dl_dep = meson.get_compiler('c').find_library('dl', required : false)
 endif

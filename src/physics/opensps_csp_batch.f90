@@ -107,9 +107,6 @@ module opensps_csp_batch
 #if defined(OPENSPS_ACCEL_BLAS)
     use opensps_accel_blas, only: accel_blas_init, accel_blas_gemm, ACCEL_BLAS_OP_N
     use, intrinsic :: iso_c_binding, only: c_loc
-#elif defined(FSPS_CUBLAS)
-    use opensps_batch_photometry, only: blas, blas_init
-    use cublas
 #endif
 
     implicit none
@@ -184,7 +181,7 @@ module opensps_csp_batch
     !> Words per model of the packed parameters (PARAMS_CORE) that flang kernels read through c_f_pointer
     integer, parameter :: NPW = (storage_size(params_core()) + 63) / 64
 
-#if defined(FSPS_PINNED) && defined(OMP_TARGET)
+#if (defined(OPENSPS_PINNED) || defined(FSPS_PINNED)) && defined(OMP_TARGET)
     !> Device-to-host DMA into a page-locked buffer on a given CUDA stream (src/core/opensps_pinned.c)
     interface
         integer(c_int) function opensps_memcpy_d2h_async(dst, src, bytes, stream) bind(C, name="opensps_memcpy_d2h_async")
@@ -205,7 +202,7 @@ module opensps_csp_batch
 #endif
     end interface
 #endif
-#if defined(FSPS_PINNED) && defined(OMP_TARGET)
+#if (defined(OPENSPS_PINNED) || defined(FSPS_PINNED)) && defined(OMP_TARGET)
     !> The two copy-back streams of the OpenMP target build (created on first use; 0: none)
     integer(c_intptr_t), save :: copy_stream(2) = 0
 #endif
@@ -1310,7 +1307,7 @@ contains
         real(WP), intent(inout)          :: spec(:,:)
         logical, intent(in)              :: pinned   !< sp's host copy is page-locked
         integer :: m
-#if defined(FSPS_PINNED) && defined(OMP_TARGET)
+#if (defined(OPENSPS_PINNED) || defined(FSPS_PINNED)) && defined(OMP_TARGET)
         !> (The kernels are synchronous, so the data is ready when the copy starts; hardware note:
         !> ~16 MB chunks measured best on the A100 node, PCIe 3 host: large enough to reach the DMA
         !> rate, small enough to overlap most of the conversion)
@@ -1355,7 +1352,7 @@ contains
         do m = 1, n_mod
             spec(1:nspec, m) = real(sp(:, m), WP)
         end do
-#if defined(FSPS_PINNED) && defined(OMP_TARGET)
+#if (defined(OPENSPS_PINNED) || defined(FSPS_PINNED)) && defined(OMP_TARGET)
     contains
 
         !> Starts the DMA of columns c1:c2 of sp to its page-locked host copy on stream q.
@@ -2926,24 +2923,6 @@ contains
 #ifdef OMP_TARGET
         !$omp end target data
 #endif
-#elif defined(FSPS_CUBLAS)
-        integer :: istat
-
-        call blas_init()
-#ifdef OMP_TARGET
-        !$omp target data use_device_addr(basis, w2, yo)
-#endif
-#ifdef KERNEL_SINGLE_PRECISION
-        istat = cublasSgemm_v2(blas, CUBLAS_OP_N, CUBLAS_OP_N, nspec, 2 * n_mod, nt, 1.0_KP, basis, nspec, &
-                               w2, nt, 0.0_KP, yo, nspec)
-#else
-        istat = cublasDgemm_v2(blas, CUBLAS_OP_N, CUBLAS_OP_N, nspec, 2 * n_mod, nt, 1.0_KP, basis, nspec, &
-                               w2, nt, 0.0_KP, yo, nspec)
-#endif
-#ifdef OMP_TARGET
-        !$omp end target data
-#endif
-        if (istat /= 0) error stop 'compute_csp_batch: cuBLAS GEMM failed'
 #elif !defined(OMP_TARGET)
         ! CPU builds: per model, one pass over the pixels (stride 1, vectorized) for each age with
         ! a weight, as compute_csp_scenario; the register tile below would pad a batch of fewer
