@@ -448,13 +448,12 @@ contains
 
         integer, parameter :: CHG = 256
         integer, parameter :: PROWS(NIMFG) = [IMF_P_ALPHA, IMF_P_ALPHA + 1, IMF_P_ALPHA + 2, IMF_P_VDMC, IMF_P_MDAVE]
-        integer :: nz, pass, m, t, j, i, np, nc_max, neb_cols, ntq, m0, nc, j0, jr, iz, ky, ig, isg
-        integer, allocatable :: perm(:), viz(:), ptr(:), cnt(:)
-        real(WP), allocatable :: cz(:), ones(:), w(:,:), wm(:,:), tot(:), pps(:,:,:), slz(:,:), sqz(:,:), wpb(:,:), &
-                                 vb(:,:,:), dsm(:,:), dsl(:,:), dsq(:,:), pmp(:,:), part(:,:), zsg(:), dsp(:,:), sxa(:,:), &
-                                 sea(:,:), apt(:,:), amp(:,:,:), dtt(:,:), remp(:,:), remm(:,:), agt(:,:,:)
+        integer :: nz, m, t, j, np1, np2, nc_max, neb_cols, ntq
+        integer, allocatable :: perm1(:), perm2(:), viz1(:), viz2(:), ptr(:), cnt(:)
+        real(WP), allocatable :: cz1(:), cz2(:), zsg1(:), zsg2(:), ones(:), w(:,:), wm(:,:), tot(:), pps(:,:,:), slz(:,:), &
+                                 sqz(:,:), wpb(:,:), vb(:,:,:), dsm(:,:), dsl(:,:), dsq(:,:), pmp(:,:), part(:,:), dsp(:,:), &
+                                 sxa(:,:), sea(:,:), apt(:,:), amp(:,:,:), dtt(:,:), remp(:,:), remm(:,:), agt(:,:,:)
         real(KP), allocatable :: wk(:,:)
-        real(WP) :: sgn
 
         nz = set%nz
         call ssp_opset_to_device(set)
@@ -462,7 +461,8 @@ contains
         if (nt_neb > 0 .and. whl > 0) neb_cols = 1
         nc_max = min(CHG, n_mod)
         ntq = size(qbar, 1)
-        allocate(perm(n_mod), viz(n_mod), ptr(nz + 1), cnt(nz + 1), cz(n_mod), ones(n_mod), zsg(n_mod))
+        allocate(perm1(n_mod), perm2(n_mod), viz1(n_mod), viz2(n_mod), ptr(nz + 1), cnt(nz + 1), &
+                 cz1(n_mod), cz2(n_mod), zsg1(n_mod), zsg2(n_mod), ones(n_mod))
         allocate(w(nc_max, set%n_pts_max), wm(nc_max, set%n_pts_max), wk(nc_max, set%n_pts_max), tot(nc_max), &
                  pps(nc_max, 3, set%n_pc_max), slz(nt, nc_max), sqz(nt, nc_max), wpb(nc_max, set%n_pts_max), &
                  vb(set%n_eff_max, 4, nc_max), dsm(nt, n_mod), dsl(nt, n_mod), dsq(nt, n_mod), pmp(size(pm, 1), n_mod), &
@@ -470,10 +470,35 @@ contains
                  apt(NIMFG, nc_max), amp(NIMFG, nt, nc_max), dtt(NIMFG, nc_max), &
                  remp(nt, nc_max), remm(nt, nc_max), agt(NIMFG, nt, nc_max))
         ones = 1.0_wp
+        ! Pass 1: zlo
+        call group_models(n_mod, nz, zlo, ones, perm1, ptr, cnt)
+        np1 = ptr(nz + 1) - 1
+        do j = 1, np1
+            viz1(j) = zlo(perm1(j))
+            cz1(j) = 1.0_wp - dz(perm1(j))
+            zsg1(j) = -1.0_wp
+        end do
+        ! Pass 2: zhi
+        if (nz > 1) then
+            call group_models(n_mod, nz, zhi, ones, perm2, ptr, cnt)
+            np2 = ptr(nz + 1) - 1
+            do j = 1, np2
+                viz2(j) = zhi(perm2(j))
+                cz2(j) = dz(perm2(j))
+                zsg2(j) = 1.0_wp
+            end do
+        else
+            np2 = 0
+            perm2 = 0
+            viz2 = 0
+            cz2 = 0.0_wp
+            zsg2 = 0.0_wp
+        end if
 #ifdef OMP_TARGET
         !$omp target data map(alloc: w, wm, wk, tot, pps, slz, sqz, wpb, vb, dsm, dsl, dsq, part, dsp, sxa, sea) &
-        !$omp& map(alloc: apt, amp, dtt, remp, remm, agt) &
-        !$omp& map(to: pm, ones, msum_bar) map(from: wbar, imf_bar, fesc_bar, zbar) map(alloc: perm, viz, cz, zsg, pmp)
+        !$omp& map(alloc: apt, amp, dtt, remp, remm, agt, pmp) &
+        !$omp& map(to: pm, ones, msum_bar, perm1, viz1, cz1, zsg1, perm2, viz2, cz2, zsg2) &
+        !$omp& map(from: wbar, imf_bar, fesc_bar, zbar)
 #endif
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do
@@ -485,42 +510,27 @@ contains
                 ! (the SFH weights' L_bol and mass terms; the fold adds its part)
                 wbar(t, m) = lsum_bar(m) * slum(t, m) + msum_bar(m) * smass(t, m)
             end do
-            do i = 1, NIMFG
-                imf_bar(i, m) = 0.0_wp
+            do j = 1, NIMFG
+                imf_bar(j, m) = 0.0_wp
             end do
             fesc_bar(m) = 0.0_wp
             zbar(m) = 0.0_wp
         end do
-        do pass = 1, 2
-            ! Every model in both passes (with the metallicity free, d / d dz takes both, whatever cz)
-            if (pass == 1) then
-                cz = 1.0_wp - dz(1:n_mod)
-                zsg = -1.0_wp
-                call group_models(n_mod, nz, zlo, ones, perm, ptr, cnt)
-            else
-                if (nz == 1) exit
-                cz = dz(1:n_mod)
-                zsg = 1.0_wp
-                call group_models(n_mod, nz, zhi, ones, perm, ptr, cnt)
-            end if
-            np = ptr(nz + 1) - 1
-            do j = 1, np
-                if (pass == 1) then
-                    viz(j) = zlo(perm(j))
-                else
-                    viz(j) = zhi(perm(j))
-                end if
-            end do
-            ! (cz, zsg by virtual model)
-            do j = 1, np
-                ones(j) = cz(perm(j))
-            end do
-            cz(1:np) = ones(1:np)
-            zsg(1:np) = zsg(1)
-            ones = 1.0_wp
+        call run_pass_adj(np1, perm1, viz1, cz1, zsg1)
+        if (nz > 1) call run_pass_adj(np2, perm2, viz2, cz2, zsg2)
 #ifdef OMP_TARGET
-            !$omp target update to(perm, viz, cz, zsg)
+        !$omp end target data
 #endif
+
+    contains
+
+        subroutine run_pass_adj(np, perm, viz, cz, zsg)
+            integer, intent(in) :: np
+            integer, intent(in), contiguous :: perm(:), viz(:)
+            real(WP), intent(in), contiguous :: cz(:), zsg(:)
+            integer :: m0, nc, j0, jr, iz, ky, j, ig, isg, m, i
+            real(WP) :: sgn
+
             do m0 = 1, np, CHG
                 nc = min(CHG, np - m0 + 1)
                 ! The point weights (and per age sl, sq of this metallicity; dsm: the surviving mass of this
@@ -610,10 +620,8 @@ contains
                                       imf_bar, zbar)
                 end do
             end do
-        end do
-#ifdef OMP_TARGET
-        !$omp end target data
-#endif
+        end subroutine run_pass_adj
+
     end subroutine ssp_batch_age_sums_adjoint
 
     !> The IMF rows of Kroupa and Dave analytically: dw/d theta of each point weight w = N / M (N the
