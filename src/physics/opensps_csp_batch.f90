@@ -4485,9 +4485,9 @@ contains
         end do
         end associate
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do private(c, q, sw)
+        !$omp target teams distribute parallel do collapse(2) private(c, sw)
 #elif defined(_OPENMP)
-        !$omp parallel do private(c, q, sw)
+        !$omp parallel do collapse(2) private(c, sw)
 #endif
         do m = 1, n_mod
             do q = 1, NDP
