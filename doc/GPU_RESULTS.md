@@ -113,6 +113,18 @@ Replaces portable loops for GEMM and batched GEMM kernels in:
 - Single call ($N = 1$): 4.815 ms -> **3.762 ms** (**21.9% speedup**).
 - Correctness gates: 23/23 unit tests pass, 16/16 regression tests pass (`OMP_TARGET_OFFLOAD=MANDATORY`), `test_ssp_operator` 42/42 pass (max relative error 1.19e-7), `test_csp_batch` 366/366 pass, `test_csp_batch_grad` 97/97 pass.
 
+## NVIDIA A100 (cc80, nvfortran 25.1, nvcc 12.6) with the HIP kernels (2026-11-05)
+
+Configure: `FC=nvfortran CC=nvc meson setup b -Daccel=omp_gpu -Dgpu_arch=cc80 -Daccel_blas=cublas
+-Daccel_hip=true`. The `.hip` file is compiled by nvcc through `src/accel/hip/cuda_shim`; the cuBLAS
+wrappers call the cuBLAS C entry points (nvfortran's `cublas` generics do not accept `c_ptr`).
+Unit and regression suites: 39/39 pass in FP32 and FP64 (`OMP_TARGET_OFFLOAD=MANDATORY`).
+us per model, FP32, N = 10^4 (main with cuBLAS -> this branch with cuBLAS and HIP):
+`full_smooth_z` 7.54 -> 7.56; `full_smooth_z_imf` 31.8 -> 26.7; `full_smooth_z` with gradients
+62.5 -> 51.2; `full_smooth_z_imf` with gradients 363 -> 185. N = 1000: 99 -> 58 and 420 -> 208 with
+gradients. HIP without cuBLAS is slower than the OpenMP kernels on plain forward runs (9.2 vs 8.4).
+The kernels are tuned for AMD wave64; not retuned for warp32.
+
 ## AMD Radeon AI PRO R9700 desktop (2026-11-02)
 
 Fedora 44, LLVM flang 22.1.8 + Fedora ROCm 7.1.1 (recipe: `doc/GPU_PLAN.md`, "On the R9700

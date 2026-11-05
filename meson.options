@@ -26,7 +26,7 @@ option('accel_blas', type: 'combo', choices: ['none', 'cublas', 'rocblas', 'hipb
   description: 'Accelerated BLAS library for GPU matrix products: none (default portable loops), cublas (NVIDIA), rocblas (AMD ROCm), hipblas (AMD/NVIDIA HIP)')
 
 option('accel_hip', type: 'boolean', value: false,
-  description: 'Enable native HIP kernels for GPU bottleneck phases on AMD ROCm')
+  description: 'Enable the native HIP kernels for GPU bottleneck phases: hipcc on AMD ROCm (automatic when hipcc is found), nvcc through a HIP-on-CUDA shim on NVIDIA (opt-in, with nvfortran)')
 
 option('trace', type: 'boolean', value: false,
   description: 'Enable ROCTX / NVTX range tracing markers for GPU profiling')
