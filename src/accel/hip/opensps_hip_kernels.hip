@@ -61,6 +61,8 @@ __global__ void __launch_bounds__(256, 4) adj_template_bar_kernel(
     T so = 0;
     T cso = 0;
 
+    __shared__ T s_etpl[TILE_K][TILE_E];
+
     for (int k0 = 0; k0 < nspec; k0 += TILE_K) {
         int k = k0 + tx;
         if (j_local < n_run_models && k < nspec) {
@@ -70,13 +72,32 @@ __global__ void __launch_bounds__(256, 4) adj_template_bar_kernel(
             s_gwy[tx][ty] = 0;
             s_gwo[tx][ty] = 0;
         }
+
+        // Cooperatively load TILE_K x TILE_E of d_etpl_t into shared LDS
+        // Block has TILE_E * TILE_M = 32 * 8 = 256 threads.
+        // Array size is TILE_K * TILE_E = 32 * 32 = 1024 elements (4 KB).
+        // Each thread loads 4 elements.
+        int tid = ty * TILE_E + tx;
+        #pragma unroll
+        for (int item = 0; item < 4; ++item) {
+            int elem = tid + item * 256;
+            int r_k = elem / TILE_E;
+            int r_e = elem % TILE_E;
+            int global_k = k0 + r_k;
+            int global_e = blockIdx.x * TILE_E + r_e;
+            if (global_k < nspec && global_e < n_eff) {
+                s_etpl[r_k][r_e] = d_etpl_t[(size_t)global_k * n_eff + global_e];
+            } else {
+                s_etpl[r_k][r_e] = 0;
+            }
+        }
         __syncthreads();
 
         int k_end = (k0 + TILE_K < nspec) ? (k0 + TILE_K) : nspec;
         if (e < n_eff && j_local < n_run_models) {
             for (int curr_k = k0; curr_k < k_end; ++curr_k) {
                 int k_sub = curr_k - k0;
-                T ev = d_etpl_t[(size_t)curr_k * n_eff + e];
+                T ev = s_etpl[k_sub][tx];
                 T gwy = s_gwy[k_sub][ty];
                 T gwo = s_gwo[k_sub][ty];
 
