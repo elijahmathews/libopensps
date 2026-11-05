@@ -1496,5 +1496,112 @@ void opensps_hip_imf_pieces_weights_dp(
     (void)hipStreamSynchronize(s);
 }
 
+
+
+
 } // extern "C"
 
+// ---------------------------------------------------------------------------
+// Band Fluxes Native HIP Kernel
+// ---------------------------------------------------------------------------
+
+template <typename T_KP>
+__global__ void __launch_bounds__(256, 4) band_fluxes_kernel(
+    int n_mod,
+    int nspec,
+    int nbands,
+    const T_KP* __restrict__ d_bands_t,
+    const int*  __restrict__ d_j_lo,
+    const int*  __restrict__ d_j_hi,
+    const int*  __restrict__ d_do_band,
+    const T_KP* __restrict__ d_wt,
+    const T_KP* __restrict__ d_fobs_t,
+    double*     __restrict__ d_fband
+) {
+    int m = blockIdx.x * blockDim.x + threadIdx.x;
+    int b = blockIdx.y;
+
+    if (b >= nbands || m >= n_mod) return;
+
+    if (d_do_band[b] == 0) {
+        d_fband[(size_t)m * nbands + b] = 0.0;
+        return;
+    }
+
+    int j_start = d_j_lo[b] - 1; // 0-based
+    int j_end   = d_j_hi[b] - 1; // 0-based
+
+    T_KP s = 0;
+    T_KP c = 0;
+
+    size_t fobs_base = (size_t)m;
+    size_t bands_base = (size_t)b;
+
+    // Prefetch first pixel of the band
+    T_KP b_curr = (j_start < nspec) ? d_bands_t[bands_base + (size_t)j_start * nbands] : (T_KP)0;
+    T_KP f_curr = (j_start < nspec) ? d_fobs_t[fobs_base + (size_t)j_start * n_mod] : (T_KP)0;
+
+    for (int j = j_start; j <= j_end; ++j) {
+        T_KP w = d_wt[j];
+        T_KP b_next = (j + 1 < nspec) ? d_bands_t[bands_base + (size_t)(j + 1) * nbands] : (T_KP)0;
+        T_KP f_next = (j + 1 < nspec) ? d_fobs_t[fobs_base + (size_t)(j + 1) * n_mod] : (T_KP)0;
+
+        T_KP term = w * (f_curr * b_curr + f_next * b_next);
+        kahan_add(term, s, c);
+
+        b_curr = b_next;
+        f_curr = f_next;
+    }
+
+    d_fband[(size_t)m * nbands + b] = (double)s;
+}
+
+extern "C" {
+
+void opensps_hip_band_fluxes_sp(
+    int n_mod,
+    int nspec,
+    int nbands,
+    const float*  d_bands_t,
+    const int*    d_j_lo,
+    const int*    d_j_hi,
+    const int*    d_do_band,
+    const float*  d_wt,
+    const float*  d_fobs_t,
+    double*       d_fband,
+    void*         stream
+) {
+    if (n_mod <= 0 || nbands <= 0) return;
+    dim3 block(32, 1);
+    dim3 grid((n_mod + 31) / 32, nbands);
+    hipStream_t s = (hipStream_t)stream;
+    band_fluxes_kernel<float><<<grid, block, 0, s>>>(
+        n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband
+    );
+    (void)hipStreamSynchronize(s);
+}
+
+void opensps_hip_band_fluxes_dp(
+    int n_mod,
+    int nspec,
+    int nbands,
+    const double* d_bands_t,
+    const int*    d_j_lo,
+    const int*    d_j_hi,
+    const int*    d_do_band,
+    const double* d_wt,
+    const double* d_fobs_t,
+    double*       d_fband,
+    void*         stream
+) {
+    if (n_mod <= 0 || nbands <= 0) return;
+    dim3 block(32, 1);
+    dim3 grid((n_mod + 31) / 32, nbands);
+    hipStream_t s = (hipStream_t)stream;
+    band_fluxes_kernel<double><<<grid, block, 0, s>>>(
+        n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband
+    );
+    (void)hipStreamSynchronize(s);
+}
+
+} // extern "C"

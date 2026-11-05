@@ -859,6 +859,11 @@ contains
         integer  :: m, j, b, mb, ml
         real(KP) :: s, c, term, tsum
 
+#if defined(OPENSPS_HIP)
+        call run_hip_band_fluxes(n_mod, nspec, nbands, bands_t, j_lo, j_hi, do_band, wt, fobs_t, fband)
+        return
+#endif
+
 #if defined(OMP_TARGET) && !defined(__flang__)
         ! (Not with LLVM flang: there the result of a parallel do reduction nested in a teams
         ! distribute loop was lost, and the teams loop reduction is a plain FP32 tree sum, ~4e-5 mag
@@ -925,5 +930,49 @@ contains
             end do
         end do
     end subroutine band_fluxes
+
+#if defined(OPENSPS_HIP)
+    subroutine run_hip_band_fluxes(n_mod, nspec, nbands, bands_t, j_lo, j_hi, do_band, wt, fobs_t, fband)
+        use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
+        integer, intent(in) :: n_mod, nspec, nbands
+        integer, intent(in), target :: j_lo(nbands), j_hi(nbands), do_band(nbands)
+        real(KP), intent(in), target :: bands_t(nbands, nspec), wt(nspec), fobs_t(n_mod, nspec)
+        real(WP), intent(out), target :: fband(nbands, n_mod)
+
+        interface
+            subroutine opensps_hip_band_fluxes_sp(n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, &
+                                                  d_wt, d_fobs_t, d_fband, stream) &
+                bind(C, name="opensps_hip_band_fluxes_sp")
+                import :: c_int, c_ptr
+                integer(c_int), value :: n_mod, nspec, nbands
+                type(c_ptr), value :: d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband, stream
+            end subroutine opensps_hip_band_fluxes_sp
+
+            subroutine opensps_hip_band_fluxes_dp(n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, &
+                                                  d_wt, d_fobs_t, d_fband, stream) &
+                bind(C, name="opensps_hip_band_fluxes_dp")
+                import :: c_int, c_ptr
+                integer(c_int), value :: n_mod, nspec, nbands
+                type(c_ptr), value :: d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband, stream
+            end subroutine opensps_hip_band_fluxes_dp
+        end interface
+
+#ifdef OMP_TARGET
+        !$omp target data use_device_addr(bands_t, j_lo, j_hi, do_band, wt, fobs_t, fband)
+#endif
+#ifdef KERNEL_SINGLE_PRECISION
+        call opensps_hip_band_fluxes_sp(int(n_mod, c_int), int(nspec, c_int), int(nbands, c_int), &
+                                        c_loc(bands_t(1, 1)), c_loc(j_lo(1)), c_loc(j_hi(1)), c_loc(do_band(1)), &
+                                        c_loc(wt(1)), c_loc(fobs_t(1, 1)), c_loc(fband(1, 1)), c_null_ptr)
+#else
+        call opensps_hip_band_fluxes_dp(int(n_mod, c_int), int(nspec, c_int), int(nbands, c_int), &
+                                        c_loc(bands_t(1, 1)), c_loc(j_lo(1)), c_loc(j_hi(1)), c_loc(do_band(1)), &
+                                        c_loc(wt(1)), c_loc(fobs_t(1, 1)), c_loc(fband(1, 1)), c_null_ptr)
+#endif
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine run_hip_band_fluxes
+#endif
 
 end module opensps_batch_photometry
