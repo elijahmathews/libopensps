@@ -30,6 +30,7 @@ module opensps_ssp_batch
                            integrate_powerlaw, powerlaw_dj_de
     use opensps_stellar_modifications, only: add_remnant_mass_p
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_to_device, ssp_operator_from_device
+    use opensps_trace, only: opensps_trace_push, opensps_trace_pop
     implicit none
     private
 
@@ -358,13 +359,17 @@ contains
 
             do m0 = 1, np, CHUNK
                 nc = min(CHUNK, np - m0 + 1)
+                call opensps_trace_push("fwd_imf_pieces_multi")
                 call imf_pieces_multi(imf_type, remnants, m0, nc, nt, set%n_pc_max, nt_neb, pm, set%n_pc, set%pt_off, &
                                       set%pc_off, set%pc_ptr, set%age_pc, set%pt_ptr, set%pt_mini, set%pt_m1, set%pt_m2, &
                                       set%pt_llo, set%pt_dl, set%pt_first, set%pt_cm, set%pt_cl, set%pt_q, set%age_mmax, &
                                       size(w, 1), set%n_pts_max, w, wk, tot, pps, perm, viz, cz, smass, slum, q0)
+                call opensps_trace_pop()
+                call opensps_trace_push("fwd_fold_multi")
                 call fold_multi(m0, nc, set%n_eff_max, set%n_seg_max, nt_neb, neb_cols, wsfh, it_tesc, fesc, &
                                 set%n_seg, set%n_eff, set%pt_off, set%seg_off, set%eff_off, set%ent_off, set%pt_age, &
                                 set%eff_pt, set%eff_val, set%seg_ptr, set%seg_first, perm, viz, cz, wk, vp, v, veuv)
+                call opensps_trace_pop()
                 ! The template products, per run of one metallicity in the chunk
                 if (direct) then
                     call products(m0, nc, perm, viz, yo, m0 - 1, n_mod + m0 - 1)
@@ -514,6 +519,7 @@ contains
         !$omp target data map(alloc: w, wm, wk, tot, pps, slz, sqz, wpb, vb, dsm, dsl, dsq, part, dsp, sxa, sea) &
         !$omp& map(alloc: apt, amp, dtt, remp, remm, agt, pmp) &
         !$omp& map(to: pm, ones, msum_bar, perm1, viz1, cz1, zsg1, it1, fe1, perm2, viz2, cz2, zsg2, it2, fe2) &
+        !$omp& map(to: wsfh, slum, lsum_bar, qbar) &
         !$omp& map(from: wbar, imf_bar, fesc_bar, zbar)
 #endif
 #if defined(OMP_TARGET)
@@ -552,12 +558,18 @@ contains
                 ! The point weights (and per age sl, sq of this metallicity; dsm: the surviving mass of this
                 ! metallicity per age, for the mass output's dz)
                 call adj_zero_cols(m0, nc, nt, perm, dsm)
+                call opensps_trace_push("adj_imf_pieces_multi")
                 call imf_pieces_multi(imf_type, remnants, m0, nc, nt, set%n_pc_max, nt_neb, pm, set%n_pc, set%pt_off, &
                                       set%pc_off, set%pc_ptr, set%age_pc, set%pt_ptr, set%pt_mini, set%pt_m1, set%pt_m2, &
                                       set%pt_llo, set%pt_dl, set%pt_first, set%pt_cm, set%pt_cl, set%pt_q, set%age_mmax, &
                                       size(w, 1), set%n_pts_max, w, wk, tot, pps, perm, viz, ones, dsm, dsl, dsq)
+                call opensps_trace_pop()
+                call opensps_trace_push("adj_age_sums_sl")
                 call adj_age_sums_sl(m0, nc, nt, set%age_pc, viz, pps, slz, sqz)
+                call opensps_trace_pop()
+                call opensps_trace_push("adj_mass_dot")
                 call adj_mass_dot(m0, nc, nt, perm, cz, zsg, wsfh, msum_bar, dsm, dsm, 0, 0, 1, pm, imf_bar, zbar)
+                call opensps_trace_pop()
                 call adj_zero(nc, set%n_pts_max, wpb)
                 ! v_bar per run of one metallicity (the young product used the run's first ky templates)
                 j0 = 1
@@ -573,26 +585,35 @@ contains
                         ky = max(ky, it(m0 + j - 1))
                     end do
                     ky = set%ops(iz)%k_age(max(1, min(nt, ky)))
+                    call opensps_trace_push("adj_template_bar")
                     call adj_template_bar(nspec, set%ops(iz)%n_eff, ky, neb_cols * whl, n_mod, m0, j0, jr, perm, &
                                           set%ops(iz)%etpl, set%ops(iz)%etpl_t, gw, set%n_eff_max, nc_max, vb)
+                    call opensps_trace_pop()
                     j0 = jr + 1
                 end do
                 ! (w, wm: free until the IMF rows' differences below)
+                call opensps_trace_push("adj_fold_gather")
                 call adj_fold_gather(m0, nc, nt, nt_neb, neb_cols, set%n_pts_max, wsfh, it, fe, set%pt_off, &
                                      set%pt_ptr, set%pt_age, set%eff_val, set%pe_ptr, set%pe_k, set%pe_e, perm, viz, cz, &
                                      zsg, wk, vb, wbar, wpb, fesc_bar, zbar, w, wm, sxa, sea)
-                call adj_lq(m0, nc, nt, nt_neb, set%n_pc_max, set%n_pc, set%pt_off, set%pc_off, set%pc_ptr, set%pt_age, &
-                            set%pt_cl, set%pt_q, perm, viz, cz, zsg, wsfh, slum, lsum_bar, qbar, ntq, slz, sqz, wpb, zbar)
+                call opensps_trace_pop()
+                call opensps_trace_push("adj_lq")
+                call adj_lq(m0, nc, nt, nt_neb, set%n_pc_max, set%n_pc, set%pt_off, set%pc_off, set%pc_ptr, set%pt_ptr, &
+                            set%pt_age, set%pt_cl, set%pt_q, perm, viz, cz, zsg, wsfh, slum, lsum_bar, qbar, ntq, &
+                            slz, sqz, wpb, zbar)
+                call opensps_trace_pop()
                 ! The IMF parameters: Kroupa and Dave (power-law slopes and break) analytically
                 ! (adj_imf_analytic); otherwise central differences of the point weights (only those the
                 ! IMF type reads; the others' rows are zero)
                 if (mod(imf_type, 10) == 2 .or. mod(imf_type, 10) == 4) then
-                    call adj_imf_analytic(imf_type, remnants, m0, nc, nt, set%n_pc_max, set%n_pc, set%pt_off, &
+                    call opensps_trace_push("adj_imf_analytic")
+                    call adj_imf_analytic(imf_type, remnants, m0, nc, nt, set%n_pc_max, set%n_pts_max, set%n_pc, set%pt_off, &
                                           set%pc_off, set%pc_ptr, set%age_pc, set%pt_ptr, set%pt_mini, set%pt_m1, &
-                                          set%pt_m2, set%pt_llo, set%pt_dl, set%pt_first, set%pt_cm, set%age_mmax, perm, &
-                                          viz, cz, wsfh, pm, &
+                                          set%pt_m2, set%pt_llo, set%pt_dl, set%pt_first, set%pt_cm, set%pt_age, set%age_mmax, &
+                                          perm, viz, cz, wsfh, pm, &
                                           pmp, tot, size(wk, 1), wk, size(wpb, 1), wpb, msum_bar, apt, amp, agt, dtt, &
                                           remp, remm, imf_bar)
+                    call opensps_trace_pop()
                     cycle
                 end if
                 do ig = 1, NIMFG
@@ -646,13 +667,13 @@ contains
     !> the sums of w_bar dw (the template, L_bol and Q cotangents of the points) and of the points'
     !> surviving masses times dw (the mass output's), per row; per model the rows. The remnants' part
     !> of the surviving mass (a scalar per age and model) by central differences, as before.
-    subroutine adj_imf_analytic(imf_type, remnants, m0, nc, nt, n_pc_max, n_pc, pt_off, pc_off, pc_ptr, age_pc, &
-                                pt_ptr, pt_mini, pt_m1, pt_m2, pt_llo, pt_dl, pt_first, pt_cm, age_mmax, perm, viz, cz, &
+    subroutine adj_imf_analytic(imf_type, remnants, m0, nc, nt, n_pc_max, n_pts_max, n_pc, pt_off, pc_off, pc_ptr, age_pc, &
+                                pt_ptr, pt_mini, pt_m1, pt_m2, pt_llo, pt_dl, pt_first, pt_cm, pt_age, age_mmax, perm, viz, cz, &
                                 wsfh, pm, pmp, tot, ldk, wk, ldw, wpb, msum_bar, apt, amp, agt, dtt, remp, remm, imf_bar)
-        integer, intent(in) :: imf_type, m0, nc, nt, n_pc_max, ldk, ldw
+        integer, intent(in) :: imf_type, m0, nc, nt, n_pc_max, n_pts_max, ldk, ldw
         logical, intent(in) :: remnants
         integer, intent(in), contiguous :: n_pc(:), pt_off(:), pc_off(:), pc_ptr(:), age_pc(:), pt_ptr(:), pt_first(:), &
-                                           perm(:), viz(:)
+                                           pt_age(:), perm(:), viz(:)
         real(WP), intent(in), contiguous :: pt_mini(:), pt_m1(:), pt_m2(:), pt_llo(:), pt_dl(:), pt_cm(:), age_mmax(:), &
                                             cz(:), wsfh(:,:), pm(:,:), tot(:), msum_bar(:)
         ! (explicit leading dimensions: a point's row is passed by its first element, as imf_pieces_multi)
@@ -679,6 +700,13 @@ contains
                                                  pm(IMF_P_UPPER_LIMIT, m), .true., imf_row_param(ig))
             end do
         end do
+
+#if defined(OPENSPS_HIP)
+        call run_hip_adj_imf_analytic(m0, nc, nt, n_pts_max, size(wsfh, 1), imf_type, ldw, ldk, &
+                                      perm, viz, cz, wsfh, pm, tot, dtt, msum_bar, &
+                                      pt_off, pt_ptr, pt_age, pt_mini, pt_m1, pt_m2, &
+                                      pt_llo, pt_dl, pt_first, pt_cm, wk, wpb, imf_bar)
+#else
         ! Per (age, model): compute piece gradients and accumulate into agt (per age) and amp (per age)
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(m, iz, o, q1, q2, q, k0, n, ig, p_apt, p_amp)
@@ -738,6 +766,7 @@ contains
                 imf_bar(ig, m) = imf_bar(ig, m) + s
             end do
         end do
+#endif
         ! The remnants' mass (with the mass output's cotangent): central differences per (age, model)
         if (.not. remnants .or. .not. any(msum_bar /= 0.0_wp)) return
         do ig = 1, NIMFG
@@ -1570,19 +1599,201 @@ contains
 #endif
         call opensps_hip_sync_stream(c_null_ptr)
     end subroutine run_hip_fold_gather
+
+    subroutine run_hip_adj_imf_analytic(m0, nc, nt, n_pts_max, n_mod, imf_type, ldw, ldk, &
+                                        perm, viz, cz, wsfh, pm, tot, dtt, msum_bar, &
+                                        pt_off, pt_ptr, pt_age, pt_mini, pt_m1, pt_m2, &
+                                        pt_llo, pt_dl, pt_first, pt_cm, wk, wpb, imf_bar)
+        use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
+        integer, intent(in) :: m0, nc, nt, n_pts_max, n_mod, imf_type, ldw, ldk
+        integer, intent(in), target, contiguous :: perm(*), viz(*), pt_off(*), pt_ptr(*), pt_age(*), pt_first(*)
+        real(WP), intent(in), target, contiguous :: cz(*), wsfh(n_mod, *), pm(312, *), tot(*), dtt(NIMFG, *), &
+                                                   msum_bar(*), pt_mini(*), pt_m1(*), pt_m2(*), pt_llo(*), pt_dl(*), &
+                                                   pt_cm(*)
+        real(KP), intent(in), target, contiguous :: wk(ldk, *)
+        real(WP), intent(in), target, contiguous :: wpb(ldw, *)
+        real(WP), intent(inout), target, contiguous :: imf_bar(NIMFG, *)
+
+        interface
+            subroutine opensps_hip_adj_imf_analytic_sp(m0, nc, nt, n_pts_max, n_mod, imf_type, ldw, ldk, &
+                                                       d_perm, d_viz, d_cz, d_wsfh, d_pm, d_tot, d_dtt, d_msum_bar, &
+                                                       d_pt_off, d_pt_ptr, d_pt_age, d_pt_mini, d_pt_m1, d_pt_m2, &
+                                                       d_pt_llo, d_pt_dl, d_pt_first, d_pt_cm, d_wk, d_wpb, d_imf_bar, &
+                                                       stream) bind(C, name="opensps_hip_adj_imf_analytic_sp")
+                import :: c_int, c_ptr
+                integer(c_int), value :: m0, nc, nt, n_pts_max, n_mod, imf_type, ldw, ldk
+                type(c_ptr), value :: d_perm, d_viz, d_cz, d_wsfh, d_pm, d_tot, d_dtt, d_msum_bar
+                type(c_ptr), value :: d_pt_off, d_pt_ptr, d_pt_age, d_pt_mini, d_pt_m1, d_pt_m2
+                type(c_ptr), value :: d_pt_llo, d_pt_dl, d_pt_first, d_pt_cm, d_wk, d_wpb, d_imf_bar, stream
+            end subroutine opensps_hip_adj_imf_analytic_sp
+
+            subroutine opensps_hip_adj_imf_analytic_dp(m0, nc, nt, n_pts_max, n_mod, imf_type, ldw, ldk, &
+                                                       d_perm, d_viz, d_cz, d_wsfh, d_pm, d_tot, d_dtt, d_msum_bar, &
+                                                       d_pt_off, d_pt_ptr, d_pt_age, d_pt_mini, d_pt_m1, d_pt_m2, &
+                                                       d_pt_llo, d_pt_dl, d_pt_first, d_pt_cm, d_wk, d_wpb, d_imf_bar, &
+                                                       stream) bind(C, name="opensps_hip_adj_imf_analytic_dp")
+                import :: c_int, c_ptr
+                integer(c_int), value :: m0, nc, nt, n_pts_max, n_mod, imf_type, ldw, ldk
+                type(c_ptr), value :: d_perm, d_viz, d_cz, d_wsfh, d_pm, d_tot, d_dtt, d_msum_bar
+                type(c_ptr), value :: d_pt_off, d_pt_ptr, d_pt_age, d_pt_mini, d_pt_m1, d_pt_m2
+                type(c_ptr), value :: d_pt_llo, d_pt_dl, d_pt_first, d_pt_cm, d_wk, d_wpb, d_imf_bar, stream
+            end subroutine opensps_hip_adj_imf_analytic_dp
+        end interface
+
+#ifdef OMP_TARGET
+        !$omp target data use_device_addr(perm, viz, cz, wsfh, pm, tot, dtt, msum_bar, &
+        !$omp& pt_off, pt_ptr, pt_age, pt_mini, pt_m1, pt_m2, pt_llo, pt_dl, pt_first, pt_cm, &
+        !$omp& wk, wpb, imf_bar)
+#endif
+#ifdef KERNEL_SINGLE_PRECISION
+        call opensps_hip_adj_imf_analytic_sp(int(m0 - 1, c_int), int(nc, c_int), int(nt, c_int), &
+                                             int(n_pts_max, c_int), int(n_mod, c_int), int(imf_type, c_int), &
+                                             int(ldw, c_int), int(ldk, c_int), &
+                                             c_loc(perm(1)), c_loc(viz(1)), c_loc(cz(1)), &
+                                             c_loc(wsfh(1, 1)), c_loc(pm(1, 1)), c_loc(tot(1)), &
+                                             c_loc(dtt(1, 1)), c_loc(msum_bar(1)), &
+                                             c_loc(pt_off(1)), c_loc(pt_ptr(1)), c_loc(pt_age(1)), &
+                                             c_loc(pt_mini(1)), c_loc(pt_m1(1)), c_loc(pt_m2(1)), &
+                                             c_loc(pt_llo(1)), c_loc(pt_dl(1)), c_loc(pt_first(1)), &
+                                             c_loc(pt_cm(1)), c_loc(wk(1, 1)), c_loc(wpb(1, 1)), &
+                                             c_loc(imf_bar(1, 1)), c_null_ptr)
+#else
+        call opensps_hip_adj_imf_analytic_dp(int(m0 - 1, c_int), int(nc, c_int), int(nt, c_int), &
+                                             int(n_pts_max, c_int), int(n_mod, c_int), int(imf_type, c_int), &
+                                             int(ldw, c_int), int(ldk, c_int), &
+                                             c_loc(perm(1)), c_loc(viz(1)), c_loc(cz(1)), &
+                                             c_loc(wsfh(1, 1)), c_loc(pm(1, 1)), c_loc(tot(1)), &
+                                             c_loc(dtt(1, 1)), c_loc(msum_bar(1)), &
+                                             c_loc(pt_off(1)), c_loc(pt_ptr(1)), c_loc(pt_age(1)), &
+                                             c_loc(pt_mini(1)), c_loc(pt_m1(1)), c_loc(pt_m2(1)), &
+                                             c_loc(pt_llo(1)), c_loc(pt_dl(1)), c_loc(pt_first(1)), &
+                                             c_loc(pt_cm(1)), c_loc(wk(1, 1)), c_loc(wpb(1, 1)), &
+                                             c_loc(imf_bar(1, 1)), c_null_ptr)
+#endif
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine run_hip_adj_imf_analytic
+
+    subroutine run_hip_adj_lq(m0, nc, nt, nt_neb, ntq, n_pts_max, n_mod, ldw, &
+                              perm, viz, cz, zsg, pt_off, pt_ptr, pt_age, pt_cl, pt_q, &
+                              wsfh, slum, lsum_bar, qbar, slz, sqz, wpb, zbar)
+        use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
+        integer, intent(in) :: m0, nc, nt, nt_neb, ntq, n_pts_max, n_mod, ldw
+        integer, intent(in), target, contiguous :: perm(*), viz(*), pt_off(*), pt_ptr(*), pt_age(*)
+        real(WP), intent(in), target, contiguous :: cz(*), zsg(*), pt_cl(*), pt_q(*), &
+                                                   wsfh(n_mod, *), slum(nt, *), lsum_bar(*), &
+                                                   qbar(ntq, *), slz(nt, *), sqz(nt, *)
+        real(WP), intent(inout), target, contiguous :: wpb(ldw, *), zbar(*)
+
+        interface
+            subroutine opensps_hip_adj_lq(m0, nc, nt, nt_neb, ntq, n_pts_max, n_mod, ldw, &
+                                          d_perm, d_viz, d_cz, d_zsg, d_pt_off, d_pt_ptr, d_pt_age, &
+                                          d_pt_cl, d_pt_q, d_wsfh, d_slum, d_lsum_bar, d_qbar, &
+                                          d_slz, d_sqz, d_wpb, d_zbar, stream) bind(C, name="opensps_hip_adj_lq")
+                import :: c_int, c_ptr
+                integer(c_int), value :: m0, nc, nt, nt_neb, ntq, n_pts_max, n_mod, ldw
+                type(c_ptr), value :: d_perm, d_viz, d_cz, d_zsg, d_pt_off, d_pt_ptr, d_pt_age
+                type(c_ptr), value :: d_pt_cl, d_pt_q, d_wsfh, d_slum, d_lsum_bar, d_qbar
+                type(c_ptr), value :: d_slz, d_sqz, d_wpb, d_zbar, stream
+            end subroutine opensps_hip_adj_lq
+        end interface
+
+#ifdef OMP_TARGET
+        !$omp target data use_device_addr(perm, viz, cz, zsg, pt_off, pt_ptr, pt_age, pt_cl, pt_q, &
+        !$omp& wsfh, slum, lsum_bar, qbar, slz, sqz, wpb, zbar)
+#endif
+        call opensps_hip_adj_lq(int(m0 - 1, c_int), int(nc, c_int), int(nt, c_int), &
+                                int(nt_neb, c_int), int(ntq, c_int), int(n_pts_max, c_int), &
+                                int(n_mod, c_int), int(ldw, c_int), &
+                                c_loc(perm(1)), c_loc(viz(1)), c_loc(cz(1)), c_loc(zsg(1)), &
+                                c_loc(pt_off(1)), c_loc(pt_ptr(1)), c_loc(pt_age(1)), &
+                                c_loc(pt_cl(1)), c_loc(pt_q(1)), &
+                                c_loc(wsfh(1, 1)), c_loc(slum(1, 1)), c_loc(lsum_bar(1)), &
+                                c_loc(qbar(1, 1)), c_loc(slz(1, 1)), c_loc(sqz(1, 1)), &
+                                c_loc(wpb(1, 1)), c_loc(zbar(1)), c_null_ptr)
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine run_hip_adj_lq
+
+    subroutine run_hip_imf_pieces_weights(m0, nc, n_pc_max, n_pts_max, ldw, imf_type, &
+                                          perm, viz, pm, tot, n_pc, pt_off, pc_off, pc_ptr, &
+                                          pt_mini, pt_m1, pt_m2, pt_llo, pt_dl, pt_first, &
+                                          pt_cm, pt_cl, pt_q, w, wk, pps)
+        use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
+        integer, intent(in) :: m0, nc, n_pc_max, n_pts_max, ldw, imf_type
+        integer, intent(in), target, contiguous :: perm(*), viz(*), n_pc(*), pt_off(*), pc_off(*), pc_ptr(*), pt_first(*)
+        real(WP), intent(in), target, contiguous :: pm(312, *), tot(*), pt_mini(*), pt_m1(*), pt_m2(*), pt_llo(*), pt_dl(*), &
+                                                    pt_cm(*), pt_cl(*), pt_q(*)
+        real(WP), intent(inout), target, contiguous :: w(ldw, *), pps(ldw, 3, *)
+        real(KP), intent(inout), target, contiguous :: wk(ldw, *)
+
+        interface
+            subroutine opensps_hip_imf_pieces_weights_sp(m0, nc, n_pc_max, n_pts_max, ldw, imf_type, &
+                perm, viz, pm, tot, n_pc, pt_off, pc_off, pc_ptr, pt_mini, pt_m1, pt_m2, pt_llo, pt_dl, &
+                pt_first, pt_cm, pt_cl, pt_q, w, wk, pps, stream) bind(C, name="opensps_hip_imf_pieces_weights_sp")
+                import :: c_int, c_ptr
+                integer(c_int), value :: m0, nc, n_pc_max, n_pts_max, ldw, imf_type
+                type(c_ptr), value :: perm, viz, pm, tot, n_pc, pt_off, pc_off, pc_ptr, pt_mini, pt_m1, pt_m2, &
+                                      pt_llo, pt_dl, pt_first, pt_cm, pt_cl, pt_q, w, wk, pps, stream
+            end subroutine opensps_hip_imf_pieces_weights_sp
+            subroutine opensps_hip_imf_pieces_weights_dp(m0, nc, n_pc_max, n_pts_max, ldw, imf_type, &
+                perm, viz, pm, tot, n_pc, pt_off, pc_off, pc_ptr, pt_mini, pt_m1, pt_m2, pt_llo, pt_dl, &
+                pt_first, pt_cm, pt_cl, pt_q, w, wk, pps, stream) bind(C, name="opensps_hip_imf_pieces_weights_dp")
+                import :: c_int, c_ptr
+                integer(c_int), value :: m0, nc, n_pc_max, n_pts_max, ldw, imf_type
+                type(c_ptr), value :: perm, viz, pm, tot, n_pc, pt_off, pc_off, pc_ptr, pt_mini, pt_m1, pt_m2, &
+                                      pt_llo, pt_dl, pt_first, pt_cm, pt_cl, pt_q, w, wk, pps, stream
+            end subroutine opensps_hip_imf_pieces_weights_dp
+        end interface
+
+#ifdef OMP_TARGET
+        !$omp target data use_device_addr(perm, viz, pm, tot, n_pc, pt_off, pc_off, pc_ptr, &
+        !$omp& pt_mini, pt_m1, pt_m2, pt_llo, pt_dl, pt_first, pt_cm, pt_cl, pt_q, w, wk, pps)
+#endif
+#ifdef KERNEL_SINGLE_PRECISION
+        call opensps_hip_imf_pieces_weights_sp(int(m0 - 1, c_int), int(nc, c_int), int(n_pc_max, c_int), &
+                                               int(n_pts_max, c_int), int(ldw, c_int), int(imf_type, c_int), &
+                                               c_loc(perm(1)), c_loc(viz(1)), c_loc(pm(1, 1)), c_loc(tot(1)), &
+                                               c_loc(n_pc(1)), c_loc(pt_off(1)), c_loc(pc_off(1)), c_loc(pc_ptr(1)), &
+                                               c_loc(pt_mini(1)), c_loc(pt_m1(1)), c_loc(pt_m2(1)), c_loc(pt_llo(1)), &
+                                               c_loc(pt_dl(1)), c_loc(pt_first(1)), c_loc(pt_cm(1)), c_loc(pt_cl(1)), &
+                                               c_loc(pt_q(1)), c_loc(w(1, 1)), c_loc(wk(1, 1)), c_loc(pps(1, 1, 1)), &
+                                               c_null_ptr)
+#else
+        call opensps_hip_imf_pieces_weights_dp(int(m0 - 1, c_int), int(nc, c_int), int(n_pc_max, c_int), &
+                                               int(n_pts_max, c_int), int(ldw, c_int), int(imf_type, c_int), &
+                                               c_loc(perm(1)), c_loc(viz(1)), c_loc(pm(1, 1)), c_loc(tot(1)), &
+                                               c_loc(n_pc(1)), c_loc(pt_off(1)), c_loc(pc_off(1)), c_loc(pc_ptr(1)), &
+                                               c_loc(pt_mini(1)), c_loc(pt_m1(1)), c_loc(pt_m2(1)), c_loc(pt_llo(1)), &
+                                               c_loc(pt_dl(1)), c_loc(pt_first(1)), c_loc(pt_cm(1)), c_loc(pt_cl(1)), &
+                                               c_loc(pt_q(1)), c_loc(w(1, 1)), c_loc(wk(1, 1)), c_loc(pps(1, 1, 1)), &
+                                               c_null_ptr)
+#endif
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine run_hip_imf_pieces_weights
 #endif
 
     !> L_bol and Q per point: w_p bar += lsum_bar wsfh(t) L(t) cz cl_p / sl_z + qbar(t) cz q_p; and their
     !> d / d dz (zbar: L in log, Q linearly).
-    subroutine adj_lq(m0, nc, nt, nt_neb, n_pc_max, n_pc, pt_off, pc_off, pc_ptr, pt_age, pt_cl, pt_q, perm, viz, cz, &
+    subroutine adj_lq(m0, nc, nt, nt_neb, n_pc_max, n_pc, pt_off, pc_off, pc_ptr, pt_ptr, pt_age, pt_cl, pt_q, perm, viz, cz, &
                       zsg, wsfh, slum, lsum_bar, qbar, ntq, slz, sqz, wpb, zbar)
         integer, intent(in) :: m0, nc, nt, nt_neb, n_pc_max, ntq
-        integer, intent(in), contiguous :: n_pc(:), pt_off(:), pc_off(:), pc_ptr(:), pt_age(:), perm(:), viz(:)
+        integer, intent(in), contiguous :: n_pc(:), pt_off(:), pc_off(:), pc_ptr(:), pt_ptr(:), pt_age(:), perm(:), viz(:)
         real(WP), intent(in), contiguous :: pt_cl(:), pt_q(:), cz(:), zsg(:), wsfh(:,:), slum(:,:), lsum_bar(:), &
                                             qbar(:,:), slz(:,:), sqz(:,:)
         real(WP), intent(inout), contiguous :: wpb(:,:), zbar(:)
         integer :: q, j, k, k0, n, iz, m, o, t
         real(WP) :: lf, qf, zs
+#if defined(OPENSPS_HIP)
+        call run_hip_adj_lq(m0, nc, nt, nt_neb, ntq, size(wpb, 2), size(wsfh, 1), size(wpb, 1), &
+                            perm, viz, cz, zsg, pt_off, pt_ptr, pt_age, pt_cl, pt_q, &
+                            wsfh, slum, lsum_bar, qbar, slz, sqz, wpb, zbar)
+        return
+#endif
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(k, k0, n, iz, m, o, t, lf, qf)
 #elif defined(_OPENMP)
@@ -1699,11 +1910,44 @@ contains
             tot(j) = imf_integral_p(imf_type, pm(:, perm(m0 + j - 1)), pm(IMF_P_LOWER_LIMIT, perm(m0 + j - 1)), &
                                     pm(IMF_P_UPPER_LIMIT, perm(m0 + j - 1)), .true.)
         end do
-#if defined(OMP_TARGET)
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET)
+        if (mod(imf_type, 10) == 0 .or. mod(imf_type, 10) == 2 .or. mod(imf_type, 10) == 4) then
+            call run_hip_imf_pieces_weights(m0, nc, n_pc_max, n_pts_max, ldw, imf_type, &
+                                            perm, viz, pm, tot, n_pc, pt_off, pc_off, pc_ptr, &
+                                            pt_mini, pt_m1, pt_m2, pt_llo, pt_dl, pt_first, &
+                                            pt_cm, pt_cl, pt_q, w, wk, pps)
+        else
+            !$omp target teams distribute parallel do collapse(2) private(k, m, k0, n, sm, sl, sq, iz, o, kl)
+            do q = 1, n_pc_max
+                do j = 1, nc
+                    iz = viz(m0 + j - 1)
+                    if (q > n_pc(iz)) cycle
+                    m = perm(m0 + j - 1)
+                    o = pt_off(iz)
+                    k0 = pc_ptr(pc_off(iz) + q)
+                    n = pc_ptr(pc_off(iz) + q + 1) - k0
+                    sm = 0.0_wp
+                    sl = 0.0_wp
+                    sq = 0.0_wp
+                    call imf_bin_weights_tab(imf_type, pm(:, m), tot(j), n, pt_mini(k0), &
+                                         pt_m1(k0), pt_m2(k0), pt_llo(k0), &
+                                         pt_dl(k0), pt_first(k0), &
+                                         w(j, k0 - o), ldw)
+                    do k = k0, k0 + n - 1
+                        kl = k - o
+                        sm = sm + pt_cm(k) * w(j, kl)
+                        sl = sl + pt_cl(k) * w(j, kl)
+                        sq = sq + pt_q(k) * w(j, kl)
+                        wk(j, kl) = real(w(j, kl), KP)
+                    end do
+                    pps(j, 1, q) = sm
+                    pps(j, 2, q) = sl
+                    pps(j, 3, q) = sq
+                end do
+            end do
+        end if
+#elif defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(k, m, k0, n, sm, sl, sq, iz, o, kl)
-#elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(k, m, k0, n, sm, sl, sq, iz, o, kl)
-#endif
         do q = 1, n_pc_max
             do j = 1, nc
                 iz = viz(m0 + j - 1)
@@ -1715,9 +1959,9 @@ contains
                 sm = 0.0_wp
                 sl = 0.0_wp
                 sq = 0.0_wp
-                call imf_bin_weights_tab(imf_type, pm(:, m), tot(j), n, pt_mini(k0:k0 + n - 1), &
-                                     pt_m1(k0:k0 + n - 1), pt_m2(k0:k0 + n - 1), pt_llo(k0:k0 + n - 1), &
-                                     pt_dl(k0:k0 + n - 1), pt_first(k0:k0 + n - 1), &
+                call imf_bin_weights_tab(imf_type, pm(:, m), tot(j), n, pt_mini(k0), &
+                                     pt_m1(k0), pt_m2(k0), pt_llo(k0), &
+                                     pt_dl(k0), pt_first(k0), &
                                      w(j, k0 - o), ldw)
                 do k = k0, k0 + n - 1
                     kl = k - o
@@ -1731,6 +1975,36 @@ contains
                 pps(j, 3, q) = sq
             end do
         end do
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(k, m, k0, n, sm, sl, sq, iz, o, kl)
+        do q = 1, n_pc_max
+            do j = 1, nc
+                iz = viz(m0 + j - 1)
+                if (q > n_pc(iz)) cycle
+                m = perm(m0 + j - 1)
+                o = pt_off(iz)
+                k0 = pc_ptr(pc_off(iz) + q)
+                n = pc_ptr(pc_off(iz) + q + 1) - k0
+                sm = 0.0_wp
+                sl = 0.0_wp
+                sq = 0.0_wp
+                call imf_bin_weights_tab(imf_type, pm(:, m), tot(j), n, pt_mini(k0), &
+                                     pt_m1(k0), pt_m2(k0), pt_llo(k0), &
+                                     pt_dl(k0), pt_first(k0), &
+                                     w(j, k0 - o), ldw)
+                do k = k0, k0 + n - 1
+                    kl = k - o
+                    sm = sm + pt_cm(k) * w(j, kl)
+                    sl = sl + pt_cl(k) * w(j, kl)
+                    sq = sq + pt_q(k) * w(j, kl)
+                    wk(j, kl) = real(w(j, kl), KP)
+                end do
+                pps(j, 1, q) = sm
+                pps(j, 2, q) = sl
+                pps(j, 3, q) = sq
+            end do
+        end do
+#endif
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(q, sm, sl, sq, iz, m)
 #elif defined(_OPENMP)
@@ -1773,13 +2047,7 @@ contains
         integer  :: s, e, j, k, t, m, tesc, tc, iz, sg, eg
         real(WP) :: x, y, o, ye, oe, f, a, ae
 
-#if defined(OPENSPS_HIP)
-        call run_hip_fold_multi(m0, nc, n_eff_max, nt_neb, neb_cols, &
-                                size(w, 1), size(wsfh, 1), &
-                                wsfh, it_tesc, fesc, n_eff, pt_off, &
-                                seg_off, eff_off, pt_age, eff_pt, eff_val, &
-                                seg_ptr, seg_first, perm, viz, cz, w, v, veuv)
-#else
+#if defined(OMP_TARGET)
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(k, t, m, tesc, tc, x, y, o, ye, oe, f, a, ae, &
         !$omp     iz, sg) map(to: fesc)
@@ -1852,127 +2120,7 @@ contains
                 end if
             end do
         end do
-#endif
     end subroutine fold_multi
-
-#if defined(OPENSPS_HIP)
-    subroutine run_hip_fold_multi(m0, nc, n_eff_max, nt_neb, neb_cols, ldw, n_mod, &
-                                  wsfh, it_tesc, fesc, n_eff, pt_off, seg_off, eff_off, &
-                                  pt_age, eff_pt, eff_val, seg_ptr, seg_first, &
-                                  perm, viz, cz, w, v, veuv)
-        use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
-        integer, intent(in) :: m0, nc, n_eff_max, nt_neb, neb_cols, ldw, n_mod
-        real(WP), intent(in), target, contiguous :: wsfh(n_mod, *), fesc(*), eff_val(*), cz(*)
-        real(KP), intent(in), target, contiguous :: w(ldw, *)
-        integer, intent(in), target, contiguous :: it_tesc(*), n_eff(*), pt_off(*), seg_off(*), &
-                                                   eff_off(*), pt_age(*), eff_pt(*), seg_ptr(*), &
-                                                   seg_first(*), perm(*), viz(*)
-        real(KP), intent(inout), target, contiguous :: v(n_eff_max, *), veuv(n_eff_max, *)
-        type(c_ptr) :: p_fesc, p_veuv
-
-        interface
-            subroutine opensps_hip_fold_multi_sp(m0, nc, n_eff_max, nt_neb, neb_cols, ldw, n_mod, &
-                                                 d_wsfh, d_it_tesc, d_fesc, d_n_eff, d_pt_off, &
-                                                 d_seg_off, d_eff_off, d_pt_age, d_eff_pt, d_eff_val, &
-                                                 d_seg_ptr, d_seg_first, d_perm, d_viz, d_cz, &
-                                                 d_w, d_v, d_veuv, stream) &
-                bind(C, name="opensps_hip_fold_multi_sp")
-                import :: c_int, c_ptr
-                integer(c_int), value :: m0, nc, n_eff_max, nt_neb, neb_cols, ldw, n_mod
-                type(c_ptr), value :: d_wsfh, d_it_tesc, d_fesc, d_n_eff, d_pt_off, d_seg_off, d_eff_off
-                type(c_ptr), value :: d_pt_age, d_eff_pt, d_eff_val, d_seg_ptr, d_seg_first
-                type(c_ptr), value :: d_perm, d_viz, d_cz, d_w, d_v, d_veuv, stream
-            end subroutine opensps_hip_fold_multi_sp
-
-            subroutine opensps_hip_fold_multi_dp(m0, nc, n_eff_max, nt_neb, neb_cols, ldw, n_mod, &
-                                                 d_wsfh, d_it_tesc, d_fesc, d_n_eff, d_pt_off, &
-                                                 d_seg_off, d_eff_off, d_pt_age, d_eff_pt, d_eff_val, &
-                                                 d_seg_ptr, d_seg_first, d_perm, d_viz, d_cz, &
-                                                 d_w, d_v, d_veuv, stream) &
-                bind(C, name="opensps_hip_fold_multi_dp")
-                import :: c_int, c_ptr
-                integer(c_int), value :: m0, nc, n_eff_max, nt_neb, neb_cols, ldw, n_mod
-                type(c_ptr), value :: d_wsfh, d_it_tesc, d_fesc, d_n_eff, d_pt_off, d_seg_off, d_eff_off
-                type(c_ptr), value :: d_pt_age, d_eff_pt, d_eff_val, d_seg_ptr, d_seg_first
-                type(c_ptr), value :: d_perm, d_viz, d_cz, d_w, d_v, d_veuv, stream
-            end subroutine opensps_hip_fold_multi_dp
-
-            subroutine opensps_hip_sync_stream(stream) bind(C, name="opensps_hip_sync_stream")
-                import :: c_ptr
-                type(c_ptr), value :: stream
-            end subroutine opensps_hip_sync_stream
-        end interface
-
-        if (neb_cols > 0) then
-#ifdef OMP_TARGET
-            !$omp target data use_device_addr(wsfh, it_tesc, fesc, n_eff, pt_off, seg_off, eff_off, &
-            !$omp& pt_age, eff_pt, eff_val, seg_ptr, seg_first, perm, viz, cz, w, v, veuv)
-#endif
-            p_fesc = c_loc(fesc(1))
-            p_veuv = c_loc(veuv(1, 1))
-#ifdef KERNEL_SINGLE_PRECISION
-            call opensps_hip_fold_multi_sp(int(m0 - 1, c_int), int(nc, c_int), int(n_eff_max, c_int), &
-                                           int(nt_neb, c_int), int(neb_cols, c_int), int(ldw, c_int), &
-                                           int(n_mod, c_int), &
-                                           c_loc(wsfh(1, 1)), c_loc(it_tesc(1)), p_fesc, &
-                                           c_loc(n_eff(1)), c_loc(pt_off(1)), c_loc(seg_off(1)), &
-                                           c_loc(eff_off(1)), c_loc(pt_age(1)), c_loc(eff_pt(1)), &
-                                           c_loc(eff_val(1)), c_loc(seg_ptr(1)), c_loc(seg_first(1)), &
-                                           c_loc(perm(1)), c_loc(viz(1)), c_loc(cz(1)), &
-                                           c_loc(w(1, 1)), c_loc(v(1, 1)), p_veuv, &
-                                           c_null_ptr)
-#else
-            call opensps_hip_fold_multi_dp(int(m0 - 1, c_int), int(nc, c_int), int(n_eff_max, c_int), &
-                                           int(nt_neb, c_int), int(neb_cols, c_int), int(ldw, c_int), &
-                                           int(n_mod, c_int), &
-                                           c_loc(wsfh(1, 1)), c_loc(it_tesc(1)), p_fesc, &
-                                           c_loc(n_eff(1)), c_loc(pt_off(1)), c_loc(seg_off(1)), &
-                                           c_loc(eff_off(1)), c_loc(pt_age(1)), c_loc(eff_pt(1)), &
-                                           c_loc(eff_val(1)), c_loc(seg_ptr(1)), c_loc(seg_first(1)), &
-                                           c_loc(perm(1)), c_loc(viz(1)), c_loc(cz(1)), &
-                                           c_loc(w(1, 1)), c_loc(v(1, 1)), p_veuv, &
-                                           c_null_ptr)
-#endif
-#ifdef OMP_TARGET
-            !$omp end target data
-#endif
-        else
-#ifdef OMP_TARGET
-            !$omp target data use_device_addr(wsfh, it_tesc, n_eff, pt_off, seg_off, eff_off, &
-            !$omp& pt_age, eff_pt, eff_val, seg_ptr, seg_first, perm, viz, cz, w, v)
-#endif
-            p_fesc = c_null_ptr
-            p_veuv = c_null_ptr
-#ifdef KERNEL_SINGLE_PRECISION
-            call opensps_hip_fold_multi_sp(int(m0 - 1, c_int), int(nc, c_int), int(n_eff_max, c_int), &
-                                           int(nt_neb, c_int), int(neb_cols, c_int), int(ldw, c_int), &
-                                           int(n_mod, c_int), &
-                                           c_loc(wsfh(1, 1)), c_loc(it_tesc(1)), p_fesc, &
-                                           c_loc(n_eff(1)), c_loc(pt_off(1)), c_loc(seg_off(1)), &
-                                           c_loc(eff_off(1)), c_loc(pt_age(1)), c_loc(eff_pt(1)), &
-                                           c_loc(eff_val(1)), c_loc(seg_ptr(1)), c_loc(seg_first(1)), &
-                                           c_loc(perm(1)), c_loc(viz(1)), c_loc(cz(1)), &
-                                           c_loc(w(1, 1)), c_loc(v(1, 1)), p_veuv, &
-                                           c_null_ptr)
-#else
-            call opensps_hip_fold_multi_dp(int(m0 - 1, c_int), int(nc, c_int), int(n_eff_max, c_int), &
-                                           int(nt_neb, c_int), int(neb_cols, c_int), int(ldw, c_int), &
-                                           int(n_mod, c_int), &
-                                           c_loc(wsfh(1, 1)), c_loc(it_tesc(1)), p_fesc, &
-                                           c_loc(n_eff(1)), c_loc(pt_off(1)), c_loc(seg_off(1)), &
-                                           c_loc(eff_off(1)), c_loc(pt_age(1)), c_loc(eff_pt(1)), &
-                                           c_loc(eff_val(1)), c_loc(seg_ptr(1)), c_loc(seg_first(1)), &
-                                           c_loc(perm(1)), c_loc(viz(1)), c_loc(cz(1)), &
-                                           c_loc(w(1, 1)), c_loc(v(1, 1)), p_veuv, &
-                                           c_null_ptr)
-#endif
-#ifdef OMP_TARGET
-            !$omp end target data
-#endif
-        end if
-        call opensps_hip_sync_stream(c_null_ptr)
-    end subroutine run_hip_fold_multi
-#endif
 
     !> perm: the models m with a nonzero weight cz(m), grouped by key(m) (counting sort, models in
     !> order within a key); ptr(iz) .. ptr(iz + 1) - 1 the entries of key iz.
