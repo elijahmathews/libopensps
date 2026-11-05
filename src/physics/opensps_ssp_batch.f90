@@ -2048,7 +2048,6 @@ contains
         real(WP) :: x, y, o, ye, oe, f, a, ae
 
 #if defined(OMP_TARGET)
-#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(k, t, m, tesc, tc, x, y, o, ye, oe, f, a, ae, &
         !$omp     iz, sg) map(to: fesc)
 #elif defined(_OPENMP)

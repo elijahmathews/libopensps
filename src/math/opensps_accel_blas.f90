@@ -25,6 +25,41 @@ module opensps_accel_blas
 
 #if defined(OPENSPS_CUBLAS)
     type(cublasHandle), save :: blas_handle
+    ! Raw cuBLAS C entry points taking device c_ptrs (nvfortran's cublas module generics want arrays)
+    interface
+        integer(c_int) function c_sgemm(h, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc) bind(C, name="cublasSgemm_v2")
+            import :: c_int, c_ptr, c_intptr_t
+            type(c_ptr), value :: h
+            integer(c_int), value :: ta, tb, m, n, k, lda, ldb, ldc
+            real(kind=4), intent(in) :: alpha, beta
+            type(c_ptr), value :: a, b, c
+        end function
+        integer(c_int) function c_dgemm(h, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc) bind(C, name="cublasDgemm_v2")
+            import :: c_int, c_ptr, c_intptr_t
+            type(c_ptr), value :: h
+            integer(c_int), value :: ta, tb, m, n, k, lda, ldb, ldc
+            real(kind=8), intent(in) :: alpha, beta
+            type(c_ptr), value :: a, b, c
+        end function
+        integer(c_int) function c_sgemm_sb(h, ta, tb, m, n, k, alpha, a, lda, sa, b, ldb, sb, beta, c, ldc, sc, nb) &
+                bind(C, name="cublasSgemmStridedBatched")
+            import :: c_int, c_ptr, c_intptr_t, c_long_long
+            type(c_ptr), value :: h
+            integer(c_int), value :: ta, tb, m, n, k, lda, ldb, ldc, nb
+            integer(c_long_long), value :: sa, sb, sc
+            real(kind=4), intent(in) :: alpha, beta
+            type(c_ptr), value :: a, b, c
+        end function
+        integer(c_int) function c_dgemm_sb(h, ta, tb, m, n, k, alpha, a, lda, sa, b, ldb, sb, beta, c, ldc, sc, nb) &
+                bind(C, name="cublasDgemmStridedBatched")
+            import :: c_int, c_ptr, c_intptr_t, c_long_long
+            type(c_ptr), value :: h
+            integer(c_int), value :: ta, tb, m, n, k, lda, ldb, ldc, nb
+            integer(c_long_long), value :: sa, sb, sc
+            real(kind=8), intent(in) :: alpha, beta
+            type(c_ptr), value :: a, b, c
+        end function
+    end interface
     logical, save :: blas_ready = .false.
 
     interface
@@ -319,13 +354,13 @@ contains
         real(KP), intent(in) :: alpha, beta
         type(c_ptr), intent(in), value :: dev_a, dev_b, dev_c
 #if defined(OPENSPS_CUBLAS)
-        integer :: istat, ta, tb
+        integer(c_int) :: istat, ta, tb
         ta = merge(CUBLAS_OP_T, CUBLAS_OP_N, transa_in == ACCEL_BLAS_OP_T)
         tb = merge(CUBLAS_OP_T, CUBLAS_OP_N, transb_in == ACCEL_BLAS_OP_T)
 #ifdef KERNEL_SINGLE_PRECISION
-        istat = cublasSgemm_v2(blas_handle, ta, tb, m, n, k, alpha, dev_a, lda, dev_b, ldb, beta, dev_c, ldc)
+        istat = c_sgemm(blas_handle%handle, ta, tb, m, n, k, alpha, dev_a, lda, dev_b, ldb, beta, dev_c, ldc)
 #else
-        istat = cublasDgemm_v2(blas_handle, ta, tb, m, n, k, alpha, dev_a, lda, dev_b, ldb, beta, dev_c, ldc)
+        istat = c_dgemm(blas_handle%handle, ta, tb, m, n, k, alpha, dev_a, lda, dev_b, ldb, beta, dev_c, ldc)
 #endif
         if (istat /= 0) error stop 'accel_blas: cuBLAS GEMM failed'
 #elif defined(OPENSPS_ROCBLAS)
@@ -366,15 +401,15 @@ contains
         real(KP), intent(in) :: alpha, beta
         type(c_ptr), intent(in), value :: dev_a, dev_b, dev_c
 #if defined(OPENSPS_CUBLAS)
-        integer :: istat, ta, tb
+        integer(c_int) :: istat, ta, tb
         ta = merge(CUBLAS_OP_T, CUBLAS_OP_N, transa_in == ACCEL_BLAS_OP_T)
         tb = merge(CUBLAS_OP_T, CUBLAS_OP_N, transb_in == ACCEL_BLAS_OP_T)
 #ifdef KERNEL_SINGLE_PRECISION
-        istat = cublasSgemmStridedBatched(blas_handle, ta, tb, m, n, k, alpha, &
+        istat = c_sgemm_sb(blas_handle%handle, ta, tb, m, n, k, alpha, &
                                           dev_a, lda, stride_a, dev_b, ldb, stride_b, &
                                           beta, dev_c, ldc, stride_c, batch_count)
 #else
-        istat = cublasDgemmStridedBatched(blas_handle, ta, tb, m, n, k, alpha, &
+        istat = c_dgemm_sb(blas_handle%handle, ta, tb, m, n, k, alpha, &
                                           dev_a, lda, stride_a, dev_b, ldb, stride_b, &
                                           beta, dev_c, ldc, stride_c, batch_count)
 #endif
