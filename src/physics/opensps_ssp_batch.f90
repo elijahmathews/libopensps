@@ -1141,10 +1141,10 @@ contains
         ! Scalar accumulators (an array tile spilled to scratch memory on the R9700), at kernel
         ! precision, compensated in FP32 kernels: s* over the non-EUV pixels, e* over the EUV pixels
         ! (i <= nwhl); *y young, *o old column
-        integer  :: e, jb, nb, i, j1, j2, j3, j4, m1, m2, m3, m4, jj, mm
+        integer  :: e, jj, mm, i
         real(KP) :: ev, term, tsum
-        real(KP) :: sy1, sy2, sy3, sy4, so1, so2, so3, so4, ey1, ey2, ey3, ey4, eo1, eo2, eo3, eo4
-        real(KP) :: csy1, csy2, csy3, csy4, cso1, cso2, cso3, cso4, cey1, cey2, cey3, cey4, ceo1, ceo2, ceo3, ceo4
+        real(KP) :: sy, so, ey, eo
+        real(KP) :: csy, cso, cey, ceo
 
 #if !defined(OMP_TARGET)
         ! CPUs: per (template, model) four lane-vectorized dot products (dot_lanes); the template's
@@ -1165,186 +1165,65 @@ contains
             end do
         end do
 #else
-        nb = (jr - j0 + 4) / 4
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(i, j1, j2, j3, j4, m1, m2, m3, m4, ev, &
-        !$omp& term, tsum, sy1, sy2, sy3, sy4, so1, so2, so3, so4, ey1, ey2, ey3, ey4, eo1, eo2, eo3, eo4, &
-        !$omp& csy1, csy2, csy3, csy4, cso1, cso2, cso3, cso4, cey1, cey2, cey3, cey4, ceo1, ceo2, ceo3, ceo4)
+        !$omp target teams distribute parallel do collapse(2) private(i, mm, ev, term, tsum, sy, so, ey, eo, csy, cso, cey, ceo)
 #elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(i, j1, j2, j3, j4, m1, m2, m3, m4, ev, term, tsum, sy1, sy2, sy3, &
-        !$omp& sy4, so1, so2, so3, so4, ey1, ey2, ey3, ey4, eo1, eo2, eo3, eo4, csy1, csy2, csy3, csy4, cso1, &
-        !$omp& cso2, cso3, cso4, cey1, cey2, cey3, cey4, ceo1, ceo2, ceo3, ceo4)
+        !$omp parallel do collapse(2) private(i, mm, ev, term, tsum, sy, so, ey, eo, csy, cso, cey, ceo)
 #endif
-        do jb = 1, nb
+        do jj = j0, jr
             do e = 1, n_eff
-                j1 = min(j0 + (jb - 1) * 4, jr)
-                j2 = min(j0 + (jb - 1) * 4 + 1, jr)
-                j3 = min(j0 + (jb - 1) * 4 + 2, jr)
-                j4 = min(j0 + (jb - 1) * 4 + 3, jr)
-                m1 = perm(m0 + j1 - 1)
-                m2 = perm(m0 + j2 - 1)
-                m3 = perm(m0 + j3 - 1)
-                m4 = perm(m0 + j4 - 1)
-                sy1 = 0.0_KP
-                sy2 = 0.0_KP
-                sy3 = 0.0_KP
-                sy4 = 0.0_KP
-                so1 = 0.0_KP
-                so2 = 0.0_KP
-                so3 = 0.0_KP
-                so4 = 0.0_KP
-                ey1 = 0.0_KP
-                ey2 = 0.0_KP
-                ey3 = 0.0_KP
-                ey4 = 0.0_KP
-                eo1 = 0.0_KP
-                eo2 = 0.0_KP
-                eo3 = 0.0_KP
-                eo4 = 0.0_KP
-                csy1 = 0.0_KP
-                csy2 = 0.0_KP
-                csy3 = 0.0_KP
-                csy4 = 0.0_KP
-                cso1 = 0.0_KP
-                cso2 = 0.0_KP
-                cso3 = 0.0_KP
-                cso4 = 0.0_KP
-                cey1 = 0.0_KP
-                cey2 = 0.0_KP
-                cey3 = 0.0_KP
-                cey4 = 0.0_KP
-                ceo1 = 0.0_KP
-                ceo2 = 0.0_KP
-                ceo3 = 0.0_KP
-                ceo4 = 0.0_KP
+                mm = perm(m0 + jj - 1)
+                ey = 0.0_KP
+                eo = 0.0_KP
+                sy = 0.0_KP
+                so = 0.0_KP
+                cey = 0.0_KP
+                ceo = 0.0_KP
+                csy = 0.0_KP
+                cso = 0.0_KP
                 do i = 1, nwhl
                     ev = etpl_t(e, i)
                     if (KP == WP) then
-                        ey1 = ey1 + ev * gw(i, m1)
-                        eo1 = eo1 + ev * gw(i, n_mod + m1)
-                        ey2 = ey2 + ev * gw(i, m2)
-                        eo2 = eo2 + ev * gw(i, n_mod + m2)
-                        ey3 = ey3 + ev * gw(i, m3)
-                        eo3 = eo3 + ev * gw(i, n_mod + m3)
-                        ey4 = ey4 + ev * gw(i, m4)
-                        eo4 = eo4 + ev * gw(i, n_mod + m4)
+                        ey = ey + ev * gw(i, mm)
+                        eo = eo + ev * gw(i, n_mod + mm)
                     else
-                        term = ev * gw(i, m1) - cey1
-                        tsum = ey1 + term
-                        cey1 = (tsum - ey1) - term
-                        ey1 = tsum
-                        term = ev * gw(i, n_mod + m1) - ceo1
-                        tsum = eo1 + term
-                        ceo1 = (tsum - eo1) - term
-                        eo1 = tsum
-                        term = ev * gw(i, m2) - cey2
-                        tsum = ey2 + term
-                        cey2 = (tsum - ey2) - term
-                        ey2 = tsum
-                        term = ev * gw(i, n_mod + m2) - ceo2
-                        tsum = eo2 + term
-                        ceo2 = (tsum - eo2) - term
-                        eo2 = tsum
-                        term = ev * gw(i, m3) - cey3
-                        tsum = ey3 + term
-                        cey3 = (tsum - ey3) - term
-                        ey3 = tsum
-                        term = ev * gw(i, n_mod + m3) - ceo3
-                        tsum = eo3 + term
-                        ceo3 = (tsum - eo3) - term
-                        eo3 = tsum
-                        term = ev * gw(i, m4) - cey4
-                        tsum = ey4 + term
-                        cey4 = (tsum - ey4) - term
-                        ey4 = tsum
-                        term = ev * gw(i, n_mod + m4) - ceo4
-                        tsum = eo4 + term
-                        ceo4 = (tsum - eo4) - term
-                        eo4 = tsum
+                        term = ev * gw(i, mm) - cey
+                        tsum = ey + term
+                        cey = (tsum - ey) - term
+                        ey = tsum
+
+                        term = ev * gw(i, n_mod + mm) - ceo
+                        tsum = eo + term
+                        ceo = (tsum - eo) - term
+                        eo = tsum
                     end if
                 end do
                 do i = nwhl + 1, nspec
                     ev = etpl_t(e, i)
                     if (KP == WP) then
-                        sy1 = sy1 + ev * gw(i, m1)
-                        so1 = so1 + ev * gw(i, n_mod + m1)
-                        sy2 = sy2 + ev * gw(i, m2)
-                        so2 = so2 + ev * gw(i, n_mod + m2)
-                        sy3 = sy3 + ev * gw(i, m3)
-                        so3 = so3 + ev * gw(i, n_mod + m3)
-                        sy4 = sy4 + ev * gw(i, m4)
-                        so4 = so4 + ev * gw(i, n_mod + m4)
+                        sy = sy + ev * gw(i, mm)
+                        so = so + ev * gw(i, n_mod + mm)
                     else
-                        term = ev * gw(i, m1) - csy1
-                        tsum = sy1 + term
-                        csy1 = (tsum - sy1) - term
-                        sy1 = tsum
-                        term = ev * gw(i, n_mod + m1) - cso1
-                        tsum = so1 + term
-                        cso1 = (tsum - so1) - term
-                        so1 = tsum
-                        term = ev * gw(i, m2) - csy2
-                        tsum = sy2 + term
-                        csy2 = (tsum - sy2) - term
-                        sy2 = tsum
-                        term = ev * gw(i, n_mod + m2) - cso2
-                        tsum = so2 + term
-                        cso2 = (tsum - so2) - term
-                        so2 = tsum
-                        term = ev * gw(i, m3) - csy3
-                        tsum = sy3 + term
-                        csy3 = (tsum - sy3) - term
-                        sy3 = tsum
-                        term = ev * gw(i, n_mod + m3) - cso3
-                        tsum = so3 + term
-                        cso3 = (tsum - so3) - term
-                        so3 = tsum
-                        term = ev * gw(i, m4) - csy4
-                        tsum = sy4 + term
-                        csy4 = (tsum - sy4) - term
-                        sy4 = tsum
-                        term = ev * gw(i, n_mod + m4) - cso4
-                        tsum = so4 + term
-                        cso4 = (tsum - so4) - term
-                        so4 = tsum
+                        term = ev * gw(i, mm) - csy
+                        tsum = sy + term
+                        csy = (tsum - sy) - term
+                        sy = tsum
+
+                        term = ev * gw(i, n_mod + mm) - cso
+                        tsum = so + term
+                        cso = (tsum - so) - term
+                        so = tsum
                     end if
                 end do
                 if (e > ky) then
-                    vb(e, 1, j1) = 0.0_wp
-                    vb(e, 3, j1) = 0.0_wp
+                    vb(e, 1, jj) = 0.0_wp
+                    vb(e, 3, jj) = 0.0_wp
                 else
-                    vb(e, 1, j1) = real(sy1, WP)
-                    vb(e, 3, j1) = real(ey1, WP)
+                    vb(e, 1, jj) = real(sy, WP)
+                    vb(e, 3, jj) = real(ey, WP)
                 end if
-                vb(e, 2, j1) = real(so1, WP)
-                vb(e, 4, j1) = real(eo1, WP)
-                if (e > ky) then
-                    vb(e, 1, j2) = 0.0_wp
-                    vb(e, 3, j2) = 0.0_wp
-                else
-                    vb(e, 1, j2) = real(sy2, WP)
-                    vb(e, 3, j2) = real(ey2, WP)
-                end if
-                vb(e, 2, j2) = real(so2, WP)
-                vb(e, 4, j2) = real(eo2, WP)
-                if (e > ky) then
-                    vb(e, 1, j3) = 0.0_wp
-                    vb(e, 3, j3) = 0.0_wp
-                else
-                    vb(e, 1, j3) = real(sy3, WP)
-                    vb(e, 3, j3) = real(ey3, WP)
-                end if
-                vb(e, 2, j3) = real(so3, WP)
-                vb(e, 4, j3) = real(eo3, WP)
-                if (e > ky) then
-                    vb(e, 1, j4) = 0.0_wp
-                    vb(e, 3, j4) = 0.0_wp
-                else
-                    vb(e, 1, j4) = real(sy4, WP)
-                    vb(e, 3, j4) = real(ey4, WP)
-                end if
-                vb(e, 2, j4) = real(so4, WP)
-                vb(e, 4, j4) = real(eo4, WP)
+                vb(e, 2, jj) = real(so, WP)
+                vb(e, 4, jj) = real(eo, WP)
             end do
         end do
 #endif
