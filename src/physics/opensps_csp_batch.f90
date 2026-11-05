@@ -4707,7 +4707,7 @@ contains
         real(WP), intent(inout) :: gneb(5, n_mod)   ! (4): set here; (5): added to
 
         integer  :: m, k, i, col, zl, zh, nlim
-        real(KP) :: sk, ck, term, tsum, d, bk, ek, ce, fk, dk, cd, dbk
+        real(KP) :: sk, ck, term, tsum, d, bk, ek, ce, fk, dk, cd, dbk, bkl, bkh
         real(WP) :: lk, sf, sd
         real(WP) :: sr, se, hr, he, sw, ew, dw
         real(WP), allocatable :: euv(:,:), zd(:,:)
@@ -4758,9 +4758,9 @@ contains
 #else
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(i, col, zl, zh, sk, ck, term, tsum, d, bk, lk, &
-        !$omp& ek, ce, fk, nlim, dk, cd, dbk)
+        !$omp& ek, ce, fk, nlim, dk, cd, dbk, bkl, bkh)
 #elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(i, col, zl, zh, sk, ck, term, tsum, d, bk, lk, ek, ce, fk, nlim, dk, cd, dbk)
+        !$omp parallel do collapse(2) private(i, col, zl, zh, sk, ck, term, tsum, d, bk, lk, ek, ce, fk, nlim, dk, cd, dbk, bkl, bkh)
 #endif
         do m = 1, n_mod
             do k = 1, nt
@@ -4777,39 +4777,57 @@ contains
                 cd = 0.0_KP
                 fk = 1.0_KP
                 if (k <= ntn) fk = real(fesc(m), KP)
-                zl = 1; zh = 1
-                d = 0.0_KP
                 if (zmode) then
                     zl = zlo(m); zh = zhi(m)
                     d = real(dz(m), KP)
-                end if
-                do i = 1, nspec
-                    if (zmode) then
-                        bk = (1.0_KP - d) * basis_t(k, i, zl) + d * basis_t(k, i, zh)
-                        dbk = basis_t(k, i, zh) - basis_t(k, i, zl)
-                        if (i <= nlim) dbk = dbk * fk
+                    if (nlim > 0) then
+                        do i = 1, nlim
+                            bkl = basis_t(k, i, zl)
+                            bkh = basis_t(k, i, zh)
+                            bk = (1.0_KP - d) * bkl + d * bkh
+                            dbk = (bkh - bkl) * fk
+                            term = dbk * gw(i, col) - cd
+                            tsum = dk + term
+                            cd = (tsum - dk) - term
+                            dk = tsum
+                            term = bk * gw(i, col) - ce
+                            tsum = ek + term
+                            ce = (tsum - ek) - term
+                            ek = tsum
+                        end do
+                    end if
+                    do i = nlim + 1, nspec
+                        bkl = basis_t(k, i, zl)
+                        bkh = basis_t(k, i, zh)
+                        bk = (1.0_KP - d) * bkl + d * bkh
+                        dbk = bkh - bkl
                         term = dbk * gw(i, col) - cd
                         tsum = dk + term
                         cd = (tsum - dk) - term
                         dk = tsum
-                    else
-                        bk = basis_t(k, i, 1)
-                    end if
-                    if (i <= nlim) then
-                        term = bk * gw(i, col) - ce
-                        tsum = ek + term
-                        ce = (tsum - ek) - term
-                        ek = tsum
-                    else
                         term = bk * gw(i, col) - ck
                         tsum = sk + term
                         ck = (tsum - sk) - term
                         sk = tsum
-                    end if
-                end do
-                if (zmode) then
+                    end do
                     lk = 10.0_wp**((1.0_wp - dz(m)) * blbol(k, zl) + dz(m) * blbol(k, zh))
                 else
+                    if (nlim > 0) then
+                        do i = 1, nlim
+                            bk = basis_t(k, i, 1)
+                            term = bk * gw(i, col) - ce
+                            tsum = ek + term
+                            ce = (tsum - ek) - term
+                            ek = tsum
+                        end do
+                    end if
+                    do i = nlim + 1, nspec
+                        bk = basis_t(k, i, 1)
+                        term = bk * gw(i, col) - ck
+                        tsum = sk + term
+                        ck = (tsum - sk) - term
+                        sk = tsum
+                    end do
                     lk = lum_linear(k)
                 end if
                 if (k <= ntn) euv(k, m) = real(ek, WP) * real(w2(k, col), WP)

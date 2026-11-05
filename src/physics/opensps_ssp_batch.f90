@@ -2131,9 +2131,9 @@ contains
         real(KP), intent(in), contiguous, target :: etpl(:,:), v(:,:)
         real(KP), intent(inout), contiguous, target :: yo(:,:)
         integer, parameter :: KB = 256
-        integer :: e0, kb1, i, j
-        real(KP), allocatable, target :: tmp(:,:), cmp(:,:)
-        real(KP) :: term, tsum
+#ifdef KERNEL_SINGLE_PRECISION
+        integer :: j0, nc1
+#endif
 
 #if defined(OPENSPS_ACCEL_BLAS)
         call accel_blas_init()
@@ -2141,36 +2141,10 @@ contains
         call blas_init()
 #endif
 #ifdef KERNEL_SINGLE_PRECISION
-        if (nc <= NC_BATCHED .and. k > KB) then
-            ! Small column counts (the runs of one metallicity in a small batch): the blocks of KB
-            ! templates as one strided batched GEMM and one compensated sum over the blocks, instead of
-            ! a GEMM and an add per block (launch bound: ~20 launches per product)
-            call gemm_columns_batched(np, nspec, n_eff, k, nc, etpl, v, v0, yo, c0)
-            return
-        end if
-        allocate(tmp(np, nc), cmp(np, nc))
-        !$omp target data map(alloc: tmp, cmp)
-        !$omp target teams distribute parallel do collapse(2)
-        do j = 1, nc
-            do i = 1, np
-                yo(i, c0 + j) = 0.0_KP
-                cmp(i, j) = 0.0_KP
-            end do
+        do j0 = 1, nc, NC_BATCHED
+            nc1 = min(NC_BATCHED, nc - j0 + 1)
+            call gemm_columns_batched(np, nspec, n_eff, k, nc1, etpl, v, v0 + j0 - 1, yo, c0 + j0 - 1)
         end do
-        do e0 = 1, k, KB
-            kb1 = min(KB, k - e0 + 1)
-            call run_block(np, nc, kb1, etpl, nspec, e0, v, n_eff, v0, tmp, np)
-            !$omp target teams distribute parallel do collapse(2) private(term, tsum)
-            do j = 1, nc
-                do i = 1, np
-                    term = tmp(i, j) - cmp(i, j)
-                    tsum = yo(i, c0 + j) + term
-                    cmp(i, j) = (tsum - yo(i, c0 + j)) - term
-                    yo(i, c0 + j) = tsum
-                end do
-            end do
-        end do
-        !$omp end target data
 #else
         call run_fp64(np, nc, k, etpl, nspec, v, n_eff, v0, yo, size(yo, 1), c0)
 #endif

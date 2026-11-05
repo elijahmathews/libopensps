@@ -108,6 +108,8 @@ Replaces portable loops for GEMM and batched GEMM kernels in:
 - `basic` batch photometry at $N = 1000$: **6.835 µs -> 5.562 µs** per model (**18.6% speedup**).
 - `basic` spectra on-device at $N = 1000$: **7.408 µs -> 5.733 µs** per model (**22.6% speedup**).
 - `full_smooth` (full SED fitting pipeline with dust & smoothing) at $N = 10^4$: **21.20 µs -> 16.96 µs** per model (**20.0% speedup** overall).
+- `full_smooth_z` (metallicity free per model) at $N = 10^4$: **23.47 µs** mags, **18.42 µs** spec on-device (**77.62 µs** with gradients, down from 79.78 µs).
+- `full_smooth_z_imf` (metallicity and IMF free per model) at $N = 10^4$: **78.59 µs -> 72.09 µs** mags (**8.3% speedup**), **78.57 µs -> 72.80 µs** spec on-device (**7.3% speedup**); with gradients: **495.5 µs -> 489.8 µs**.
 - Single call ($N = 1$): 4.815 ms -> **3.762 ms** (**21.9% speedup**).
 - Correctness gates: 23/23 unit tests pass, 16/16 regression tests pass (`OMP_TARGET_OFFLOAD=MANDATORY`), `test_ssp_operator` 42/42 pass (max relative error 1.19e-7), `test_csp_batch` 366/366 pass, `test_csp_batch_grad` 97/97 pass.
 

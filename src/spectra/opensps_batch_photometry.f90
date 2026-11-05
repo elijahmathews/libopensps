@@ -32,7 +32,7 @@ module opensps_batch_photometry
 
     public :: compute_magnitudes_columns, prepare_batch_grid
     public :: smoothing_on_device, prepare_smoothing_kernel, smooth_columns, smooth_columns_adjoint
-    public :: distance_term_dz, smooth_sigma_adjoint
+    public :: distance_term_dz, smooth_sigma_adjoint, free_smooth_work
 #if defined(FSPS_CUBLAS)
     public :: blas, blas_init
 #endif
@@ -42,6 +42,7 @@ module opensps_batch_photometry
     !> Pixels per block of the split-K band product (cuBLAS path): each block is a plain FP32 sum
     !> of at most 256 positive terms; the blocks are added in FP64
     integer, parameter :: BAND_BLOCK = 256
+    real(KP), allocatable, save, target :: smooth_work(:,:)
 #if defined(FSPS_CUBLAS)
     type(cublasHandle), save :: blas
     logical, save :: blas_ready = .false.
@@ -465,6 +466,29 @@ contains
         end associate
     end subroutine prepare_smoothing_kernel
 
+    subroutine ensure_smooth_work(nspec, n_col)
+        integer, intent(in) :: nspec, n_col
+        if (.not. allocated(smooth_work)) allocate(smooth_work(1, 1))
+        if (size(smooth_work, 1) < nspec .or. size(smooth_work, 2) < n_col) then
+            call free_smooth_work()
+            allocate(smooth_work(max(nspec, size(smooth_work, 1)), max(n_col, size(smooth_work, 2))))
+#ifdef OMP_TARGET
+            !$omp target enter data map(alloc: smooth_work)
+#endif
+        end if
+    end subroutine ensure_smooth_work
+
+    subroutine free_smooth_work()
+        if (allocated(smooth_work)) then
+            if (size(smooth_work) > 1) then
+#ifdef OMP_TARGET
+                !$omp target exit data map(delete: smooth_work)
+#endif
+            end if
+            deallocate(smooth_work)
+        end if
+    end subroutine free_smooth_work
+
     !> Smooths spec(:, 1:n_col) (present on the device) with the prepared operator: per pixel the
     !> normalized trapezoid weights of its window, summed in FP64 (apply_velocity_kernel).
     subroutine smooth_columns(ctx, spec, n_col)
@@ -474,8 +498,9 @@ contains
 
         ! The operator's arrays passed as arrays: device code does not refer to the cache's
         ! derived type, which is mapped only through its components
+        call ensure_smooth_work(ctx%state%nspec, n_col)
         call smooth_kernel(ctx%state%nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
-                           ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_coef, spec)
+                           ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_coef, smooth_work, spec)
     end subroutine smooth_columns
 
     !> The transpose of smooth_columns, in place: spec_bar(k) = sum over pixels i of C(i, k)
@@ -486,9 +511,10 @@ contains
         real(KP), intent(inout), contiguous :: spec_bar(:,:)
         integer, intent(in)                 :: n_col
 
+        call ensure_smooth_work(ctx%state%nspec, n_col)
         call smooth_kernel_t(ctx%state%nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
                              ctx%state%batch%sm_off, ctx%state%batch%sm_coef, ctx%state%batch%sm_t_lo, &
-                             ctx%state%batch%sm_t_hi, spec_bar)
+                             ctx%state%batch%sm_t_hi, smooth_work, spec_bar)
     end subroutine smooth_columns_adjoint
 
     !> d L / d sigma_smooth per column, for the prepared operator (smooth_columns): with
@@ -566,19 +592,16 @@ contains
     end subroutine smooth_sigma_kernel
 
     !> smooth_kernel transposed: gather per pixel and column in parallel.
-    subroutine smooth_kernel_t(nspec, n_col, ncoef, sm_lo, sm_off, sm_coef, sm_t_lo, sm_t_hi, spec)
+    subroutine smooth_kernel_t(nspec, n_col, ncoef, sm_lo, sm_off, sm_coef, sm_t_lo, sm_t_hi, sm, spec)
         integer, intent(in)                 :: nspec, n_col, ncoef
         integer, intent(in)                 :: sm_lo(nspec), sm_off(nspec), sm_t_lo(nspec), sm_t_hi(nspec)
         real(WP), intent(in)                :: sm_coef(ncoef)
-        real(KP), intent(inout)             :: spec(nspec, n_col)
+        real(KP), intent(inout), target     :: sm(nspec, *), spec(nspec, *)
 
-        real(KP), allocatable :: sm(:,:)
         integer  :: m, k, i, lo, hi
         real(WP) :: s
 
-        allocate(sm(nspec, n_col))
-#ifdef OMP_TARGET
-        !$omp target data map(alloc: sm)
+#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(s, lo, hi, i)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(s, lo, hi, i)
@@ -605,26 +628,18 @@ contains
                 spec(k, m) = sm(k, m)
             end do
         end do
-#ifdef OMP_TARGET
-        !$omp end target data
-#endif
     end subroutine smooth_kernel_t
 
-    subroutine smooth_kernel(nspec, n_col, ncoef, sm_lo, sm_hi, sm_off, sm_coef, spec)
+    subroutine smooth_kernel(nspec, n_col, ncoef, sm_lo, sm_hi, sm_off, sm_coef, sm, spec)
         ! Explicit-shape arguments: no array descriptors to map in every launch
         integer, intent(in)                 :: nspec, n_col, ncoef
         integer, intent(in)                 :: sm_lo(nspec), sm_hi(nspec), sm_off(nspec)
         real(WP), intent(in)                :: sm_coef(ncoef)
-        real(KP), intent(inout)             :: spec(nspec, n_col)
+        real(KP), intent(inout), target     :: sm(nspec, *), spec(nspec, *)
 
-        real(KP), allocatable :: sm(:,:)
         integer  :: m, i, k, lo, off
         real(WP) :: s
 
-        allocate(sm(nspec, n_col))
-#ifdef OMP_TARGET
-        !$omp target data map(alloc: sm)
-#endif
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(s, lo, off, k)
 #elif defined(_OPENMP)
@@ -655,9 +670,6 @@ contains
                 spec(i, m) = sm(i, m)
             end do
         end do
-#ifdef OMP_TARGET
-        !$omp end target data
-#endif
     end subroutine smooth_kernel
 
     !> Distance modulus and (1 + z) term of the magnitudes at redshift zred (0 at z = 0:
