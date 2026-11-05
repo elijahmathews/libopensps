@@ -107,6 +107,35 @@ if accel_defs.contains('-DFSPS_PINNED')
     dl_dep = meson.get_compiler('c').find_library('dl', required : false)
 endif
 
+# AMD GPU builds: native HIP kernels for GPU bottleneck phases
+hip_sources = []
+if accel_target == 'omp_gpu' and fc_id in ['llvm-flang', 'flang']
+    hipcc_prog = find_program('hipcc', required : get_option('accel_hip'))
+    if get_option('accel_hip') or hipcc_prog.found()
+        accel_defs += ['-DOPENSPS_HIP']
+        hip_lib = meson.get_compiler('c').find_library('amdhip64', required : true)
+        if not blas_dep.contains(hip_lib)
+            blas_dep += [hip_lib]
+        endif
+        hip_sources = [
+            custom_target('opensps_hip_kernels.o',
+                input : 'src/accel/hip/opensps_hip_kernels.hip',
+                output : 'opensps_hip_kernels.o',
+                command : [
+                    hipcc_prog,
+                    '--offload-arch=' + get_option('gpu_arch'),
+                    '-O3',
+                    '-fPIC',
+                    '-c',
+                    '@INPUT@',
+                    '-o',
+                    '@OUTPUT@'
+                ]
+            )
+        ]
+    endif
+endif
+
 # Create a dependency object that explicitly propagates these flags
 # to both compile and link stages across all consuming targets.
 accel_dep = declare_dependency(
@@ -221,7 +250,7 @@ lib_sources = files(
 
 # This builds libopensps.so (and handles .mod generation automatically)
 libopensps = library('opensps',
-    lib_sources + pinned_sources,
+    lib_sources + pinned_sources + hip_sources,
     version : meson.project_version(),
     soversion : '0',
     install : true,

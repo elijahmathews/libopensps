@@ -449,10 +449,11 @@ contains
         integer, parameter :: CHG = 256
         integer, parameter :: PROWS(NIMFG) = [IMF_P_ALPHA, IMF_P_ALPHA + 1, IMF_P_ALPHA + 2, IMF_P_VDMC, IMF_P_MDAVE]
         integer :: nz, m, t, j, np1, np2, nc_max, neb_cols, ntq
-        integer, allocatable :: perm1(:), perm2(:), viz1(:), viz2(:), ptr(:), cnt(:)
-        real(WP), allocatable :: cz1(:), cz2(:), zsg1(:), zsg2(:), ones(:), w(:,:), wm(:,:), tot(:), pps(:,:,:), slz(:,:), &
-                                 sqz(:,:), wpb(:,:), vb(:,:,:), dsm(:,:), dsl(:,:), dsq(:,:), pmp(:,:), part(:,:), dsp(:,:), &
-                                 sxa(:,:), sea(:,:), apt(:,:), amp(:,:,:), dtt(:,:), remp(:,:), remm(:,:), agt(:,:,:)
+        integer, allocatable :: perm1(:), perm2(:), viz1(:), viz2(:), ptr(:), cnt(:), it1(:), it2(:)
+        real(WP), allocatable :: cz1(:), cz2(:), zsg1(:), zsg2(:), fe1(:), fe2(:), ones(:), w(:,:), wm(:,:), tot(:), &
+                                 pps(:,:,:), slz(:,:), sqz(:,:), wpb(:,:), vb(:,:,:), dsm(:,:), dsl(:,:), dsq(:,:), &
+                                 pmp(:,:), part(:,:), dsp(:,:), sxa(:,:), sea(:,:), apt(:,:), amp(:,:,:), dtt(:,:), &
+                                 remp(:,:), remm(:,:), agt(:,:,:)
         real(KP), allocatable :: wk(:,:)
 
         nz = set%nz
@@ -462,7 +463,8 @@ contains
         nc_max = min(CHG, n_mod)
         ntq = size(qbar, 1)
         allocate(perm1(n_mod), perm2(n_mod), viz1(n_mod), viz2(n_mod), ptr(nz + 1), cnt(nz + 1), &
-                 cz1(n_mod), cz2(n_mod), zsg1(n_mod), zsg2(n_mod), ones(n_mod))
+                 cz1(n_mod), cz2(n_mod), zsg1(n_mod), zsg2(n_mod), ones(n_mod), &
+                 it1(n_mod), it2(n_mod), fe1(n_mod), fe2(n_mod))
         allocate(w(nc_max, set%n_pts_max), wm(nc_max, set%n_pts_max), wk(nc_max, set%n_pts_max), tot(nc_max), &
                  pps(nc_max, 3, set%n_pc_max), slz(nt, nc_max), sqz(nt, nc_max), wpb(nc_max, set%n_pts_max), &
                  vb(set%n_eff_max, 4, nc_max), dsm(nt, n_mod), dsl(nt, n_mod), dsq(nt, n_mod), pmp(size(pm, 1), n_mod), &
@@ -477,6 +479,12 @@ contains
             viz1(j) = zlo(perm1(j))
             cz1(j) = 1.0_wp - dz(perm1(j))
             zsg1(j) = -1.0_wp
+            it1(j) = it_tesc(perm1(j))
+            if (neb_cols > 0) then
+                fe1(j) = fesc(perm1(j))
+            else
+                fe1(j) = 1.0_wp
+            end if
         end do
         ! Pass 2: zhi
         if (nz > 1) then
@@ -486,6 +494,12 @@ contains
                 viz2(j) = zhi(perm2(j))
                 cz2(j) = dz(perm2(j))
                 zsg2(j) = 1.0_wp
+                it2(j) = it_tesc(perm2(j))
+                if (neb_cols > 0) then
+                    fe2(j) = fesc(perm2(j))
+                else
+                    fe2(j) = 1.0_wp
+                end if
             end do
         else
             np2 = 0
@@ -493,11 +507,13 @@ contains
             viz2 = 0
             cz2 = 0.0_wp
             zsg2 = 0.0_wp
+            it2 = 0
+            fe2 = 1.0_wp
         end if
 #ifdef OMP_TARGET
         !$omp target data map(alloc: w, wm, wk, tot, pps, slz, sqz, wpb, vb, dsm, dsl, dsq, part, dsp, sxa, sea) &
         !$omp& map(alloc: apt, amp, dtt, remp, remm, agt, pmp) &
-        !$omp& map(to: pm, ones, msum_bar, perm1, viz1, cz1, zsg1, perm2, viz2, cz2, zsg2) &
+        !$omp& map(to: pm, ones, msum_bar, perm1, viz1, cz1, zsg1, it1, fe1, perm2, viz2, cz2, zsg2, it2, fe2) &
         !$omp& map(from: wbar, imf_bar, fesc_bar, zbar)
 #endif
 #if defined(OMP_TARGET)
@@ -516,18 +532,18 @@ contains
             fesc_bar(m) = 0.0_wp
             zbar(m) = 0.0_wp
         end do
-        call run_pass_adj(np1, perm1, viz1, cz1, zsg1)
-        if (nz > 1) call run_pass_adj(np2, perm2, viz2, cz2, zsg2)
+        call run_pass_adj(np1, perm1, viz1, cz1, zsg1, it1, fe1)
+        if (nz > 1) call run_pass_adj(np2, perm2, viz2, cz2, zsg2, it2, fe2)
 #ifdef OMP_TARGET
         !$omp end target data
 #endif
 
     contains
 
-        subroutine run_pass_adj(np, perm, viz, cz, zsg)
+        subroutine run_pass_adj(np, perm, viz, cz, zsg, it, fe)
             integer, intent(in) :: np
-            integer, intent(in), contiguous :: perm(:), viz(:)
-            real(WP), intent(in), contiguous :: cz(:), zsg(:)
+            integer, intent(in), contiguous :: perm(:), viz(:), it(:)
+            real(WP), intent(in), contiguous :: cz(:), zsg(:), fe(:)
             integer :: m0, nc, j0, jr, iz, ky, j, ig, isg, m, i
             real(WP) :: sgn
 
@@ -554,7 +570,7 @@ contains
                     end do
                     ky = 0
                     do j = j0, jr
-                        ky = max(ky, it_tesc(perm(m0 + j - 1)))
+                        ky = max(ky, it(m0 + j - 1))
                     end do
                     ky = set%ops(iz)%k_age(max(1, min(nt, ky)))
                     call adj_template_bar(nspec, set%ops(iz)%n_eff, ky, neb_cols * whl, n_mod, m0, j0, jr, perm, &
@@ -562,7 +578,7 @@ contains
                     j0 = jr + 1
                 end do
                 ! (w, wm: free until the IMF rows' differences below)
-                call adj_fold_gather(m0, nc, nt, nt_neb, neb_cols, set%n_pts_max, wsfh, it_tesc, fesc, set%pt_off, &
+                call adj_fold_gather(m0, nc, nt, nt_neb, neb_cols, set%n_pts_max, wsfh, it, fe, set%pt_off, &
                                      set%pt_ptr, set%pt_age, set%eff_val, set%pe_ptr, set%pe_k, set%pe_e, perm, viz, cz, &
                                      zsg, wk, vb, wbar, wpb, fesc_bar, zbar, w, wm, sxa, sea)
                 call adj_lq(m0, nc, nt, nt_neb, set%n_pc_max, set%n_pc, set%pt_off, set%pc_off, set%pc_ptr, set%pt_age, &
@@ -1172,6 +1188,8 @@ contains
                 vb(e, 4, jj) = dot_lanes(nwhl, etpl(1, e), gw(1, n_mod + mm))
             end do
         end do
+#elif defined(OPENSPS_HIP)
+        call run_hip_template_bar(nspec, n_eff, ky, nwhl, n_mod, m0, j0, jr, perm, etpl_t, gw, n_eff_max, nc_max, vb)
 #else
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(i, mm, ev, term, tsum, sy, so, ey, eo, csy, cso, cey, ceo)
@@ -1236,6 +1254,61 @@ contains
         end do
 #endif
     end subroutine adj_template_bar
+
+#if defined(OPENSPS_HIP)
+    subroutine run_hip_template_bar(nspec, n_eff, ky, nwhl, n_mod, m0, j0, jr, perm, etpl_t, gw, n_eff_max, nc_max, vb)
+        use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
+        integer, intent(in) :: nspec, n_eff, ky, nwhl, n_mod, m0, j0, jr, n_eff_max, nc_max
+        integer, intent(in), contiguous, target :: perm(:)
+        real(KP), intent(in), target :: etpl_t(n_eff, *), gw(nspec, 2 * n_mod)
+        real(WP), intent(inout), target :: vb(n_eff_max, 4, nc_max)
+
+        interface
+            subroutine opensps_hip_adj_template_bar_sp(nspec, n_eff, ky, nwhl, n_mod, m0, j0, jr, &
+                                                       d_perm, d_etpl_t, d_gw, n_eff_max, nc_max, d_vb, stream) &
+                bind(C, name="opensps_hip_adj_template_bar_sp")
+                import :: c_int, c_ptr
+                integer(c_int), value :: nspec, n_eff, ky, nwhl, n_mod, m0, j0, jr, n_eff_max, nc_max
+                type(c_ptr), value :: d_perm, d_etpl_t, d_gw, d_vb, stream
+            end subroutine opensps_hip_adj_template_bar_sp
+
+            subroutine opensps_hip_adj_template_bar_dp(nspec, n_eff, ky, nwhl, n_mod, m0, j0, jr, &
+                                                       d_perm, d_etpl_t, d_gw, n_eff_max, nc_max, d_vb, stream) &
+                bind(C, name="opensps_hip_adj_template_bar_dp")
+                import :: c_int, c_ptr
+                integer(c_int), value :: nspec, n_eff, ky, nwhl, n_mod, m0, j0, jr, n_eff_max, nc_max
+                type(c_ptr), value :: d_perm, d_etpl_t, d_gw, d_vb, stream
+            end subroutine opensps_hip_adj_template_bar_dp
+
+            subroutine opensps_hip_sync_stream(stream) bind(C, name="opensps_hip_sync_stream")
+                import :: c_ptr
+                type(c_ptr), value :: stream
+            end subroutine opensps_hip_sync_stream
+        end interface
+
+#ifdef OMP_TARGET
+        !$omp target data use_device_addr(perm, etpl_t, gw, vb)
+#endif
+#ifdef KERNEL_SINGLE_PRECISION
+        call opensps_hip_adj_template_bar_sp(int(nspec, c_int), int(n_eff, c_int), int(ky, c_int), &
+                                             int(nwhl, c_int), int(n_mod, c_int), int(m0, c_int), &
+                                             int(j0, c_int), int(jr, c_int), &
+                                             c_loc(perm(1)), c_loc(etpl_t(1, 1)), c_loc(gw(1, 1)), &
+                                             int(n_eff_max, c_int), int(nc_max, c_int), c_loc(vb(1, 1, 1)), &
+                                             c_null_ptr)
+#else
+        call opensps_hip_adj_template_bar_dp(int(nspec, c_int), int(n_eff, c_int), int(ky, c_int), &
+                                             int(nwhl, c_int), int(n_mod, c_int), int(m0, c_int), &
+                                             int(j0, c_int), int(jr, c_int), &
+                                             c_loc(perm(1)), c_loc(etpl_t(1, 1)), c_loc(gw(1, 1)), &
+                                             int(n_eff_max, c_int), int(nc_max, c_int), c_loc(vb(1, 1, 1)), &
+                                             c_null_ptr)
+#endif
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine run_hip_template_bar
+#endif
 
     !> The fold in reverse: per template e and chunk model, its segments' ages t: a = sum eff_val w_p,
     !> G = v_bar(young or old) + (f if t <= nt_neb, else 1) v_euv_bar; wbar(t) += cz a G, w_p bar += eff_val cz
@@ -1342,6 +1415,12 @@ contains
         integer  :: p, j, q, k, e, t, m, iz, gp, np, c1
         real(WP) :: g, ge, gx, fac, c, sx, se
 
+#if defined(OPENSPS_HIP)
+        call run_hip_fold_gather(m0, nc, nt, nt_neb, neb_cols, n_pts_max, &
+                                 size(vb, 1), size(vb, 3), size(wsfh, 1), &
+                                 wsfh, it_tesc, fesc, pt_off, pt_ptr, eff_val, pe_ptr, pe_k, pe_e, &
+                                 perm, viz, cz, zsg, wk, vb, wbar, wpb, fesc_bar, zbar)
+#else
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(q, k, e, t, m, iz, gp, np, c1, g, ge, gx, fac, c)
 #elif defined(_OPENMP)
@@ -1359,7 +1438,7 @@ contains
                 if (t <= 0) cycle
                 m = perm(m0 + j - 1)
                 c1 = 2
-                if (t <= it_tesc(m)) c1 = 1
+                if (t <= it_tesc(m0 + j - 1)) c1 = 1
                 g = 0.0_wp
                 ge = 0.0_wp
                 do q = pe_ptr(gp), pe_ptr(gp + 1) - 1
@@ -1369,7 +1448,7 @@ contains
                     if (neb_cols > 0) ge = ge + eff_val(k) * vb(e, c1 + 2, j)
                 end do
                 fac = 1.0_wp
-                if (t <= nt_neb) fac = fesc(m)
+                if (t <= nt_neb) fac = fesc(m0 + j - 1)
                 gx = g + fac * ge
                 c = cz(m0 + j - 1)
                 wpb(j, p) = wpb(j, p) + c * wsfh(m, t) * gx
@@ -1413,7 +1492,85 @@ contains
             zbar(m) = zbar(m) + zsg(m0 + j - 1) * sx
             if (neb_cols > 0) fesc_bar(m) = fesc_bar(m) + cz(m0 + j - 1) * se
         end do
+#endif
     end subroutine adj_fold_gather
+
+#if defined(OPENSPS_HIP)
+    subroutine run_hip_fold_gather(m0, nc, nt, nt_neb, neb_cols, n_pts_max, n_eff_max, nc_max, n_mod, &
+                                   wsfh, it_tesc, fesc, pt_off, pt_ptr, eff_val, pe_ptr, pe_k, pe_e, &
+                                   perm, viz, cz, zsg, wk, vb, wbar, wpb, fesc_bar, zbar)
+        use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
+        integer, intent(in) :: m0, nc, nt, nt_neb, neb_cols, n_pts_max, n_eff_max, nc_max, n_mod
+        real(WP), intent(in), target, contiguous :: wsfh(n_mod, *), fesc(*), eff_val(*), cz(*), zsg(*), vb(n_eff_max, 4, *)
+        real(KP), intent(in), target, contiguous :: wk(nc_max, *)
+        integer, intent(in), target, contiguous :: it_tesc(*), pt_off(*), pt_ptr(*), pe_ptr(*), pe_k(*), pe_e(*), &
+                                                   perm(*), viz(*)
+        real(WP), intent(inout), target, contiguous :: wbar(nt, *), wpb(nc_max, *), fesc_bar(*), zbar(*)
+
+        interface
+            subroutine opensps_hip_adj_fold_gather_sp(m0, nc, nt, nt_neb, neb_cols, n_pts_max, n_eff_max, nc_max, n_mod, &
+                                                      d_wsfh, d_it_tesc, d_fesc, d_pt_off, d_pt_ptr, d_eff_val, &
+                                                      d_pe_ptr, d_pe_k, d_pe_e, d_perm, d_viz, d_cz, d_zsg, &
+                                                      d_wk, d_vb, d_wbar, d_wpb, d_fesc_bar, d_zbar, stream) &
+                bind(C, name="opensps_hip_adj_fold_gather_sp")
+                import :: c_int, c_ptr
+                integer(c_int), value :: m0, nc, nt, nt_neb, neb_cols, n_pts_max, n_eff_max, nc_max, n_mod
+                type(c_ptr), value :: d_wsfh, d_it_tesc, d_fesc, d_pt_off, d_pt_ptr, d_eff_val
+                type(c_ptr), value :: d_pe_ptr, d_pe_k, d_pe_e, d_perm, d_viz, d_cz, d_zsg
+                type(c_ptr), value :: d_wk, d_vb, d_wbar, d_wpb, d_fesc_bar, d_zbar, stream
+            end subroutine opensps_hip_adj_fold_gather_sp
+
+            subroutine opensps_hip_adj_fold_gather_dp(m0, nc, nt, nt_neb, neb_cols, n_pts_max, n_eff_max, nc_max, n_mod, &
+                                                      d_wsfh, d_it_tesc, d_fesc, d_pt_off, d_pt_ptr, d_eff_val, &
+                                                      d_pe_ptr, d_pe_k, d_pe_e, d_perm, d_viz, d_cz, d_zsg, &
+                                                      d_wk, d_vb, d_wbar, d_wpb, d_fesc_bar, d_zbar, stream) &
+                bind(C, name="opensps_hip_adj_fold_gather_dp")
+                import :: c_int, c_ptr
+                integer(c_int), value :: m0, nc, nt, nt_neb, neb_cols, n_pts_max, n_eff_max, nc_max, n_mod
+                type(c_ptr), value :: d_wsfh, d_it_tesc, d_fesc, d_pt_off, d_pt_ptr, d_eff_val
+                type(c_ptr), value :: d_pe_ptr, d_pe_k, d_pe_e, d_perm, d_viz, d_cz, d_zsg
+                type(c_ptr), value :: d_wk, d_vb, d_wbar, d_wpb, d_fesc_bar, d_zbar, stream
+            end subroutine opensps_hip_adj_fold_gather_dp
+
+            subroutine opensps_hip_sync_stream(stream) bind(C, name="opensps_hip_sync_stream")
+                import :: c_ptr
+                type(c_ptr), value :: stream
+            end subroutine opensps_hip_sync_stream
+        end interface
+
+#ifdef OMP_TARGET
+        !$omp target data use_device_addr(wsfh, it_tesc, fesc, pt_off, pt_ptr, eff_val, pe_ptr, pe_k, pe_e, &
+        !$omp& perm, viz, cz, zsg, wk, vb, wbar, wpb, fesc_bar, zbar)
+#endif
+#ifdef KERNEL_SINGLE_PRECISION
+        call opensps_hip_adj_fold_gather_sp(int(m0 - 1, c_int), int(nc, c_int), int(nt, c_int), &
+                                            int(nt_neb, c_int), int(neb_cols, c_int), int(n_pts_max, c_int), &
+                                            int(n_eff_max, c_int), int(nc_max, c_int), int(n_mod, c_int), &
+                                            c_loc(wsfh(1, 1)), c_loc(it_tesc(1)), c_loc(fesc(1)), &
+                                            c_loc(pt_off(1)), c_loc(pt_ptr(1)), c_loc(eff_val(1)), &
+                                            c_loc(pe_ptr(1)), c_loc(pe_k(1)), c_loc(pe_e(1)), &
+                                            c_loc(perm(1)), c_loc(viz(1)), c_loc(cz(1)), c_loc(zsg(1)), &
+                                            c_loc(wk(1, 1)), c_loc(vb(1, 1, 1)), c_loc(wbar(1, 1)), &
+                                            c_loc(wpb(1, 1)), c_loc(fesc_bar(1)), c_loc(zbar(1)), &
+                                            c_null_ptr)
+#else
+        call opensps_hip_adj_fold_gather_dp(int(m0 - 1, c_int), int(nc, c_int), int(nt, c_int), &
+                                            int(nt_neb, c_int), int(neb_cols, c_int), int(n_pts_max, c_int), &
+                                            int(n_eff_max, c_int), int(nc_max, c_int), int(n_mod, c_int), &
+                                            c_loc(wsfh(1, 1)), c_loc(it_tesc(1)), c_loc(fesc(1)), &
+                                            c_loc(pt_off(1)), c_loc(pt_ptr(1)), c_loc(eff_val(1)), &
+                                            c_loc(pe_ptr(1)), c_loc(pe_k(1)), c_loc(pe_e(1)), &
+                                            c_loc(perm(1)), c_loc(viz(1)), c_loc(cz(1)), c_loc(zsg(1)), &
+                                            c_loc(wk(1, 1)), c_loc(vb(1, 1, 1)), c_loc(wbar(1, 1)), &
+                                            c_loc(wpb(1, 1)), c_loc(fesc_bar(1)), c_loc(zbar(1)), &
+                                            c_null_ptr)
+#endif
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+        call opensps_hip_sync_stream(c_null_ptr)
+    end subroutine run_hip_fold_gather
+#endif
 
     !> L_bol and Q per point: w_p bar += lsum_bar wsfh(t) L(t) cz cl_p / sl_z + qbar(t) cz q_p; and their
     !> d / d dz (zbar: L in log, Q linearly).
