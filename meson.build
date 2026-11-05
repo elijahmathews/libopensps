@@ -117,6 +117,18 @@ if accel_target == 'omp_gpu' and fc_id in ['llvm-flang', 'flang']
         if not blas_dep.contains(hip_lib)
             blas_dep += [hip_lib]
         endif
+        hip_extra_args = []
+        if get_option('trace')
+            accel_defs += ['-DOPENSPS_ENABLE_TRACE', '-DOPENSPS_ROCTX']
+            roctx_lib = meson.get_compiler('c').find_library('roctx64', required : false)
+            if not roctx_lib.found()
+                roctx_lib = meson.get_compiler('c').find_library('rocprofiler-sdk-roctx', required : false)
+            endif
+            if roctx_lib.found()
+                blas_dep += [roctx_lib]
+                hip_extra_args += ['-DOPENSPS_ENABLE_TRACE', '-DOPENSPS_ROCTX']
+            endif
+        endif
         hip_sources = [
             custom_target('opensps_hip_kernels.o',
                 input : 'src/accel/hip/opensps_hip_kernels.hip',
@@ -130,9 +142,17 @@ if accel_target == 'omp_gpu' and fc_id in ['llvm-flang', 'flang']
                     '@INPUT@',
                     '-o',
                     '@OUTPUT@'
-                ]
+                ] + hip_extra_args
             )
         ]
+    endif
+elif get_option('trace')
+    if accel_blas_choice == 'cublas'
+        accel_defs += ['-DOPENSPS_ENABLE_TRACE', '-DOPENSPS_NVTX']
+        nvtx_lib = meson.get_compiler('c').find_library('nvToolsExt', required : false)
+        if nvtx_lib.found()
+            blas_dep += [nvtx_lib]
+        endif
     endif
 endif
 
@@ -198,6 +218,7 @@ lib_sources = files(
     'src/bindings/c/opensps_c_api.f90',
 
     # Core FSPS Modules
+    'src/core/opensps_trace.f90',
     'src/core/opensps_cache.f90',
     'src/core/opensps_setup_lock.c',
     'src/core/opensps_constants.f90',

@@ -1773,6 +1773,13 @@ contains
         integer  :: s, e, j, k, t, m, tesc, tc, iz, sg, eg
         real(WP) :: x, y, o, ye, oe, f, a, ae
 
+#if defined(OPENSPS_HIP)
+        call run_hip_fold_multi(m0, nc, n_eff_max, nt_neb, neb_cols, &
+                                size(w, 1), size(wsfh, 1), &
+                                wsfh, it_tesc, fesc, n_eff, pt_off, &
+                                seg_off, eff_off, pt_age, eff_pt, eff_val, &
+                                seg_ptr, seg_first, perm, viz, cz, w, v, veuv)
+#else
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(k, t, m, tesc, tc, x, y, o, ye, oe, f, a, ae, &
         !$omp     iz, sg) map(to: fesc)
@@ -1845,7 +1852,127 @@ contains
                 end if
             end do
         end do
+#endif
     end subroutine fold_multi
+
+#if defined(OPENSPS_HIP)
+    subroutine run_hip_fold_multi(m0, nc, n_eff_max, nt_neb, neb_cols, ldw, n_mod, &
+                                  wsfh, it_tesc, fesc, n_eff, pt_off, seg_off, eff_off, &
+                                  pt_age, eff_pt, eff_val, seg_ptr, seg_first, &
+                                  perm, viz, cz, w, v, veuv)
+        use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
+        integer, intent(in) :: m0, nc, n_eff_max, nt_neb, neb_cols, ldw, n_mod
+        real(WP), intent(in), target, contiguous :: wsfh(n_mod, *), fesc(*), eff_val(*), cz(*)
+        real(KP), intent(in), target, contiguous :: w(ldw, *)
+        integer, intent(in), target, contiguous :: it_tesc(*), n_eff(*), pt_off(*), seg_off(*), &
+                                                   eff_off(*), pt_age(*), eff_pt(*), seg_ptr(*), &
+                                                   seg_first(*), perm(*), viz(*)
+        real(KP), intent(inout), target, contiguous :: v(n_eff_max, *), veuv(n_eff_max, *)
+        type(c_ptr) :: p_fesc, p_veuv
+
+        interface
+            subroutine opensps_hip_fold_multi_sp(m0, nc, n_eff_max, nt_neb, neb_cols, ldw, n_mod, &
+                                                 d_wsfh, d_it_tesc, d_fesc, d_n_eff, d_pt_off, &
+                                                 d_seg_off, d_eff_off, d_pt_age, d_eff_pt, d_eff_val, &
+                                                 d_seg_ptr, d_seg_first, d_perm, d_viz, d_cz, &
+                                                 d_w, d_v, d_veuv, stream) &
+                bind(C, name="opensps_hip_fold_multi_sp")
+                import :: c_int, c_ptr
+                integer(c_int), value :: m0, nc, n_eff_max, nt_neb, neb_cols, ldw, n_mod
+                type(c_ptr), value :: d_wsfh, d_it_tesc, d_fesc, d_n_eff, d_pt_off, d_seg_off, d_eff_off
+                type(c_ptr), value :: d_pt_age, d_eff_pt, d_eff_val, d_seg_ptr, d_seg_first
+                type(c_ptr), value :: d_perm, d_viz, d_cz, d_w, d_v, d_veuv, stream
+            end subroutine opensps_hip_fold_multi_sp
+
+            subroutine opensps_hip_fold_multi_dp(m0, nc, n_eff_max, nt_neb, neb_cols, ldw, n_mod, &
+                                                 d_wsfh, d_it_tesc, d_fesc, d_n_eff, d_pt_off, &
+                                                 d_seg_off, d_eff_off, d_pt_age, d_eff_pt, d_eff_val, &
+                                                 d_seg_ptr, d_seg_first, d_perm, d_viz, d_cz, &
+                                                 d_w, d_v, d_veuv, stream) &
+                bind(C, name="opensps_hip_fold_multi_dp")
+                import :: c_int, c_ptr
+                integer(c_int), value :: m0, nc, n_eff_max, nt_neb, neb_cols, ldw, n_mod
+                type(c_ptr), value :: d_wsfh, d_it_tesc, d_fesc, d_n_eff, d_pt_off, d_seg_off, d_eff_off
+                type(c_ptr), value :: d_pt_age, d_eff_pt, d_eff_val, d_seg_ptr, d_seg_first
+                type(c_ptr), value :: d_perm, d_viz, d_cz, d_w, d_v, d_veuv, stream
+            end subroutine opensps_hip_fold_multi_dp
+
+            subroutine opensps_hip_sync_stream(stream) bind(C, name="opensps_hip_sync_stream")
+                import :: c_ptr
+                type(c_ptr), value :: stream
+            end subroutine opensps_hip_sync_stream
+        end interface
+
+        if (neb_cols > 0) then
+#ifdef OMP_TARGET
+            !$omp target data use_device_addr(wsfh, it_tesc, fesc, n_eff, pt_off, seg_off, eff_off, &
+            !$omp& pt_age, eff_pt, eff_val, seg_ptr, seg_first, perm, viz, cz, w, v, veuv)
+#endif
+            p_fesc = c_loc(fesc(1))
+            p_veuv = c_loc(veuv(1, 1))
+#ifdef KERNEL_SINGLE_PRECISION
+            call opensps_hip_fold_multi_sp(int(m0 - 1, c_int), int(nc, c_int), int(n_eff_max, c_int), &
+                                           int(nt_neb, c_int), int(neb_cols, c_int), int(ldw, c_int), &
+                                           int(n_mod, c_int), &
+                                           c_loc(wsfh(1, 1)), c_loc(it_tesc(1)), p_fesc, &
+                                           c_loc(n_eff(1)), c_loc(pt_off(1)), c_loc(seg_off(1)), &
+                                           c_loc(eff_off(1)), c_loc(pt_age(1)), c_loc(eff_pt(1)), &
+                                           c_loc(eff_val(1)), c_loc(seg_ptr(1)), c_loc(seg_first(1)), &
+                                           c_loc(perm(1)), c_loc(viz(1)), c_loc(cz(1)), &
+                                           c_loc(w(1, 1)), c_loc(v(1, 1)), p_veuv, &
+                                           c_null_ptr)
+#else
+            call opensps_hip_fold_multi_dp(int(m0 - 1, c_int), int(nc, c_int), int(n_eff_max, c_int), &
+                                           int(nt_neb, c_int), int(neb_cols, c_int), int(ldw, c_int), &
+                                           int(n_mod, c_int), &
+                                           c_loc(wsfh(1, 1)), c_loc(it_tesc(1)), p_fesc, &
+                                           c_loc(n_eff(1)), c_loc(pt_off(1)), c_loc(seg_off(1)), &
+                                           c_loc(eff_off(1)), c_loc(pt_age(1)), c_loc(eff_pt(1)), &
+                                           c_loc(eff_val(1)), c_loc(seg_ptr(1)), c_loc(seg_first(1)), &
+                                           c_loc(perm(1)), c_loc(viz(1)), c_loc(cz(1)), &
+                                           c_loc(w(1, 1)), c_loc(v(1, 1)), p_veuv, &
+                                           c_null_ptr)
+#endif
+#ifdef OMP_TARGET
+            !$omp end target data
+#endif
+        else
+#ifdef OMP_TARGET
+            !$omp target data use_device_addr(wsfh, it_tesc, n_eff, pt_off, seg_off, eff_off, &
+            !$omp& pt_age, eff_pt, eff_val, seg_ptr, seg_first, perm, viz, cz, w, v)
+#endif
+            p_fesc = c_null_ptr
+            p_veuv = c_null_ptr
+#ifdef KERNEL_SINGLE_PRECISION
+            call opensps_hip_fold_multi_sp(int(m0 - 1, c_int), int(nc, c_int), int(n_eff_max, c_int), &
+                                           int(nt_neb, c_int), int(neb_cols, c_int), int(ldw, c_int), &
+                                           int(n_mod, c_int), &
+                                           c_loc(wsfh(1, 1)), c_loc(it_tesc(1)), p_fesc, &
+                                           c_loc(n_eff(1)), c_loc(pt_off(1)), c_loc(seg_off(1)), &
+                                           c_loc(eff_off(1)), c_loc(pt_age(1)), c_loc(eff_pt(1)), &
+                                           c_loc(eff_val(1)), c_loc(seg_ptr(1)), c_loc(seg_first(1)), &
+                                           c_loc(perm(1)), c_loc(viz(1)), c_loc(cz(1)), &
+                                           c_loc(w(1, 1)), c_loc(v(1, 1)), p_veuv, &
+                                           c_null_ptr)
+#else
+            call opensps_hip_fold_multi_dp(int(m0 - 1, c_int), int(nc, c_int), int(n_eff_max, c_int), &
+                                           int(nt_neb, c_int), int(neb_cols, c_int), int(ldw, c_int), &
+                                           int(n_mod, c_int), &
+                                           c_loc(wsfh(1, 1)), c_loc(it_tesc(1)), p_fesc, &
+                                           c_loc(n_eff(1)), c_loc(pt_off(1)), c_loc(seg_off(1)), &
+                                           c_loc(eff_off(1)), c_loc(pt_age(1)), c_loc(eff_pt(1)), &
+                                           c_loc(eff_val(1)), c_loc(seg_ptr(1)), c_loc(seg_first(1)), &
+                                           c_loc(perm(1)), c_loc(viz(1)), c_loc(cz(1)), &
+                                           c_loc(w(1, 1)), c_loc(v(1, 1)), p_veuv, &
+                                           c_null_ptr)
+#endif
+#ifdef OMP_TARGET
+            !$omp end target data
+#endif
+        end if
+        call opensps_hip_sync_stream(c_null_ptr)
+    end subroutine run_hip_fold_multi
+#endif
 
     !> perm: the models m with a nonzero weight cz(m), grouped by key(m) (counting sort, models in
     !> order within a key); ptr(iz) .. ptr(iz + 1) - 1 the entries of key iz.

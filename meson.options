@@ -28,6 +28,9 @@ option('accel_blas', type: 'combo', choices: ['none', 'cublas', 'rocblas', 'hipb
 option('accel_hip', type: 'boolean', value: false,
   description: 'Enable native HIP kernels for GPU bottleneck phases on AMD ROCm')
 
+option('trace', type: 'boolean', value: false,
+  description: 'Enable ROCTX / NVTX range tracing markers for GPU profiling')
+
 option('tests', type: 'boolean', value: true,
   description: 'Build the test and benchmark programs (off when built as a subproject of a binding package)')
 

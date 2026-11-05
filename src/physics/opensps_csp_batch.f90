@@ -108,6 +108,7 @@ module opensps_csp_batch
     use opensps_accel_blas, only: accel_blas_init, accel_blas_gemm, ACCEL_BLAS_OP_N
     use, intrinsic :: iso_c_binding, only: c_loc
 #endif
+    use opensps_trace, only: opensps_trace_push, opensps_trace_pop
 
     implicit none
     private
@@ -205,6 +206,26 @@ module opensps_csp_batch
 #if (defined(OPENSPS_PINNED) || defined(FSPS_PINNED)) && defined(OMP_TARGET)
     !> The two copy-back streams of the OpenMP target build (created on first use; 0: none)
     integer(c_intptr_t), save :: copy_stream(2) = 0
+#endif
+
+#if defined(OPENSPS_HIP)
+    interface
+        subroutine opensps_hip_nebular_continuum_sp(n_mod, nspec, ntab, nt_neb, tab, ia, wa, dwa, newr, &
+                                                    cy, co, lns, iz, wz, iu, wu, yo, stream) &
+            bind(C, name="opensps_hip_nebular_continuum_sp")
+            import :: c_ptr, c_int
+            integer(c_int), value :: n_mod, nspec, ntab, nt_neb
+            type(c_ptr), value :: tab, ia, wa, dwa, newr, cy, co, lns, iz, wz, iu, wu, yo, stream
+        end subroutine opensps_hip_nebular_continuum_sp
+
+        subroutine opensps_hip_nebular_continuum_dp(n_mod, nspec, ntab, nt_neb, tab, ia, wa, dwa, newr, &
+                                                    cy, co, lns, iz, wz, iu, wu, yo, stream) &
+            bind(C, name="opensps_hip_nebular_continuum_dp")
+            import :: c_ptr, c_int
+            integer(c_int), value :: n_mod, nspec, ntab, nt_neb
+            type(c_ptr), value :: tab, ia, wa, dwa, newr, cy, co, lns, iz, wz, iu, wu, yo, stream
+        end subroutine opensps_hip_nebular_continuum_dp
+    end interface
 #endif
 
 
@@ -2199,16 +2220,41 @@ contains
     !> arithmetic and loads. The arithmetic per pixel is the one of the generic kernel, in the same
     !> order, so the results are identical bit for bit.
     subroutine nebular_continuum_tiled(n_mod, nspec, ntab, nt_neb, tab, ia, wa, dwa, newr, cy, co, lns, iz, wz, iu, wu, yo)
-        integer, intent(in)     :: n_mod, nspec, ntab, nt_neb, ia(nt_neb), iz(n_mod), iu(n_mod)
-        real(WP), intent(in)    :: tab(ntab, NEBNZ, NEBNAGE, NEBNIP), wa(nt_neb), dwa(nt_neb)
-        real(KP), intent(in)    :: cy(nt_neb, n_mod), co(nt_neb, n_mod)
-        real(WP), intent(in)    :: lns(n_mod), wz(n_mod), wu(n_mod)
+        use, intrinsic :: iso_c_binding, only: c_loc, c_null_ptr
+        integer, intent(in)     :: n_mod, nspec, ntab, nt_neb
+        integer, intent(in), target :: ia(nt_neb), iz(n_mod), iu(n_mod)
+        real(WP), intent(in), target :: tab(ntab, NEBNZ, NEBNAGE, NEBNIP), wa(nt_neb), dwa(nt_neb)
+        real(KP), intent(in), target :: cy(nt_neb, n_mod), co(nt_neb, n_mod)
+        real(WP), intent(in), target :: lns(n_mod), wz(n_mod), wu(n_mod)
         logical, intent(in)     :: newr(nt_neb)
-        real(KP), intent(inout) :: yo(nspec, 2 * n_mod)
+        real(KP), intent(inout), target :: yo(nspec, 2 * n_mod)
 
         integer, parameter :: PT = 4
         real(WP), parameter :: LN10 = log(10.0_wp)
         integer  :: m, ip, npt
+#if defined(OPENSPS_HIP)
+        integer, allocatable, target :: newr_int(:)
+#endif
+
+#if defined(OPENSPS_HIP)
+        allocate(newr_int(nt_neb))
+        newr_int = merge(1, 0, newr)
+        !$omp target data map(to: newr_int) use_device_addr(tab, ia, wa, dwa, newr_int, cy, co, lns, iz, wz, iu, wu, yo)
+        if (KP == WP) then
+            call opensps_hip_nebular_continuum_dp(n_mod, nspec, ntab, nt_neb, &
+                c_loc(tab), c_loc(ia), c_loc(wa), c_loc(dwa), c_loc(newr_int), &
+                c_loc(cy), c_loc(co), c_loc(lns), c_loc(iz), c_loc(wz), c_loc(iu), c_loc(wu), &
+                c_loc(yo), c_null_ptr)
+        else
+            call opensps_hip_nebular_continuum_sp(n_mod, nspec, ntab, nt_neb, &
+                c_loc(tab), c_loc(ia), c_loc(wa), c_loc(dwa), c_loc(newr_int), &
+                c_loc(cy), c_loc(co), c_loc(lns), c_loc(iz), c_loc(wz), c_loc(iu), c_loc(wu), &
+                c_loc(yo), c_null_ptr)
+        end if
+        !$omp end target data
+        deallocate(newr_int)
+        return
+#endif
 
         npt = (nspec + PT - 1) / PT
         ! (The small work arrays are declared in a block of the loop body: flang maps `private` arrays,
