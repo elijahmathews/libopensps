@@ -450,10 +450,15 @@ contains
 
     subroutine ensure_smooth_work(nspec, n_col)
         integer, intent(in) :: nspec, n_col
+        integer :: n1, n2
         if (.not. allocated(smooth_work)) allocate(smooth_work(1, 1))
         if (size(smooth_work, 1) < nspec .or. size(smooth_work, 2) < n_col) then
+            ! (the new shape is formed before the old buffer is freed: reading size() of a
+            ! deallocated array is undefined, and gfortran rejects it in the ALLOCATE)
+            n1 = max(nspec, size(smooth_work, 1))
+            n2 = max(n_col, size(smooth_work, 2))
             call free_smooth_work()
-            allocate(smooth_work(max(nspec, size(smooth_work, 1)), max(n_col, size(smooth_work, 2))))
+            allocate(smooth_work(n1, n2))
 #ifdef OMP_TARGET
             !$omp target enter data map(alloc: smooth_work)
 #endif

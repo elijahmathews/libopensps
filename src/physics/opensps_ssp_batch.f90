@@ -1975,8 +1975,10 @@ contains
                 pps(j, 3, q) = sq
             end do
         end do
-#elif defined(_OPENMP)
+#else
+#if defined(_OPENMP)
         !$omp parallel do collapse(2) private(k, m, k0, n, sm, sl, sq, iz, o, kl)
+#endif
         do q = 1, n_pc_max
             do j = 1, nc
                 iz = viz(m0 + j - 1)
@@ -1988,9 +1990,9 @@ contains
                 sm = 0.0_wp
                 sl = 0.0_wp
                 sq = 0.0_wp
-                call imf_bin_weights_tab(imf_type, pm(:, m), tot(j), n, pt_mini(k0), &
-                                     pt_m1(k0), pt_m2(k0), pt_llo(k0), &
-                                     pt_dl(k0), pt_first(k0), &
+                call imf_bin_weights_tab(imf_type, pm(:, m), tot(j), n, pt_mini(k0:k0 + n - 1), &
+                                     pt_m1(k0:k0 + n - 1), pt_m2(k0:k0 + n - 1), pt_llo(k0:k0 + n - 1), &
+                                     pt_dl(k0:k0 + n - 1), pt_first(k0:k0 + n - 1), &
                                      w(j, k0 - o), ldw)
                 do k = k0, k0 + n - 1
                     kl = k - o
