@@ -29,8 +29,9 @@ static pthread_once_t opensps_pinned_once = PTHREAD_ONCE_INIT;
 
 static void opensps_pinned_init(void)
 {
-    /* FSPS_NO_PIN=1 keeps the buffers pageable (for comparisons) */
-    const char *off = getenv("FSPS_NO_PIN");
+    /* OPENSPS_NO_PIN=1 (or legacy FSPS_NO_PIN=1) keeps the buffers pageable (for comparisons) */
+    const char *off = getenv("OPENSPS_NO_PIN");
+    if (!off) off = getenv("FSPS_NO_PIN");
     if (off && off[0] && off[0] != '0') return;
     void *lib = dlopen("libcuda.so.1", RTLD_LAZY | RTLD_NOLOAD);
     if (!lib) lib = dlopen("libcuda.so.1", RTLD_LAZY);

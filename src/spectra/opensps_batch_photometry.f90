@@ -18,10 +18,9 @@ module opensps_batch_photometry
     use opensps_special_functions, only: mag_from_flux
     use opensps_smoothing, only: velocity_kernel_t, build_velocity_kernel
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
-#ifdef FSPS_CUBLAS
-    use cublas
-    use omp_lib, only: omp_get_default_device
-    use, intrinsic :: iso_c_binding, only: c_ptr, c_int, c_intptr_t
+#if defined(OPENSPS_ACCEL_BLAS)
+    use opensps_accel_blas, only: accel_blas_init, accel_blas_gemm, ACCEL_BLAS_OP_T, ACCEL_BLAS_OP_N
+    use, intrinsic :: iso_c_binding, only: c_loc
 #endif
 
     implicit none
@@ -29,27 +28,14 @@ module opensps_batch_photometry
 
     public :: compute_magnitudes_columns, prepare_batch_grid
     public :: smoothing_on_device, prepare_smoothing_kernel, smooth_columns, smooth_columns_adjoint
-    public :: distance_term_dz, smooth_sigma_adjoint
-#ifdef FSPS_CUBLAS
-    public :: blas, blas_init
-#endif
+    public :: distance_term_dz, smooth_sigma_adjoint, free_smooth_work
 
     real(WP), parameter :: AB_ZEROPOINT = 48.60_wp
     integer, parameter  :: IDX_V_BAND = 1
-    !> Pixels per block of the split-K band product (cuBLAS path): each block is a plain FP32 sum
+    !> Pixels per block of the split-K band product: each block is a plain FP32 sum
     !> of at most 256 positive terms; the blocks are added in FP64
     integer, parameter :: BAND_BLOCK = 256
-#ifdef FSPS_CUBLAS
-    type(cublasHandle), save :: blas
-    logical, save :: blas_ready = .false.
-    interface
-        !> The CUDA stream of the NVIDIA OpenMP runtime's target regions (synchronous: nowait = 0)
-        type(c_ptr) function ompx_get_cuda_stream(device, nowait) bind(C, name="ompx_get_cuda_stream")
-            import :: c_ptr, c_int
-            integer(c_int), value :: device, nowait
-        end function ompx_get_cuda_stream
-    end interface
-#endif
+    real(KP), allocatable, save, target :: smooth_work(:,:)
 
 contains
 
@@ -78,7 +64,7 @@ contains
         real(KP), allocatable :: fobs(:,:)
         real(WP) :: flux
         logical  :: done
-#ifdef FSPS_CUBLAS
+#if defined(OPENSPS_ACCEL_BLAS)
         integer :: npad
         integer, parameter :: GEMM_MIN_COLS = 16
 #endif
@@ -116,8 +102,8 @@ contains
 
         associate(g => ctx%state%batch)
         done = .false.
-#ifdef FSPS_CUBLAS
-        ! cuBLAS for many spectra; a few (single CSP calls) take the compensated kernels below,
+#if defined(OPENSPS_ACCEL_BLAS)
+        ! Accelerated BLAS for many spectra; a few (single CSP calls) take the compensated kernels below,
         ! which are more accurate (no plain FP32 block sums) and as fast there
         if (n_col >= GEMM_MIN_COLS) then
             npad = BAND_BLOCK * ((nspec + BAND_BLOCK - 1) / BAND_BLOCK)
@@ -350,7 +336,7 @@ contains
         end associate
 #endif
 
-#ifdef FSPS_CUBLAS
+#if defined(OPENSPS_ACCEL_BLAS)
         ! Filter matrix of the split-K band product, padded to whole pixel blocks
         npad = BAND_BLOCK * ((nspec + BAND_BLOCK - 1) / BAND_BLOCK)
         allocate(g%cmat(npad, nbands))
@@ -462,6 +448,34 @@ contains
         end associate
     end subroutine prepare_smoothing_kernel
 
+    subroutine ensure_smooth_work(nspec, n_col)
+        integer, intent(in) :: nspec, n_col
+        integer :: n1, n2
+        if (.not. allocated(smooth_work)) allocate(smooth_work(1, 1))
+        if (size(smooth_work, 1) < nspec .or. size(smooth_work, 2) < n_col) then
+            ! (the new shape is formed before the old buffer is freed: reading size() of a
+            ! deallocated array is undefined, and gfortran rejects it in the ALLOCATE)
+            n1 = max(nspec, size(smooth_work, 1))
+            n2 = max(n_col, size(smooth_work, 2))
+            call free_smooth_work()
+            allocate(smooth_work(n1, n2))
+#ifdef OMP_TARGET
+            !$omp target enter data map(alloc: smooth_work)
+#endif
+        end if
+    end subroutine ensure_smooth_work
+
+    subroutine free_smooth_work()
+        if (allocated(smooth_work)) then
+            if (size(smooth_work) > 1) then
+#ifdef OMP_TARGET
+                !$omp target exit data map(delete: smooth_work)
+#endif
+            end if
+            deallocate(smooth_work)
+        end if
+    end subroutine free_smooth_work
+
     !> Smooths spec(:, 1:n_col) (present on the device) with the prepared operator: per pixel the
     !> normalized trapezoid weights of its window, summed in FP64 (apply_velocity_kernel).
     subroutine smooth_columns(ctx, spec, n_col)
@@ -471,8 +485,9 @@ contains
 
         ! The operator's arrays passed as arrays: device code does not refer to the cache's
         ! derived type, which is mapped only through its components
+        call ensure_smooth_work(ctx%state%nspec, n_col)
         call smooth_kernel(ctx%state%nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
-                           ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_coef, spec)
+                           ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_coef, smooth_work, spec)
     end subroutine smooth_columns
 
     !> The transpose of smooth_columns, in place: spec_bar(k) = sum over pixels i of C(i, k)
@@ -483,9 +498,10 @@ contains
         real(KP), intent(inout), contiguous :: spec_bar(:,:)
         integer, intent(in)                 :: n_col
 
+        call ensure_smooth_work(ctx%state%nspec, n_col)
         call smooth_kernel_t(ctx%state%nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
                              ctx%state%batch%sm_off, ctx%state%batch%sm_coef, ctx%state%batch%sm_t_lo, &
-                             ctx%state%batch%sm_t_hi, spec_bar)
+                             ctx%state%batch%sm_t_hi, smooth_work, spec_bar)
     end subroutine smooth_columns_adjoint
 
     !> d L / d sigma_smooth per column, for the prepared operator (smooth_columns): with
@@ -563,19 +579,16 @@ contains
     end subroutine smooth_sigma_kernel
 
     !> smooth_kernel transposed: gather per pixel and column in parallel.
-    subroutine smooth_kernel_t(nspec, n_col, ncoef, sm_lo, sm_off, sm_coef, sm_t_lo, sm_t_hi, spec)
+    subroutine smooth_kernel_t(nspec, n_col, ncoef, sm_lo, sm_off, sm_coef, sm_t_lo, sm_t_hi, sm, spec)
         integer, intent(in)                 :: nspec, n_col, ncoef
         integer, intent(in)                 :: sm_lo(nspec), sm_off(nspec), sm_t_lo(nspec), sm_t_hi(nspec)
         real(WP), intent(in)                :: sm_coef(ncoef)
-        real(KP), intent(inout)             :: spec(nspec, n_col)
+        real(KP), intent(inout), target     :: sm(nspec, *), spec(nspec, *)
 
-        real(KP), allocatable :: sm(:,:)
         integer  :: m, k, i, lo, hi
         real(WP) :: s
 
-        allocate(sm(nspec, n_col))
-#ifdef OMP_TARGET
-        !$omp target data map(alloc: sm)
+#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(s, lo, hi, i)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(s, lo, hi, i)
@@ -602,26 +615,18 @@ contains
                 spec(k, m) = sm(k, m)
             end do
         end do
-#ifdef OMP_TARGET
-        !$omp end target data
-#endif
     end subroutine smooth_kernel_t
 
-    subroutine smooth_kernel(nspec, n_col, ncoef, sm_lo, sm_hi, sm_off, sm_coef, spec)
+    subroutine smooth_kernel(nspec, n_col, ncoef, sm_lo, sm_hi, sm_off, sm_coef, sm, spec)
         ! Explicit-shape arguments: no array descriptors to map in every launch
         integer, intent(in)                 :: nspec, n_col, ncoef
         integer, intent(in)                 :: sm_lo(nspec), sm_hi(nspec), sm_off(nspec)
         real(WP), intent(in)                :: sm_coef(ncoef)
-        real(KP), intent(inout)             :: spec(nspec, n_col)
+        real(KP), intent(inout), target     :: sm(nspec, *), spec(nspec, *)
 
-        real(KP), allocatable :: sm(:,:)
         integer  :: m, i, k, lo, off
         real(WP) :: s
 
-        allocate(sm(nspec, n_col))
-#ifdef OMP_TARGET
-        !$omp target data map(alloc: sm)
-#endif
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(s, lo, off, k)
 #elif defined(_OPENMP)
@@ -652,9 +657,6 @@ contains
                 spec(i, m) = sm(i, m)
             end do
         end do
-#ifdef OMP_TARGET
-        !$omp end target data
-#endif
     end subroutine smooth_kernel
 
     !> Distance modulus and (1 + z) term of the magnitudes at redshift zred (0 at z = 0:
@@ -798,42 +800,35 @@ contains
         end do
     end subroutine observed_frame_t
 
-#ifdef FSPS_CUBLAS
+#if defined(OPENSPS_ACCEL_BLAS)
     !> Band fluxes as a split-K matrix product: per block of BAND_BLOCK pixels,
     !> partial = C^T . fobs with C(j, b) = (dl(j-1) + dl(j)) / 2 * band(j, b) (the trapezoid rule
     !> regrouped by pixel, formed in FP64; prepare_batch_grid); the blocks are summed in FP64.
     subroutine band_fluxes_gemm(n_mod, npad, nbands, cmat, fobs, fband)
-        integer, intent(in)     :: n_mod, npad, nbands
-        real(KP), intent(in)    :: cmat(:,:), fobs(:,:)
-        real(WP), intent(out)   :: fband(:,:)
+        integer, intent(in)                      :: n_mod, npad, nbands
+        real(KP), intent(in), contiguous, target :: cmat(:,:), fobs(:,:)
+        real(WP), intent(out)                    :: fband(:,:)
 
-        real(KP), allocatable :: partial(:,:,:)
-        integer  :: b, m, q, nkb, istat
+        real(KP), allocatable, target :: partial(:,:,:)
+        integer  :: b, m, q, nkb
         real(WP) :: sw
 
         nkb = npad / BAND_BLOCK
         allocate(partial(nbands, n_mod, nkb))
-        call blas_init()
+        call accel_blas_init()
 #ifdef OMP_TARGET
         !$omp target data map(alloc: partial)
         !$omp target data use_device_addr(cmat, fobs, partial)
 #endif
         do q = 1, nkb
-#ifdef KERNEL_SINGLE_PRECISION
-            istat = cublasSgemm_v2(blas, CUBLAS_OP_T, CUBLAS_OP_N, nbands, n_mod, BAND_BLOCK, 1.0_KP, &
-                                   cmat((q - 1) * BAND_BLOCK + 1, 1), npad, fobs((q - 1) * BAND_BLOCK + 1, 1), npad, &
-                                   0.0_KP, partial(1, 1, q), nbands)
-#else
-            istat = cublasDgemm_v2(blas, CUBLAS_OP_T, CUBLAS_OP_N, nbands, n_mod, BAND_BLOCK, 1.0_KP, &
-                                   cmat((q - 1) * BAND_BLOCK + 1, 1), npad, fobs((q - 1) * BAND_BLOCK + 1, 1), npad, &
-                                   0.0_KP, partial(1, 1, q), nbands)
-#endif
-            if (istat /= 0) exit
+            call accel_blas_gemm(ACCEL_BLAS_OP_T, ACCEL_BLAS_OP_N, nbands, n_mod, BAND_BLOCK, 1.0_KP, &
+                                 c_loc(cmat((q - 1) * BAND_BLOCK + 1, 1)), npad, &
+                                 c_loc(fobs((q - 1) * BAND_BLOCK + 1, 1)), npad, &
+                                 0.0_KP, c_loc(partial(1, 1, q)), nbands)
         end do
 #ifdef OMP_TARGET
         !$omp end target data
 #endif
-        if (istat /= 0) error stop 'compute_csp_batch: cuBLAS GEMM failed'
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(sw, q)
 #elif defined(_OPENMP)
@@ -852,29 +847,6 @@ contains
         !$omp end target data
 #endif
     end subroutine band_fluxes_gemm
-
-    !> The cuBLAS handle, on the stream of the OpenMP target regions. Experiment switch (NVIDIA only):
-    !> FSPS_CUBLAS_MATH = tf32 lets the FP32 products use TF32 tensor cores (A100 and newer;
-    !> 10-bit mantissa inputs), pedantic forbids tensor cores and reduced-precision paths (the
-    !> FP64 products then run without the A100's FP64 tensor cores); unset: cuBLAS default math
-    !> (FP32 on FP32 units, FP64 on FP64 tensor cores where available).
-    subroutine blas_init()
-        integer :: istat
-        character(len=16) :: mode
-        if (blas_ready) return
-        istat = cublasCreate(blas)
-        ! The products run on the stream of the kernels around them, so they are ordered with them
-        istat = cublasSetStream(blas, int(transfer(ompx_get_cuda_stream(int(omp_get_default_device(), c_int), 0_c_int), &
-                                                   0_c_intptr_t), 8))
-        call get_environment_variable('FSPS_CUBLAS_MATH', mode)
-        select case (trim(mode))
-        case ('tf32')
-            istat = cublasSetMathMode(blas, CUBLAS_TF32_TENSOR_OP_MATH)
-        case ('pedantic')
-            istat = cublasSetMathMode(blas, CUBLAS_PEDANTIC_MATH)
-        end select
-        blas_ready = .true.
-    end subroutine blas_init
 #endif
 
     !> Band fluxes: the trapezoid filter integral of fobs over each band's support, compensated at
@@ -891,6 +863,11 @@ contains
         integer, parameter :: MBLK = 128, SMALL_N = 16
         integer  :: m, j, b, mb, ml
         real(KP) :: s, c, term, tsum
+
+#if defined(OPENSPS_HIP)
+        call run_hip_band_fluxes(n_mod, nspec, nbands, bands_t, j_lo, j_hi, do_band, wt, fobs_t, fband)
+        return
+#endif
 
 #if defined(OMP_TARGET) && !defined(__flang__)
         ! (Not with LLVM flang: there the result of a parallel do reduction nested in a teams
@@ -958,5 +935,49 @@ contains
             end do
         end do
     end subroutine band_fluxes
+
+#if defined(OPENSPS_HIP)
+    subroutine run_hip_band_fluxes(n_mod, nspec, nbands, bands_t, j_lo, j_hi, do_band, wt, fobs_t, fband)
+        use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
+        integer, intent(in) :: n_mod, nspec, nbands
+        integer, intent(in), target :: j_lo(nbands), j_hi(nbands), do_band(nbands)
+        real(KP), intent(in), target :: bands_t(nbands, nspec), wt(nspec), fobs_t(n_mod, nspec)
+        real(WP), intent(out), target :: fband(nbands, n_mod)
+
+        interface
+            subroutine opensps_hip_band_fluxes_sp(n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, &
+                                                  d_wt, d_fobs_t, d_fband, stream) &
+                bind(C, name="opensps_hip_band_fluxes_sp")
+                import :: c_int, c_ptr
+                integer(c_int), value :: n_mod, nspec, nbands
+                type(c_ptr), value :: d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband, stream
+            end subroutine opensps_hip_band_fluxes_sp
+
+            subroutine opensps_hip_band_fluxes_dp(n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, &
+                                                  d_wt, d_fobs_t, d_fband, stream) &
+                bind(C, name="opensps_hip_band_fluxes_dp")
+                import :: c_int, c_ptr
+                integer(c_int), value :: n_mod, nspec, nbands
+                type(c_ptr), value :: d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband, stream
+            end subroutine opensps_hip_band_fluxes_dp
+        end interface
+
+#ifdef OMP_TARGET
+        !$omp target data use_device_addr(bands_t, j_lo, j_hi, do_band, wt, fobs_t, fband)
+#endif
+#ifdef KERNEL_SINGLE_PRECISION
+        call opensps_hip_band_fluxes_sp(int(n_mod, c_int), int(nspec, c_int), int(nbands, c_int), &
+                                        c_loc(bands_t(1, 1)), c_loc(j_lo(1)), c_loc(j_hi(1)), c_loc(do_band(1)), &
+                                        c_loc(wt(1)), c_loc(fobs_t(1, 1)), c_loc(fband(1, 1)), c_null_ptr)
+#else
+        call opensps_hip_band_fluxes_dp(int(n_mod, c_int), int(nspec, c_int), int(nbands, c_int), &
+                                        c_loc(bands_t(1, 1)), c_loc(j_lo(1)), c_loc(j_hi(1)), c_loc(do_band(1)), &
+                                        c_loc(wt(1)), c_loc(fobs_t(1, 1)), c_loc(fband(1, 1)), c_null_ptr)
+#endif
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine run_hip_band_fluxes
+#endif
 
 end module opensps_batch_photometry

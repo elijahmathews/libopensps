@@ -73,7 +73,10 @@ contains
         integer :: stat, n
 
         mode = DATA_FORMAT_AUTO
-        call get_environment_variable('FSPS_DATA_FORMAT', value=buf, length=n, status=stat)
+        call get_environment_variable('OPENSPS_DATA_FORMAT', value=buf, length=n, status=stat)
+        if (stat /= 0 .or. n == 0) then
+            call get_environment_variable('FSPS_DATA_FORMAT', value=buf, length=n, status=stat)
+        end if
         if (stat /= 0 .or. n == 0) return
         select case (to_lower_local(trim(adjustl(buf))))
         case ('legacy')
@@ -83,7 +86,7 @@ contains
         case ('auto', '')
             mode = DATA_FORMAT_AUTO
         case default
-            write(error_unit, '(3A)') '[OPENSPS_DATA] Error: FSPS_DATA_FORMAT must be legacy, standard or auto, not "', &
+            write(error_unit, '(3A)') '[OPENSPS_DATA] Error: OPENSPS_DATA_FORMAT must be legacy, standard or auto, not "', &
                 trim(buf), '"'
             error stop 1
         end select

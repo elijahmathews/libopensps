@@ -42,8 +42,9 @@ GPU builds (details and per-machine notes: `doc/GPU_PLAN.md`, results: `doc/GPU_
 what comes next: `doc/ROADMAP.md`):
 
 - OpenMP target offload: `FC=nvfortran CC=nvc meson setup b -Daccel=omp_gpu -Dgpu_arch=cc80`
-  (add `-Dcublas=true` for cuBLAS batch products), or LLVM flang (`-Dgpu_arch=gfx1103`, ...).
-  Run with `OMP_TARGET_OFFLOAD=MANDATORY` so a silent host fallback fails.
+  (add `-Daccel_blas=cublas` for cuBLAS batch products), or LLVM flang (`-Dgpu_arch=gfx1103`,
+  `-Daccel_blas=rocblas` or `hipblas`). Run with `OMP_TARGET_OFFLOAD=MANDATORY` so a silent host
+  fallback fails.
 - CPU threads: `-Denable_openmp=true` runs the same OpenMP loops on the host cores.
 
 Other tools: `tests/benchmark_phases`, `tests/benchmark_csp_batch` (timings);

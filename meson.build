@@ -48,6 +48,13 @@ datadir = get_option('datadir')
 accel_target = get_option('accel')
 accel_args = []
 accel_defs = []
+# Accelerated BLAS (cuBLAS on NVIDIA, rocBLAS / hipBLAS on AMD)
+accel_blas_choice = get_option('accel_blas')
+if get_option('cublas') and accel_blas_choice == 'none'
+    accel_blas_choice = 'cublas'
+endif
+
+blas_dep = []
 if accel_target == 'omp_gpu' and fc_id in ['llvm-flang', 'flang']
     # LLVM flang (AMD and other GPUs): -Dgpu_arch is an offload target such as gfx1103 or gfx942.
     # flang assumes OpenMP 3.1 unless told otherwise and then rejects the 5.x clauses the
@@ -62,6 +69,18 @@ if accel_target == 'omp_gpu' and fc_id in ['llvm-flang', 'flang']
     # map-type modifier of the kernels' map clauses for data that is already on the device
     # (OMP_MAP_PRESENT_ALLOC; OpenMP 5.1): flang checks presence, nvfortran 25.1 does not parse it
     accel_defs = ['-DOMP_TARGET', '-DOMP_MAP_PRESENT_ALLOC=present,alloc']
+    if accel_blas_choice in ['rocblas', 'hipblas']
+        accel_defs += ['-DOPENSPS_ACCEL_BLAS', '-DOPENSPS_' + accel_blas_choice.to_upper()]
+        blas_lib = meson.get_compiler('c').find_library(accel_blas_choice, required : true)
+        hip_lib = meson.get_compiler('c').find_library('amdhip64', required : false)
+        if hip_lib.found()
+            blas_dep = [blas_lib, hip_lib]
+        else
+            blas_dep = [blas_lib]
+        endif
+    elif accel_blas_choice != 'none'
+        error('accel_blas=' + accel_blas_choice + ' is not supported with LLVM flang (use rocblas or hipblas)')
+    endif
 elif accel_target == 'omp_gpu'
     if fc_id != 'nvidia_hpc'
         error('-Daccel=omp_gpu needs nvfortran or LLVM flang')
@@ -70,10 +89,12 @@ elif accel_target == 'omp_gpu'
     # (compute_csp_batch, batch photometry and indices; compute_csp_scenario runs as a batch).
     # Run with OMP_TARGET_OFFLOAD=MANDATORY to catch a silent host fallback.
     accel_args = ['-mp=gpu', '-gpu=' + get_option('gpu_arch')]
-    accel_defs = ['-DOMP_TARGET', '-DFSPS_PINNED', '-DOMP_MAP_PRESENT_ALLOC=alloc']
-    if get_option('cublas')
+    accel_defs = ['-DOMP_TARGET', '-DOPENSPS_PINNED', '-DOMP_MAP_PRESENT_ALLOC=alloc']
+    if accel_blas_choice == 'cublas'
         accel_args += ['-cudalib=cublas']
-        accel_defs += ['-DFSPS_CUBLAS']
+        accel_defs += ['-DOPENSPS_ACCEL_BLAS', '-DOPENSPS_CUBLAS']
+    elif accel_blas_choice != 'none'
+        error('accel_blas=' + accel_blas_choice + ' is not supported with nvfortran (use cublas)')
     endif
 endif
 
@@ -81,16 +102,87 @@ endif
 # the CUDA driver resolved at run time)
 pinned_sources = []
 dl_dep = []
-if accel_defs.contains('-DFSPS_PINNED')
+if accel_defs.contains('-DOPENSPS_PINNED') or accel_defs.contains('-DFSPS_PINNED')
     pinned_sources = files('src/core/opensps_pinned.c')
     dl_dep = meson.get_compiler('c').find_library('dl', required : false)
+endif
+
+# AMD GPU builds: native HIP kernels for GPU bottleneck phases
+hip_sources = []
+if accel_target == 'omp_gpu' and fc_id in ['llvm-flang', 'flang']
+    hipcc_prog = find_program('hipcc', required : get_option('accel_hip'))
+    if get_option('accel_hip') or hipcc_prog.found()
+        accel_defs += ['-DOPENSPS_HIP']
+        hip_lib = meson.get_compiler('c').find_library('amdhip64', required : true)
+        if not blas_dep.contains(hip_lib)
+            blas_dep += [hip_lib]
+        endif
+        hip_extra_args = []
+        if get_option('trace')
+            accel_defs += ['-DOPENSPS_ENABLE_TRACE', '-DOPENSPS_ROCTX']
+            roctx_lib = meson.get_compiler('c').find_library('roctx64', required : false)
+            if not roctx_lib.found()
+                roctx_lib = meson.get_compiler('c').find_library('rocprofiler-sdk-roctx', required : false)
+            endif
+            if roctx_lib.found()
+                blas_dep += [roctx_lib]
+                hip_extra_args += ['-DOPENSPS_ENABLE_TRACE', '-DOPENSPS_ROCTX']
+            endif
+        endif
+        hip_sources = [
+            custom_target('opensps_hip_kernels.o',
+                input : 'src/accel/hip/opensps_hip_kernels.hip',
+                output : 'opensps_hip_kernels.o',
+                command : [
+                    hipcc_prog,
+                    '--offload-arch=' + get_option('gpu_arch'),
+                    '-O3',
+                    '-fPIC',
+                    '-c',
+                    '@INPUT@',
+                    '-o',
+                    '@OUTPUT@'
+                ] + hip_extra_args
+            )
+        ]
+    endif
+elif accel_target == 'omp_gpu' and get_option('accel_hip')
+    # NVIDIA: the same HIP kernels, compiled by nvcc through the HIP-on-CUDA shim header in
+    # src/accel/hip/cuda_shim (it maps the few hip* calls the kernels use onto CUDA). No hipcc or
+    # ROCm needed. Opt-in: on the A100 the kernels pay off with cuBLAS (-Daccel_blas=cublas).
+    nvcc_prog = find_program('nvcc', required : true)
+    accel_defs += ['-DOPENSPS_HIP']
+    nvcc_args = []
+    foreach arch : get_option('gpu_arch').split(',')
+        sm = arch.strip().replace('cc', '')
+        nvcc_args += ['-gencode', 'arch=compute_' + sm + ',code=sm_' + sm]
+    endforeach
+    hip_sources = [
+        custom_target('opensps_hip_kernels.o',
+            input : 'src/accel/hip/opensps_hip_kernels.hip',
+            output : 'opensps_hip_kernels.o',
+            command : [nvcc_prog, '-x', 'cu'] + nvcc_args + [
+                '-O3', '-Xcompiler', '-fPIC',
+                '-I', meson.current_source_dir() / 'src/accel/hip/cuda_shim',
+                '-c', '@INPUT@', '-o', '@OUTPUT@'])
+    ]
+    accel_args += ['-cuda']
+elif get_option('trace')
+    if accel_blas_choice == 'cublas'
+        accel_defs += ['-DOPENSPS_ENABLE_TRACE', '-DOPENSPS_NVTX']
+        nvtx_lib = meson.get_compiler('c').find_library('nvToolsExt', required : false)
+        if nvtx_lib.found()
+            blas_dep += [nvtx_lib]
+        endif
+    endif
 endif
 
 # Create a dependency object that explicitly propagates these flags
 # to both compile and link stages across all consuming targets.
 accel_dep = declare_dependency(
     compile_args : accel_args + accel_defs,
-    link_args : accel_args
+    link_args : accel_args,
+    dependencies : blas_dep
 )
 
 # -----------------------------------
@@ -147,6 +239,7 @@ lib_sources = files(
     'src/bindings/c/opensps_c_api.f90',
 
     # Core FSPS Modules
+    'src/core/opensps_trace.f90',
     'src/core/opensps_cache.f90',
     'src/core/opensps_setup_lock.c',
     'src/core/opensps_constants.f90',
@@ -165,6 +258,7 @@ lib_sources = files(
     'src/io/opensps_datalib.f90',
 
     # Math Modules
+    'src/math/opensps_accel_blas.f90',
     'src/math/opensps_integration.f90',
     'src/math/opensps_interpolation.f90',
     'src/math/opensps_special_functions.f90',
@@ -198,7 +292,7 @@ lib_sources = files(
 
 # This builds libopensps.so (and handles .mod generation automatically)
 libopensps = library('opensps',
-    lib_sources + pinned_sources,
+    lib_sources + pinned_sources + hip_sources,
     version : meson.project_version(),
     soversion : '0',
     install : true,

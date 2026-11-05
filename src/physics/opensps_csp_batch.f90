@@ -104,10 +104,11 @@ module opensps_csp_batch
     use opensps_ssp_operator, only: ssp_op_mod_signature
     use opensps_ssp_batch, only: ssp_batch_age_sums_z, ssp_opset_t, ssp_batch_age_sums_adjoint, NIMFG, dot_lanes
     use opensps_sfh_tangent, only: sfh_weights_tangent, sfh_tangent_supported, NSFHT
-#ifdef FSPS_CUBLAS
-    use opensps_batch_photometry, only: blas, blas_init
-    use cublas
+#if defined(OPENSPS_ACCEL_BLAS)
+    use opensps_accel_blas, only: accel_blas_init, accel_blas_gemm, ACCEL_BLAS_OP_N
+    use, intrinsic :: iso_c_binding, only: c_loc
 #endif
+    use opensps_trace, only: opensps_trace_push, opensps_trace_pop
 
     implicit none
     private
@@ -181,7 +182,7 @@ module opensps_csp_batch
     !> Words per model of the packed parameters (PARAMS_CORE) that flang kernels read through c_f_pointer
     integer, parameter :: NPW = (storage_size(params_core()) + 63) / 64
 
-#if defined(FSPS_PINNED) && defined(OMP_TARGET)
+#if (defined(OPENSPS_PINNED) || defined(FSPS_PINNED)) && defined(OMP_TARGET)
     !> Device-to-host DMA into a page-locked buffer on a given CUDA stream (src/core/opensps_pinned.c)
     interface
         integer(c_int) function opensps_memcpy_d2h_async(dst, src, bytes, stream) bind(C, name="opensps_memcpy_d2h_async")
@@ -202,9 +203,45 @@ module opensps_csp_batch
 #endif
     end interface
 #endif
-#if defined(FSPS_PINNED) && defined(OMP_TARGET)
+#if (defined(OPENSPS_PINNED) || defined(FSPS_PINNED)) && defined(OMP_TARGET)
     !> The two copy-back streams of the OpenMP target build (created on first use; 0: none)
     integer(c_intptr_t), save :: copy_stream(2) = 0
+#endif
+
+#if defined(OPENSPS_HIP)
+    interface
+        subroutine opensps_hip_nebular_continuum_sp(n_mod, nspec, ntab, nt_neb, tab, ia, wa, dwa, newr, &
+                                                    cy, co, lns, iz, wz, iu, wu, yo, stream) &
+            bind(C, name="opensps_hip_nebular_continuum_sp")
+            import :: c_ptr, c_int
+            integer(c_int), value :: n_mod, nspec, ntab, nt_neb
+            type(c_ptr), value :: tab, ia, wa, dwa, newr, cy, co, lns, iz, wz, iu, wu, yo, stream
+        end subroutine opensps_hip_nebular_continuum_sp
+
+        subroutine opensps_hip_nebular_continuum_dp(n_mod, nspec, ntab, nt_neb, tab, ia, wa, dwa, newr, &
+                                                    cy, co, lns, iz, wz, iu, wu, yo, stream) &
+            bind(C, name="opensps_hip_nebular_continuum_dp")
+            import :: c_ptr, c_int
+            integer(c_int), value :: n_mod, nspec, ntab, nt_neb
+            type(c_ptr), value :: tab, ia, wa, dwa, newr, cy, co, lns, iz, wz, iu, wu, yo, stream
+        end subroutine opensps_hip_nebular_continuum_dp
+
+        subroutine opensps_hip_adj_nebular_continuum_sp(n_mod, nspec, ntab, ntn, nrun, tab, gw, it_tesc, ia, wa, &
+                                                        rs, rl, iz, wz, iu, wu, fabs, qzt, lref, csum, stream) &
+            bind(C, name="opensps_hip_adj_nebular_continuum_sp")
+            import :: c_ptr, c_int
+            integer(c_int), value :: n_mod, nspec, ntab, ntn, nrun
+            type(c_ptr), value :: tab, gw, it_tesc, ia, wa, rs, rl, iz, wz, iu, wu, fabs, qzt, lref, csum, stream
+        end subroutine opensps_hip_adj_nebular_continuum_sp
+
+        subroutine opensps_hip_adj_nebular_continuum_dp(n_mod, nspec, ntab, ntn, nrun, tab, gw, it_tesc, ia, wa, &
+                                                        rs, rl, iz, wz, iu, wu, fabs, qzt, lref, csum, stream) &
+            bind(C, name="opensps_hip_adj_nebular_continuum_dp")
+            import :: c_ptr, c_int
+            integer(c_int), value :: n_mod, nspec, ntab, ntn, nrun
+            type(c_ptr), value :: tab, gw, it_tesc, ia, wa, rs, rl, iz, wz, iu, wu, fabs, qzt, lref, csum, stream
+        end subroutine opensps_hip_adj_nebular_continuum_dp
+    end interface
 #endif
 
 
@@ -1307,7 +1344,7 @@ contains
         real(WP), intent(inout)          :: spec(:,:)
         logical, intent(in)              :: pinned   !< sp's host copy is page-locked
         integer :: m
-#if defined(FSPS_PINNED) && defined(OMP_TARGET)
+#if (defined(OPENSPS_PINNED) || defined(FSPS_PINNED)) && defined(OMP_TARGET)
         !> (The kernels are synchronous, so the data is ready when the copy starts; hardware note:
         !> ~16 MB chunks measured best on the A100 node, PCIe 3 host: large enough to reach the DMA
         !> rate, small enough to overlap most of the conversion)
@@ -1352,7 +1389,7 @@ contains
         do m = 1, n_mod
             spec(1:nspec, m) = real(sp(:, m), WP)
         end do
-#if defined(FSPS_PINNED) && defined(OMP_TARGET)
+#if (defined(OPENSPS_PINNED) || defined(FSPS_PINNED)) && defined(OMP_TARGET)
     contains
 
         !> Starts the DMA of columns c1:c2 of sp to its page-locked host copy on stream q.
@@ -2199,16 +2236,41 @@ contains
     !> arithmetic and loads. The arithmetic per pixel is the one of the generic kernel, in the same
     !> order, so the results are identical bit for bit.
     subroutine nebular_continuum_tiled(n_mod, nspec, ntab, nt_neb, tab, ia, wa, dwa, newr, cy, co, lns, iz, wz, iu, wu, yo)
-        integer, intent(in)     :: n_mod, nspec, ntab, nt_neb, ia(nt_neb), iz(n_mod), iu(n_mod)
-        real(WP), intent(in)    :: tab(ntab, NEBNZ, NEBNAGE, NEBNIP), wa(nt_neb), dwa(nt_neb)
-        real(KP), intent(in)    :: cy(nt_neb, n_mod), co(nt_neb, n_mod)
-        real(WP), intent(in)    :: lns(n_mod), wz(n_mod), wu(n_mod)
+        use, intrinsic :: iso_c_binding, only: c_loc, c_null_ptr
+        integer, intent(in)     :: n_mod, nspec, ntab, nt_neb
+        integer, intent(in), target :: ia(nt_neb), iz(n_mod), iu(n_mod)
+        real(WP), intent(in), target :: tab(ntab, NEBNZ, NEBNAGE, NEBNIP), wa(nt_neb), dwa(nt_neb)
+        real(KP), intent(in), target :: cy(nt_neb, n_mod), co(nt_neb, n_mod)
+        real(WP), intent(in), target :: lns(n_mod), wz(n_mod), wu(n_mod)
         logical, intent(in)     :: newr(nt_neb)
-        real(KP), intent(inout) :: yo(nspec, 2 * n_mod)
+        real(KP), intent(inout), target :: yo(nspec, 2 * n_mod)
 
         integer, parameter :: PT = 4
         real(WP), parameter :: LN10 = log(10.0_wp)
         integer  :: m, ip, npt
+#if defined(OPENSPS_HIP)
+        integer, allocatable, target :: newr_int(:)
+#endif
+
+#if defined(OPENSPS_HIP)
+        allocate(newr_int(nt_neb))
+        newr_int = merge(1, 0, newr)
+        !$omp target data map(to: newr_int) use_device_addr(tab, ia, wa, dwa, newr_int, cy, co, lns, iz, wz, iu, wu, yo)
+        if (KP == WP) then
+            call opensps_hip_nebular_continuum_dp(n_mod, nspec, ntab, nt_neb, &
+                c_loc(tab), c_loc(ia), c_loc(wa), c_loc(dwa), c_loc(newr_int), &
+                c_loc(cy), c_loc(co), c_loc(lns), c_loc(iz), c_loc(wz), c_loc(iu), c_loc(wu), &
+                c_loc(yo), c_null_ptr)
+        else
+            call opensps_hip_nebular_continuum_sp(n_mod, nspec, ntab, nt_neb, &
+                c_loc(tab), c_loc(ia), c_loc(wa), c_loc(dwa), c_loc(newr_int), &
+                c_loc(cy), c_loc(co), c_loc(lns), c_loc(iz), c_loc(wz), c_loc(iu), c_loc(wu), &
+                c_loc(yo), c_null_ptr)
+        end if
+        !$omp end target data
+        deallocate(newr_int)
+        return
+#endif
 
         npt = (nspec + PT - 1) / PT
         ! (The small work arrays are declared in a block of the loop body: flang maps `private` arrays,
@@ -2910,27 +2972,19 @@ contains
     !> Age sums of all models: yo = basis . w2 (pixels x ages . ages x 2N), plain sums over the ages
     !> at kernel precision as in compute_csp_scenario.
     subroutine age_sums(nspec, nt, n_mod, basis, w2, it_tesc, yo)
-        integer, intent(in)              :: nspec, nt, n_mod, it_tesc(:)
-        real(KP), intent(in), contiguous :: basis(:,:), w2(:,:)
-        real(KP), intent(out)            :: yo(:,:)
-#if defined(FSPS_CUBLAS)
-        integer :: istat
-
-        call blas_init()
+        integer, intent(in)                      :: nspec, nt, n_mod, it_tesc(:)
+        real(KP), intent(in), contiguous, target :: basis(:,:), w2(:,:)
+        real(KP), intent(inout), contiguous, target :: yo(:,:)
+#if defined(OPENSPS_ACCEL_BLAS)
+        call accel_blas_init()
 #ifdef OMP_TARGET
         !$omp target data use_device_addr(basis, w2, yo)
 #endif
-#ifdef KERNEL_SINGLE_PRECISION
-        istat = cublasSgemm_v2(blas, CUBLAS_OP_N, CUBLAS_OP_N, nspec, 2 * n_mod, nt, 1.0_KP, basis, nspec, &
-                               w2, nt, 0.0_KP, yo, nspec)
-#else
-        istat = cublasDgemm_v2(blas, CUBLAS_OP_N, CUBLAS_OP_N, nspec, 2 * n_mod, nt, 1.0_KP, basis, nspec, &
-                               w2, nt, 0.0_KP, yo, nspec)
-#endif
+        call accel_blas_gemm(ACCEL_BLAS_OP_N, ACCEL_BLAS_OP_N, nspec, 2 * n_mod, nt, 1.0_KP, &
+                             c_loc(basis), nspec, c_loc(w2), nt, 0.0_KP, c_loc(yo), nspec)
 #ifdef OMP_TARGET
         !$omp end target data
 #endif
-        if (istat /= 0) error stop 'compute_csp_batch: cuBLAS GEMM failed'
 #elif !defined(OMP_TARGET)
         ! CPU builds: per model, one pass over the pixels (stride 1, vectorized) for each age with
         ! a weight, as compute_csp_scenario; the register tile below would pad a batch of fewer
@@ -3590,7 +3644,7 @@ contains
         associate (g => ctx%state%batch)
         call backward_observed_frame(n_mod, nspec, nbands, fb_bar, g%bands_t, g%j_lo, g%j_hi, g%wtl, g%wl, &
                                      ctx%state%spec_lambda, zcm, total, have_s, sbar, gw, .not. lzm, dzo, &
-                                     g%bp, g%bi, g%bk, g%i_lo, g%t_obs, g%jr0)
+                                     g%bp, g%bi, g%bk, g%i_lo, g%t_obs, g%jr0, part)
         ! The IGM's short-wavelength cap: per model, the pixel whose optical depth caps the bluer ones
         if (igm) call igm_cap_pixels(n_mod, nspec, pbuf, ctx%state%spec_lambda, jmx)
         ! Velocity smoothing (the last stage of the spectrum): sigma_smooth's gradient (from the
@@ -3760,7 +3814,7 @@ contains
     !> gw(:, N + m) = spec_bar + the transposed interpolation (one thread per model, serial over the
     !> pixels: each rest-frame pixel collects from its observed-frame neighbours).
     subroutine backward_observed_frame(n_mod, nspec, nbands, fb_bar, bands_t, j_lo, j_hi, wtl, wl, lam, zcm, total, &
-                                       have_s, sbar, gw, dzon, dzo, bp, bi, bk, g_i_lo, g_t_obs, g_jr0)
+                                       have_s, sbar, gw, dzon, dzo, bp, bi, bk, g_i_lo, g_t_obs, g_jr0, part)
         integer, intent(in)     :: n_mod, nspec, nbands, j_lo(nbands), j_hi(nbands)
         real(WP), intent(in)    :: fb_bar(nbands, n_mod), lam(nspec), zcm(n_mod)
         real(KP), intent(in)    :: bands_t(nbands, nspec), wtl(nspec), wl(nspec), total(nspec, n_mod), sbar(:,:)
@@ -3774,12 +3828,12 @@ contains
         real(KP), intent(in)    :: bk(:)
         integer, intent(in)     :: g_i_lo(nspec), g_jr0(nspec)
         real(WP), intent(in)    :: g_t_obs(nspec)
+        real(KP), intent(inout) :: part(NDP, NCHG, n_mod)
 
         integer, parameter :: NZC = 32
         integer  :: m, j, il, k, c, j0, j1, nbz, i, jlo, jhi, jm
         real(WP) :: t, sz
         real(KP) :: vk
-        real(WP), allocatable :: zp(:,:)
         logical  :: zsame
         real(KP) :: gk, tk
 
@@ -3813,11 +3867,9 @@ contains
 
         ! d L / d z of the resampling (t = (lambda_j / (1 + z) - lambda_il) / (lambda_il+1 - lambda_il)):
         ! per model, partial sums over NZC contiguous blocks of pixels (one thread each), then the
-        ! blocks in order
+        ! blocks in order. We reuse the scratch buffer 'part' (which is only needed in backward_attenuation later).
         nbz = (nspec + NZC - 1) / NZC
-        allocate(zp(NZC, n_mod))
 #if defined(OMP_TARGET)
-        !$omp target data map(alloc: zp)
         !$omp target teams distribute parallel do collapse(2) private(j, j0, j1, il, t, sz)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(j, j0, j1, il, t, sz)
@@ -3840,7 +3892,7 @@ contains
                                   (-lam(j) / (1.0_wp + zcm(m))**2) / (lam(il + 1) - lam(il))
                     end do
                 end if
-                zp(c, m) = sz
+                part(c, 1, m) = real(sz, KP)
             end do
         end do
 #if defined(OMP_TARGET)
@@ -3851,13 +3903,10 @@ contains
         do m = 1, n_mod
             sz = 0.0_wp
             do c = 1, NZC
-                sz = sz + zp(c, m)
+                sz = sz + real(part(c, 1, m), WP)
             end do
             dzo(m) = sz
         end do
-#if defined(OMP_TARGET)
-        !$omp end target data
-#endif
 
         ! The resampling's transpose into the rest frame (the old column, which also takes the
         ! spectrum's own cotangent): S_bar(il) += (1 - t) fobs_bar(j), S_bar(il + 1) += t fobs_bar(j)
@@ -4447,9 +4496,9 @@ contains
         end do
         end associate
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do private(c, q, sw)
+        !$omp target teams distribute parallel do collapse(2) private(c, sw)
 #elif defined(_OPENMP)
-        !$omp parallel do private(c, q, sw)
+        !$omp parallel do collapse(2) private(c, sw)
 #endif
         do m = 1, n_mod
             do q = 1, NDP
@@ -4694,7 +4743,7 @@ contains
         real(WP), intent(inout) :: gneb(5, n_mod)   ! (4): set here; (5): added to
 
         integer  :: m, k, i, col, zl, zh, nlim
-        real(KP) :: sk, ck, term, tsum, d, bk, ek, ce, fk, dk, cd, dbk
+        real(KP) :: sk, ck, term, tsum, d, bk, ek, ce, fk, dk, cd, dbk, bkl, bkh
         real(WP) :: lk, sf, sd
         real(WP) :: sr, se, hr, he, sw, ew, dw
         real(WP), allocatable :: euv(:,:), zd(:,:)
@@ -4745,9 +4794,9 @@ contains
 #else
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(i, col, zl, zh, sk, ck, term, tsum, d, bk, lk, &
-        !$omp& ek, ce, fk, nlim, dk, cd, dbk)
+        !$omp& ek, ce, fk, nlim, dk, cd, dbk, bkl, bkh)
 #elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(i, col, zl, zh, sk, ck, term, tsum, d, bk, lk, ek, ce, fk, nlim, dk, cd, dbk)
+        !$omp parallel do collapse(2) private(i, col, zl, zh, sk, ck, term, tsum, d, bk, lk, ek, ce, fk, nlim, dk, cd, dbk, bkl, bkh)
 #endif
         do m = 1, n_mod
             do k = 1, nt
@@ -4764,39 +4813,57 @@ contains
                 cd = 0.0_KP
                 fk = 1.0_KP
                 if (k <= ntn) fk = real(fesc(m), KP)
-                zl = 1; zh = 1
-                d = 0.0_KP
                 if (zmode) then
                     zl = zlo(m); zh = zhi(m)
                     d = real(dz(m), KP)
-                end if
-                do i = 1, nspec
-                    if (zmode) then
-                        bk = (1.0_KP - d) * basis_t(k, i, zl) + d * basis_t(k, i, zh)
-                        dbk = basis_t(k, i, zh) - basis_t(k, i, zl)
-                        if (i <= nlim) dbk = dbk * fk
+                    if (nlim > 0) then
+                        do i = 1, nlim
+                            bkl = basis_t(k, i, zl)
+                            bkh = basis_t(k, i, zh)
+                            bk = (1.0_KP - d) * bkl + d * bkh
+                            dbk = (bkh - bkl) * fk
+                            term = dbk * gw(i, col) - cd
+                            tsum = dk + term
+                            cd = (tsum - dk) - term
+                            dk = tsum
+                            term = bk * gw(i, col) - ce
+                            tsum = ek + term
+                            ce = (tsum - ek) - term
+                            ek = tsum
+                        end do
+                    end if
+                    do i = nlim + 1, nspec
+                        bkl = basis_t(k, i, zl)
+                        bkh = basis_t(k, i, zh)
+                        bk = (1.0_KP - d) * bkl + d * bkh
+                        dbk = bkh - bkl
                         term = dbk * gw(i, col) - cd
                         tsum = dk + term
                         cd = (tsum - dk) - term
                         dk = tsum
-                    else
-                        bk = basis_t(k, i, 1)
-                    end if
-                    if (i <= nlim) then
-                        term = bk * gw(i, col) - ce
-                        tsum = ek + term
-                        ce = (tsum - ek) - term
-                        ek = tsum
-                    else
                         term = bk * gw(i, col) - ck
                         tsum = sk + term
                         ck = (tsum - sk) - term
                         sk = tsum
-                    end if
-                end do
-                if (zmode) then
+                    end do
                     lk = 10.0_wp**((1.0_wp - dz(m)) * blbol(k, zl) + dz(m) * blbol(k, zh))
                 else
+                    if (nlim > 0) then
+                        do i = 1, nlim
+                            bk = basis_t(k, i, 1)
+                            term = bk * gw(i, col) - ce
+                            tsum = ek + term
+                            ce = (tsum - ek) - term
+                            ek = tsum
+                        end do
+                    end if
+                    do i = nlim + 1, nspec
+                        bk = basis_t(k, i, 1)
+                        term = bk * gw(i, col) - ck
+                        tsum = sk + term
+                        ck = (tsum - sk) - term
+                        sk = tsum
+                    end do
                     lk = lum_linear(k)
                 end if
                 if (k <= ntn) euv(k, m) = real(ek, WP) * real(w2(k, col), WP)
@@ -4844,14 +4911,17 @@ contains
     subroutine backward_nebular(n_mod, nspec, nt, nzb, ntn, cont, lines, it_tesc, zlo, zhi, dz, zmode, ia, wa, iz, wz, &
                                 iu, wu, fabs, q0, lj_lo, lj_hi, nrun, rs, rl, rt, w2, ctab, ltab, gauss, gw, lbar, &
                                 nwb, gneb, qmod, qb, lgiven)
-        integer, intent(in)     :: n_mod, nspec, nt, nzb, ntn, it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
+#if defined(OPENSPS_HIP)
+        use, intrinsic :: iso_c_binding, only: c_loc, c_null_ptr, c_int
+#endif
+        integer, intent(in), target :: n_mod, nspec, nt, nzb, ntn, it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
         logical, intent(in)     :: cont, lines, zmode
-        integer, intent(in)     :: ia(max(1, ntn)), iz(n_mod), iu(n_mod)
+        integer, intent(in), target :: ia(max(1, ntn)), iz(n_mod), iu(n_mod)
         integer, intent(in)     :: lj_lo(NEMLINE), lj_hi(NEMLINE), nrun
-        integer, intent(in)     :: rs(max(1, ntn)), rl(max(1, ntn)), rt(max(1, ntn))
-        real(WP), intent(in)    :: dz(n_mod), wa(max(1, ntn)), wz(n_mod), wu(n_mod), fabs(n_mod), q0(max(1, ntn), nzb)
-        real(KP), intent(in)    :: w2(nt, 2 * n_mod), gw(nspec, 2 * n_mod)
-        real(WP), intent(in)    :: ctab(nspec, NEBNZ, NEBNAGE, NEBNIP), ltab(:,:,:,:)
+        integer, intent(in), target :: rs(max(1, ntn)), rl(max(1, ntn)), rt(max(1, ntn))
+        real(WP), intent(in), target :: dz(n_mod), wa(max(1, ntn)), wz(n_mod), wu(n_mod), fabs(n_mod), q0(max(1, ntn), nzb)
+        real(KP), intent(in), target :: w2(nt, 2 * n_mod), gw(nspec, 2 * n_mod)
+        real(WP), intent(in), target :: ctab(nspec, NEBNZ, NEBNAGE, NEBNIP), ltab(:,:,:,:)
         real(KP), intent(in)    :: gauss(:,:)
         real(KP), intent(inout) :: lbar(:,:)
         real(WP), intent(out)   :: nwb(max(1, ntn), n_mod)
@@ -4875,24 +4945,44 @@ contains
         ! (npb pixel blocks per (model, run): GPUs, enough threads to fill the device (~64k), at most 64
         ! blocks and at least 8; CPUs 8)
         integer :: npb
-        real(WP), allocatable :: qzt(:,:), lref(:,:)
+        real(WP), allocatable, target :: qzt(:,:), lref(:,:)
         real(KP), allocatable :: cpart(:,:,:,:)
+#if defined(OPENSPS_HIP)
+        real(KP), allocatable, target :: csum(:,:,:)
+#endif
 
         ! (tq: per-model metallicity, d L / d dz through Q, interpolated in log Z)
         allocate(tz(max(1, ntn), n_mod), tu(max(1, ntn), n_mod), tf(max(1, ntn), n_mod), tq(max(1, ntn), n_mod))
-        allocate(qzt(max(1, ntn), n_mod), lref(max(1, ntn), n_mod))
-#if defined(OMP_TARGET)
+        allocate(qzt(max(1, ntn), n_mod), lref(max(1, nrun), n_mod))
+#if defined(OPENSPS_HIP)
+        if (cont .and. ntn > 0) then
+            allocate(csum(5, ntn, n_mod))
+        else
+            allocate(csum(5, 1, 1))
+        end if
+        allocate(cpart(5, 1, 1, 1))
+        npb = 1
+#elif defined(OMP_TARGET)
         npb = max(8, min(64, 65536 / max(1, n_mod * nrun)))
-#else
-        npb = 8
-#endif
         if (cont .and. ntn > 0) then
             allocate(cpart(5, ntn, npb, n_mod))
         else
             allocate(cpart(5, 1, 1, 1))
         end if
+#else
+        npb = 8
+        if (cont .and. ntn > 0) then
+            allocate(cpart(5, ntn, npb, n_mod))
+        else
+            allocate(cpart(5, 1, 1, 1))
+        end if
+#endif
 #ifdef OMP_TARGET
+#if defined(OPENSPS_HIP)
+        !$omp target data map(alloc: tz, tu, tf, tq, qzt, lref, csum)
+#else
         !$omp target data map(alloc: tz, tu, tf, tq, qzt, lref, cpart)
+#endif
 #endif
         ! Q per (age, model)
 #if defined(OMP_TARGET)
@@ -4913,6 +5003,23 @@ contains
         end do
         ! The continuum's sums: one thread per (model, run, block of pixels)
         if (cont .and. ntn > 0) then
+#if defined(OPENSPS_HIP)
+            !$omp target data use_device_addr(ctab, gw, it_tesc, ia, wa, rs, rl, iz, wz, iu, wu, fabs, qzt, lref, csum)
+            if (KP == WP) then
+                call opensps_hip_adj_nebular_continuum_dp(int(n_mod, c_int), int(nspec, c_int), &
+                    int(size(ctab, 1), c_int), int(ntn, c_int), int(nrun, c_int), &
+                    c_loc(ctab), c_loc(gw), c_loc(it_tesc), c_loc(ia), c_loc(wa), &
+                    c_loc(rs), c_loc(rl), c_loc(iz), c_loc(wz), c_loc(iu), c_loc(wu), &
+                    c_loc(fabs), c_loc(qzt), c_loc(lref), c_loc(csum), c_null_ptr)
+            else
+                call opensps_hip_adj_nebular_continuum_sp(int(n_mod, c_int), int(nspec, c_int), &
+                    int(size(ctab, 1), c_int), int(ntn, c_int), int(nrun, c_int), &
+                    c_loc(ctab), c_loc(gw), c_loc(it_tesc), c_loc(ia), c_loc(wa), &
+                    c_loc(rs), c_loc(rl), c_loc(iz), c_loc(wz), c_loc(iu), c_loc(wu), &
+                    c_loc(fabs), c_loc(qzt), c_loc(lref), c_loc(csum), c_null_ptr)
+            end if
+            !$omp end target data
+#else
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do collapse(3) private(t, lnq)
 #elif defined(_OPENMP)
@@ -4935,6 +5042,7 @@ contains
                     end do
                 end do
             end do
+#endif
         end if
         ! The lines' cotangents (profiles transposed): one thread per (line, young / old column), over
         ! the pixels whose profile lists include the line (lj_lo(i) to lj_hi(i)), in
@@ -5020,6 +5128,11 @@ contains
                         qf = exp(lnq - lref(rt(t), m))
                         s4 = 0.0_wp
                         s5 = 0.0_wp
+#if defined(OPENSPS_HIP)
+                        s1 = s1 + qf * real(csum(1, t, m), WP)
+                        s4 = real(csum(2, t, m), WP) * (1.0_wp - w1) + real(csum(3, t, m), WP) * w1
+                        s5 = real(csum(4, t, m), WP) * (1.0_wp - w1) + real(csum(5, t, m), WP) * w1
+#else
                         do k = 1, npb
                             s1 = s1 + qf * real(cpart(1, t, k, m), WP)
                         end do
@@ -5027,6 +5140,7 @@ contains
                             s4 = s4 + real(cpart(2, t, k, m), WP) * (1.0_wp - w1) + real(cpart(3, t, k, m), WP) * w1
                             s5 = s5 + real(cpart(4, t, k, m), WP) * (1.0_wp - w1) + real(cpart(5, t, k, m), WP) * w1
                         end do
+#endif
                         s2 = s2 + qf * LN10 * s4
                         s3 = s3 + qf * LN10 * s5
                     end if

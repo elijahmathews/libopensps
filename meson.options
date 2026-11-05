@@ -20,7 +20,16 @@ option('gpu_arch', type: 'string', value: 'cc80,cc90',
   description: 'Offload targets for -Daccel=omp_gpu: nvfortran -gpu= (cc80 = A100, cc90 = H100; cc70 for V100 with HPC SDK < 26) or an LLVM offload arch (gfx1103, gfx942)')
 
 option('cublas', type: 'boolean', value: false,
-  description: 'With -Daccel=omp_gpu and nvfortran: run the batched CSP matrix products through cuBLAS (NVIDIA only; the portable loops are the default)')
+  description: 'Deprecated alias for -Daccel_blas=cublas')
+
+option('accel_blas', type: 'combo', choices: ['none', 'cublas', 'rocblas', 'hipblas'], value: 'none',
+  description: 'Accelerated BLAS library for GPU matrix products: none (default portable loops), cublas (NVIDIA), rocblas (AMD ROCm), hipblas (AMD/NVIDIA HIP)')
+
+option('accel_hip', type: 'boolean', value: false,
+  description: 'Enable the native HIP kernels for GPU bottleneck phases: hipcc on AMD ROCm (automatic when hipcc is found), nvcc through a HIP-on-CUDA shim on NVIDIA (opt-in, with nvfortran)')
+
+option('trace', type: 'boolean', value: false,
+  description: 'Enable ROCTX / NVTX range tracing markers for GPU profiling')
 
 option('tests', type: 'boolean', value: true,
   description: 'Build the test and benchmark programs (off when built as a subproject of a binding package)')
