@@ -3628,7 +3628,7 @@ contains
         associate (g => ctx%state%batch)
         call backward_observed_frame(n_mod, nspec, nbands, fb_bar, g%bands_t, g%j_lo, g%j_hi, g%wtl, g%wl, &
                                      ctx%state%spec_lambda, zcm, total, have_s, sbar, gw, .not. lzm, dzo, &
-                                     g%bp, g%bi, g%bk, g%i_lo, g%t_obs, g%jr0)
+                                     g%bp, g%bi, g%bk, g%i_lo, g%t_obs, g%jr0, part)
         ! The IGM's short-wavelength cap: per model, the pixel whose optical depth caps the bluer ones
         if (igm) call igm_cap_pixels(n_mod, nspec, pbuf, ctx%state%spec_lambda, jmx)
         ! Velocity smoothing (the last stage of the spectrum): sigma_smooth's gradient (from the
@@ -3798,7 +3798,7 @@ contains
     !> gw(:, N + m) = spec_bar + the transposed interpolation (one thread per model, serial over the
     !> pixels: each rest-frame pixel collects from its observed-frame neighbours).
     subroutine backward_observed_frame(n_mod, nspec, nbands, fb_bar, bands_t, j_lo, j_hi, wtl, wl, lam, zcm, total, &
-                                       have_s, sbar, gw, dzon, dzo, bp, bi, bk, g_i_lo, g_t_obs, g_jr0)
+                                       have_s, sbar, gw, dzon, dzo, bp, bi, bk, g_i_lo, g_t_obs, g_jr0, part)
         integer, intent(in)     :: n_mod, nspec, nbands, j_lo(nbands), j_hi(nbands)
         real(WP), intent(in)    :: fb_bar(nbands, n_mod), lam(nspec), zcm(n_mod)
         real(KP), intent(in)    :: bands_t(nbands, nspec), wtl(nspec), wl(nspec), total(nspec, n_mod), sbar(:,:)
@@ -3812,12 +3812,12 @@ contains
         real(KP), intent(in)    :: bk(:)
         integer, intent(in)     :: g_i_lo(nspec), g_jr0(nspec)
         real(WP), intent(in)    :: g_t_obs(nspec)
+        real(KP), intent(inout) :: part(NDP, NCHG, n_mod)
 
         integer, parameter :: NZC = 32
         integer  :: m, j, il, k, c, j0, j1, nbz, i, jlo, jhi, jm
         real(WP) :: t, sz
         real(KP) :: vk
-        real(WP), allocatable :: zp(:,:)
         logical  :: zsame
         real(KP) :: gk, tk
 
@@ -3851,11 +3851,9 @@ contains
 
         ! d L / d z of the resampling (t = (lambda_j / (1 + z) - lambda_il) / (lambda_il+1 - lambda_il)):
         ! per model, partial sums over NZC contiguous blocks of pixels (one thread each), then the
-        ! blocks in order
+        ! blocks in order. We reuse the scratch buffer 'part' (which is only needed in backward_attenuation later).
         nbz = (nspec + NZC - 1) / NZC
-        allocate(zp(NZC, n_mod))
 #if defined(OMP_TARGET)
-        !$omp target data map(alloc: zp)
         !$omp target teams distribute parallel do collapse(2) private(j, j0, j1, il, t, sz)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(j, j0, j1, il, t, sz)
@@ -3878,7 +3876,7 @@ contains
                                   (-lam(j) / (1.0_wp + zcm(m))**2) / (lam(il + 1) - lam(il))
                     end do
                 end if
-                zp(c, m) = sz
+                part(c, 1, m) = real(sz, KP)
             end do
         end do
 #if defined(OMP_TARGET)
@@ -3889,13 +3887,10 @@ contains
         do m = 1, n_mod
             sz = 0.0_wp
             do c = 1, NZC
-                sz = sz + zp(c, m)
+                sz = sz + real(part(c, 1, m), WP)
             end do
             dzo(m) = sz
         end do
-#if defined(OMP_TARGET)
-        !$omp end target data
-#endif
 
         ! The resampling's transpose into the rest frame (the old column, which also takes the
         ! spectrum's own cotangent): S_bar(il) += (1 - t) fobs_bar(j), S_bar(il + 1) += t fobs_bar(j)
