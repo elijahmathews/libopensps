@@ -48,10 +48,13 @@ jobs:
           VERSION=$(grep -i '^Version:' packaging/opensps.spec | awk '{print $2}')
           tar -czf ~/rpmbuild/SOURCES/opensps-$VERSION.tar.gz --transform "s|^\.|opensps-$VERSION|" --exclude='.git' .
           rpmbuild -ba ~/rpmbuild/SPECS/opensps.spec
-      - name: Install and check the library
+      - name: Install and verify the library
         run: |
-          dnf install -y ~/rpmbuild/RPMS/x86_64/*.rpm
+          dnf install -y ~/rpmbuild/RPMS/x86_64/*.rpm gcc pkgconf-pkg-config
           ldconfig -p | grep libopensps
+          pkg-config --cflags --libs opensps
+          gcc tests/test_c_smoke.c $(pkg-config --cflags --libs opensps) -lm -o /tmp/test_installed_opensps
+          OPENSPS_DATA_HOME=$PWD/tests/data/opensps-test-data /tmp/test_installed_opensps
       - uses: actions/upload-artifact@v7
         with:
           name: fedora-rpms
@@ -74,11 +77,14 @@ jobs:
         run: |
           chmod +x debian/rules
           dpkg-buildpackage -us -uc -b
-      - name: Install and check the library
+      - name: Install and verify the library
         run: |
           sudo apt-get install -y ../libopensps0_*.deb ../libopensps-dev_*.deb
           sudo ldconfig
           ldconfig -p | grep libopensps
+          pkg-config --cflags --libs opensps
+          gcc tests/test_c_smoke.c $(pkg-config --cflags --libs opensps) -lm -o /tmp/test_installed_opensps
+          OPENSPS_DATA_HOME=$PWD/tests/data/opensps-test-data /tmp/test_installed_opensps
           mkdir -p dist
           mv ../libopensps0_*.deb ../libopensps-dev_*.deb ../opensps_*.buildinfo ../opensps_*.changes dist/
       - uses: actions/upload-artifact@v7
