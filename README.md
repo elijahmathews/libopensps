@@ -58,15 +58,16 @@ What it adds to FSPS:
 - **Free IMF parameters per model.** SSP operators decouple the isochrones from the IMF integrals,
   so IMF slopes, characteristic masses and bounds can vary from galaxy to galaxy within a batch.
 - **Optional FP32 kernels.** `-Dkernel_precision=single` runs the per-pixel kernels in single
-  precision (setup, isochrones and weights stay in double). It reproduces the FP64 results to about
-  1e-6 and is much faster on GPUs with slow FP64. See [doc/MIXED_PRECISION.md](doc/MIXED_PRECISION.md).
+  precision (setup, isochrones and weights stay in double). It is much faster on GPUs with slow
+  FP64, and the regression suite checks it against the FP64 references. See
+  [doc/MIXED_PRECISION.md](doc/MIXED_PRECISION.md) for the accuracy evidence.
 - **Thread-safe contexts.** Independent `Context` objects replace FSPS's global state, so several
   setups can live in one process.
 - **A stable C API** (`include/opensps.h`) that Python, C++, Julia, Rust and others can bind to.
 
 On the GPU, the batched forward model costs microseconds to tens of microseconds per model, and the
-GPU and CPU builds agree to better than 1e-9 (FP64) and about 1e-6 (FP32) over the regression case
-matrix. Configurations and measurements are in [doc/GPU_RESULTS.md](doc/GPU_RESULTS.md).
+GPU builds are checked against the CPU build over the case matrix in both precisions.
+Configurations and measurements are in [doc/GPU_RESULTS.md](doc/GPU_RESULTS.md).
 
 ## Quick start
 
@@ -107,7 +108,7 @@ Supported platforms and compilers, in order of how much they are used and tested
 | Target | Compiler | How it is tested |
 |---|---|---|
 | **AMD GPU** (`gfx1201`, Radeon AI PRO R9700) | LLVM flang 22 with ROCm | Developed and run on real hardware |
-| **NVIDIA GPU** (`cc80`, A100) | NVIDIA HPC SDK `nvfortran` | Run on real hardware; `cc90` (H100) is a default target but has not been run on hardware |
+| **NVIDIA GPU** (`cc80`, A100) | NVIDIA HPC SDK `nvfortran` | Run on real hardware |
 | Linux x86-64 CPU | gfortran | CI, plus local runs |
 | Linux arm64 CPU | gfortran | CI only |
 | macOS arm64 CPU | gfortran | CI only |
@@ -128,7 +129,7 @@ Three options control GPU builds, and **we recommend using all three** for GPU e
 | `-Daccel_hip=true` | `false` (default), `true` | Builds the native HIP kernels for the bottleneck phases: `hipcc` on AMD ROCm, `nvcc` through a small HIP-on-CUDA shim on NVIDIA. Needs `hipcc` (AMD) or `nvcc` (NVIDIA) at build time. |
 
 `-Dgpu_arch=` selects the device target: an LLVM offload architecture (`gfx1201`, `gfx942`) for
-flang, or the `nvfortran -gpu=` value (`cc80` for the A100, `cc90` for the H100) for NVIDIA. At run
+flang, or the `nvfortran -gpu=` value (`cc80` for the A100) for NVIDIA. At run
 time, set `OMP_TARGET_OFFLOAD=MANDATORY` so that a missing or unusable GPU stops the program
 instead of silently running on the host.
 
@@ -199,8 +200,7 @@ request; the unit suite needs no data, and the regression suite needs `OPENSPS_D
 Tagged releases attach tarballs (CPU, NVIDIA `cc80`, AMD `gfx1201`) built by
 [`release.yml`](.github/workflows/release.yml), plus RPM and DEB packages and a source archive.
 The prebuilt libraries need a recent Linux (glibc 2.34 or newer for the NVIDIA build) and, for the
-GPU builds, the matching vendor runtime and driver. No release has been published yet, so for now,
-build from source.
+GPU builds, the matching vendor runtime and driver.
 
 ### Installing and linking
 
