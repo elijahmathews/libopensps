@@ -23,9 +23,9 @@ delete it here.
 - **Accuracy:** FP64 GPU = CPU to 1.6e-11 per pixel; FP32 kernels reproduce FP64 to ~4e-7
   per pixel and 5e-7 mag. Legacy FSPS parity is checked case by case
   (`tools/legacy_parity`).
-- **Portability:** OpenMP target on NVIDIA (nvfortran; all suites pass on the A100). LLVM
-  flang builds the OpenMP target path for AMD (gfx1103) and passes the suites with offload
-  disabled; offload on AMD GPUs does not work yet (priority 5, future work).
+- **Portability:** OpenMP target offload on AMD (LLVM flang with ROCm; gfx1201, the R9700: unit and
+  regression suites pass with `OMP_TARGET_OFFLOAD=MANDATORY`, FP64 and FP32) and on NVIDIA
+  (nvfortran; cc80, the A100: all suites pass). Other GPUs, macOS, arm64 and ifx build in CI only.
 
 ## Cutover to libopensps
 
