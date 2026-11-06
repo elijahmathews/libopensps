@@ -193,7 +193,6 @@ jobs:
         run: |
           LIBFILE=$(find staging/usr/local -name "libopensps.so.*" -type f | head -n 1)
           echo "Found library: $LIBFILE"
-          file "$LIBFILE"
           nm -D "$LIBFILE" | grep -E "opensps_context_create|opensps_get_driver_version"
       - uses: actions/upload-artifact@v7
         with:
@@ -250,7 +249,6 @@ jobs:
         run: |
           LIBFILE=$(find staging/usr/local -name "libopensps.so.*" -type f | head -n 1)
           echo "Found library: $LIBFILE"
-          file "$LIBFILE"
           nm -D "$LIBFILE" | grep -E "opensps_context_create|opensps_get_driver_version"
       - uses: actions/upload-artifact@v7
         with:
