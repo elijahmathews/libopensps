@@ -121,7 +121,8 @@ Commit messages and pull request titles follow
    release by a maintainer.
 4. Open the pull request against `main` with a Conventional Commits title. CI must be green;
    say in the description what you ran locally (builds, suites, counts).
-5. A maintainer reviews and squash-merges.
+5. A maintainer reviews and squash-merges. Maintainers: the release procedure is in
+   [doc/RELEASING.md](doc/RELEASING.md).
 
 ## Reporting bugs / requesting features
 

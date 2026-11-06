@@ -330,6 +330,7 @@ The regression suite compares against stored reference outputs from the data rel
 | [doc/GPU_PLAN.md](doc/GPU_PLAN.md), [doc/GPU_RESULTS.md](doc/GPU_RESULTS.md) | GPU builds, rules learned and measurements |
 | [doc/MIXED_PRECISION.md](doc/MIXED_PRECISION.md) | The FP32 kernels and their accuracy |
 | [doc/ROADMAP.md](doc/ROADMAP.md) | What comes next |
+| [doc/RELEASING.md](doc/RELEASING.md) | How a release is made (for maintainers) |
 | [doc/MANUAL.pdf](doc/MANUAL.pdf) | The legacy FSPS manual (parameters and physics) |
 | [AGENTS.md](AGENTS.md) | Rules for contributors and coding agents |
 

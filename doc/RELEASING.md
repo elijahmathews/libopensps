@@ -1,0 +1,65 @@
+# Releasing OpenSPS
+
+How a maintainer cuts a release of `libopensps`. Pushing a `v*` tag publishes a GitHub release, so
+the steps before it exist to make that push the last thing that can go wrong.
+
+## Where the version lives
+
+`meson.build` (`project(..., version : 'X.Y.Z')`) is the single source of truth. The C header
+macros (`OPENSPS_API_VERSION_*`, `OPENSPS_VERSION_STRING`), the generated Fortran version module,
+the tarball names and the version badge in the README all derive from it. Three files cannot
+derive it and are checked instead by `tools/check_versions.py` (CI runs it as `version-sync`, and
+the release workflow runs it against the pushed tag):
+
+| File | What to change |
+|---|---|
+| `CITATION.cff` | `version: "X.Y.Z"` |
+| `packaging/opensps.spec` | `Version:` and a new `%changelog` entry |
+| `debian/changelog` | a new top entry, `opensps (X.Y.Z-1) unstable; urgency=medium` |
+
+Between releases `main` keeps the version of the last release; the version changes in the
+release-preparation pull request (or in the first pull request that changes the API), not before.
+`opensps-python` accepts a range of C API versions (`MIN_C_API_VERSION` and `MAX_C_API_VERSION` in
+its `_version.py`); widen it there if the new version falls outside it.
+
+## Procedure
+
+1. **Prepare.** Merge everything that belongs in the release. In one pull request, bump the version
+   in `meson.build` and the three files above, then run `python3 tools/check_versions.py`. CI on
+   the merge commit on `main` must be green (the nightly suites too, if the release touches
+   anything they cover).
+2. **Dry run on `main`.** In GitHub, Actions, Release, "Run workflow" on `main`, with `dry_run` left
+   at `true` and `tag_name` set to the tag you are about to push (its default is only a
+   placeholder). It builds the source archive, RPMs, DEBs and the CPU, NVIDIA (`cc80`) and AMD
+   (`gfx1201`) tarballs and stages them as the `all-release-assets` artifact without publishing
+   anything. Download the tarballs and try at least the one for your own hardware: the NVIDIA
+   tarball needs glibc 2.34 or newer, so on an older host run it in a container.
+3. **Tag the merge commit on `main`.** Use an annotated tag and push only the tag:
+
+   ```sh
+   git switch main && git pull --ff-only
+   git tag -a vX.Y.Z -m "OpenSPS X.Y.Z"
+   git push origin vX.Y.Z
+   ```
+
+   The Release workflow checks that the tag matches `meson.build` and the files above, builds
+   everything again, writes checksums and publishes the release with generated notes.
+   **Do not also run `gh release create`:** the workflow creates the release, and a second one
+   fails or races it.
+4. **After the release.** Check the release page (assets, checksums), edit the notes to list known
+   issues, and tag the `opensps-python` release that goes with it if it has one.
+
+## If a tag is wrong
+
+Release tags are protected by a repository ruleset ("Release tag protection"): tags matching `v*`
+cannot be deleted or moved. This is deliberate. Anyone who downloaded a release has files that
+belong to that tag, so a corrected release should be a new version (`X.Y.Z+1`), not a re-pushed
+tag. If you really must change one (for example, a tag pushed to the wrong commit before anything
+was published), a repository administrator can disable the ruleset in the repository settings,
+fix the tag, and enable it again.
+
+## Fixes to an older release
+
+Create a maintenance branch from the tag when you need one, not before:
+`git switch -c release/X.Y vX.Y.Z`. Cherry-pick the fix there, bump the patch version in the same
+places as above, and tag it from that branch.
