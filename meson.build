@@ -250,6 +250,13 @@ opensps_version_h = configure_file(
     install_dir : get_option('includedir')
 )
 
+# The same version as a Fortran module (the environment banner)
+opensps_version_f90 = configure_file(
+    input : 'src/core/opensps_version.f90.in',
+    output : 'opensps_version.f90',
+    configuration : version_conf
+)
+
 # ===================================
 # Source Definitions
 # ===================================
@@ -306,6 +313,7 @@ lib_sources = files(
     'src/spectra/opensps_spectral_indices.f90',
     'src/spectra/opensps_spectral_library.f90',
 )
+lib_sources += [opensps_version_f90]   # generated from the project version
 
 # ===================================
 # Main Library Target

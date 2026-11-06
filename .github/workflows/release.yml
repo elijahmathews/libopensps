@@ -36,6 +36,13 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+      - name: Check that the tag and the version files agree with meson.build
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            python3 tools/check_versions.py "${{ github.ref_name }}"
+          else
+            python3 tools/check_versions.py
+          fi
       - name: Install build tools
         run: |
           sudo apt-get update -q
