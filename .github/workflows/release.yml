@@ -171,7 +171,9 @@ jobs:
         run: |
           VERSION=$(grep -m1 "version :" meson.build | cut -d"'" -f2)
           meson setup build --buildtype=release \
-            -Daccel=omp_gpu -Dgpu_arch=cc80 -Dcpu_baseline=x86-64-v3 -Dtests=false --prefix=/usr/local
+            -Daccel=omp_gpu -Dgpu_arch=cc80 \
+            -Daccel_hip=true -Daccel_blas=cublas \
+            -Dcpu_baseline=x86-64-v3 -Dtests=false --prefix=/usr/local
           meson compile -C build
           DESTDIR=$PWD/staging meson install -C build
           TAR_DIR="libopensps-${VERSION}-linux-x86_64-cuda-cc80"
@@ -181,9 +183,9 @@ jobs:
             "libopensps (NVIDIA GPU Build - cc80)" \
             "=====================================" \
             "Target: NVIDIA GPU Compute Capability 8.0 (cc80)" \
-            "Acceleration: OpenMP Target Offload (-Daccel=omp_gpu -Dgpu_arch=cc80)" \
-            "Compiler: NVIDIA HPC SDK (nvfortran / nvc 26.1)" \
-            "Runtime Requirements: NVIDIA GPU Driver (CUDA 12.0+ compatible), NVIDIA HPC OpenMP runtime (libnvomp.so)" \
+            "Acceleration: OpenMP Target Offload + Native HIP Kernels + cuBLAS" \
+            "Compiler: NVIDIA HPC SDK (nvfortran / nvc / nvcc 26.1)" \
+            "Runtime Requirements: NVIDIA GPU Driver (CUDA 12.0+ compatible), NVIDIA HPC OpenMP runtime (libnvomp.so), cuBLAS (libcublas.so)" \
             > "$TAR_DIR/README.txt"
           tar -czvf "${TAR_DIR}.tar.gz" "$TAR_DIR"
         env:
@@ -223,7 +225,7 @@ jobs:
           LA="['$D','-Xoffload-linker','--library-path=$AMDHSA_DIR']"
           
           FC=flang CC=clang meson setup build --buildtype=release \
-            -Daccel=omp_gpu -Dgpu_arch=gfx1201 -Dtests=false \
+            -Daccel=omp_gpu -Dgpu_arch=gfx1201 -Daccel_hip=true -Dtests=false \
             -Dfortran_args="$D" -Dc_args="$D" \
             -Dfortran_link_args="$LA" -Dc_link_args="$LA" \
             --prefix=/usr/local
@@ -240,8 +242,8 @@ jobs:
             "libopensps (AMD ROCm GPU Build - gfx1201)" \
             "=========================================" \
             "Target: AMD GPU (gfx1201)" \
-            "Acceleration: OpenMP Target Offload (-Daccel=omp_gpu -Dgpu_arch=gfx1201)" \
-            "Compiler: LLVM flang / clang" \
+            "Acceleration: OpenMP Target Offload + Native HIP Kernels" \
+            "Compiler: LLVM flang / clang / hipcc" \
             "Runtime Requirements: AMD ROCm 7.x runtime, amdgpu driver, libamdhip64.so" \
             > "$TAR_DIR/README.txt"
           tar -czvf "${TAR_DIR}.tar.gz" "$TAR_DIR"
