@@ -130,14 +130,14 @@ jobs:
           TAR_DIR="libopensps-${VERSION}-linux-x86_64-cpu"
           mkdir -p "$TAR_DIR"
           cp -r staging/usr/local/* "$TAR_DIR/"
-          cat << 'EOF' > "$TAR_DIR/README.txt"
-libopensps (Generic CPU OpenMP Build)
-=====================================
-Target: Generic x86-64 CPU (SSE2 baseline)
-Compiler: GNU Fortran (gfortran)
-Threading: OpenMP CPU parallelization (-Denable_openmp=true)
-Runtime Requirements: libgomp.so.1, glibc >= 2.35
-EOF
+          printf "%s\n" \
+            "libopensps (Generic CPU OpenMP Build)" \
+            "=====================================" \
+            "Target: Generic x86-64 CPU (SSE2 baseline)" \
+            "Compiler: GNU Fortran (gfortran)" \
+            "Threading: OpenMP CPU parallelization (-Denable_openmp=true)" \
+            "Runtime Requirements: libgomp.so.1, glibc >= 2.35" \
+            > "$TAR_DIR/README.txt"
           tar -czvf "${TAR_DIR}.tar.gz" "$TAR_DIR"
       - name: Smoke test staged library
         run: |
@@ -177,14 +177,14 @@ EOF
           TAR_DIR="libopensps-${VERSION}-linux-x86_64-cuda-cc80"
           mkdir -p "$TAR_DIR"
           cp -r staging/usr/local/* "$TAR_DIR/"
-          cat << 'EOF' > "$TAR_DIR/README.txt"
-libopensps (NVIDIA GPU Build - cc80 / A100)
-===========================================
-Target: NVIDIA GPU Compute Capability 8.0 (Ampere A100)
-Acceleration: OpenMP Target Offload (-Daccel=omp_gpu -Dgpu_arch=cc80)
-Compiler: NVIDIA HPC SDK (nvfortran / nvc 26.1)
-Runtime Requirements: NVIDIA GPU Driver (CUDA 12.0+ compatible), NVIDIA HPC OpenMP runtime (libnvomp.so)
-EOF
+          printf "%s\n" \
+            "libopensps (NVIDIA GPU Build - cc80 / A100)" \
+            "===========================================" \
+            "Target: NVIDIA GPU Compute Capability 8.0 (Ampere A100)" \
+            "Acceleration: OpenMP Target Offload (-Daccel=omp_gpu -Dgpu_arch=cc80)" \
+            "Compiler: NVIDIA HPC SDK (nvfortran / nvc 26.1)" \
+            "Runtime Requirements: NVIDIA GPU Driver (CUDA 12.0+ compatible), NVIDIA HPC OpenMP runtime (libnvomp.so)" \
+            > "$TAR_DIR/README.txt"
           tar -czvf "${TAR_DIR}.tar.gz" "$TAR_DIR"
         env:
           FC: nvfortran
@@ -236,14 +236,14 @@ EOF
           TAR_DIR="libopensps-${VERSION}-linux-x86_64-rocm-gfx1201"
           mkdir -p "$TAR_DIR"
           cp -r staging/usr/local/* "$TAR_DIR/"
-          cat << 'EOF' > "$TAR_DIR/README.txt"
-libopensps (AMD ROCm GPU Build - gfx1201 / Radeon AI Pro R9700)
-===============================================================
-Target: AMD RDNA4 (gfx1201 / AMD Radeon AI PRO R9700)
-Acceleration: OpenMP Target Offload (-Daccel=omp_gpu -Dgpu_arch=gfx1201)
-Compiler: LLVM flang / clang
-Runtime Requirements: AMD ROCm 7.x runtime, amdgpu driver, libamdhip64.so
-EOF
+          printf "%s\n" \
+            "libopensps (AMD ROCm GPU Build - gfx1201 / Radeon AI Pro R9700)" \
+            "===============================================================" \
+            "Target: AMD RDNA4 (gfx1201 / AMD Radeon AI PRO R9700)" \
+            "Acceleration: OpenMP Target Offload (-Daccel=omp_gpu -Dgpu_arch=gfx1201)" \
+            "Compiler: LLVM flang / clang" \
+            "Runtime Requirements: AMD ROCm 7.x runtime, amdgpu driver, libamdhip64.so" \
+            > "$TAR_DIR/README.txt"
           tar -czvf "${TAR_DIR}.tar.gz" "$TAR_DIR"
       - name: Verify symbols and SONAME
         run: |
@@ -269,7 +269,7 @@ EOF
     steps:
       - uses: actions/checkout@v7
       - name: Download all built artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: staging-assets
           merge-multiple: true
