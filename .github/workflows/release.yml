@@ -142,9 +142,9 @@ jobs:
       - name: Smoke test staged library
         run: |
           PKG_PATH=$(find $PWD/staging/usr/local -name opensps.pc -exec dirname {} \;)
-          PKG_CONFIG_PATH="$PKG_PATH" pkg-config --cflags --libs opensps
-          CFLAGS=$(PKG_CONFIG_PATH="$PKG_PATH" pkg-config --cflags opensps)
-          LIBS=$(PKG_CONFIG_PATH="$PKG_PATH" pkg-config --libs opensps)
+          PKG_CONFIG_PATH="$PKG_PATH" pkg-config --define-variable=prefix=$PWD/staging/usr/local --cflags --libs opensps
+          CFLAGS=$(PKG_CONFIG_PATH="$PKG_PATH" pkg-config --define-variable=prefix=$PWD/staging/usr/local --cflags opensps)
+          LIBS=$(PKG_CONFIG_PATH="$PKG_PATH" pkg-config --define-variable=prefix=$PWD/staging/usr/local --libs opensps)
           gcc tests/test_c_smoke.c $CFLAGS $LIBS -lm -o /tmp/test_c_smoke
           LIBDIR=$(find staging/usr/local -type f -name 'libopensps.so.*' -exec dirname {} \; | head -n 1)
           LD_LIBRARY_PATH=$PWD/$LIBDIR OPENSPS_DATA_HOME=$PWD/tests/data/opensps-test-data /tmp/test_c_smoke
@@ -155,7 +155,7 @@ jobs:
           retention-days: 7
 
   build-cuda-tarball:
-    name: NVIDIA GPU Tarball (cc80 / A100)
+    name: NVIDIA GPU Tarball (cc80)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -178,9 +178,9 @@ jobs:
           mkdir -p "$TAR_DIR"
           cp -r staging/usr/local/* "$TAR_DIR/"
           printf "%s\n" \
-            "libopensps (NVIDIA GPU Build - cc80 / A100)" \
-            "===========================================" \
-            "Target: NVIDIA GPU Compute Capability 8.0 (Ampere A100)" \
+            "libopensps (NVIDIA GPU Build - cc80)" \
+            "=====================================" \
+            "Target: NVIDIA GPU Compute Capability 8.0 (cc80)" \
             "Acceleration: OpenMP Target Offload (-Daccel=omp_gpu -Dgpu_arch=cc80)" \
             "Compiler: NVIDIA HPC SDK (nvfortran / nvc 26.1)" \
             "Runtime Requirements: NVIDIA GPU Driver (CUDA 12.0+ compatible), NVIDIA HPC OpenMP runtime (libnvomp.so)" \
@@ -201,10 +201,10 @@ jobs:
           retention-days: 7
 
   build-rocm-tarball:
-    name: AMD ROCm Tarball (gfx1201 / R9700)
+    name: AMD ROCm Tarball (gfx1201)
     runs-on: ubuntu-24.04
     container:
-      image: fedora:latest
+      image: fedora:44
     steps:
       - uses: actions/checkout@v7
       - name: Install dependencies
@@ -237,9 +237,9 @@ jobs:
           mkdir -p "$TAR_DIR"
           cp -r staging/usr/local/* "$TAR_DIR/"
           printf "%s\n" \
-            "libopensps (AMD ROCm GPU Build - gfx1201 / Radeon AI Pro R9700)" \
-            "===============================================================" \
-            "Target: AMD RDNA4 (gfx1201 / AMD Radeon AI PRO R9700)" \
+            "libopensps (AMD ROCm GPU Build - gfx1201)" \
+            "=========================================" \
+            "Target: AMD GPU (gfx1201)" \
             "Acceleration: OpenMP Target Offload (-Daccel=omp_gpu -Dgpu_arch=gfx1201)" \
             "Compiler: LLVM flang / clang" \
             "Runtime Requirements: AMD ROCm 7.x runtime, amdgpu driver, libamdhip64.so" \
