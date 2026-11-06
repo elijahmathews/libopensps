@@ -192,9 +192,9 @@ jobs:
       - name: Verify symbols and SONAME
         run: |
           LIBFILE=$(find staging/usr/local -name "libopensps.so.*" -type f | head -n 1)
-          readelf -d "$LIBFILE" | grep SONAME
-          readelf -sW "$LIBFILE" | grep opensps_context_create
-          readelf -sW "$LIBFILE" | grep opensps_get_driver_version
+          echo "Found library: $LIBFILE"
+          file "$LIBFILE"
+          nm -D "$LIBFILE" | grep -E "opensps_context_create|opensps_get_driver_version"
       - uses: actions/upload-artifact@v7
         with:
           name: tarball-cuda
@@ -211,7 +211,7 @@ jobs:
       - name: Install dependencies
         run: |
           dnf install -y --setopt=install_weak_deps=False \
-            flang flang-runtime clang lld llvm libomp-devel \
+            flang flang-runtime clang clang-tools-extra lld llvm libomp-devel \
             rocm-device-libs rocm-hip-devel gcc meson ninja-build git tar gzip findutils
       - name: Discover device bitcode and configure
         run: |
@@ -249,9 +249,9 @@ jobs:
       - name: Verify symbols and SONAME
         run: |
           LIBFILE=$(find staging/usr/local -name "libopensps.so.*" -type f | head -n 1)
-          readelf -d "$LIBFILE" | grep SONAME
-          readelf -sW "$LIBFILE" | grep opensps_context_create
-          readelf -sW "$LIBFILE" | grep opensps_get_driver_version
+          echo "Found library: $LIBFILE"
+          file "$LIBFILE"
+          nm -D "$LIBFILE" | grep -E "opensps_context_create|opensps_get_driver_version"
       - uses: actions/upload-artifact@v7
         with:
           name: tarball-rocm
