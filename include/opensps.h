@@ -5,17 +5,7 @@
 extern "C" {
 #endif
 
-// ----------------------------------------------------------------------------
-// API version (also returned by opensps_get_driver_version). The minor number grows when entry
-// points are added; the major number changes only for incompatible changes. 1.1 added the
-// context grids (lambda, ages, zlegend, emlambda, filter data), the tabular SFH and the single
-// CSP (opensps_context_compute_csp / opensps_context_get_csp). 1.2 added the batch's young and old
-// components (opensps_context_compute_csp_batch_parts). 2.0 dropped light-weighted ages:
-// setting compute_light_ages to a value other than 0 returns OPENSPS_ERR_UNSUPPORTED_PARAM.
-// ----------------------------------------------------------------------------
-#define OPENSPS_API_VERSION_MAJOR 2
-#define OPENSPS_API_VERSION_MINOR 1
-#define OPENSPS_API_VERSION_PATCH 0
+#include "opensps_version.h"
 
 // ----------------------------------------------------------------------------
 // Batch Gradient Parameter Indices (params_bar rows, 0-indexed in C)
@@ -103,6 +93,7 @@ void opensps_get_last_error(int *status, char *message, int message_len);
 void opensps_lock(int *status);
 void opensps_unlock(int *status);
 void opensps_get_driver_version(int *major, int *minor, int *patch);
+const char *opensps_get_version_string(void);
 void opensps_get_nbgrad(int *nbgrad);
 void opensps_get_grad_param_name(int grad_idx, char *name, int max_len, int *status);
 void opensps_validate_params(int *status); // Note: Checks legacy global state context

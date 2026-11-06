@@ -45,14 +45,6 @@ module opensps_c_api
     implicit none
 
     ! ---------------------------------------------------------------------
-    ! Module constants
-    ! ---------------------------------------------------------------------
-
-    integer, parameter :: opensps_driver_version_major = 2   ! = OPENSPS_API_VERSION_MAJOR in opensps.h
-    integer, parameter :: opensps_driver_version_minor = 1   ! = OPENSPS_API_VERSION_MINOR in opensps.h
-    integer, parameter :: opensps_driver_version_patch = 0
-
-    ! ---------------------------------------------------------------------
     ! Global state
     ! ---------------------------------------------------------------------
     type(PARAMS), pointer :: global_pset => NULL()
@@ -296,14 +288,6 @@ contains
         opensps_lock_state = 0
         status = 0
     end subroutine opensps_unlock
-
-    subroutine opensps_get_driver_version(major, minor, patch) &
-        bind(C, name="opensps_get_driver_version")
-        integer(c_int), intent(OUT) :: major, minor, patch
-        major = opensps_driver_version_major
-        minor = opensps_driver_version_minor
-        patch = opensps_driver_version_patch
-    end subroutine opensps_get_driver_version
 
     ! -------------------------------------------------------------------------
     ! CONTEXT-BASED C API

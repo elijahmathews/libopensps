@@ -231,12 +231,32 @@ if fc_id == 'nvidia_hpc' and cpu_baseline in nv_tp and host_cpu == 'x86_64'
 endif
 
 # ===================================
+# Version Configuration
+# ===================================
+
+version_parts = meson.project_version().split('.')
+version_conf = configuration_data()
+version_conf.set('OPENSPS_API_VERSION_MAJOR', version_parts[0].to_int())
+version_conf.set('OPENSPS_API_VERSION_MINOR', version_parts[1].to_int())
+version_conf.set('OPENSPS_API_VERSION_PATCH', version_parts[2].to_int())
+version_conf.set('OPENSPS_VERSION_STRING', meson.project_version())
+
+opensps_version_h = configure_file(
+    input : 'include/opensps_version.h.in',
+    output : 'opensps_version.h',
+    configuration : version_conf,
+    install : true,
+    install_dir : get_option('includedir')
+)
+
+# ===================================
 # Source Definitions
 # ===================================
 
 lib_sources = files(
     # Language Binding Modules
     'src/bindings/c/opensps_c_api.f90',
+    'src/bindings/c/opensps_version.c',
 
     # Core FSPS Modules
     'src/core/opensps_trace.f90',
@@ -296,6 +316,7 @@ libopensps = library('opensps',
     version : meson.project_version(),
     soversion : '0',
     install : true,
+    include_directories : [include_directories('include'), include_directories('.')],
     dependencies : [omp_dep, accel_dep, threads_dep, dl_dep],
     # The library's C sources (setup-cache lock, pinning); link with the Fortran compiler so its
     # runtime (libgfortran, flang runtime, ...) is always included
@@ -306,7 +327,7 @@ libopensps = library('opensps',
 # This ensures they find the generated .mod files and link to the lib
 opensps_dep = declare_dependency(
     link_with : libopensps,
-    include_directories : include_directories('include'),
+    include_directories : [include_directories('include'), include_directories('.')],
     dependencies : [omp_dep, accel_dep, threads_dep]
 )
 # dependency('opensps') in a project that has this one as a subproject
@@ -743,7 +764,7 @@ endif # tests
 # ===================================
 
 # Install Headers
-install_headers('include/opensps.h', 'include/fsps.h')  # fsps.h: deprecated compatibility header
+install_headers('include/opensps.h', 'include/fsps.h', opensps_version_h)  # fsps.h: deprecated compatibility header
 
 # Install Data (recursively copies the directory; 1.3 GB, off with -Dinstall_data=false, e.g. for
 # a Python wheel that builds the library as a subproject; skipped when the tree has no data/)
