@@ -285,8 +285,23 @@ jobs:
       - name: Prepare release assets and generate checksums
         run: |
           mkdir -p release-assets
-          cp -v staging-assets/* release-assets/ 2>/dev/null || true
+          # Artifacts keep their directory structure (the RPMs are under RPMS/ and SRPMS/), so
+          # copy every file, not just the top level.
+          find staging-assets -type f -exec cp -v -t release-assets/ {} +
           cd release-assets
+          # Fail instead of publishing an incomplete release.
+          missing=0
+          for pat in 'opensps-*.tar.gz' 'libopensps-*-linux-x86_64-cpu.tar.gz' \
+                     'libopensps-*-linux-x86_64-cuda-cc80.tar.gz' \
+                     'libopensps-*-linux-x86_64-rocm-gfx1201.tar.gz' \
+                     'libopensps0_*.deb' 'libopensps-dev_*.deb' \
+                     'libopensps-0*.x86_64.rpm' 'libopensps-devel-*.x86_64.rpm' 'opensps-*.src.rpm'; do
+            if ! ls $pat > /dev/null 2>&1; then
+              echo "::error::missing release asset: $pat"
+              missing=1
+            fi
+          done
+          [ "$missing" = 0 ] || exit 1
           sha256sum * > SHA256SUMS.txt
           echo "--- Release Assets Checksums ---"
           cat SHA256SUMS.txt
