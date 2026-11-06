@@ -1,6 +1,6 @@
 # Authors
 
-libopensps is derived from FSPS, Flexible Stellar Population Synthesis, the work of Charlie
+OpenSPS is derived from FSPS, Flexible Stellar Population Synthesis, the work of Charlie
 Conroy and contributors (https://github.com/cconroy20/fsps). The models are described in
 Conroy, Gunn & White (2009, ApJ, 699, 486) and Conroy & Gunn (2010, ApJ, 712, 833); please cite
 both papers in work that uses this library (CITATION.cff).

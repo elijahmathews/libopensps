@@ -16,11 +16,14 @@ module opensps_c_api
                         api_compute_ssp => opensps_compute_ssp, api_compute_csp => opensps_compute_csp
     use opensps_csp, only: compute_csp_scenario
     use opensps_io, only: load_tabular_sfh, write_isochrone_cmd
-    use opensps_ssp, only: generate_ssp_grid, compute_interpolated_ssp
+    use opensps_ssp, only: generate_ssp_grid, compute_interpolated_ssp, configure_imf_parameters
     use opensps_spectral_library, only: get_stellar_spectrum
     use opensps_stellar_modifications, only: apply_blue_stragglers, modify_giant_branch, &
                                           modify_horizontal_branch
-    use opensps_imf, only: compute_imf_weights
+    use opensps_imf, only: compute_imf_weights, IMF_NPAR, imf_pack_params, &
+                           IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE
+    use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_evaluate, ssp_operator_free
+    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free
     use opensps_smoothing, only: apply_smoothing
     use opensps_cosmology, only: vacuum_to_air
     use opensps_interpolation, only: find_interval
@@ -29,18 +32,17 @@ module opensps_c_api
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                             is_ssp_sensitive_float_param, is_ssp_sensitive_int_param, &
                             is_ssp_sensitive_str_param, opensps_context_prepare_csp_workspace
-    use opensps_csp_batch, only: compute_csp_batch, batch_spectra_device, batch_spectra_host
+    use opensps_csp_batch, only: compute_csp_batch, batch_spectra_device, batch_spectra_host, &
+                                 BGRAD_FAGN, BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, &
+                                 BGRAD_DUST1_INDEX, BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, &
+                                 BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, &
+                                 BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
+                                 BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, &
+                                 BGRAD_SF_TRUNC, BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, &
+                                 BGRAD_VDMC, BGRAD_MDAVE, BGRAD_AGN_TAU, BGRAD_IGM_FACTOR, NBGRAD
     use opensps_context_types, only: opensps_context_t
 
     implicit none
-
-    ! ---------------------------------------------------------------------
-    ! Module constants
-    ! ---------------------------------------------------------------------
-
-    integer, parameter :: opensps_driver_version_major = 2   ! = OPENSPS_API_VERSION_MAJOR in opensps.h
-    integer, parameter :: opensps_driver_version_minor = 0   ! = OPENSPS_API_VERSION_MINOR in opensps.h
-    integer, parameter :: opensps_driver_version_patch = 0
 
     ! ---------------------------------------------------------------------
     ! Global state
@@ -58,6 +60,8 @@ module opensps_c_api
         real(WP), allocatable :: spec(:, :, :), mass(:, :), lbol(:, :)
         logical, allocatable :: have(:)
         type(COMPSPOUT), allocatable :: results(:)
+        type(ssp_opset_t) :: opset
+        logical :: have_opset = .false.
     end type ctx_store_t
     type(ctx_store_t), allocatable :: ctx_store(:)
     ! Driver error state
@@ -285,14 +289,6 @@ contains
         status = 0
     end subroutine opensps_unlock
 
-    subroutine opensps_get_driver_version(major, minor, patch) &
-        bind(C, name="opensps_get_driver_version")
-        integer(c_int), intent(OUT) :: major, minor, patch
-        major = opensps_driver_version_major
-        minor = opensps_driver_version_minor
-        patch = opensps_driver_version_patch
-    end subroutine opensps_get_driver_version
-
     ! -------------------------------------------------------------------------
     ! CONTEXT-BASED C API
     ! -------------------------------------------------------------------------
@@ -502,9 +498,11 @@ contains
         type(c_ptr), value :: c_mags, c_spec, c_mass, c_lbol, c_mdust, c_sfr, c_emlines, c_indx
         integer(c_int), intent(OUT) :: status
 
-        call batch_handle(handle, n, n_params, c_names, c_values, c_weights, c_mags, c_spec, c_mass, c_lbol, &
-                          c_mdust, c_sfr, c_emlines, c_indx, c_null_ptr, c_null_ptr, c_null_ptr, c_null_ptr, &
-                          c_null_ptr, c_null_ptr, status)
+        call batch_handle(handle, n, n_params, c_names, c_values, c_weights, c_null_ptr, c_null_ptr, &
+                          c_null_ptr, c_null_ptr, c_null_ptr, c_null_ptr, &
+                          c_mags, c_spec, c_mass, c_lbol, c_mdust, c_sfr, c_emlines, c_indx, &
+                          c_null_ptr, c_null_ptr, c_null_ptr, &
+                          c_null_ptr, c_null_ptr, c_null_ptr, c_null_ptr, c_null_ptr, c_null_ptr, status)
     end subroutine opensps_context_compute_csp_batch_handle
 
     !> @brief The batch with its intrinsic young and old components as well (emulator training
@@ -531,18 +529,48 @@ contains
             call opensps_set_error(3, 'compute_csp_batch_parts: young and old are required')
             return
         end if
-        call batch_handle(handle, n, n_params, c_names, c_values, c_weights, c_mags, c_spec, c_mass, c_lbol, &
-                          c_mdust, c_sfr, c_emlines, c_indx, c_young, c_old, c_mass_young, c_mass_old, &
-                          c_lbol_young, c_lbol_old, status)
+        call batch_handle(handle, n, n_params, c_names, c_values, c_weights, c_null_ptr, c_null_ptr, &
+                          c_null_ptr, c_null_ptr, c_null_ptr, c_null_ptr, &
+                          c_mags, c_spec, c_mass, c_lbol, c_mdust, c_sfr, c_emlines, c_indx, &
+                          c_null_ptr, c_null_ptr, c_null_ptr, &
+                          c_young, c_old, c_mass_young, c_mass_old, c_lbol_young, c_lbol_old, status)
     end subroutine opensps_context_compute_csp_batch_parts_handle
 
-    !> The two batch entry points (parts requested when c_young is associated).
-    subroutine batch_handle(handle, n, n_params, c_names, c_values, c_weights, c_mags, c_spec, c_mass, c_lbol, &
-                            c_mdust, c_sfr, c_emlines, c_indx, c_young, c_old, c_mass_young, c_mass_old, &
-                            c_lbol_young, c_lbol_old, status)
+    !> @brief Batched CSP with Gradients (Reverse-mode Adjoint).
+    !> Computes forward outputs and/or derivatives of a loss L with respect to physical parameters,
+    !> SFH weights, and enrichment histories given incoming cotangents.
+    subroutine opensps_context_compute_csp_batch_grad_handle(handle, n, n_params, c_names, c_values, &
+                                                          c_weights, c_weights_z, c_zred_mags, &
+                                                          c_mags_bar, c_spec_bar, c_mass_bar, c_lbol_bar, &
+                                                          c_mags, c_spec, c_mass, c_lbol, c_mdust, c_sfr, &
+                                                          c_emlines, c_indx, c_params_bar, c_weights_bar, &
+                                                          c_weights_z_bar, status) &
+        bind(C, name="opensps_context_compute_csp_batch_grad")
+        integer(c_int), value :: handle, n, n_params
+        type(c_ptr), value :: c_names, c_values, c_weights, c_weights_z, c_zred_mags
+        type(c_ptr), value :: c_mags_bar, c_spec_bar, c_mass_bar, c_lbol_bar
+        type(c_ptr), value :: c_mags, c_spec, c_mass, c_lbol, c_mdust, c_sfr, c_emlines, c_indx
+        type(c_ptr), value :: c_params_bar, c_weights_bar, c_weights_z_bar
+        integer(c_int), intent(OUT) :: status
+
+        call batch_handle(handle, n, n_params, c_names, c_values, c_weights, c_weights_z, c_zred_mags, &
+                          c_mags_bar, c_spec_bar, c_mass_bar, c_lbol_bar, &
+                          c_mags, c_spec, c_mass, c_lbol, c_mdust, c_sfr, c_emlines, c_indx, &
+                          c_params_bar, c_weights_bar, c_weights_z_bar, &
+                          c_null_ptr, c_null_ptr, c_null_ptr, c_null_ptr, c_null_ptr, c_null_ptr, status)
+    end subroutine opensps_context_compute_csp_batch_grad_handle
+
+    !> The general batch driver covering forward, parts, and gradients.
+    subroutine batch_handle(handle, n, n_params, c_names, c_values, c_weights, c_weights_z, c_zred_mags, &
+                            c_mags_bar, c_spec_bar, c_mass_bar, c_lbol_bar, &
+                            c_mags, c_spec, c_mass, c_lbol, c_mdust, c_sfr, c_emlines, c_indx, &
+                            c_params_bar, c_weights_bar, c_weights_z_bar, &
+                            c_young, c_old, c_mass_young, c_mass_old, c_lbol_young, c_lbol_old, status)
         integer(c_int), intent(IN) :: handle, n, n_params
-        type(c_ptr), intent(IN) :: c_names, c_values, c_weights
+        type(c_ptr), intent(IN) :: c_names, c_values, c_weights, c_weights_z, c_zred_mags
+        type(c_ptr), intent(IN) :: c_mags_bar, c_spec_bar, c_mass_bar, c_lbol_bar
         type(c_ptr), intent(IN) :: c_mags, c_spec, c_mass, c_lbol, c_mdust, c_sfr, c_emlines, c_indx
+        type(c_ptr), intent(IN) :: c_params_bar, c_weights_bar, c_weights_z_bar
         type(c_ptr), intent(IN) :: c_young, c_old, c_mass_young, c_mass_old, c_lbol_young, c_lbol_old
         integer(c_int), intent(OUT) :: status
         real(c_double), pointer :: young(:, :), old(:, :), pv(:)
@@ -550,15 +578,30 @@ contains
         real(WP), allocatable :: my_l(:), mo_l(:), ly_l(:), lo_l(:)
         type(c_ptr), pointer :: name_ptrs(:), value_ptrs(:)
         real(c_double), pointer :: v(:)
-        real(c_double), pointer :: mags(:, :), spec(:, :), emlines(:, :), indx(:, :), weights(:, :)
+        real(c_double), pointer :: mags(:, :)
+        real(c_double), pointer :: spec(:, :), emlines(:, :), indx(:, :), weights(:, :)
+        real(c_double), pointer :: weights_z(:, :, :), zred_mags(:)
+        real(c_double), pointer :: mags_bar(:, :), spec_bar(:, :), mass_bar(:), lbol_bar(:)
+        real(c_double), pointer :: params_bar(:, :), weights_bar(:, :), weights_z_bar(:, :, :)
+        ! Optional arrays of compute_csp_batch, copied from the caller's arrays only when given.
+        ! They are allocatable, not disassociated pointers, because an unallocated allocatable
+        ! passed to an optional dummy is absent by the standard, whereas nvfortran (25.1) reports a
+        ! disassociated pointer as present for an optional dummy. The large outputs (spec, indx,
+        ! young, old) are not copied: run_batch chooses the call by their association instead.
+        real(WP), allocatable :: weights_a(:, :), weights_z_a(:, :, :), zred_a(:)
+        real(WP), allocatable :: mags_bar_a(:, :), spec_bar_a(:, :), mass_bar_a(:), lbol_bar_a(:)
+        ! Gradient outputs, likewise (copied in, so elements the batch leaves alone keep the caller's
+        ! values, and copied back after a successful batch)
+        real(WP), allocatable :: params_bar_a(:, :), weights_bar_a(:, :), weights_z_bar_a(:, :, :)
         real(c_double), pointer :: mass(:), lbol(:), mdust(:), sfr(:)
         character(LEN=64), allocatable :: names(:)
         type(PARAMS) :: base
         type(PARAMS), allocatable :: psets(:)
         integer :: i, m, st, nspec, nt, nbands
-        logical :: zmode, dirty
+        logical :: zmode, dirty, has_ops
         real(WP), allocatable :: mass_l(:), lbol_l(:), mdust_l(:), sfr_l(:), eml_l(:, :)
         character(LEN=10), parameter :: NEB_PARAMS(3) = [character(LEN=10) :: 'gas_logu', 'gas_logz', 'frac_obrun']
+        character(LEN=10), parameter :: IMF_PARAMS(5) = [character(LEN=10) :: 'imf1', 'imf2', 'imf3', 'vdmc', 'mdave']
 
         status = 0
         if (handle < 1 .or. .not. ALLOCATED(ctx_pool) .or. handle > SIZE(ctx_pool)) then
@@ -574,6 +617,24 @@ contains
         nspec = ctx%state%nspec
         nt = ctx%state%ntfull
         nbands = ctx%state%nbands
+        has_ops = ctx_store(handle)%have_opset
+
+        ! Initialize all pointers
+        spec => null()
+        indx => null()
+        emlines => null()
+        weights => null()
+        weights_z => null()
+        zred_mags => null()
+        mags_bar => null()
+        spec_bar => null()
+        mass_bar => null()
+        lbol_bar => null()
+        params_bar => null()
+        weights_bar => null()
+        weights_z_bar => null()
+        young => null()
+        old => null()
 
         ! Parameter names; those that change the SSPs cannot vary per model
         allocate(names(max(0, n_params)))
@@ -584,9 +645,11 @@ contains
             do i = 1, n_params
                 call c_ptr_to_f_string(name_ptrs(i), names(i))
                 ! The nebular parameters are SSP parameters only with nebular emission in the SSPs
-                ! (add_neb_emission = 2); otherwise they act in the CSP and may vary per model
+                ! (add_neb_emission = 2); otherwise they act in the CSP and may vary per model.
+                ! When ssp_ops is enabled on the context, IMF parameters may vary per model.
                 if (is_ssp_sensitive_float_param(trim(names(i))) .and. .not. &
-                    (ctx%add_neb_emission_val /= 2 .and. any(trim(names(i)) == NEB_PARAMS))) then
+                    (ctx%add_neb_emission_val /= 2 .and. any(trim(names(i)) == NEB_PARAMS)) .and. .not. &
+                    (has_ops .and. any(trim(names(i)) == IMF_PARAMS))) then
                     status = 2
                     call opensps_set_error(2, 'compute_csp_batch: '//trim(names(i))//' changes the SSPs')
                     return
@@ -623,18 +686,49 @@ contains
         ctx%pset = base
         ctx%state%ssp_basis_is_dirty = dirty
 
-        call ensure_batch_basis(ctx, zmode)
+        if (.not. has_ops) call ensure_batch_basis(ctx, zmode)
 
         call c_f_pointer(c_mags, mags, [nbands, n])
         if (c_associated(c_spec)) call c_f_pointer(c_spec, spec, [nspec, n])
         if (c_associated(c_indx)) call c_f_pointer(c_indx, indx, [ctx%state%nindx, n])
-        if (c_associated(c_weights)) call c_f_pointer(c_weights, weights, [nt, n])
-        ! Small outputs always computed; spectra, indices and weights passed only when given.
-        ! (Not by passing disassociated pointers as absent arguments: with -acc=gpu, nvfortran
-        ! 25.1 reports some of them as present.)
+        if (c_associated(c_emlines)) call c_f_pointer(c_emlines, emlines, [NEMLINE, n])
+        if (c_associated(c_weights)) then
+            call c_f_pointer(c_weights, weights, [nt, n]); allocate(weights_a, source=weights)
+        end if
+        if (c_associated(c_weights_z)) then
+            call c_f_pointer(c_weights_z, weights_z, [nt, ctx%state%nz, n]); allocate(weights_z_a, source=weights_z)
+        end if
+        if (c_associated(c_zred_mags)) then
+            call c_f_pointer(c_zred_mags, zred_mags, [n]); allocate(zred_a, source=zred_mags)
+        end if
+
+        if (c_associated(c_mags_bar)) then
+            call c_f_pointer(c_mags_bar, mags_bar, [nbands, n]); allocate(mags_bar_a, source=mags_bar)
+        end if
+        if (c_associated(c_spec_bar)) then
+            call c_f_pointer(c_spec_bar, spec_bar, [nspec, n]); allocate(spec_bar_a, source=spec_bar)
+        end if
+        if (c_associated(c_mass_bar)) then
+            call c_f_pointer(c_mass_bar, mass_bar, [n]); allocate(mass_bar_a, source=mass_bar)
+        end if
+        if (c_associated(c_lbol_bar)) then
+            call c_f_pointer(c_lbol_bar, lbol_bar, [n]); allocate(lbol_bar_a, source=lbol_bar)
+        end if
+
+        if (c_associated(c_params_bar)) then
+            call c_f_pointer(c_params_bar, params_bar, [NBGRAD, n]); allocate(params_bar_a, source=params_bar)
+        end if
+        if (c_associated(c_weights_bar)) then
+            call c_f_pointer(c_weights_bar, weights_bar, [nt, n]); allocate(weights_bar_a, source=weights_bar)
+        end if
+        if (c_associated(c_weights_z_bar)) then
+            call c_f_pointer(c_weights_z_bar, weights_z_bar, [nt, ctx%state%nz, n])
+            allocate(weights_z_bar_a, source=weights_z_bar)
+        end if
+
+        ! Small outputs always computed
         allocate(mass_l(n), lbol_l(n), mdust_l(n), sfr_l(n), eml_l(NEMLINE, n))
         if (c_associated(c_young)) then
-            ! With the young / old parts: the spectra always (the caller's array or a local one)
             call c_f_pointer(c_young, young, [nspec, n])
             call c_f_pointer(c_old, old, [nspec, n])
             allocate(my_l(n), mo_l(n), ly_l(n), lo_l(n))
@@ -642,83 +736,23 @@ contains
                 allocate(spec_l(nspec, n))
                 spec => spec_l
             end if
-            if (c_associated(c_indx)) then
-                if (c_associated(c_weights)) then
-                    call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
-                                           sfr=sfr_l, emlines=eml_l, indx=indx, ssp_weights=weights, &
-                                           spec_young=young, spec_old=old, mass_young=my_l, mass_old=mo_l, &
-                                           lbol_young=ly_l, lbol_old=lo_l)
-                else
-                    call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
-                                           sfr=sfr_l, emlines=eml_l, indx=indx, &
-                                           spec_young=young, spec_old=old, mass_young=my_l, mass_old=mo_l, &
-                                           lbol_young=ly_l, lbol_old=lo_l)
-                end if
-            else
-                if (c_associated(c_weights)) then
-                    call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
-                                           sfr=sfr_l, emlines=eml_l, ssp_weights=weights, &
-                                           spec_young=young, spec_old=old, mass_young=my_l, mass_old=mo_l, &
-                                           lbol_young=ly_l, lbol_old=lo_l)
-                else
-                    call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
-                                           sfr=sfr_l, emlines=eml_l, &
-                                           spec_young=young, spec_old=old, mass_young=my_l, mass_old=mo_l, &
-                                           lbol_young=ly_l, lbol_old=lo_l)
-                end if
-            end if
-            if (st == 0) then
-                if (c_associated(c_mass_young)) then
-                    call c_f_pointer(c_mass_young, pv, [n]); pv = my_l
-                end if
-                if (c_associated(c_mass_old)) then
-                    call c_f_pointer(c_mass_old, pv, [n]); pv = mo_l
-                end if
-                if (c_associated(c_lbol_young)) then
-                    call c_f_pointer(c_lbol_young, pv, [n]); pv = ly_l
-                end if
-                if (c_associated(c_lbol_old)) then
-                    call c_f_pointer(c_lbol_old, pv, [n]); pv = lo_l
-                end if
-            end if
-        else if (c_associated(c_spec)) then
-            if (c_associated(c_indx)) then
-                if (c_associated(c_weights)) then
-                    call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
-                                           sfr=sfr_l, emlines=eml_l, indx=indx, ssp_weights=weights)
-                else
-                    call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
-                                           sfr=sfr_l, emlines=eml_l, indx=indx)
-                end if
-            else
-                if (c_associated(c_weights)) then
-                    call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
-                                           sfr=sfr_l, emlines=eml_l, ssp_weights=weights)
-                else
-                    call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
-                                           sfr=sfr_l, emlines=eml_l)
-                end if
-            end if
-        else
-            if (c_associated(c_indx)) then
-                if (c_associated(c_weights)) then
-                    call compute_csp_batch(ctx, psets, mags, st, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
-                                           sfr=sfr_l, emlines=eml_l, indx=indx, ssp_weights=weights)
-                else
-                    call compute_csp_batch(ctx, psets, mags, st, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
-                                           sfr=sfr_l, emlines=eml_l, indx=indx)
-                end if
-            else
-                if (c_associated(c_weights)) then
-                    call compute_csp_batch(ctx, psets, mags, st, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
-                                           sfr=sfr_l, emlines=eml_l, ssp_weights=weights)
-                else
-                    call compute_csp_batch(ctx, psets, mags, st, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
-                                           sfr=sfr_l, emlines=eml_l)
-                end if
-            end if
         end if
+
+        if (has_ops) then
+            call run_batch(ctx, psets, mags, st, spec, indx, young, old, mass_l, lbol_l, mdust_l, sfr_l, eml_l, &
+                           my_l, mo_l, ly_l, lo_l, weights_a, weights_z_a, zred_a, mags_bar_a, spec_bar_a, &
+                           mass_bar_a, lbol_bar_a, params_bar_a, weights_bar_a, weights_z_bar_a, &
+                           ctx_store(handle)%opset)
+        else
+            call run_batch(ctx, psets, mags, st, spec, indx, young, old, mass_l, lbol_l, mdust_l, sfr_l, eml_l, &
+                           my_l, mo_l, ly_l, lo_l, weights_a, weights_z_a, zred_a, mags_bar_a, spec_bar_a, &
+                           mass_bar_a, lbol_bar_a, params_bar_a, weights_bar_a, weights_z_bar_a)
+        end if
+
         if (st == 0) then
+            if (allocated(params_bar_a)) params_bar = params_bar_a
+            if (allocated(weights_bar_a)) weights_bar = weights_bar_a
+            if (allocated(weights_z_bar_a)) weights_z_bar = weights_z_bar_a
             if (c_associated(c_mass)) then
                 call c_f_pointer(c_mass, mass, [n]); mass = mass_l
             end if
@@ -732,12 +766,104 @@ contains
                 call c_f_pointer(c_sfr, sfr, [n]); sfr = sfr_l
             end if
             if (c_associated(c_emlines)) then
-                call c_f_pointer(c_emlines, emlines, [NEMLINE, n]); emlines = eml_l
+                emlines = eml_l
+            end if
+            if (c_associated(c_young)) then
+                if (c_associated(c_mass_young)) then
+                    call c_f_pointer(c_mass_young, pv, [n]); pv = my_l
+                end if
+                if (c_associated(c_mass_old)) then
+                    call c_f_pointer(c_mass_old, pv, [n]); pv = mo_l
+                end if
+                if (c_associated(c_lbol_young)) then
+                    call c_f_pointer(c_lbol_young, pv, [n]); pv = ly_l
+                end if
+                if (c_associated(c_lbol_old)) then
+                    call c_f_pointer(c_lbol_old, pv, [n]); pv = lo_l
+                end if
             end if
         end if
         status = st
         end associate
     end subroutine batch_handle
+
+    !> The call of compute_csp_batch for batch_handle. The optional arrays arrive as optional
+    !> dummies (absent when the caller's actual argument is an unallocated allocatable), which
+    !> compute_csp_batch then sees as absent too. The pointers spec, indx, young and old are
+    !> disassociated when not requested; nvfortran (25.1) reports a disassociated pointer as present
+    !> for an optional dummy, so the call is chosen by their association rather than passing them on.
+    subroutine run_batch(ctx, psets, mags, st, spec, indx, young, old, mass_l, lbol_l, mdust_l, sfr_l, eml_l, &
+                         my_l, mo_l, ly_l, lo_l, ssp_weights, ssp_weights_z, zred_mags, mags_bar, spec_bar, &
+                         mass_bar, lbol_bar, params_bar, weights_bar, weights_z_bar, ssp_ops)
+        type(opensps_context_t), intent(inout) :: ctx
+#if defined(__flang__)
+        type(PARAMS), intent(in)            :: psets(:)
+#else
+        type(PARAMS), intent(in), target    :: psets(:)
+#endif
+        real(WP), intent(out)               :: mags(:, :)
+        integer, intent(out)                :: st
+        real(WP), pointer                   :: spec(:, :), indx(:, :), young(:, :), old(:, :)
+        real(WP), intent(out)               :: mass_l(:), lbol_l(:), mdust_l(:), sfr_l(:), eml_l(:, :)
+        real(WP), intent(out), optional     :: my_l(:), mo_l(:), ly_l(:), lo_l(:)
+        real(WP), intent(in), optional      :: ssp_weights(:, :), ssp_weights_z(:, :, :), zred_mags(:)
+        real(WP), intent(in), optional      :: mags_bar(:, :), spec_bar(:, :), mass_bar(:), lbol_bar(:)
+        real(WP), intent(out), optional     :: params_bar(:, :), weights_bar(:, :), weights_z_bar(:, :, :)
+        type(ssp_opset_t), intent(inout), optional :: ssp_ops
+
+        if (associated(young)) then
+            ! The parts always come with the spectra (the caller's or a local array)
+            if (associated(indx)) then
+                call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
+                                       sfr=sfr_l, emlines=eml_l, indx=indx, ssp_weights=ssp_weights, &
+                                       spec_young=young, spec_old=old, mass_young=my_l, mass_old=mo_l, &
+                                       lbol_young=ly_l, lbol_old=lo_l, zred_mags=zred_mags, &
+                                       ssp_weights_z=ssp_weights_z, ssp_ops=ssp_ops, mags_bar=mags_bar, &
+                                       spec_bar=spec_bar, params_bar=params_bar, weights_bar=weights_bar, &
+                                       mass_bar=mass_bar, lbol_bar=lbol_bar, weights_z_bar=weights_z_bar)
+            else
+                call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
+                                       sfr=sfr_l, emlines=eml_l, ssp_weights=ssp_weights, &
+                                       spec_young=young, spec_old=old, mass_young=my_l, mass_old=mo_l, &
+                                       lbol_young=ly_l, lbol_old=lo_l, zred_mags=zred_mags, &
+                                       ssp_weights_z=ssp_weights_z, ssp_ops=ssp_ops, mags_bar=mags_bar, &
+                                       spec_bar=spec_bar, params_bar=params_bar, weights_bar=weights_bar, &
+                                       mass_bar=mass_bar, lbol_bar=lbol_bar, weights_z_bar=weights_z_bar)
+            end if
+        else if (associated(spec)) then
+            if (associated(indx)) then
+                call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
+                                       sfr=sfr_l, emlines=eml_l, indx=indx, ssp_weights=ssp_weights, &
+                                       zred_mags=zred_mags, ssp_weights_z=ssp_weights_z, ssp_ops=ssp_ops, &
+                                       mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, &
+                                       weights_bar=weights_bar, mass_bar=mass_bar, lbol_bar=lbol_bar, &
+                                       weights_z_bar=weights_z_bar)
+            else
+                call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
+                                       sfr=sfr_l, emlines=eml_l, ssp_weights=ssp_weights, &
+                                       zred_mags=zred_mags, ssp_weights_z=ssp_weights_z, ssp_ops=ssp_ops, &
+                                       mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, &
+                                       weights_bar=weights_bar, mass_bar=mass_bar, lbol_bar=lbol_bar, &
+                                       weights_z_bar=weights_z_bar)
+            end if
+        else
+            if (associated(indx)) then
+                call compute_csp_batch(ctx, psets, mags, st, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
+                                       sfr=sfr_l, emlines=eml_l, indx=indx, ssp_weights=ssp_weights, &
+                                       zred_mags=zred_mags, ssp_weights_z=ssp_weights_z, ssp_ops=ssp_ops, &
+                                       mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, &
+                                       weights_bar=weights_bar, mass_bar=mass_bar, lbol_bar=lbol_bar, &
+                                       weights_z_bar=weights_z_bar)
+            else
+                call compute_csp_batch(ctx, psets, mags, st, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
+                                       sfr=sfr_l, emlines=eml_l, ssp_weights=ssp_weights, &
+                                       zred_mags=zred_mags, ssp_weights_z=ssp_weights_z, ssp_ops=ssp_ops, &
+                                       mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, &
+                                       weights_bar=weights_bar, mass_bar=mass_bar, lbol_bar=lbol_bar, &
+                                       weights_z_bar=weights_z_bar)
+            end if
+        end if
+    end subroutine run_batch
 
     !> Where the last batch's spectra are (see batch_spectra_device): the device address, nspec,
     !> the number of models and the bytes per value (4 or 8); status 1 for a bad handle.
@@ -787,6 +913,206 @@ contains
         call batch_spectra_host(ctx_pool(handle), ptr, ns, nm, nb)
         nspec = ns; n = nm; bytes = nb
     end subroutine opensps_context_batch_spec_host_handle
+
+    !> Number of parameter gradients returned by compute_csp_batch_grad (params_bar rows).
+    subroutine opensps_get_nbgrad_c(n_grad) bind(C, name="opensps_get_nbgrad")
+        integer(c_int), intent(OUT) :: n_grad
+        n_grad = NBGRAD
+    end subroutine opensps_get_nbgrad_c
+
+    !> Name of the parameter corresponding to gradient index c_idx (0- or 1-indexed).
+    subroutine opensps_get_grad_param_name_c(c_idx, c_name, max_len, status) &
+        bind(C, name="opensps_get_grad_param_name")
+        integer(c_int), value :: c_idx, max_len
+        character(KIND=c_char), dimension(*), intent(OUT) :: c_name
+        integer(c_int), intent(OUT) :: status
+        character(LEN=64) :: p_name
+        integer :: f_idx
+
+        status = 0
+        if (c_idx >= 0 .and. c_idx < NBGRAD) then
+            f_idx = c_idx + 1
+        else
+            status = 1
+            call opensps_set_error(1, 'opensps_get_grad_param_name: index out of range')
+            return
+        end if
+
+        select case (f_idx)
+        case (BGRAD_FAGN);           p_name = 'fagn'
+        case (BGRAD_DUST1);          p_name = 'dust1'
+        case (BGRAD_DUST2);          p_name = 'dust2'
+        case (BGRAD_DUST3);          p_name = 'dust3'
+        case (BGRAD_DUST_INDEX);     p_name = 'dust_index'
+        case (BGRAD_DUST1_INDEX);    p_name = 'dust1_index'
+        case (BGRAD_FRAC_OBRUN);     p_name = 'frac_obrun'
+        case (BGRAD_FRAC_NODUST);    p_name = 'frac_nodust'
+        case (BGRAD_MWR);            p_name = 'mwr'
+        case (BGRAD_UVB);            p_name = 'uvb'
+        case (BGRAD_DUSTE_QPAH);     p_name = 'duste_qpah'
+        case (BGRAD_DUSTE_UMIN);     p_name = 'duste_umin'
+        case (BGRAD_DUSTE_GAMMA);    p_name = 'duste_gamma'
+        case (BGRAD_GAS_LOGZ);       p_name = 'gas_logz'
+        case (BGRAD_GAS_LOGU);       p_name = 'gas_logu'
+        case (BGRAD_LOGZSOL);        p_name = 'logzsol'
+        case (BGRAD_TAGE);           p_name = 'tage'
+        case (BGRAD_TAU);            p_name = 'tau'
+        case (BGRAD_CONST);          p_name = 'const'
+        case (BGRAD_FBURST);         p_name = 'fburst'
+        case (BGRAD_TBURST);         p_name = 'tburst'
+        case (BGRAD_SF_START);       p_name = 'sf_start'
+        case (BGRAD_ZRED);           p_name = 'zred'
+        case (BGRAD_SIGMA_SMOOTH);   p_name = 'sigma_smooth'
+        case (BGRAD_SF_TRUNC);       p_name = 'sf_trunc'
+        case (BGRAD_SF_SLOPE);       p_name = 'sf_slope'
+        case (BGRAD_IMF1);           p_name = 'imf1'
+        case (BGRAD_IMF2);           p_name = 'imf2'
+        case (BGRAD_IMF3);           p_name = 'imf3'
+        case (BGRAD_VDMC);           p_name = 'vdmc'
+        case (BGRAD_MDAVE);          p_name = 'mdave'
+        case (BGRAD_AGN_TAU);        p_name = 'agn_tau'
+        case (BGRAD_IGM_FACTOR);     p_name = 'igm_factor'
+        case default
+            status = 1
+            call opensps_set_error(1, 'opensps_get_grad_param_name: unknown index')
+            return
+        end select
+        call f_to_c_string(TRIM(p_name), c_name, max_len)
+    end subroutine opensps_get_grad_param_name_c
+
+    !> Build SSP operators on the context.
+    subroutine opensps_context_build_ssp_ops_handle(handle, all_metallicities, status) &
+        bind(C, name="opensps_context_build_ssp_ops")
+        integer(c_int), value :: handle, all_metallicities
+        integer(c_int), intent(OUT) :: status
+        type(PARAMS) :: pset
+        type(ssp_operator_t), allocatable :: ops(:)
+        integer :: z, nz
+
+        status = 0
+        if (.not. handle_ok(handle)) then
+            status = 1
+            return
+        end if
+        associate(ctx => ctx_pool(handle), st => ctx_store(handle))
+        if (.not. ctx%initialized .or. ctx%state%check_sps_setup == 0) then
+            status = 301
+            call opensps_set_error(301, 'opensps_context_build_ssp_ops: context not set up')
+            return
+        end if
+        if (st%have_opset) then
+            call ssp_opset_free(st%opset)
+            st%have_opset = .false.
+        end if
+
+        call opensps_prepare_pset(ctx)
+        pset = ctx%pset
+        if (all_metallicities /= 0) then
+            nz = ctx%state%nz
+            allocate(ops(nz))
+            do z = 1, nz
+                pset%zmet = z
+                call ssp_operator_build(ctx, pset, ops(z))
+            end do
+            call ssp_opset_build(ops, st%opset)
+        else
+            allocate(ops(1))
+            call ssp_operator_build(ctx, pset, ops(1))
+            call ssp_opset_build(ops, st%opset)
+        end if
+        st%have_opset = .true.
+        end associate
+    end subroutine opensps_context_build_ssp_ops_handle
+
+    !> Free context-managed SSP operators.
+    subroutine opensps_context_free_ssp_ops_handle(handle, status) &
+        bind(C, name="opensps_context_free_ssp_ops")
+        integer(c_int), value :: handle
+        integer(c_int), intent(OUT) :: status
+
+        status = 0
+        if (.not. handle_ok(handle)) then
+            status = 1
+            return
+        end if
+        if (ctx_store(handle)%have_opset) then
+            call ssp_opset_free(ctx_store(handle)%opset)
+            ctx_store(handle)%have_opset = .false.
+        end if
+    end subroutine opensps_context_free_ssp_ops_handle
+
+    !> Check if context has active SSP operators.
+    subroutine opensps_context_has_ssp_ops_handle(handle, has_ops, status) &
+        bind(C, name="opensps_context_has_ssp_ops")
+        integer(c_int), value :: handle
+        integer(c_int), intent(OUT) :: has_ops, status
+
+        status = 0
+        has_ops = 0
+        if (.not. handle_ok(handle)) then
+            status = 1
+            return
+        end if
+        if (ctx_store(handle)%have_opset) has_ops = 1
+    end subroutine opensps_context_has_ssp_ops_handle
+
+    !> Evaluate the SSP operator directly for an arbitrary IMF.
+    subroutine opensps_context_evaluate_ssp_op_handle(handle, imf_type, c_imf_params, c_mass, c_lbol, c_spec, status) &
+        bind(C, name="opensps_context_evaluate_ssp_op")
+        integer(c_int), value :: handle, imf_type
+        type(c_ptr), value :: c_imf_params, c_mass, c_lbol, c_spec
+        integer(c_int), intent(OUT) :: status
+        real(WP) :: p(IMF_NPAR)
+        real(c_double), pointer :: ip(:), mass_out(:), lbol_out(:), spec_out(:, :)
+        type(PARAMS) :: pset
+        integer :: zidx, nt, nspec, it
+
+        status = 0
+        if (.not. handle_ok(handle)) then
+            status = 1
+            return
+        end if
+        associate(ctx => ctx_pool(handle), st => ctx_store(handle))
+        if (.not. st%have_opset) then
+            status = 303
+            call opensps_set_error(303, 'opensps_context_evaluate_ssp_op: no SSP operator built on context')
+            return
+        end if
+        if (.not. c_associated(c_mass) .or. .not. c_associated(c_lbol) .or. .not. c_associated(c_spec)) then
+            status = 3
+            call opensps_set_error(3, 'opensps_context_evaluate_ssp_op: output pointers must not be NULL')
+            return
+        end if
+
+        nt = ctx%state%ntfull
+        nspec = ctx%state%nspec
+        call c_f_pointer(c_mass, mass_out, [nt])
+        call c_f_pointer(c_lbol, lbol_out, [nt])
+        call c_f_pointer(c_spec, spec_out, [nspec, nt])
+
+        call opensps_prepare_pset(ctx)
+        pset = ctx%pset
+        it = merge(imf_type, ctx%imf_type_val, imf_type >= 0)
+        call configure_imf_parameters(ctx, pset)
+        call imf_pack_params(ctx, p)
+
+        if (c_associated(c_imf_params)) then
+            call c_f_pointer(c_imf_params, ip, [5])
+            p(IMF_P_ALPHA)     = real(ip(1), WP)
+            p(IMF_P_ALPHA + 1) = real(ip(2), WP)
+            p(IMF_P_ALPHA + 2) = real(ip(3), WP)
+            p(IMF_P_VDMC)      = real(ip(4), WP)
+            p(IMF_P_MDAVE)     = real(ip(5), WP)
+        end if
+
+        zidx = 1
+        if (st%opset%nz > 1) then
+            zidx = max(1, min(ctx%state%nz, pset%zmet))
+        end if
+
+        call ssp_operator_evaluate(ctx, pset, st%opset%ops(zidx), it, p, mass_out, lbol_out, spec_out)
+        end associate
+    end subroutine opensps_context_evaluate_ssp_op_handle
 
     !> The context's SSP basis for compute_csp_batch: on the device in GPU builds, for the
     !> current SSP parameters, one metallicity (zmet) or, with zmode, all of them.
@@ -1241,6 +1567,10 @@ contains
         if (ALLOCATED(st%lbol)) deallocate (st%lbol)
         if (ALLOCATED(st%have)) deallocate (st%have)
         if (ALLOCATED(st%results)) deallocate (st%results)
+        if (st%have_opset) then
+            call ssp_opset_free(st%opset)
+            st%have_opset = .false.
+        end if
     end subroutine reset_store
 
     subroutine move_store(from, to)
@@ -1250,12 +1580,19 @@ contains
         if (ALLOCATED(from%lbol)) call MOVE_ALLOC(from%lbol, to%lbol)
         if (ALLOCATED(from%have)) call MOVE_ALLOC(from%have, to%have)
         if (ALLOCATED(from%results)) call MOVE_ALLOC(from%results, to%results)
+        to%opset = from%opset
+        to%have_opset = from%have_opset
+        from%have_opset = .false.
     end subroutine move_store
 
     !> An SSP parameter changed: the stored SSP grids are stale.
     subroutine invalidate_ssps(st)
         type(ctx_store_t), intent(INOUT) :: st
         if (ALLOCATED(st%have)) st%have = .false.
+        if (st%have_opset) then
+            call ssp_opset_free(st%opset)
+            st%have_opset = .false.
+        end if
     end subroutine invalidate_ssps
 
     !> Unmaps the context's spec/mass/lbol_ssp_zz from the device (mapped by

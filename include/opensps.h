@@ -5,17 +5,49 @@
 extern "C" {
 #endif
 
+#include "opensps_version.h"
+
 // ----------------------------------------------------------------------------
-// API version (also returned by opensps_get_driver_version). The minor number grows when entry
-// points are added; the major number changes only for incompatible changes. 1.1 added the
-// context grids (lambda, ages, zlegend, emlambda, filter data), the tabular SFH and the single
-// CSP (opensps_context_compute_csp / opensps_context_get_csp). 1.2 added the batch's young and old
-// components (opensps_context_compute_csp_batch_parts). 2.0 dropped light-weighted ages:
-// setting compute_light_ages to a value other than 0 returns OPENSPS_ERR_UNSUPPORTED_PARAM.
+// Batch Gradient Parameter Indices (params_bar rows, 0-indexed in C)
+// Corresponds to BGRAD_* in opensps_csp_batch.f90
 // ----------------------------------------------------------------------------
-#define OPENSPS_API_VERSION_MAJOR 2
-#define OPENSPS_API_VERSION_MINOR 0
-#define OPENSPS_API_VERSION_PATCH 0
+#define OPENSPS_NBGRAD 33
+
+typedef enum {
+    OPENSPS_BGRAD_FAGN = 0,
+    OPENSPS_BGRAD_DUST1 = 1,
+    OPENSPS_BGRAD_DUST2 = 2,
+    OPENSPS_BGRAD_DUST3 = 3,
+    OPENSPS_BGRAD_DUST_INDEX = 4,
+    OPENSPS_BGRAD_DUST1_INDEX = 5,
+    OPENSPS_BGRAD_FRAC_OBRUN = 6,
+    OPENSPS_BGRAD_FRAC_NODUST = 7,
+    OPENSPS_BGRAD_MWR = 8,
+    OPENSPS_BGRAD_UVB = 9,
+    OPENSPS_BGRAD_DUSTE_QPAH = 10,
+    OPENSPS_BGRAD_DUSTE_UMIN = 11,
+    OPENSPS_BGRAD_DUSTE_GAMMA = 12,
+    OPENSPS_BGRAD_GAS_LOGZ = 13,
+    OPENSPS_BGRAD_GAS_LOGU = 14,
+    OPENSPS_BGRAD_LOGZSOL = 15,
+    OPENSPS_BGRAD_TAGE = 16,
+    OPENSPS_BGRAD_TAU = 17,
+    OPENSPS_BGRAD_CONST = 18,
+    OPENSPS_BGRAD_FBURST = 19,
+    OPENSPS_BGRAD_TBURST = 20,
+    OPENSPS_BGRAD_SF_START = 21,
+    OPENSPS_BGRAD_ZRED = 22,
+    OPENSPS_BGRAD_SIGMA_SMOOTH = 23,
+    OPENSPS_BGRAD_SF_TRUNC = 24,
+    OPENSPS_BGRAD_SF_SLOPE = 25,
+    OPENSPS_BGRAD_IMF1 = 26,
+    OPENSPS_BGRAD_IMF2 = 27,
+    OPENSPS_BGRAD_IMF3 = 28,
+    OPENSPS_BGRAD_VDMC = 29,
+    OPENSPS_BGRAD_MDAVE = 30,
+    OPENSPS_BGRAD_AGN_TAU = 31,
+    OPENSPS_BGRAD_IGM_FACTOR = 32
+} opensps_bgrad_param_t;
 
 // ----------------------------------------------------------------------------
 // Status Codes
@@ -61,6 +93,9 @@ void opensps_get_last_error(int *status, char *message, int message_len);
 void opensps_lock(int *status);
 void opensps_unlock(int *status);
 void opensps_get_driver_version(int *major, int *minor, int *patch);
+const char *opensps_get_version_string(void);
+void opensps_get_nbgrad(int *nbgrad);
+void opensps_get_grad_param_name(int grad_idx, char *name, int max_len, int *status);
 void opensps_validate_params(int *status); // Note: Checks legacy global state context
 
 // ----------------------------------------------------------------------------
@@ -173,6 +208,111 @@ void opensps_context_batch_spec_device(int handle, void **ptr, int *nspec, int *
 // precision is enough). *ptr is a host address; valid until the next batch call on the handle.
 void opensps_context_batch_spec_host(int handle, void **ptr, int *nspec, int *n, int *bytes,
                                   int *status);
+
+// Batched CSP with Gradients (Reverse-mode Adjoint):
+// Computes forward outputs and/or derivatives of a loss L with respect to:
+//   - params_bar (NBGRAD x n): physical parameters
+//   - weights_bar (ntfull x n): non-parametric SFH weights
+//   - weights_z_bar (ntfull x nz x n): enrichment history weights
+// Given incoming cotangents (any may be NULL):
+//   - mags_bar (nbands x n) = dL / d(mags)
+//   - spec_bar (nspec x n)  = dL / d(spec)
+//   - mass_bar (n)          = dL / d(mass)
+//   - lbol_bar (n)          = dL / d(lbol)
+// Forward outputs (any but mags may be NULL).
+// If ssp_weights_z is non-NULL (ntfull x nz x n), it replaces ssp_weights.
+// If zred_mags is non-NULL (n), it gives per-model magnitude redshifts.
+// When ssp_ops is enabled on the context, IMF parameters (imf1, imf2, imf3, vdmc, mdave)
+// may vary per model.
+void opensps_context_compute_csp_batch_grad(
+    int handle, int n, int n_params, const char *const *names,
+    const double *const *values, const double *ssp_weights,
+    const double *ssp_weights_z, const double *zred_mags,
+    const double *mags_bar, const double *spec_bar, const double *mass_bar, const double *lbol_bar,
+    double *mags, double *spec, double *mass, double *lbol,
+    double *mdust, double *sfr, double *emlines, double *indx,
+    double *params_bar, double *weights_bar, double *weights_z_bar,
+    int *status
+);
+
+// Struct-based configuration options for batched CSP computation with gradients
+typedef struct {
+    int n;                          // Number of models
+    int n_params;                   // Number of parameters in names / values
+    const char *const *names;       // Parameter names (n_params)
+    const double *const *values;    // Parameter values (n_params x n)
+    const double *ssp_weights;      // ntfull x n, or NULL
+    const double *ssp_weights_z;    // ntfull x nz x n, or NULL
+    const double *zred_mags;        // n, or NULL
+    // Adjoint cotangents (inputs for gradient computation)
+    const double *mags_bar;         // nbands x n, or NULL
+    const double *spec_bar;         // nspec x n, or NULL
+    const double *mass_bar;         // n, or NULL
+    const double *lbol_bar;         // n, or NULL
+} opensps_batch_options_t;
+
+// Struct-based result buffers for batched CSP computation and gradients
+typedef struct {
+    // Forward outputs (any may be NULL)
+    double *mags;                   // nbands x n
+    double *spec;                   // nspec x n
+    double *mass;                   // n
+    double *lbol;                   // n
+    double *mdust;                  // n
+    double *sfr;                    // n
+    double *emlines;                // nemline x n
+    double *indx;                   // nindx x n
+    // Gradient adjoint outputs (any may be NULL)
+    double *params_bar;             // NBGRAD x n
+    double *weights_bar;            // ntfull x n
+    double *weights_z_bar;          // ntfull x nz x n
+} opensps_batch_results_t;
+
+// Struct-based entry point for batch calculation and adjoint gradients
+static inline void opensps_context_compute_csp_batch_ext(
+    int handle,
+    const opensps_batch_options_t *opts,
+    opensps_batch_results_t *res,
+    int *status
+) {
+    if (!opts || !res || !status) {
+        if (status) *status = 1;
+        return;
+    }
+    opensps_context_compute_csp_batch_grad(
+        handle, opts->n, opts->n_params, opts->names, opts->values,
+        opts->ssp_weights, opts->ssp_weights_z, opts->zred_mags,
+        opts->mags_bar, opts->spec_bar, opts->mass_bar, opts->lbol_bar,
+        res->mags, res->spec, res->mass, res->lbol,
+        res->mdust, res->sfr, res->emlines, res->indx,
+        res->params_bar, res->weights_bar, res->weights_z_bar,
+        status
+    );
+}
+
+// ----------------------------------------------------------------------------
+// SSP Operator Management (Batched IMF and direct evaluation)
+// ----------------------------------------------------------------------------
+
+// Build SSP operators on the context. If all_metallicities != 0, builds an
+// operator for every metallicity in the context (allowing both IMF and logzsol
+// to vary per model in compute_csp_batch).
+void opensps_context_build_ssp_ops(int handle, int all_metallicities, int *status);
+
+// Free context-managed SSP operators
+void opensps_context_free_ssp_ops(int handle, int *status);
+
+// Check if SSP operators are active on the context (returns *has_ops = 1 or 0)
+void opensps_context_has_ssp_ops(int handle, int *has_ops, int *status);
+
+// Evaluate the SSP operator directly for an arbitrary IMF.
+// imf_params: 5 parameters [imf1, imf2, imf3, vdmc, mdave] or NULL to use context values.
+// mass_grid: ntfull, lbol_grid: ntfull, spec_grid: nspec x ntfull (column-major).
+void opensps_context_evaluate_ssp_op(
+    int handle, int imf_type, const double *imf_params,
+    double *mass_grid, double *lbol_grid, double *spec_grid,
+    int *status
+);
 
 // ----------------------------------------------------------------------------
 // Legacy Global State API (Backward Compatibility)

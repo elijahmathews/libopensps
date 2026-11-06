@@ -1,9 +1,9 @@
-# Contributing to libopensps
+# Contributing to OpenSPS
 
-Thanks for your interest in contributing to libopensps! This document covers the
+Thanks for your interest in contributing to OpenSPS! This document covers the
 essentials for getting a development environment running and submitting a change.
 
-libopensps is a modernized FSPS: its physics must stay correct and traceable to legacy FSPS
+OpenSPS is a modernized FSPS: its physics must stay correct and traceable to legacy FSPS
 or to independent identities. Most of the rules below exist to protect that.
 
 ## Development setup
@@ -121,7 +121,8 @@ Commit messages and pull request titles follow
    release by a maintainer.
 4. Open the pull request against `main` with a Conventional Commits title. CI must be green;
    say in the description what you ran locally (builds, suites, counts).
-5. A maintainer reviews and squash-merges.
+5. A maintainer reviews and squash-merges. Maintainers: the release procedure is in
+   [doc/RELEASING.md](doc/RELEASING.md).
 
 ## Reporting bugs / requesting features
 

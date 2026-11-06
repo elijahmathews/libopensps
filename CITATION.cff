@@ -1,14 +1,14 @@
-# Citation metadata of libopensps (https://citation-file-format.github.io). The FSPS papers are
+# Citation metadata of OpenSPS (https://citation-file-format.github.io). The FSPS papers are
 # listed under references: please cite them in any work that uses this library.
 cff-version: 1.2.0
 message: >-
-  If you use libopensps in your research, please cite it using this metadata,
+  If you use OpenSPS in your research, please cite it using this metadata,
   and also cite the FSPS papers listed under references (Conroy, Gunn & White
   2009; Conroy & Gunn 2010).
-title: "libopensps"
+title: "OpenSPS"
 abstract: >-
   A high-performance, hardware-accelerated stellar population synthesis
-  library. libopensps is derived from FSPS (Flexible Stellar Population
+  library. OpenSPS is derived from FSPS (Flexible Stellar Population
   Synthesis) by Charlie Conroy and contributors: a thread-safe Fortran 2008
   code with a stable C API, batched composite populations for fitting, FP32
   kernels and GPU offload.
@@ -27,9 +27,10 @@ authors:
     orcid: "https://orcid.org/0000-0003-0384-0681"
     email: pgp@elijahmathews.com
     affiliation: "The Pennsylvania State University"
-# At each release: version, date-released and the archive DOI of the release (e.g. Zenodo).
-# version: "0.1.0"
-# date-released: "YYYY-MM-DD"
+# version must equal the project version in meson.build (tools/check_versions.py, run by CI and
+# the release workflow, fails otherwise). date-released is left out: GitHub and Zenodo take the
+# release date from the release itself. Add the archive DOI once there is one.
+version: "0.1.0"
 # doi: "10.5281/zenodo.TODO"
 references:
   - type: article

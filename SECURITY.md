@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-libopensps is pre-1.0 research software under active development. Security fixes are
+OpenSPS is pre-1.0 research software under active development. Security fixes are
 made against the latest release on `main`; there is no long-term support for older
 versions at this stage.
 

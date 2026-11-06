@@ -14,6 +14,7 @@ module opensps_environment
     use opensps_context_types, only: opensps_context_t, opensps_context_state_destroy
     use opensps_cache, only: opensps_cache_release_setup
     use opensps_datalib, only: datalib_format_from_env, datalib_root_is_standard
+    use opensps_version, only: OPENSPS_VERSION_STRING
 
     implicit none
     private
@@ -22,13 +23,6 @@ module opensps_environment
     public :: opensps_find_data_root
     public :: opensps_cleanup
     public :: opensps_print_env_info
-
-    ! ---------------------------------------------------------------------
-    ! Module constants
-    ! ---------------------------------------------------------------------
-
-    !> @brief Hardcoded version string for the library
-    character(len=*), parameter :: FSPS_VERSION = "3.2"
 
 contains
 
@@ -154,17 +148,17 @@ contains
         type(opensps_context_t), intent(in) :: ctx
 
         write (output_unit, '(A)') '--------------------------------------------------'
-        write (output_unit, '(A, A)') ' FSPS Version:  ', FSPS_VERSION
-        write (output_unit, '(A, A)') ' Data Root:     ', trim(ctx%sps_home)
-        write (output_unit, '(A, A)') ' Output Root:   ', trim(ctx%output_home)
+        write (output_unit, '(A, A)') ' OpenSPS Version: ', OPENSPS_VERSION_STRING
+        write (output_unit, '(A, A)') ' Data Root:       ', trim(ctx%sps_home)
+        write (output_unit, '(A, A)') ' Output Root:     ', trim(ctx%output_home)
 
         ! Note: OMP_GET_MAX_THREADS is intrinsic in many modern compilers,
         ! but strict F2008 standard compliance often requires the `omp_lib` module.
         ! We leave this simple print for now to avoid compilation complexity if OpenMP is off.
 #ifdef _OPENMP
-        write (output_unit, '(A)') ' OpenMP Status: Enabled'
+        write (output_unit, '(A)') ' OpenMP Status:   Enabled'
 #else
-        write (output_unit, '(A)') ' OpenMP Status: Disabled (Serial)'
+        write (output_unit, '(A)') ' OpenMP Status:   Disabled (Serial)'
 #endif
         write (output_unit, '(A)') '--------------------------------------------------'
     end subroutine opensps_print_env_info

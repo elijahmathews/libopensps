@@ -1,6 +1,5 @@
 # Commits that git blame skips (git config blame.ignoreRevsFile .git-blame-ignore-revs; GitHub
 # reads this file by itself): mechanical changes such as the fsps -> opensps rename. Add the
-# rename's commit on main once it is merged:
-#   tools/cutover/rename_to_opensps.sh --record-blame-ignore <commit> .
+# rename's commit on main once it is merged.
 # refactor!: rename the public C API and library to opensps (#4)
 813c78a119017f54ead33c25459a0a567041966c

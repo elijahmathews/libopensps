@@ -1,0 +1,325 @@
+# Automated GitHub Release Workflow: builds and verifies all release artifacts.
+# Triggered automatically on push of release tags (e.g., v0.1.0), or manually on demand
+# via workflow_dispatch (with dry_run=true default for non-destructive pre-release testing).
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (validate builds and stage artifacts without creating a GitHub release)'
+        type: boolean
+        default: true
+      tag_name:
+        description: 'Release tag override (used for asset naming in dry-run mode)'
+        type: string
+        default: 'v0.1.0'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-source:
+    name: Source Distribution
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check that the tag and the version files agree with meson.build
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            python3 tools/check_versions.py "${{ github.ref_name }}"
+          else
+            python3 tools/check_versions.py
+          fi
+      - name: Install build tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gfortran meson ninja-build
+      - name: Generate clean source distribution
+        run: |
+          meson setup build-dist -Dtests=false
+          meson dist -C build-dist --no-tests --formats gztar
+      - uses: actions/upload-artifact@v7
+        with:
+          name: source-dist
+          path: build-dist/meson-dist/opensps-*.tar.gz
+          retention-days: 7
+
+  build-rpm:
+    name: Fedora RPM (OpenMP CPU)
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install build dependencies
+        run: |
+          dnf install -y rpm-build rpmdevtools
+          dnf builddep -y packaging/opensps.spec
+      - name: Build RPMs
+        run: |
+          rpmdev-setuptree
+          cp packaging/opensps.spec ~/rpmbuild/SPECS/
+          VERSION=$(grep -i '^Version:' packaging/opensps.spec | awk '{print $2}')
+          tar -czf ~/rpmbuild/SOURCES/opensps-$VERSION.tar.gz --transform "s|^\.|opensps-$VERSION|" --exclude='.git' .
+          rpmbuild -ba ~/rpmbuild/SPECS/opensps.spec
+      - name: Install and verify library
+        run: |
+          dnf install -y ~/rpmbuild/RPMS/x86_64/*.rpm gcc pkgconf-pkg-config
+          ldconfig -p | grep libopensps
+          pkg-config --cflags --libs opensps
+          gcc tests/test_c_smoke.c $(pkg-config --cflags --libs opensps) -lm -o /tmp/test_installed_opensps
+          OPENSPS_DATA_HOME=$PWD/tests/data/opensps-test-data /tmp/test_installed_opensps
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fedora-rpms
+          path: |
+            ~/rpmbuild/RPMS/*/*.rpm
+            ~/rpmbuild/SRPMS/*.rpm
+          retention-days: 7
+
+  build-deb:
+    name: Ubuntu DEB (OpenMP CPU)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q debhelper build-essential gfortran meson ninja-build pkgconf devscripts
+      - name: Build packages
+        run: |
+          chmod +x debian/rules
+          dpkg-buildpackage -us -uc -b
+      - name: Install and verify library
+        run: |
+          sudo apt-get install -y ../libopensps0_*.deb ../libopensps-dev_*.deb
+          sudo ldconfig
+          ldconfig -p | grep libopensps
+          pkg-config --cflags --libs opensps
+          gcc tests/test_c_smoke.c $(pkg-config --cflags --libs opensps) -lm -o /tmp/test_installed_opensps
+          OPENSPS_DATA_HOME=$PWD/tests/data/opensps-test-data /tmp/test_installed_opensps
+          mkdir -p dist
+          mv ../libopensps0_*.deb ../libopensps-dev_*.deb dist/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ubuntu-debs
+          path: dist/*.deb
+          retention-days: 7
+
+  build-cpu-tarball:
+    name: Generic CPU Tarball
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gfortran meson ninja-build pkgconf
+      - name: Build and stage CPU library
+        run: |
+          VERSION=$(grep -m1 "version :" meson.build | cut -d"'" -f2)
+          meson setup build --buildtype=release -Denable_openmp=true -Dcpu_baseline=generic -Dtests=false --prefix=/usr/local
+          meson compile -C build
+          DESTDIR=$PWD/staging meson install -C build
+          TAR_DIR="libopensps-${VERSION}-linux-x86_64-cpu"
+          mkdir -p "$TAR_DIR"
+          cp -r staging/usr/local/* "$TAR_DIR/"
+          printf "%s\n" \
+            "libopensps (Generic CPU OpenMP Build)" \
+            "=====================================" \
+            "Target: Generic x86-64 CPU (SSE2 baseline)" \
+            "Compiler: GNU Fortran (gfortran)" \
+            "Threading: OpenMP CPU parallelization (-Denable_openmp=true)" \
+            "Runtime Requirements: libgomp.so.1, glibc >= 2.35" \
+            > "$TAR_DIR/README.txt"
+          tar -czvf "${TAR_DIR}.tar.gz" "$TAR_DIR"
+      - name: Smoke test staged library
+        run: |
+          PKG_PATH=$(find $PWD/staging/usr/local -name opensps.pc -exec dirname {} \;)
+          PKG_CONFIG_PATH="$PKG_PATH" pkg-config --define-variable=prefix=$PWD/staging/usr/local --cflags --libs opensps
+          CFLAGS=$(PKG_CONFIG_PATH="$PKG_PATH" pkg-config --define-variable=prefix=$PWD/staging/usr/local --cflags opensps)
+          LIBS=$(PKG_CONFIG_PATH="$PKG_PATH" pkg-config --define-variable=prefix=$PWD/staging/usr/local --libs opensps)
+          gcc tests/test_c_smoke.c $CFLAGS $LIBS -lm -o /tmp/test_c_smoke
+          LIBDIR=$(find staging/usr/local -type f -name 'libopensps.so.*' -exec dirname {} \; | head -n 1)
+          LD_LIBRARY_PATH=$PWD/$LIBDIR OPENSPS_DATA_HOME=$PWD/tests/data/opensps-test-data /tmp/test_c_smoke
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tarball-cpu
+          path: libopensps-*-linux-x86_64-cpu.tar.gz
+          retention-days: 7
+
+  build-cuda-tarball:
+    name: NVIDIA GPU Tarball (cc80)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install nvfortran
+        uses: fortran-lang/setup-fortran@v1
+        with:
+          compiler: nvidia-hpc
+          version: '26.1'
+      - name: Pin nvfortran math dispatch
+        run: echo "MTH_I_ARCH=avx2" >> "$GITHUB_ENV"
+      - run: pipx install meson && pipx install ninja
+      - name: Build and stage CUDA library
+        run: |
+          VERSION=$(grep -m1 "version :" meson.build | cut -d"'" -f2)
+          meson setup build --buildtype=release \
+            -Daccel=omp_gpu -Dgpu_arch=cc80 \
+            -Daccel_hip=true -Daccel_blas=cublas \
+            -Dcpu_baseline=x86-64-v3 -Dtests=false --prefix=/usr/local
+          meson compile -C build
+          DESTDIR=$PWD/staging meson install -C build
+          TAR_DIR="libopensps-${VERSION}-linux-x86_64-cuda-cc80"
+          mkdir -p "$TAR_DIR"
+          cp -r staging/usr/local/* "$TAR_DIR/"
+          printf "%s\n" \
+            "libopensps (NVIDIA GPU Build - cc80)" \
+            "=====================================" \
+            "Target: NVIDIA GPU Compute Capability 8.0 (cc80)" \
+            "Acceleration: OpenMP Target Offload + Native HIP Kernels + cuBLAS" \
+            "Compiler: NVIDIA HPC SDK (nvfortran / nvc / nvcc 26.1)" \
+            "Runtime Requirements: NVIDIA GPU Driver (CUDA 12.0+ compatible), NVIDIA HPC OpenMP runtime (libnvomp.so), cuBLAS (libcublas.so)" \
+            > "$TAR_DIR/README.txt"
+          tar -czvf "${TAR_DIR}.tar.gz" "$TAR_DIR"
+        env:
+          FC: nvfortran
+          CC: nvc
+      - name: Verify symbols and SONAME
+        run: |
+          LIBFILE=$(find staging/usr/local -name "libopensps.so.*" -type f | head -n 1)
+          echo "Found library: $LIBFILE"
+          nm -D "$LIBFILE" | grep -E "opensps_context_create|opensps_get_driver_version"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tarball-cuda
+          path: libopensps-*-linux-x86_64-cuda-cc80.tar.gz
+          retention-days: 7
+
+  build-rocm-tarball:
+    name: AMD ROCm Tarball (gfx1201)
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:44
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            flang flang-runtime clang clang-tools-extra lld llvm libomp-devel \
+            rocm-device-libs rocm-hip-devel gcc meson ninja-build git tar gzip findutils
+      - name: Discover device bitcode and configure
+        run: |
+          BITCODE_DIR=$(find /usr/lib64 -type d -path '*/amdgcn/bitcode' 2>/dev/null | head -n 1)
+          AMDHSA_DIR=$(find /usr/lib64 -type d -name 'amdgcn-amd-amdhsa' 2>/dev/null | head -n 1)
+          echo "Discovered bitcode directory: $BITCODE_DIR"
+          echo "Discovered amdhsa library directory: $AMDHSA_DIR"
+          
+          D="--rocm-device-lib-path=$BITCODE_DIR"
+          LA="['$D','-Xoffload-linker','--library-path=$AMDHSA_DIR']"
+          
+          FC=flang CC=clang meson setup build --buildtype=release \
+            -Daccel=omp_gpu -Dgpu_arch=gfx1201 -Daccel_hip=true -Dtests=false \
+            -Dfortran_args="$D" -Dc_args="$D" \
+            -Dfortran_link_args="$LA" -Dc_link_args="$LA" \
+            --prefix=/usr/local
+      - name: Compile
+        run: meson compile -C build
+      - name: Package ROCm tarball
+        run: |
+          VERSION=$(grep -m1 "version :" meson.build | cut -d"'" -f2)
+          DESTDIR=$PWD/staging meson install -C build
+          TAR_DIR="libopensps-${VERSION}-linux-x86_64-rocm-gfx1201"
+          mkdir -p "$TAR_DIR"
+          cp -r staging/usr/local/* "$TAR_DIR/"
+          printf "%s\n" \
+            "libopensps (AMD ROCm GPU Build - gfx1201)" \
+            "=========================================" \
+            "Target: AMD GPU (gfx1201)" \
+            "Acceleration: OpenMP Target Offload + Native HIP Kernels" \
+            "Compiler: LLVM flang / clang / hipcc" \
+            "Runtime Requirements: AMD ROCm 7.x runtime, amdgpu driver, libamdhip64.so" \
+            > "$TAR_DIR/README.txt"
+          tar -czvf "${TAR_DIR}.tar.gz" "$TAR_DIR"
+      - name: Verify symbols and SONAME
+        run: |
+          LIBFILE=$(find staging/usr/local -name "libopensps.so.*" -type f | head -n 1)
+          echo "Found library: $LIBFILE"
+          nm -D "$LIBFILE" | grep -E "opensps_context_create|opensps_get_driver_version"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tarball-rocm
+          path: libopensps-*-linux-x86_64-rocm-gfx1201.tar.gz
+          retention-days: 7
+
+  publish:
+    name: Publish Release
+    runs-on: ubuntu-24.04
+    needs:
+      - build-source
+      - build-rpm
+      - build-deb
+      - build-cpu-tarball
+      - build-cuda-tarball
+      - build-rocm-tarball
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: staging-assets
+          merge-multiple: true
+      - name: Prepare release assets and generate checksums
+        run: |
+          mkdir -p release-assets
+          cp -v staging-assets/* release-assets/ 2>/dev/null || true
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+          echo "--- Release Assets Checksums ---"
+          cat SHA256SUMS.txt
+      - name: Upload consolidated release bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: all-release-assets
+          path: release-assets/
+          retention-days: 14
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.tag_name || 'v0.1.0' }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "version=v0.1.0-pr${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish GitHub Release
+        if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.tag.outputs.version }}"
+          gh release create "$TAG" release-assets/* \
+            --title "libopensps $TAG" \
+            --generate-notes
+      - name: Dry Run Notice
+        if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true') }}
+        run: |
+          echo "=========================================================================="
+          echo "DRY RUN COMPLETE: All release assets were built and validated successfully."
+          echo "All release assets are available in the 'all-release-assets' workflow artifact."
+          echo "No GitHub Release was published."
+          echo "=========================================================================="

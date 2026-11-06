@@ -23,6 +23,7 @@ libopensps is a stellar population synthesis library derived from FSPS
 %package -n libopensps
 Summary:        FSPS shared library
 Requires:       libgfortran
+Requires:       libgomp
 
 %description -n libopensps
 Shared library for FSPS. This is the runtime dependency needed by 
@@ -49,9 +50,8 @@ for developing applications against libopensps.
 
 %build
 # The meson macro automatically sets --prefix=/usr, --libdir=/usr/lib64, etc.
-# We explicitly pass our new optimization toggle to guarantee a generic, 
-# highly-performant binary for distribution.
-%meson -Dcpu_baseline=x86-64-v3
+# Build a generic, OpenMP-parallelized CPU binary that runs reliably on almost every system.
+%meson -Denable_openmp=true -Dcpu_baseline=generic
 %meson_build
 
 %install
@@ -76,6 +76,7 @@ rm -rf %{buildroot}%{_datadir}/fsps
 
 %files -n libopensps-devel
 %{_includedir}/opensps.h
+%{_includedir}/opensps_version.h
 %{_includedir}/fsps.h
 # Package the unversioned symlink used by the linker
 %{_libdir}/libopensps.so

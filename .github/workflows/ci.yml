@@ -39,6 +39,15 @@ permissions:
   contents: read
 
 jobs:
+  # The files that repeat the version (CITATION.cff, spec, debian/changelog) must match meson.build
+  version-sync:
+    name: Version files agree with meson.build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 tools/check_versions.py
+
   test:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}

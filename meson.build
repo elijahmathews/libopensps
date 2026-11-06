@@ -17,6 +17,7 @@ project('opensps', ['fortran', 'c'],
 fc = meson.get_compiler('fortran')
 fc_id = fc.get_id()
 host_cpu = host_machine.cpu_family()
+fs = import('fs')
 
 # Universal arguments
 add_project_arguments('-cpp', language : 'fortran')
@@ -231,12 +232,39 @@ if fc_id == 'nvidia_hpc' and cpu_baseline in nv_tp and host_cpu == 'x86_64'
 endif
 
 # ===================================
+# Version Configuration
+# ===================================
+
+version_parts = meson.project_version().split('.')
+version_conf = configuration_data()
+version_conf.set('OPENSPS_API_VERSION_MAJOR', version_parts[0].to_int())
+version_conf.set('OPENSPS_API_VERSION_MINOR', version_parts[1].to_int())
+version_conf.set('OPENSPS_API_VERSION_PATCH', version_parts[2].to_int())
+version_conf.set('OPENSPS_VERSION_STRING', meson.project_version())
+
+opensps_version_h = configure_file(
+    input : 'include/opensps_version.h.in',
+    output : 'opensps_version.h',
+    configuration : version_conf,
+    install : true,
+    install_dir : get_option('includedir')
+)
+
+# The same version as a Fortran module (the environment banner)
+opensps_version_f90 = configure_file(
+    input : 'src/core/opensps_version.f90.in',
+    output : 'opensps_version.f90',
+    configuration : version_conf
+)
+
+# ===================================
 # Source Definitions
 # ===================================
 
 lib_sources = files(
     # Language Binding Modules
     'src/bindings/c/opensps_c_api.f90',
+    'src/bindings/c/opensps_version.c',
 
     # Core FSPS Modules
     'src/core/opensps_trace.f90',
@@ -285,6 +313,7 @@ lib_sources = files(
     'src/spectra/opensps_spectral_indices.f90',
     'src/spectra/opensps_spectral_library.f90',
 )
+lib_sources += [opensps_version_f90]   # generated from the project version
 
 # ===================================
 # Main Library Target
@@ -296,6 +325,7 @@ libopensps = library('opensps',
     version : meson.project_version(),
     soversion : '0',
     install : true,
+    include_directories : [include_directories('include'), include_directories('.')],
     dependencies : [omp_dep, accel_dep, threads_dep, dl_dep],
     # The library's C sources (setup-cache lock, pinning); link with the Fortran compiler so its
     # runtime (libgfortran, flang runtime, ...) is always included
@@ -306,7 +336,7 @@ libopensps = library('opensps',
 # This ensures they find the generated .mod files and link to the lib
 opensps_dep = declare_dependency(
     link_with : libopensps,
-    include_directories : include_directories('include'),
+    include_directories : [include_directories('include'), include_directories('.')],
     dependencies : [omp_dep, accel_dep, threads_dep]
 )
 # dependency('opensps') in a project that has this one as a subproject
@@ -428,7 +458,6 @@ if get_option('enable_stress_testing')
 endif
 
 # 3a. Regression Tests (run through Meson test framework)
-fs = import('fs')
 # Without a data root (neither a standard root with opensps-data.json, or the older fsps-data.json,
 # nor a legacy tree with data/), as in a package build from the source tree, the tests that need it
 # are still registered and report SKIP with the reason: each program checks for a data root at run
@@ -716,6 +745,26 @@ test('c_csp', test_c_csp_exe,
     timeout : 600
 )
 
+test_c_ssp_operator_exe = executable('test_c_ssp_operator', 'tests/test_c_ssp_operator.c',
+    dependencies : [opensps_dep, meson.get_compiler('c').find_library('m', required : false)],
+    include_directories : include_directories('include')
+)
+test('c_ssp_operator', test_c_ssp_operator_exe,
+    env : regression_env,
+    suite : 'regression',
+    timeout : 600
+)
+
+test_c_batch_grad_exe = executable('test_c_batch_grad', 'tests/test_c_batch_grad.c',
+    dependencies : [opensps_dep, meson.get_compiler('c').find_library('m', required : false)],
+    include_directories : include_directories('include')
+)
+test('c_batch_grad', test_c_batch_grad_exe,
+    env : regression_env,
+    suite : 'regression',
+    timeout : 600
+)
+
 endif # tests
 
 # ===================================
@@ -723,7 +772,7 @@ endif # tests
 # ===================================
 
 # Install Headers
-install_headers('include/opensps.h', 'include/fsps.h')  # fsps.h: deprecated compatibility header
+install_headers('include/opensps.h', 'include/fsps.h', opensps_version_h)  # fsps.h: deprecated compatibility header
 
 # Install Data (recursively copies the directory; 1.3 GB, off with -Dinstall_data=false, e.g. for
 # a Python wheel that builds the library as a subproject; skipped when the tree has no data/)
