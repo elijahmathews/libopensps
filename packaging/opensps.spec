@@ -76,6 +76,7 @@ rm -rf %{buildroot}%{_datadir}/fsps
 
 %files -n libopensps-devel
 %{_includedir}/opensps.h
+%{_includedir}/opensps_version.h
 %{_includedir}/fsps.h
 # Package the unversioned symlink used by the linker
 %{_libdir}/libopensps.so
