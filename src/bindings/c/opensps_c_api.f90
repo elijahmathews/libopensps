@@ -583,6 +583,16 @@ contains
         real(c_double), pointer :: weights_z(:, :, :), zred_mags(:)
         real(c_double), pointer :: mags_bar(:, :), spec_bar(:, :), mass_bar(:), lbol_bar(:)
         real(c_double), pointer :: params_bar(:, :), weights_bar(:, :), weights_z_bar(:, :, :)
+        ! Optional arrays of compute_csp_batch, copied from the caller's arrays only when given.
+        ! They are allocatable, not disassociated pointers, because an unallocated allocatable
+        ! passed to an optional dummy is absent by the standard, whereas nvfortran (25.1) reports a
+        ! disassociated pointer as present for an optional dummy. The large outputs (spec, indx,
+        ! young, old) are not copied: run_batch chooses the call by their association instead.
+        real(WP), allocatable :: weights_a(:, :), weights_z_a(:, :, :), zred_a(:)
+        real(WP), allocatable :: mags_bar_a(:, :), spec_bar_a(:, :), mass_bar_a(:), lbol_bar_a(:)
+        ! Gradient outputs, likewise (copied in, so elements the batch leaves alone keep the caller's
+        ! values, and copied back after a successful batch)
+        real(WP), allocatable :: params_bar_a(:, :), weights_bar_a(:, :), weights_z_bar_a(:, :, :)
         real(c_double), pointer :: mass(:), lbol(:), mdust(:), sfr(:)
         character(LEN=64), allocatable :: names(:)
         type(PARAMS) :: base
@@ -682,18 +692,39 @@ contains
         if (c_associated(c_spec)) call c_f_pointer(c_spec, spec, [nspec, n])
         if (c_associated(c_indx)) call c_f_pointer(c_indx, indx, [ctx%state%nindx, n])
         if (c_associated(c_emlines)) call c_f_pointer(c_emlines, emlines, [NEMLINE, n])
-        if (c_associated(c_weights)) call c_f_pointer(c_weights, weights, [nt, n])
-        if (c_associated(c_weights_z)) call c_f_pointer(c_weights_z, weights_z, [nt, ctx%state%nz, n])
-        if (c_associated(c_zred_mags)) call c_f_pointer(c_zred_mags, zred_mags, [n])
+        if (c_associated(c_weights)) then
+            call c_f_pointer(c_weights, weights, [nt, n]); allocate(weights_a, source=weights)
+        end if
+        if (c_associated(c_weights_z)) then
+            call c_f_pointer(c_weights_z, weights_z, [nt, ctx%state%nz, n]); allocate(weights_z_a, source=weights_z)
+        end if
+        if (c_associated(c_zred_mags)) then
+            call c_f_pointer(c_zred_mags, zred_mags, [n]); allocate(zred_a, source=zred_mags)
+        end if
 
-        if (c_associated(c_mags_bar)) call c_f_pointer(c_mags_bar, mags_bar, [nbands, n])
-        if (c_associated(c_spec_bar)) call c_f_pointer(c_spec_bar, spec_bar, [nspec, n])
-        if (c_associated(c_mass_bar)) call c_f_pointer(c_mass_bar, mass_bar, [n])
-        if (c_associated(c_lbol_bar)) call c_f_pointer(c_lbol_bar, lbol_bar, [n])
+        if (c_associated(c_mags_bar)) then
+            call c_f_pointer(c_mags_bar, mags_bar, [nbands, n]); allocate(mags_bar_a, source=mags_bar)
+        end if
+        if (c_associated(c_spec_bar)) then
+            call c_f_pointer(c_spec_bar, spec_bar, [nspec, n]); allocate(spec_bar_a, source=spec_bar)
+        end if
+        if (c_associated(c_mass_bar)) then
+            call c_f_pointer(c_mass_bar, mass_bar, [n]); allocate(mass_bar_a, source=mass_bar)
+        end if
+        if (c_associated(c_lbol_bar)) then
+            call c_f_pointer(c_lbol_bar, lbol_bar, [n]); allocate(lbol_bar_a, source=lbol_bar)
+        end if
 
-        if (c_associated(c_params_bar)) call c_f_pointer(c_params_bar, params_bar, [NBGRAD, n])
-        if (c_associated(c_weights_bar)) call c_f_pointer(c_weights_bar, weights_bar, [nt, n])
-        if (c_associated(c_weights_z_bar)) call c_f_pointer(c_weights_z_bar, weights_z_bar, [nt, ctx%state%nz, n])
+        if (c_associated(c_params_bar)) then
+            call c_f_pointer(c_params_bar, params_bar, [NBGRAD, n]); allocate(params_bar_a, source=params_bar)
+        end if
+        if (c_associated(c_weights_bar)) then
+            call c_f_pointer(c_weights_bar, weights_bar, [nt, n]); allocate(weights_bar_a, source=weights_bar)
+        end if
+        if (c_associated(c_weights_z_bar)) then
+            call c_f_pointer(c_weights_z_bar, weights_z_bar, [nt, ctx%state%nz, n])
+            allocate(weights_z_bar_a, source=weights_z_bar)
+        end if
 
         ! Small outputs always computed
         allocate(mass_l(n), lbol_l(n), mdust_l(n), sfr_l(n), eml_l(NEMLINE, n))
@@ -707,43 +738,21 @@ contains
             end if
         end if
 
-        if (c_associated(c_young)) then
-            if (has_ops) then
-                call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
-                                       sfr=sfr_l, emlines=eml_l, indx=indx, ssp_weights=weights, &
-                                       spec_young=young, spec_old=old, mass_young=my_l, mass_old=mo_l, &
-                                       lbol_young=ly_l, lbol_old=lo_l, zred_mags=zred_mags, ssp_weights_z=weights_z, &
-                                       ssp_ops=ctx_store(handle)%opset, mags_bar=mags_bar, spec_bar=spec_bar, &
-                                       params_bar=params_bar, weights_bar=weights_bar, mass_bar=mass_bar, &
-                                       lbol_bar=lbol_bar, weights_z_bar=weights_z_bar)
-            else
-                call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
-                                       sfr=sfr_l, emlines=eml_l, indx=indx, ssp_weights=weights, &
-                                       spec_young=young, spec_old=old, mass_young=my_l, mass_old=mo_l, &
-                                       lbol_young=ly_l, lbol_old=lo_l, zred_mags=zred_mags, ssp_weights_z=weights_z, &
-                                       mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, &
-                                       weights_bar=weights_bar, mass_bar=mass_bar, lbol_bar=lbol_bar, &
-                                       weights_z_bar=weights_z_bar)
-            end if
+        if (has_ops) then
+            call run_batch(ctx, psets, mags, st, spec, indx, young, old, mass_l, lbol_l, mdust_l, sfr_l, eml_l, &
+                           my_l, mo_l, ly_l, lo_l, weights_a, weights_z_a, zred_a, mags_bar_a, spec_bar_a, &
+                           mass_bar_a, lbol_bar_a, params_bar_a, weights_bar_a, weights_z_bar_a, &
+                           ctx_store(handle)%opset)
         else
-            if (has_ops) then
-                call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
-                                       sfr=sfr_l, emlines=eml_l, indx=indx, ssp_weights=weights, &
-                                       zred_mags=zred_mags, ssp_weights_z=weights_z, &
-                                       ssp_ops=ctx_store(handle)%opset, mags_bar=mags_bar, spec_bar=spec_bar, &
-                                       params_bar=params_bar, weights_bar=weights_bar, mass_bar=mass_bar, &
-                                       lbol_bar=lbol_bar, weights_z_bar=weights_z_bar)
-            else
-                call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
-                                       sfr=sfr_l, emlines=eml_l, indx=indx, ssp_weights=weights, &
-                                       zred_mags=zred_mags, ssp_weights_z=weights_z, &
-                                       mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, &
-                                       weights_bar=weights_bar, mass_bar=mass_bar, lbol_bar=lbol_bar, &
-                                       weights_z_bar=weights_z_bar)
-            end if
+            call run_batch(ctx, psets, mags, st, spec, indx, young, old, mass_l, lbol_l, mdust_l, sfr_l, eml_l, &
+                           my_l, mo_l, ly_l, lo_l, weights_a, weights_z_a, zred_a, mags_bar_a, spec_bar_a, &
+                           mass_bar_a, lbol_bar_a, params_bar_a, weights_bar_a, weights_z_bar_a)
         end if
 
         if (st == 0) then
+            if (allocated(params_bar_a)) params_bar = params_bar_a
+            if (allocated(weights_bar_a)) weights_bar = weights_bar_a
+            if (allocated(weights_z_bar_a)) weights_z_bar = weights_z_bar_a
             if (c_associated(c_mass)) then
                 call c_f_pointer(c_mass, mass, [n]); mass = mass_l
             end if
@@ -777,6 +786,84 @@ contains
         status = st
         end associate
     end subroutine batch_handle
+
+    !> The call of compute_csp_batch for batch_handle. The optional arrays arrive as optional
+    !> dummies (absent when the caller's actual argument is an unallocated allocatable), which
+    !> compute_csp_batch then sees as absent too. The pointers spec, indx, young and old are
+    !> disassociated when not requested; nvfortran (25.1) reports a disassociated pointer as present
+    !> for an optional dummy, so the call is chosen by their association rather than passing them on.
+    subroutine run_batch(ctx, psets, mags, st, spec, indx, young, old, mass_l, lbol_l, mdust_l, sfr_l, eml_l, &
+                         my_l, mo_l, ly_l, lo_l, ssp_weights, ssp_weights_z, zred_mags, mags_bar, spec_bar, &
+                         mass_bar, lbol_bar, params_bar, weights_bar, weights_z_bar, ssp_ops)
+        type(opensps_context_t), intent(inout) :: ctx
+#if defined(__flang__)
+        type(PARAMS), intent(in)            :: psets(:)
+#else
+        type(PARAMS), intent(in), target    :: psets(:)
+#endif
+        real(WP), intent(out)               :: mags(:, :)
+        integer, intent(out)                :: st
+        real(WP), pointer                   :: spec(:, :), indx(:, :), young(:, :), old(:, :)
+        real(WP), intent(out)               :: mass_l(:), lbol_l(:), mdust_l(:), sfr_l(:), eml_l(:, :)
+        real(WP), intent(out), optional     :: my_l(:), mo_l(:), ly_l(:), lo_l(:)
+        real(WP), intent(in), optional      :: ssp_weights(:, :), ssp_weights_z(:, :, :), zred_mags(:)
+        real(WP), intent(in), optional      :: mags_bar(:, :), spec_bar(:, :), mass_bar(:), lbol_bar(:)
+        real(WP), intent(out), optional     :: params_bar(:, :), weights_bar(:, :), weights_z_bar(:, :, :)
+        type(ssp_opset_t), intent(inout), optional :: ssp_ops
+
+        if (associated(young)) then
+            ! The parts always come with the spectra (the caller's or a local array)
+            if (associated(indx)) then
+                call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
+                                       sfr=sfr_l, emlines=eml_l, indx=indx, ssp_weights=ssp_weights, &
+                                       spec_young=young, spec_old=old, mass_young=my_l, mass_old=mo_l, &
+                                       lbol_young=ly_l, lbol_old=lo_l, zred_mags=zred_mags, &
+                                       ssp_weights_z=ssp_weights_z, ssp_ops=ssp_ops, mags_bar=mags_bar, &
+                                       spec_bar=spec_bar, params_bar=params_bar, weights_bar=weights_bar, &
+                                       mass_bar=mass_bar, lbol_bar=lbol_bar, weights_z_bar=weights_z_bar)
+            else
+                call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
+                                       sfr=sfr_l, emlines=eml_l, ssp_weights=ssp_weights, &
+                                       spec_young=young, spec_old=old, mass_young=my_l, mass_old=mo_l, &
+                                       lbol_young=ly_l, lbol_old=lo_l, zred_mags=zred_mags, &
+                                       ssp_weights_z=ssp_weights_z, ssp_ops=ssp_ops, mags_bar=mags_bar, &
+                                       spec_bar=spec_bar, params_bar=params_bar, weights_bar=weights_bar, &
+                                       mass_bar=mass_bar, lbol_bar=lbol_bar, weights_z_bar=weights_z_bar)
+            end if
+        else if (associated(spec)) then
+            if (associated(indx)) then
+                call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
+                                       sfr=sfr_l, emlines=eml_l, indx=indx, ssp_weights=ssp_weights, &
+                                       zred_mags=zred_mags, ssp_weights_z=ssp_weights_z, ssp_ops=ssp_ops, &
+                                       mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, &
+                                       weights_bar=weights_bar, mass_bar=mass_bar, lbol_bar=lbol_bar, &
+                                       weights_z_bar=weights_z_bar)
+            else
+                call compute_csp_batch(ctx, psets, mags, st, spec=spec, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
+                                       sfr=sfr_l, emlines=eml_l, ssp_weights=ssp_weights, &
+                                       zred_mags=zred_mags, ssp_weights_z=ssp_weights_z, ssp_ops=ssp_ops, &
+                                       mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, &
+                                       weights_bar=weights_bar, mass_bar=mass_bar, lbol_bar=lbol_bar, &
+                                       weights_z_bar=weights_z_bar)
+            end if
+        else
+            if (associated(indx)) then
+                call compute_csp_batch(ctx, psets, mags, st, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
+                                       sfr=sfr_l, emlines=eml_l, indx=indx, ssp_weights=ssp_weights, &
+                                       zred_mags=zred_mags, ssp_weights_z=ssp_weights_z, ssp_ops=ssp_ops, &
+                                       mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, &
+                                       weights_bar=weights_bar, mass_bar=mass_bar, lbol_bar=lbol_bar, &
+                                       weights_z_bar=weights_z_bar)
+            else
+                call compute_csp_batch(ctx, psets, mags, st, mass=mass_l, lbol=lbol_l, mdust=mdust_l, &
+                                       sfr=sfr_l, emlines=eml_l, ssp_weights=ssp_weights, &
+                                       zred_mags=zred_mags, ssp_weights_z=ssp_weights_z, ssp_ops=ssp_ops, &
+                                       mags_bar=mags_bar, spec_bar=spec_bar, params_bar=params_bar, &
+                                       weights_bar=weights_bar, mass_bar=mass_bar, lbol_bar=lbol_bar, &
+                                       weights_z_bar=weights_z_bar)
+            end if
+        end if
+    end subroutine run_batch
 
     !> Where the last batch's spectra are (see batch_spectra_device): the device address, nspec,
     !> the number of models and the bytes per value (4 or 8); status 1 for a bad handle.
