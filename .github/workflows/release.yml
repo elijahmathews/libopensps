@@ -193,7 +193,8 @@ jobs:
         run: |
           LIBFILE=$(find staging/usr/local -name "libopensps.so.*" -type f | head -n 1)
           readelf -d "$LIBFILE" | grep SONAME
-          readelf -s "$LIBFILE" | grep opensps_initialize
+          readelf -sW "$LIBFILE" | grep opensps_context_create
+          readelf -sW "$LIBFILE" | grep opensps_get_driver_version
       - uses: actions/upload-artifact@v7
         with:
           name: tarball-cuda
@@ -249,7 +250,8 @@ jobs:
         run: |
           LIBFILE=$(find staging/usr/local -name "libopensps.so.*" -type f | head -n 1)
           readelf -d "$LIBFILE" | grep SONAME
-          readelf -s "$LIBFILE" | grep opensps_initialize
+          readelf -sW "$LIBFILE" | grep opensps_context_create
+          readelf -sW "$LIBFILE" | grep opensps_get_driver_version
       - uses: actions/upload-artifact@v7
         with:
           name: tarball-rocm
