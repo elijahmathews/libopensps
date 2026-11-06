@@ -1,6 +1,6 @@
 # Agent guide
 
-Instructions for AI coding agents working on libopensps (and a quick reference for people).
+Instructions for AI coding agents working on OpenSPS (and a quick reference for people).
 Read this first; the linked documents hold the detail. Keep this file short and current:
 when a rule here changes, change it here.
 

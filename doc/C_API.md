@@ -1,6 +1,6 @@
-# libopensps C API
+# OpenSPS C API
 
-This document describes the C API of libopensps: header `opensps.h`, library `libopensps`, pkg-config `opensps`, prefix `opensps_` (macros `OPENSPS_`). This API allows FSPS to be used as a shared library in C, C++, Python, Julia, Rust, and other languages supporting C interoperability.
+This document describes the C API of OpenSPS: header `opensps.h`, library `libopensps`, pkg-config `opensps`, prefix `opensps_` (macros `OPENSPS_`). This API allows FSPS to be used as a shared library in C, C++, Python, Julia, Rust, and other languages supporting C interoperability.
 
 ## Build
 

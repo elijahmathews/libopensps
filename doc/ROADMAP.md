@@ -27,42 +27,6 @@ delete it here.
   regression suites pass with `OMP_TARGET_OFFLOAD=MANDATORY`, FP64 and FP32) and on NVIDIA
   (nvfortran; cc80, the A100: all suites pass). Other GPUs, macOS, arm64 and ifx build in CI only.
 
-## Cutover to libopensps
-
-The code moves to a fresh repository, `elijahmathews/libopensps`, without the history and the
-data of this fork. Its first commit is a snapshot: "libopensps: the state of
-elijahmathews/fsps at commit <hash>". Everything after it happens in the new repository.
-
-**Cutover commit (this repository):** the last commit on `develop` before the move, tagged
-`fsps-final`. It must contain:
-
-- [ ] the standard data format and loaders, so the code runs from fetched data without `data/`
-      (priority 1), with the small test library in the repository;
-- [ ] the data archives published (per-library archives, release `data-v1`) and the fetch
-      script pointing at them; CI fetching and caching them for the regression and
-      legacy-parity suites;
-- [ ] the open pull requests that are ready merged (GPU performance stack, roadmap, C API
-      additions for the bindings); work not ready by then moves to the new repository as
-      patches (`git format-patch` / `git am`: the trees are identical apart from `data/`);
-- [ ] a green CI run on that commit, including the nightly suites.
-
-**First commit (libopensps):** the cutover tree without `data/` and without large generated
-files, the FSPS MIT license and copyright notice unchanged, and an `AUTHORS` / credit section
-naming the FSPS authors and the fork's contributors (the history that recorded them is not
-carried over). The commit message names the source commit.
-
-**Immediately after, in libopensps:**
-
-1. Rename (one pull request): library `libopensps` (soname), header `opensps.h`, pkg-config
-   `opensps`, C prefix `opensps_`, Meson project name, documentation; the bindings switch with
-   a one-file change.
-2. Repository settings: issues on, branch protection on `main`, CI and coverage tokens,
-   description and topics; `CITATION.cff` citing FSPS and libopensps.
-3. Tag a first release; point `opensps-python`'s Meson wrap at the tag.
-
-**This repository afterwards:** a final README note pointing to libopensps, then archived
-(read-only). The tag `fsps-final` keeps the full history and data reachable.
-
 ## Priorities
 
 In order of work, with the reason for the order. Items marked *parallel* need no GPU and can

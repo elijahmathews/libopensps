@@ -2,7 +2,7 @@
   <img src="assets/logo.svg" alt="OpenSPS logo" width="180px" height="180px" />
 </p>
 
-<h1 align="center">libopensps</h1>
+<h1 align="center">OpenSPS</h1>
 
 <p align="center">
   <strong>A High-Performance, Hardware-Accelerated Stellar Population Synthesis Library</strong>
@@ -26,7 +26,7 @@
 </p>
 
 > [!WARNING]
-> **libopensps is very newly developed software and is probably a bit fragile.** Interfaces may
+> **OpenSPS is very newly developed software and is probably a bit fragile.** Interfaces may
 > change without notice, there are certainly bugs we have not found yet, and nothing here has
 > had the years of use that FSPS has. Validate results against your own checks (and against
 > legacy FSPS) before relying on them in published work. Buyer beware! If something breaks, please
@@ -35,14 +35,17 @@
 **Contributions are very welcome!** Bug reports, physics checks, new platforms, documentation and
 code are all appreciated. See [Contributing](#contributing).
 
-## What is libopensps?
+## What is OpenSPS?
 
-libopensps is a modernized version of [FSPS](https://github.com/cconroy20/fsps) (Flexible Stellar
+OpenSPS is a modernized version of [FSPS](https://github.com/cconroy20/fsps) (Flexible Stellar
 Population Synthesis; Conroy, Gunn & White 2009; Conroy & Gunn 2010), written in Fortran 2008+ with
 a stable C API. It computes simple and composite stellar populations (SSPs and CSPs): spectra,
 photometry, spectral indices, emission lines, stellar masses and bolometric luminosities. The aim is
 physics that stays traceable to legacy FSPS, with a code base built for fitting large numbers of
 models.
+
+The project is called OpenSPS; this repository and its shared library are named `libopensps`
+(`libopensps.so`, header `opensps.h`, C prefix `opensps_`).
 
 What it adds to FSPS:
 
@@ -209,10 +212,10 @@ meson install -C build        # honours --prefix and DESTDIR
 ```
 
 installs `libopensps`, `opensps.h` and a pkg-config file (`pkg-config --cflags --libs opensps`).
-Projects that build libopensps as a Meson subproject can use `dependency('opensps')` and usually
+Projects that build the library as a Meson subproject can use `dependency('opensps')` and usually
 pass `-Dtests=false`.
 
-## Using libopensps
+## Using OpenSPS
 
 ### From Python
 
@@ -344,14 +347,14 @@ the unit and regression suites must pass in FP64 and FP32 builds. Be kind to eac
 
 ## Citation
 
-If you use libopensps in your research, please cite it (see [CITATION.cff](CITATION.cff)) **and**
+If you use OpenSPS in your research, please cite it (see [CITATION.cff](CITATION.cff)) **and**
 the FSPS papers: [Conroy, Gunn & White (2009)](https://ui.adsabs.harvard.edu/abs/2009ApJ...699..486C)
 and [Conroy & Gunn (2010)](https://ui.adsabs.harvard.edu/abs/2010ApJ...712..833C). Cite the data
 release you used as well (`data_release.bib` in the data directory).
 
 ## License and credits
 
-libopensps is released under the [MIT license](LICENSE.md), which retains the FSPS copyright
+OpenSPS is released under the [MIT license](LICENSE.md), which retains the FSPS copyright
 notice. It is derived from FSPS by Charlie Conroy and contributors; [AUTHORS](AUTHORS) lists
 everyone whose work it builds on. Much of the modernized code was written with AI coding agents
 (Claude, by Anthropic) under the direction and review of the maintainer.

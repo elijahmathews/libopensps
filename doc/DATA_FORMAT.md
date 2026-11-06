@@ -1,6 +1,6 @@
 # Data libraries: survey and standard format
 
-This document describes how libopensps (https://github.com/elijahmathews/libopensps), a modernized
+This document describes how OpenSPS (https://github.com/elijahmathews/libopensps), a modernized
 FSPS, reads its input libraries (stellar spectra, isochrones,
 nebular grids, dust, filters, ...), the standard format that replaces the legacy layout, and the
 tools that convert, package and fetch the data.

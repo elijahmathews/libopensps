@@ -1,9 +1,9 @@
-# Contributing to libopensps
+# Contributing to OpenSPS
 
-Thanks for your interest in contributing to libopensps! This document covers the
+Thanks for your interest in contributing to OpenSPS! This document covers the
 essentials for getting a development environment running and submitting a change.
 
-libopensps is a modernized FSPS: its physics must stay correct and traceable to legacy FSPS
+OpenSPS is a modernized FSPS: its physics must stay correct and traceable to legacy FSPS
 or to independent identities. Most of the rules below exist to protect that.
 
 ## Development setup
