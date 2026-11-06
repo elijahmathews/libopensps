@@ -17,6 +17,7 @@ project('opensps', ['fortran', 'c'],
 fc = meson.get_compiler('fortran')
 fc_id = fc.get_id()
 host_cpu = host_machine.cpu_family()
+fs = import('fs')
 
 # Universal arguments
 add_project_arguments('-cpp', language : 'fortran')
@@ -449,7 +450,6 @@ if get_option('enable_stress_testing')
 endif
 
 # 3a. Regression Tests (run through Meson test framework)
-fs = import('fs')
 # Without a data root (neither a standard root with opensps-data.json, or the older fsps-data.json,
 # nor a legacy tree with data/), as in a package build from the source tree, the tests that need it
 # are still registered and report SKIP with the reason: each program checks for a data root at run
