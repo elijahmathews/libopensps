@@ -1094,7 +1094,7 @@ void opensps_hip_nebular_continuum_sp(
         n_mod, nspec, ntab, nt_neb, d_tab, d_ia, d_wa, d_dwa, d_newr,
         d_cy, d_co, d_lns, d_iz, d_wz, d_iu, d_wu, d_yo
     );
-    hipDeviceSynchronize();
+    (void)hipDeviceSynchronize();
 }
 
 void opensps_hip_nebular_continuum_dp(
@@ -1125,7 +1125,7 @@ void opensps_hip_nebular_continuum_dp(
         n_mod, nspec, ntab, nt_neb, d_tab, d_ia, d_wa, d_dwa, d_newr,
         d_cy, d_co, d_lns, d_iz, d_wz, d_iu, d_wu, d_yo
     );
-    hipDeviceSynchronize();
+    (void)hipDeviceSynchronize();
 }
 
 void opensps_hip_adj_nebular_continuum_sp(
@@ -1159,7 +1159,7 @@ void opensps_hip_adj_nebular_continuum_sp(
         n_mod, nspec, ntab, ntn, nrun, d_tab, d_gw, d_it_tesc, d_ia, d_wa,
         d_rs, d_rl, d_iz, d_wz, d_iu, d_wu, d_fabs, d_qzt, d_lref, d_csum
     );
-    hipDeviceSynchronize();
+    (void)hipDeviceSynchronize();
 }
 
 void opensps_hip_adj_nebular_continuum_dp(
@@ -1193,7 +1193,7 @@ void opensps_hip_adj_nebular_continuum_dp(
         n_mod, nspec, ntab, ntn, nrun, d_tab, d_gw, d_it_tesc, d_ia, d_wa,
         d_rs, d_rl, d_iz, d_wz, d_iu, d_wu, d_fabs, d_qzt, d_lref, d_csum
     );
-    hipDeviceSynchronize();
+    (void)hipDeviceSynchronize();
 }
 
 void opensps_hip_adj_imf_analytic_sp(
@@ -1240,7 +1240,7 @@ void opensps_hip_adj_imf_analytic_sp(
         d_pt_off, d_pt_ptr, d_pt_age, d_pt_mini, d_pt_m1, d_pt_m2,
         d_pt_llo, d_pt_dl, d_pt_first, d_pt_cm, d_wk, d_wpb, d_imf_bar
     );
-    hipStreamSynchronize(s);
+    (void)hipStreamSynchronize(s);
 }
 
 void opensps_hip_adj_imf_analytic_dp(
@@ -1287,7 +1287,7 @@ void opensps_hip_adj_imf_analytic_dp(
         d_pt_off, d_pt_ptr, d_pt_age, d_pt_mini, d_pt_m1, d_pt_m2,
         d_pt_llo, d_pt_dl, d_pt_first, d_pt_cm, d_wk, d_wpb, d_imf_bar
     );
-    hipStreamSynchronize(s);
+    (void)hipStreamSynchronize(s);
 }
 
 // ---------------------------------------------------------------------------
