@@ -15,6 +15,7 @@ module opensps_environment
     use opensps_cache, only: opensps_cache_release_setup
     use opensps_datalib, only: datalib_format_from_env, datalib_root_is_standard
     use opensps_version, only: OPENSPS_VERSION_STRING
+    use opensps_build_info, only: opensps_build_id
 
     implicit none
     private
@@ -149,6 +150,8 @@ contains
 
         write (output_unit, '(A)') '--------------------------------------------------'
         write (output_unit, '(A, A)') ' OpenSPS Version: ', OPENSPS_VERSION_STRING
+        if (len(opensps_build_id()) > 0) &
+            write (output_unit, '(A, A)') ' Build:           ', opensps_build_id()
         write (output_unit, '(A, A)') ' Data Root:       ', trim(ctx%sps_home)
         write (output_unit, '(A, A)') ' Output Root:     ', trim(ctx%output_home)
 

@@ -94,6 +94,9 @@ void opensps_lock(int *status);
 void opensps_unlock(int *status);
 void opensps_get_driver_version(int *major, int *minor, int *patch);
 const char *opensps_get_version_string(void);
+// Source revision of a development build (git describe), e.g. "v0.2.0-37-g6de9eb6"; "" for a
+// release build. Static storage; do not free.
+const char *opensps_get_build_id(void);
 void opensps_get_nbgrad(int *nbgrad);
 void opensps_get_grad_param_name(int grad_idx, char *name, int max_len, int *status);
 void opensps_validate_params(int *status); // Note: Checks legacy global state context

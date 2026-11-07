@@ -25,6 +25,19 @@ int main(void) {
         return 1;
     }
 
+    const char *bid = opensps_get_build_id();
+    printf("   Build id: \"%s\"\n", bid ? bid : "(null)");
+    if (!bid) {
+        fprintf(stderr, "FAIL: null build id\n");
+        return 1;
+    }
+    // The release workflow sets this on tag builds: a release must not carry a build id.
+    const char *expect_release = getenv("OPENSPS_EXPECT_RELEASE");  // CI sets it to "" off tags
+    if (expect_release && expect_release[0] != '\0' && bid[0] != '\0') {
+        fprintf(stderr, "FAIL: release build reports build id \"%s\"\n", bid);
+        return 1;
+    }
+
     // 2. FFI Metadata Queries
     int nbgrad = 0;
     opensps_get_nbgrad(&nbgrad);
