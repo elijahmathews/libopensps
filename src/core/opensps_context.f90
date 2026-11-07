@@ -1304,6 +1304,13 @@ contains
 
         ! Nothing mapped
         if (.not. ctx%on_device) return
+
+        ! Two kinds of device data. The pointer components of the state (isochrones, stellar
+        ! libraries, filters, dust tables: the setup cache that contexts with the same library
+        ! selection share, issue #77) are mapped once per context, so a second context raises the
+        ! reference count of the same arrays; they are released here, which drops only this
+        ! context's reference. delete would remove the arrays for every other context that still
+        ! uses them. The allocatable components are the context's own: delete.
         if (allocated(ctx%state%ssp_basis_spec)) then
 #ifdef OMP_TARGET
             associate (d_spec => ctx%state%ssp_basis_spec, d_spec_t => ctx%state%ssp_basis_spec_t, &
@@ -1361,32 +1368,32 @@ contains
             end if
             if (associated(s%zmet_xrb)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%zmet_xrb)
+                !$omp target exit data map(release: s%zmet_xrb)
 #endif
             end if
             if (associated(s%ages_xrb)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%ages_xrb)
+                !$omp target exit data map(release: s%ages_xrb)
 #endif
             end if
             if (associated(s%spec_xrb)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%spec_xrb)
+                !$omp target exit data map(release: s%spec_xrb)
 #endif
             end if
             if (associated(s%lam_xrb)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%lam_xrb)
+                !$omp target exit data map(release: s%lam_xrb)
 #endif
             end if
             if (associated(s%bpass_mass_ssp)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%bpass_mass_ssp)
+                !$omp target exit data map(release: s%bpass_mass_ssp)
 #endif
             end if
             if (associated(s%bpass_spec_ssp)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%bpass_spec_ssp)
+                !$omp target exit data map(release: s%bpass_spec_ssp)
 #endif
             end if
             if (allocated(s%ssp_temp_grid)) then
@@ -1411,7 +1418,7 @@ contains
             end if
             if (associated(s%time_full)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%time_full)
+                !$omp target exit data map(release: s%time_full)
 #endif
             end if
             if (allocated(s%lbol_ssp_zz)) then
@@ -1431,72 +1438,72 @@ contains
             end if
             if (associated(s%zlegendinit)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%zlegendinit)
+                !$omp target exit data map(release: s%zlegendinit)
 #endif
             end if
             if (associated(s%zlegend)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%zlegend)
+                !$omp target exit data map(release: s%zlegend)
 #endif
             end if
             if (associated(s%timestep_isoc)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%timestep_isoc)
+                !$omp target exit data map(release: s%timestep_isoc)
 #endif
             end if
             if (associated(s%nmass_isoc)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%nmass_isoc)
+                !$omp target exit data map(release: s%nmass_isoc)
 #endif
             end if
             if (associated(s%lmdot_isoc)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%lmdot_isoc)
+                !$omp target exit data map(release: s%lmdot_isoc)
 #endif
             end if
             if (associated(s%mini_isoc)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%mini_isoc)
+                !$omp target exit data map(release: s%mini_isoc)
 #endif
             end if
             if (associated(s%phase_isoc)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%phase_isoc)
+                !$omp target exit data map(release: s%phase_isoc)
 #endif
             end if
             if (associated(s%ffco_isoc)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%ffco_isoc)
+                !$omp target exit data map(release: s%ffco_isoc)
 #endif
             end if
             if (associated(s%logg_isoc)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%logg_isoc)
+                !$omp target exit data map(release: s%logg_isoc)
 #endif
             end if
             if (associated(s%logt_isoc)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%logt_isoc)
+                !$omp target exit data map(release: s%logt_isoc)
 #endif
             end if
             if (associated(s%logl_isoc)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%logl_isoc)
+                !$omp target exit data map(release: s%logl_isoc)
 #endif
             end if
             if (associated(s%mact_isoc)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%mact_isoc)
+                !$omp target exit data map(release: s%mact_isoc)
 #endif
             end if
             if (associated(s%agndust_spec)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%agndust_spec)
+                !$omp target exit data map(release: s%agndust_spec)
 #endif
             end if
             if (associated(s%gaussnebarr)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%gaussnebarr)
+                !$omp target exit data map(release: s%gaussnebarr)
 #endif
             end if
             if (s%att_on_device) then
@@ -1507,177 +1514,177 @@ contains
             end if
             if (associated(s%neb_res_min)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%neb_res_min)
+                !$omp target exit data map(release: s%neb_res_min)
 #endif
             end if
             if (associated(s%xnebem_cont)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%xnebem_cont)
+                !$omp target exit data map(release: s%xnebem_cont)
 #endif
             end if
             if (associated(s%nebem_cont)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%nebem_cont)
+                !$omp target exit data map(release: s%nebem_cont)
 #endif
             end if
             if (associated(s%flux_dagb)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%flux_dagb)
+                !$omp target exit data map(release: s%flux_dagb)
 #endif
             end if
             if (associated(s%dustem2_dustem)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%dustem2_dustem)
+                !$omp target exit data map(release: s%dustem2_dustem)
 #endif
             end if
             if (associated(s%dustem_dustem)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%dustem_dustem)
+                !$omp target exit data map(release: s%dustem_dustem)
 #endif
             end if
             if (associated(s%lambda_dustem)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%lambda_dustem)
+                !$omp target exit data map(release: s%lambda_dustem)
 #endif
             end if
             if (associated(s%uminarr)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%uminarr)
+                !$omp target exit data map(release: s%uminarr)
 #endif
             end if
             if (associated(s%qpaharr)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%qpaharr)
+                !$omp target exit data map(release: s%qpaharr)
 #endif
             end if
             if (associated(s%wrc_spec)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%wrc_spec)
+                !$omp target exit data map(release: s%wrc_spec)
 #endif
             end if
             if (associated(s%wrn_spec)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%wrn_spec)
+                !$omp target exit data map(release: s%wrn_spec)
 #endif
             end if
             if (associated(s%pagb_spec)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%pagb_spec)
+                !$omp target exit data map(release: s%pagb_spec)
 #endif
             end if
             if (associated(s%agb_spec_car)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%agb_spec_car)
+                !$omp target exit data map(release: s%agb_spec_car)
 #endif
             end if
             if (associated(s%speclib_agb_smooth)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%speclib_agb_smooth)
+                !$omp target exit data map(release: s%speclib_agb_smooth)
 #endif
             end if
             if (associated(s%agb_spec_o_smooth)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%agb_spec_o_smooth)
+                !$omp target exit data map(release: s%agb_spec_o_smooth)
 #endif
             end if
             if (associated(s%agb_spec_c_smooth)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%agb_spec_c_smooth)
+                !$omp target exit data map(release: s%agb_spec_c_smooth)
 #endif
             end if
             if (associated(s%agb_spec_car_smooth)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%agb_spec_car_smooth)
+                !$omp target exit data map(release: s%agb_spec_car_smooth)
 #endif
             end if
             if (associated(s%agb_logt_c)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%agb_logt_c)
+                !$omp target exit data map(release: s%agb_logt_c)
 #endif
             end if
             if (associated(s%agb_spec_c)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%agb_spec_c)
+                !$omp target exit data map(release: s%agb_spec_c)
 #endif
             end if
             if (associated(s%agb_logt_o)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%agb_logt_o)
+                !$omp target exit data map(release: s%agb_logt_o)
 #endif
             end if
             if (associated(s%agb_spec_o)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%agb_spec_o)
+                !$omp target exit data map(release: s%agb_spec_o)
 #endif
             end if
             if (associated(s%wmb_spec)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%wmb_spec)
+                !$omp target exit data map(release: s%wmb_spec)
 #endif
             end if
             if (associated(s%speclib)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%speclib)
+                !$omp target exit data map(release: s%speclib)
 #endif
             end if
             if (associated(s%spec_res)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%spec_res)
+                !$omp target exit data map(release: s%spec_res)
 #endif
             end if
             if (associated(s%spec_nu)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%spec_nu)
+                !$omp target exit data map(release: s%spec_nu)
 #endif
             end if
             if (associated(s%spec_lambda)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%spec_lambda)
+                !$omp target exit data map(release: s%spec_lambda)
 #endif
             end if
             if (associated(s%sun_spec)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%sun_spec)
+                !$omp target exit data map(release: s%sun_spec)
 #endif
             end if
             if (associated(s%vega_spec)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%vega_spec)
+                !$omp target exit data map(release: s%vega_spec)
 #endif
             end if
             if (associated(s%filter_leff)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%filter_leff)
+                !$omp target exit data map(release: s%filter_leff)
 #endif
             end if
             if (associated(s%magvega)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%magvega)
+                !$omp target exit data map(release: s%magvega)
 #endif
             end if
             if (associated(s%magsun)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%magsun)
+                !$omp target exit data map(release: s%magsun)
 #endif
             end if
             if (associated(s%bands)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%bands)
+                !$omp target exit data map(release: s%bands)
 #endif
             end if
             if (associated(s%g03smcextn)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%g03smcextn)
+                !$omp target exit data map(release: s%g03smcextn)
 #endif
             end if
             if (associated(s%wgdust)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%wgdust)
+                !$omp target exit data map(release: s%wgdust)
 #endif
             end if
             if (associated(s%indexdefined)) then
 #ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%indexdefined)
+                !$omp target exit data map(release: s%indexdefined)
 #endif
             end if
 
@@ -1758,11 +1765,14 @@ contains
             !$omp target exit data map(delete: ctx%state%nebem_line, ctx%state%xnebem_line)
 #endif
         end if
+        ! The last two unmaps take the context's pointer members along (the setup-cache arrays that
+        ! contexts with the same library selection share, mapped once per context): release drops
+        ! this context's reference to them, where delete would remove them for the other contexts
 #ifdef OMP_TARGET
-        !$omp target exit data map(delete: ctx%state)
+        !$omp target exit data map(release: ctx%state)
 #endif
 #ifdef OMP_TARGET
-        !$omp target exit data map(delete: ctx)
+        !$omp target exit data map(release: ctx)
 #endif
         ctx%on_device = .false.
     end subroutine opensps_context_remove_from_device

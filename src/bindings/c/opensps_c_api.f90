@@ -52,7 +52,14 @@ module opensps_c_api
     integer, allocatable :: has_ssp(:)
     integer, allocatable :: has_ssp_age(:, :)
     ! Context pool for handle-based API
-    type(opensps_context_t), allocatable :: ctx_pool(:)
+    ! Each context is allocated once and keeps its host address for as long as the process runs:
+    ! device mappings (OpenMP target) are keyed by the host address of the context and of its
+    ! allocatable components, so growing the pool must move ownership (MOVE_ALLOC), never copy
+    ! the contexts, which would free the old components under their live device mappings
+    type :: ctx_slot_t
+        type(opensps_context_t), allocatable :: c
+    end type ctx_slot_t
+    type(ctx_slot_t), allocatable, target :: ctx_pool(:)
     logical, allocatable :: ctx_inuse(:)
     !> Per handle, for opensps_context_compute_csp: the SSP grids computed so far (one per
     !> metallicity, kept until an SSP parameter changes) and the last single CSP's outputs
@@ -83,12 +90,13 @@ contains
     subroutine opensps_context_alloc_slot(slot)
         integer, intent(OUT) :: slot
         integer :: i, n
-        type(opensps_context_t), allocatable :: new_pool(:)
+        type(ctx_slot_t), allocatable :: new_pool(:)
         logical, allocatable :: new_inuse(:)
         type(ctx_store_t), allocatable :: new_store(:)
 
         if (.not. ALLOCATED(ctx_pool)) then
             allocate (ctx_pool(1))
+            allocate (ctx_pool(1)%c)
             allocate (ctx_inuse(1))
             allocate (ctx_store(1))
             ctx_inuse = .false.
@@ -106,7 +114,10 @@ contains
             n = SIZE(ctx_pool)
             allocate (new_pool(n + 1))
             allocate (new_inuse(n + 1))
-            new_pool(1:n) = ctx_pool
+            do i = 1, n
+                call MOVE_ALLOC(ctx_pool(i)%c, new_pool(i)%c)   ! the context stays where it is
+            end do
+            allocate (new_pool(n + 1)%c)
             new_inuse(1:n) = ctx_inuse
             new_inuse(n + 1) = .false.
             call MOVE_ALLOC(new_pool, ctx_pool)
@@ -303,8 +314,8 @@ contains
         call reset_store(ctx_store(slot))
         ! A reused slot keeps the previous context's parameter set (opensps_create resets only the
         ! context settings): start from the defaults
-        ctx_pool(slot)%pset = default_pset
-        call opensps_create(ctx_pool(slot))
+        ctx_pool(slot)%c%pset = default_pset
+        call opensps_create(ctx_pool(slot)%c)
         ctx_inuse(slot) = .true.
         handle = slot
         status = 0
@@ -329,7 +340,7 @@ contains
             return
         end if
 
-        call opensps_destroy(ctx_pool(handle))
+        call opensps_destroy(ctx_pool(handle)%c)
         call reset_store(ctx_store(handle))
         ctx_inuse(handle) = .false.
     end subroutine opensps_context_destroy_handle
@@ -367,13 +378,13 @@ contains
 
         if (LEN_TRIM(isoc_type_in) == 0 .and. LEN_TRIM(spec_type_in) == 0 .and. &
             LEN_TRIM(dust_type_in) == 0) then
-            call opensps_setup(ctx_pool(handle), zin)
+            call opensps_setup(ctx_pool(handle)%c, zin)
         else if (LEN_TRIM(spec_type_in) == 0 .and. LEN_TRIM(dust_type_in) == 0) then
-            call opensps_setup(ctx_pool(handle), zin, TRIM(isoc_type_in))
+            call opensps_setup(ctx_pool(handle)%c, zin, TRIM(isoc_type_in))
         else if (LEN_TRIM(dust_type_in) == 0) then
-            call opensps_setup(ctx_pool(handle), zin, TRIM(isoc_type_in), TRIM(spec_type_in))
+            call opensps_setup(ctx_pool(handle)%c, zin, TRIM(isoc_type_in), TRIM(spec_type_in))
         else
-            call opensps_setup(ctx_pool(handle), zin, TRIM(isoc_type_in), TRIM(spec_type_in), TRIM(dust_type_in))
+            call opensps_setup(ctx_pool(handle)%c, zin, TRIM(isoc_type_in), TRIM(spec_type_in), TRIM(dust_type_in))
         end if
     end subroutine opensps_context_setup_handle
 
@@ -396,7 +407,7 @@ contains
         end if
 
         call c_to_f_string(c_key, key)
-        call opensps_set_param_int(ctx_pool(handle), TRIM(key), value, status)
+        call opensps_set_param_int(ctx_pool(handle)%c, TRIM(key), value, status)
         ! zmet only selects among the stored grids
         if (status == 0 .and. TRIM(key) /= 'zmet' .and. is_ssp_sensitive_int_param(TRIM(key))) &
             call invalidate_ssps(ctx_store(handle))
@@ -421,11 +432,11 @@ contains
         end if
 
         call c_to_f_string(c_key, key)
-        call opensps_set_param_float(ctx_pool(handle), TRIM(key), real(value, WP), status)
+        call opensps_set_param_float(ctx_pool(handle)%c, TRIM(key), real(value, WP), status)
         ! The nebular parameters change the SSPs only with nebular emission in them
         ! (add_neb_emission = 2), as in opensps_context_compute_csp_batch
         if (status == 0 .and. is_ssp_sensitive_float_param(TRIM(key))) then
-            if (ctx_pool(handle)%add_neb_emission_val == 2 .or. .not. &
+            if (ctx_pool(handle)%c%add_neb_emission_val == 2 .or. .not. &
                 any(TRIM(key) == [character(LEN=10) :: 'gas_logu', 'gas_logz', 'frac_obrun'])) &
                 call invalidate_ssps(ctx_store(handle))
         end if
@@ -452,7 +463,7 @@ contains
 
         call c_to_f_string(c_key, key)
         call c_to_f_string(c_val, val)
-        call opensps_set_param_str(ctx_pool(handle), TRIM(key), TRIM(val), status)
+        call opensps_set_param_str(ctx_pool(handle)%c, TRIM(key), TRIM(val), status)
         if (status == 0 .and. is_ssp_sensitive_str_param(TRIM(key))) call invalidate_ssps(ctx_store(handle))
     end subroutine opensps_context_set_str_handle
 
@@ -472,7 +483,7 @@ contains
             return
         end if
 
-        call opensps_set_fast_mode(ctx_pool(handle), fast_mode /= 0)
+        call opensps_set_fast_mode(ctx_pool(handle)%c, fast_mode /= 0)
     end subroutine opensps_context_set_fast_mode_handle
 
     !> @brief Batched CSPs from parameter arrays (fitting pipelines).
@@ -613,7 +624,7 @@ contains
             return
         end if
         if (n <= 0) return
-        associate(ctx => ctx_pool(handle))
+        associate(ctx => ctx_pool(handle)%c)
         nspec = ctx%state%nspec
         nt = ctx%state%ntfull
         nbands = ctx%state%nbands
@@ -885,7 +896,7 @@ contains
             status = 1
             return
         end if
-        call batch_spectra_device(ctx_pool(handle), ptr, ns, nm, nb)
+        call batch_spectra_device(ctx_pool(handle)%c, ptr, ns, nm, nb)
         nspec = ns; n = nm; bytes = nb
     end subroutine opensps_context_batch_spec_device_handle
 
@@ -910,7 +921,7 @@ contains
             status = 1
             return
         end if
-        call batch_spectra_host(ctx_pool(handle), ptr, ns, nm, nb)
+        call batch_spectra_host(ctx_pool(handle)%c, ptr, ns, nm, nb)
         nspec = ns; n = nm; bytes = nb
     end subroutine opensps_context_batch_spec_host_handle
 
@@ -994,7 +1005,7 @@ contains
             status = 1
             return
         end if
-        associate(ctx => ctx_pool(handle), st => ctx_store(handle))
+        associate(ctx => ctx_pool(handle)%c, st => ctx_store(handle))
         if (.not. ctx%initialized .or. ctx%state%check_sps_setup == 0) then
             status = 301
             call opensps_set_error(301, 'opensps_context_build_ssp_ops: context not set up')
@@ -1072,7 +1083,7 @@ contains
             status = 1
             return
         end if
-        associate(ctx => ctx_pool(handle), st => ctx_store(handle))
+        associate(ctx => ctx_pool(handle)%c, st => ctx_store(handle))
         if (.not. st%have_opset) then
             status = 303
             call opensps_set_error(303, 'opensps_context_evaluate_ssp_op: no SSP operator built on context')
@@ -1175,14 +1186,14 @@ contains
             return
         end if
 
-        n_spec = ctx_pool(handle)%state%nspec
-        n_time = ctx_pool(handle)%state%ntfull
+        n_spec = ctx_pool(handle)%c%state%nspec
+        n_time = ctx_pool(handle)%c%state%ntfull
         call c_f_pointer(c_spec, spec_ptr, [n_spec, n_time])
         call c_f_pointer(c_mass, mass_ptr, [n_time])
         call c_f_pointer(c_lbol, lbol_ptr, [n_time])
         ! Computed in the working precision, returned as double (the C API is double throughout)
         allocate (spec(n_spec, n_time), mass(n_time), lbol(n_time))
-        call api_compute_ssp(ctx_pool(handle), mass, lbol, spec)
+        call api_compute_ssp(ctx_pool(handle)%c, mass, lbol, spec)
         spec_ptr = spec
         mass_ptr = mass
         lbol_ptr = lbol
@@ -1214,7 +1225,7 @@ contains
             return
         end if
 
-        call opensps_get_paths(ctx_pool(handle), sps_path, data_path, out_path)
+        call opensps_get_paths(ctx_pool(handle)%c, sps_path, data_path, out_path)
         call f_to_c_string(TRIM(sps_path), c_sps, sps_len)
         call f_to_c_string(TRIM(data_path), c_data, data_len)
         call f_to_c_string(TRIM(out_path), c_out, out_len)
@@ -1238,8 +1249,8 @@ contains
             return
         end if
 
-        n_spec = ctx_pool(handle)%state%nspec
-        n_time = ctx_pool(handle)%state%ntfull
+        n_spec = ctx_pool(handle)%c%state%nspec
+        n_time = ctx_pool(handle)%c%state%ntfull
     end subroutine opensps_context_get_dims_handle
 
     subroutine opensps_context_get_nspec_handle(handle, n_spec, status) &
@@ -1259,7 +1270,7 @@ contains
             return
         end if
 
-        n_spec = ctx_pool(handle)%state%nspec
+        n_spec = ctx_pool(handle)%c%state%nspec
     end subroutine opensps_context_get_nspec_handle
 
     subroutine opensps_context_get_ntfull_handle(handle, n_time, status) &
@@ -1279,7 +1290,7 @@ contains
             return
         end if
 
-        n_time = ctx_pool(handle)%state%ntfull
+        n_time = ctx_pool(handle)%c%state%ntfull
     end subroutine opensps_context_get_ntfull_handle
 
     subroutine opensps_context_get_nbands_handle(handle, n_bands, status) &
@@ -1299,7 +1310,7 @@ contains
             return
         end if
 
-        n_bands = ctx_pool(handle)%state%nbands
+        n_bands = ctx_pool(handle)%c%state%nbands
     end subroutine opensps_context_get_nbands_handle
 
     subroutine opensps_context_get_nindx_handle(handle, n_indices, status) &
@@ -1319,7 +1330,7 @@ contains
             return
         end if
 
-        n_indices = ctx_pool(handle)%state%nindx
+        n_indices = ctx_pool(handle)%c%state%nindx
     end subroutine opensps_context_get_nindx_handle
 
     subroutine opensps_context_get_nz_handle(handle, n_z, status) &
@@ -1339,7 +1350,7 @@ contains
             return
         end if
 
-        n_z = ctx_pool(handle)%state%nz
+        n_z = ctx_pool(handle)%c%state%nz
     end subroutine opensps_context_get_nz_handle
 
     subroutine opensps_context_get_nemline_handle(handle, n_line, status) &
@@ -1379,7 +1390,7 @@ contains
             return
         end if
 
-        z_sol = ctx_pool(handle)%state%zsol
+        z_sol = ctx_pool(handle)%c%state%zsol
     end subroutine opensps_context_get_zsol_handle
 
     ! -------------------------------------------------------------------------
@@ -1408,7 +1419,7 @@ contains
             status = 1
             return
         end if
-        associate(ctx => ctx_pool(handle))
+        associate(ctx => ctx_pool(handle)%c)
         if (.not. ASSOCIATED(ctx%state%spec_lambda)) then
             status = 301
             return
@@ -1435,7 +1446,7 @@ contains
             status = 1
             return
         end if
-        associate(ctx => ctx_pool(handle))
+        associate(ctx => ctx_pool(handle)%c)
         if (.not. ASSOCIATED(ctx%state%time_full)) then
             status = 301
             return
@@ -1458,7 +1469,7 @@ contains
             status = 1
             return
         end if
-        associate(ctx => ctx_pool(handle))
+        associate(ctx => ctx_pool(handle)%c)
         if (.not. ASSOCIATED(ctx%state%zlegend)) then
             status = 301
             return
@@ -1481,7 +1492,7 @@ contains
             status = 1
             return
         end if
-        associate(ctx => ctx_pool(handle))
+        associate(ctx => ctx_pool(handle)%c)
         call c_f_pointer(c_wave, f, [NEMLINE])
         if (ctx%vactoair_flag_val == 1) then
             f = vacuum_to_air(ctx%state%nebem_line_pos)
@@ -1506,7 +1517,7 @@ contains
             status = 1
             return
         end if
-        associate(ctx => ctx_pool(handle))
+        associate(ctx => ctx_pool(handle)%c)
         nb = ctx%state%nbands
         if (.not. ASSOCIATED(ctx%state%filter_leff)) then
             status = 301
@@ -1539,7 +1550,7 @@ contains
             status = 1
             return
         end if
-        associate(ctx => ctx_pool(handle))
+        associate(ctx => ctx_pool(handle)%c)
         if (ntab < 1 .or. ntab > SIZE(ctx%state%sfh_tab, 2)) then
             status = 3
             call opensps_set_error(3, 'opensps_context_set_sfh_tab: ntab out of range')
@@ -1677,7 +1688,7 @@ contains
             status = 1
             return
         end if
-        associate(ctx => ctx_pool(handle), store => ctx_store(handle))
+        associate(ctx => ctx_pool(handle)%c, store => ctx_store(handle))
         if (.not. ctx%initialized .or. ctx%state%check_sps_setup == 0) then
             status = 301
             call opensps_set_error(301, 'opensps_context_compute_csp: context not set up')
@@ -1795,7 +1806,7 @@ contains
             call opensps_set_error(302, 'opensps_context_get_csp: no CSP computed')
             return
         end if
-        associate(ctx => ctx_pool(handle), r => ctx_store(handle)%results)
+        associate(ctx => ctx_pool(handle)%c, r => ctx_store(handle)%results)
         n = SIZE(r)
         ns = ctx%state%nspec
         nb = ctx%state%nbands
