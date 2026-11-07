@@ -147,6 +147,9 @@ jobs:
             > "$TAR_DIR/README.txt"
           tar -czvf "${TAR_DIR}.tar.gz" "$TAR_DIR"
       - name: Smoke test staged library
+        env:
+          # On a tag build the library must report no build id (see src/core/opensps_build_info.f90.in)
+          OPENSPS_EXPECT_RELEASE: ${{ github.ref_type == 'tag' && '1' || '' }}
         run: |
           PKG_PATH=$(find $PWD/staging/usr/local -name opensps.pc -exec dirname {} \;)
           PKG_CONFIG_PATH="$PKG_PATH" pkg-config --define-variable=prefix=$PWD/staging/usr/local --cflags --libs opensps

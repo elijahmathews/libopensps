@@ -4,6 +4,9 @@ program test_opensps
     !> Aggregates results from individual test modules.
 
     ! Core modules
+    use test_opensps_build_info_mod, only: run_opensps_build_info_tests, &
+                                        failures_build_info => total_failures, &
+                                        tests_build_info => total_tests
     use test_opensps_cache_mod, only: run_opensps_cache_tests, &
                                    failures_cache => total_failures, &
                                    tests_cache => total_tests
@@ -85,6 +88,7 @@ program test_opensps
     call print_major_header("FSPS UNIT TEST SUITE")
 
     ! Run all the tests
+    if (selected('opensps_build_info')) call run_opensps_build_info_tests()
     if (selected('opensps_cache')) call run_opensps_cache_tests()
     if (selected('opensps_context')) call run_opensps_context_tests()
     if (selected('opensps_context_types')) call run_opensps_context_types_tests()
@@ -114,6 +118,11 @@ program test_opensps
     ! --- Summary ---
     call print_major_header("FSPS UNIT TEST FINAL REPORT")
     
+    call print_summary_line( &
+        "opensps_build_info", &
+        (tests_build_info - failures_build_info), &
+        tests_build_info &
+    )
     call print_summary_line( &
         "opensps_cache", &
         (tests_cache - failures_cache), &
@@ -227,6 +236,7 @@ program test_opensps
     grand_total_failures = failures_cache + &
                            failures_context + &
                            failures_context_types + &
+                           failures_build_info + &
                            failures_strings + &
                            failures_types + &
                            failures_io + &
@@ -249,6 +259,7 @@ program test_opensps
     grand_total_tests = tests_cache + &
                         tests_context + &
                         tests_context_types + &
+                        tests_build_info + &
                         tests_strings + &
                         tests_types + &
                         tests_io + &
