@@ -640,12 +640,13 @@ contains
 
         ctx%state%speclib = real(0.0_wp, kind=kind(ctx%state%speclib))
         ctx%state%wmb_spec = real(0.0_wp, kind=kind(ctx%state%wmb_spec))
-        ctx%state%agb_spec_o = SAFE_FLOOR
-        ctx%state%agb_spec_c = SAFE_FLOOR
-        ctx%state%agb_spec_car = SAFE_FLOOR
-        ctx%state%pagb_spec = SAFE_FLOOR
-        ctx%state%wrn_spec = SAFE_FLOOR
-        ctx%state%wrc_spec = SAFE_FLOOR
+        ! The floor at kernel precision: SAFE_FLOOR (double) underflows to zero in an FP32 build
+        ctx%state%agb_spec_o = tiny(ctx%state%agb_spec_o)
+        ctx%state%agb_spec_c = tiny(ctx%state%agb_spec_c)
+        ctx%state%agb_spec_car = tiny(ctx%state%agb_spec_car)
+        ctx%state%pagb_spec = tiny(ctx%state%pagb_spec)
+        ctx%state%wrn_spec = tiny(ctx%state%wrn_spec)
+        ctx%state%wrc_spec = tiny(ctx%state%wrc_spec)
         ctx%state%flux_dagb = 1.0_wp
 
         ctx%state%zlegend = 1.0_wp
