@@ -15,6 +15,7 @@ module opensps_environment
     use opensps_cache, only: opensps_cache_release_setup
     use opensps_datalib, only: datalib_format_from_env, datalib_root_is_standard
     use opensps_version, only: OPENSPS_VERSION_STRING
+    use opensps_build_info, only: opensps_build_id
 
     implicit none
     private
@@ -23,6 +24,7 @@ module opensps_environment
     public :: opensps_find_data_root
     public :: opensps_cleanup
     public :: opensps_print_env_info
+    public :: opensps_print_optional
 
 contains
 
@@ -142,25 +144,47 @@ contains
 
     end function opensps_find_data_root
 
+    !> @brief Writes `label value` on a line, or nothing at all when value is empty.
+    !> @details The banner uses it for the build identifier, which a release build does not have.
+    !> @param[in] label Text before the value.
+    !> @param[in] value Text to print; empty prints no line.
+    !> @param[in] unit Output unit (default: standard output).
+    subroutine opensps_print_optional(label, value, unit)
+        character(len=*), intent(in) :: label, value
+        integer, intent(in), optional :: unit
+        integer :: u
+
+        if (len(value) == 0) return
+        u = output_unit
+        if (present(unit)) u = unit
+        write (u, '(A, A)') label, value
+    end subroutine opensps_print_optional
+
     !> @brief Prints a summary of the current FSPS runtime environment.
     !> @details Useful for debugging and verification during startup.
-    subroutine opensps_print_env_info(ctx)
+    subroutine opensps_print_env_info(ctx, unit)
         type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in), optional :: unit   !< output unit (default: standard output)
+        integer :: u
 
-        write (output_unit, '(A)') '--------------------------------------------------'
-        write (output_unit, '(A, A)') ' OpenSPS Version: ', OPENSPS_VERSION_STRING
-        write (output_unit, '(A, A)') ' Data Root:       ', trim(ctx%sps_home)
-        write (output_unit, '(A, A)') ' Output Root:     ', trim(ctx%output_home)
+        u = output_unit
+        if (present(unit)) u = unit
+
+        write (u, '(A)') '--------------------------------------------------'
+        write (u, '(A, A)') ' OpenSPS Version: ', OPENSPS_VERSION_STRING
+        call opensps_print_optional(' Build:           ', opensps_build_id(), u)
+        write (u, '(A, A)') ' Data Root:       ', trim(ctx%sps_home)
+        write (u, '(A, A)') ' Output Root:     ', trim(ctx%output_home)
 
         ! Note: OMP_GET_MAX_THREADS is intrinsic in many modern compilers,
         ! but strict F2008 standard compliance often requires the `omp_lib` module.
         ! We leave this simple print for now to avoid compilation complexity if OpenMP is off.
 #ifdef _OPENMP
-        write (output_unit, '(A)') ' OpenMP Status:   Enabled'
+        write (u, '(A)') ' OpenMP Status:   Enabled'
 #else
-        write (output_unit, '(A)') ' OpenMP Status:   Disabled (Serial)'
+        write (u, '(A)') ' OpenMP Status:   Disabled (Serial)'
 #endif
-        write (output_unit, '(A)') '--------------------------------------------------'
+        write (u, '(A)') '--------------------------------------------------'
     end subroutine opensps_print_env_info
 
     !> @brief Tears down the FSPS context and releases global cache resources.
