@@ -425,6 +425,7 @@ unit_test_sources = files(
     'tests/physics/test_opensps_ssp.f90',
     'tests/physics/test_opensps_stellar_modifications.f90',
 
+    'tests/spectra/test_opensps_batch_photometry.f90',
     'tests/spectra/test_opensps_photometry.f90',
     'tests/spectra/test_opensps_smoothing.f90',
     'tests/spectra/test_opensps_spectral_indices.f90',
@@ -450,7 +451,7 @@ unit_modules = [
     'opensps_c_api', 'opensps_build_info', 'opensps_cache', 'opensps_context', 'opensps_context_types', 'opensps_strings', 'opensps_types', 'opensps_io',
     'opensps_integration', 'opensps_interpolation', 'opensps_special_functions', 'opensps_cosmology', 'opensps_csp',
     'opensps_dust', 'opensps_gas', 'opensps_imf', 'opensps_sfh', 'opensps_ssp', 'opensps_stellar_modifications',
-    'opensps_photometry', 'opensps_smoothing', 'opensps_spectral_indices', 'opensps_spectral_library',
+    'opensps_batch_photometry', 'opensps_photometry', 'opensps_smoothing', 'opensps_spectral_indices', 'opensps_spectral_library',
 ]
 foreach unit_module : unit_modules
     test('unit_' + unit_module.substring(8), tests_units_exe,
