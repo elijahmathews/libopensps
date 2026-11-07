@@ -2,7 +2,7 @@ module test_opensps_build_info_mod
     use, intrinsic :: iso_c_binding, only: c_char, c_null_char, c_ptr, c_associated, c_f_pointer
     use opensps_build_info, only: opensps_build_id, opensps_get_build_id
     use opensps_context_types, only: opensps_context_t
-    use opensps_environment, only: opensps_print_env_info
+    use opensps_environment, only: opensps_print_env_info, opensps_print_optional
     use opensps_version, only: OPENSPS_VERSION_STRING
     use test_utils_mod, only: print_group, print_summary_line, print_minor_header, assert_true
     implicit none
@@ -73,11 +73,62 @@ contains
 
     subroutine test_banner()
         type(opensps_context_t) :: ctx
+        character(len=200) :: line
+        character(len=:), allocatable :: id
+        integer :: u, ios
+        logical :: has_version, has_build, build_ok
 
         call print_group("Environment banner")
-        ! Prints the version and, for a development build, the Build: line; it must not fail.
-        call opensps_print_env_info(ctx)
-        call assert_true(.true., "Banner prints for a default context", total_tests, total_failures)
+        id = opensps_build_id()
+
+        ! The banner goes to a scratch file (not the TAP stream) and is read back: the version
+        ! line is there, and the Build line exactly when the build has an identifier.
+        open (newunit=u, status='scratch', action='readwrite')
+        call opensps_print_env_info(ctx, u)
+        rewind (u)
+        has_version = .false.
+        has_build = .false.
+        build_ok = .true.
+        do
+            read (u, '(A)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, 'OpenSPS Version: ' // OPENSPS_VERSION_STRING) > 0) has_version = .true.
+            if (index(line, 'Build:') > 0) then
+                has_build = .true.
+                build_ok = (len(id) > 0 .and. index(line, id) > 0)
+            end if
+        end do
+        close (u)
+        call assert_true(has_version, "Banner shows the version", total_tests, total_failures)
+        call assert_true(has_build .eqv. (len(id) > 0), "Banner shows a Build line exactly when there is a build id", &
+                         total_tests, total_failures)
+        call assert_true(build_ok, "The Build line carries the identifier", total_tests, total_failures)
+
+        ! The build line is printed for a development build and omitted for a release (empty id)
+        call check_optional_line('v0.2.0-37-g6de9eb6', ' Build: v0.2.0-37-g6de9eb6', &
+                                 "A development build id prints a Build line")
+        call check_optional_line('', '', "An empty build id (a release) prints nothing")
     end subroutine test_banner
+
+    !> Runs opensps_print_optional into a scratch file and compares what it wrote
+    subroutine check_optional_line(value, expected, label)
+        character(len=*), intent(in) :: value, expected, label
+        character(len=200) :: line
+        integer :: u, ios
+        logical :: ok
+
+        open (newunit=u, status='scratch', action='readwrite')
+        call opensps_print_optional(' Build: ', value, u)
+        rewind (u)
+        line = ''
+        read (u, '(A)', iostat=ios) line
+        if (len(expected) == 0) then
+            ok = (ios /= 0)             ! end of file: no line was written
+        else
+            ok = (ios == 0 .and. trim(line) == expected)
+        end if
+        close (u)
+        call assert_true(ok, label, total_tests, total_failures)
+    end subroutine check_optional_line
 
 end module test_opensps_build_info_mod
