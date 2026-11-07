@@ -36,7 +36,7 @@ program test_csp_batch_grad
     use, intrinsic :: iso_fortran_env, only: int64
     use opensps_precision, only: WP, KP
     use opensps_types, only: PARAMS
-    use opensps_api, only: opensps_create, opensps_setup
+    use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
     use opensps_csp, only: sfh_weights_core
     use opensps_csp_batch, only: compute_csp_batch, BGRAD_FAGN, BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, &
                                  BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, &
@@ -223,6 +223,12 @@ program test_csp_batch_grad
     use_ops = .false.
     call ssp_opset_free(opset)
     call set_int('imf_type', 1)
+
+    ! Free what the program allocated: the sanitizer build (nightly ASan) reports it as leaked otherwise
+    if (allocated(lbar_m)) deallocate(lbar_m, lbar_s, lbar_mass, lbar_lbol)
+    if (allocated(wzg)) deallocate(wzg, wzg_bar)
+    call opensps_destroy(ctx)
+    deallocate(ctx)
 
     call print_summary_line("Batched CSP gradients", total_tests - total_failures, total_tests)
     call tap_finish()
