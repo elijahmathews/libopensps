@@ -3892,7 +3892,7 @@ contains
                                   (-lam(j) / (1.0_wp + zcm(m))**2) / (lam(il + 1) - lam(il))
                     end do
                 end if
-                part(c, 1, m) = real(sz, KP)
+                part(1, c, m) = real(sz, KP)
             end do
         end do
 #if defined(OMP_TARGET)
@@ -3903,7 +3903,7 @@ contains
         do m = 1, n_mod
             sz = 0.0_wp
             do c = 1, NZC
-                sz = sz + real(part(c, 1, m), WP)
+                sz = sz + real(part(1, c, m), WP)
             end do
             dzo(m) = sz
         end do
