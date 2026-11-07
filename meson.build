@@ -760,6 +760,15 @@ test('c_two_contexts', test_c_two_contexts_exe,
     suite : 'regression',
     timeout : 600
 )
+test_c_setup_forms_exe = executable('test_c_setup_forms', 'tests/test_c_setup_forms.c',
+    dependencies : opensps_dep,
+    include_directories : include_directories('include')
+)
+test('c_setup_forms', test_c_setup_forms_exe,
+    env : regression_env,
+    suite : 'regression',
+    timeout : 600
+)
 test_c_batch_parts_exe = executable('test_c_batch_parts', 'tests/test_c_batch_parts.c',
     dependencies : [opensps_dep, meson.get_compiler('c').find_library('m', required : false)],
     include_directories : include_directories('include')
