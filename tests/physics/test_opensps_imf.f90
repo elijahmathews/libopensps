@@ -37,6 +37,11 @@ contains
         call test_powerlaw_bin_worst_cases()
         call test_bin_weights_tab_paths()
         call test_powerlaw_integral_worst_cases()
+        call test_user_imf_segments()
+        call test_bin_logs_edge_cases()
+        call test_non_monotonic_mass_grid()
+        call test_exp_reduced_kp()
+        call test_expm1_kp()
 
         call print_summary_line("Module Summary", total_tests - total_failures, total_tests)
 
@@ -243,6 +248,11 @@ contains
         ctx%state%imf_lower_limit = 0.08_wp
         ctx%state%imf_upper_limit = 120.0_wp
         ctx%state%imf_lower_bound = 0.08_wp
+        ! User-defined IMF (type 5): three segments (lower mass, upper mass, slope)
+        ctx%state%n_user_imf = 3
+        ctx%state%imf_user_alpha(:, 1) = [0.08_wp, 0.5_wp, 1.3_wp]
+        ctx%state%imf_user_alpha(:, 2) = [0.5_wp, 1.5_wp, 2.3_wp]
+        ctx%state%imf_user_alpha(:, 3) = [1.5_wp, 150.0_wp, 2.7_wp]   ! (upper mass is exclusive: above the 120 of the tests)
     end subroutine setup_imf_context
 
     !> Composite Simpson integral of get_imf_value over [lo, hi], in u = ln m (dm = m du).
@@ -372,7 +382,7 @@ contains
 
     subroutine test_analytic_integrals_match_quadrature()
         type(opensps_context_t), allocatable :: ctx
-        integer, parameter :: types(3) = [0, 2, 4]
+        integer, parameter :: types(6) = [0, 1, 2, 3, 4, 5]
         real(WP), parameter :: lo(6) = [0.08_wp, 0.3_wp, 0.4_wp, 0.9_wp, 5.0_wp, 0.08_wp]
         real(WP), parameter :: hi(6) = [0.3_wp, 0.7_wp, 2.0_wp, 1.1_wp, 120.0_wp, 120.0_wp]
         logical :: mass_weighted
@@ -741,5 +751,219 @@ contains
                              total_tests, total_failures)
         end do
     end subroutine test_powerlaw_integral_worst_cases
+
+    ! ------------------------------------------------------------------------
+    ! User-defined IMF, edge cases of the bin logarithms and mass grid, FP32 exponentials
+    ! ------------------------------------------------------------------------
+
+    !> The user IMF (type 5): the segments join continuously at their breakpoints (the cumulative
+    !> factor carries the amplitude from one segment to the next), each segment is a power law of its
+    !> own slope, and the IMF is zero outside [first lower mass, last upper mass).
+    subroutine test_user_imf_segments()
+        type(opensps_context_t), allocatable :: ctx
+        real(WP), parameter :: EPS = 1.0e-12_wp
+        real(WP) :: below, above, a1, a2, a3
+        logical :: ok
+
+        call print_group("User-defined IMF: segments join continuously, zero outside")
+        call setup_imf_context(ctx, 5)
+        a1 = 1.3_wp; a2 = 2.3_wp; a3 = 2.7_wp
+
+        ! first segment: m**-a1, unit amplitude
+        call assert_relative_error(get_imf_value(ctx, 0.2_wp, .false.), 0.2_wp**(-a1), EPS, &
+                                   "segment 1 is m^-a1", total_tests, total_failures)
+        ! continuity at 0.5 and 1.5: the limit from below equals the first value of the next segment
+        below = 0.5_wp * (1.0_wp - 1.0e-13_wp); above = 0.5_wp
+        call assert_relative_error(get_imf_value(ctx, above, .false.), get_imf_value(ctx, below, .false.), &
+                                   1.0e-9_wp, "continuous at the first breakpoint", total_tests, total_failures)
+        below = 1.5_wp * (1.0_wp - 1.0e-13_wp); above = 1.5_wp
+        call assert_relative_error(get_imf_value(ctx, above, .false.), get_imf_value(ctx, below, .false.), &
+                                   1.0e-9_wp, "continuous at the second breakpoint", total_tests, total_failures)
+        ! segment 2 and 3 carry the amplitudes of the earlier segments
+        call assert_relative_error(get_imf_value(ctx, 1.0_wp, .false.), 0.5_wp**(-a1 + a2) * 1.0_wp**(-a2), EPS, &
+                                   "segment 2 amplitude", total_tests, total_failures)
+        call assert_relative_error(get_imf_value(ctx, 10.0_wp, .false.), &
+                                   0.5_wp**(-a1 + a2) * 1.5_wp**(-a2 + a3) * 10.0_wp**(-a3), EPS, &
+                                   "segment 3 amplitude", total_tests, total_failures)
+        ! mass weighting multiplies by the mass
+        call assert_relative_error(get_imf_value(ctx, 10.0_wp, .true.), 10.0_wp * get_imf_value(ctx, 10.0_wp, .false.), &
+                                   EPS, "mass weighting", total_tests, total_failures)
+        ok = get_imf_value(ctx, 0.05_wp, .false.) == 0.0_wp .and. get_imf_value(ctx, 150.0_wp, .false.) == 0.0_wp .and. &
+             get_imf_value(ctx, 500.0_wp, .false.) == 0.0_wp .and. get_imf_value(ctx, 149.9_wp, .false.) > 0.0_wp
+        call assert_true(ok, "zero below the first segment and from the last upper mass on", total_tests, total_failures)
+        ! an unknown base type gives zero
+        ctx%imf_type_val = 9
+        call assert_true(get_imf_value(ctx, 1.0_wp, .false.) == 0.0_wp, "unknown IMF type gives zero", &
+                         total_tests, total_failures)
+        deallocate(ctx)
+    end subroutine test_user_imf_segments
+
+    !> imf_bin_logs: ln m1 and ln(m2/m1) as log1p of the relative width. Empty and invalid bins give
+    !> zero; a bin one rounding step wide keeps its width (the naive log(m2/m1) rounds to 0 or 1 ulp of
+    !> 1); a wide bin gives the ordinary logarithm.
+    subroutine test_bin_logs_edge_cases()
+        real(WP) :: llo, dl, m1, m2
+
+        call print_group("imf_bin_logs: empty, invalid, one-ulp and wide bins")
+        call imf_bin_logs(1.0_wp, 1.0_wp, llo, dl)
+        call assert_true(llo == 0.0_wp .and. dl == 0.0_wp, "empty bin: zero", total_tests, total_failures)
+        call imf_bin_logs(2.0_wp, 1.0_wp, llo, dl)
+        call assert_true(llo == 0.0_wp .and. dl == 0.0_wp, "reversed bin: zero", total_tests, total_failures)
+        call imf_bin_logs(-1.0_wp, 1.0_wp, llo, dl)
+        call assert_true(llo == 0.0_wp .and. dl == 0.0_wp, "non-positive lower edge: zero", total_tests, total_failures)
+
+        ! The largest double below 1 and 1: the relative width is 2**-53, so 1 + x rounds to exactly 1
+        m1 = nearest(1.0_wp, -1.0_wp); m2 = 1.0_wp
+        call imf_bin_logs(m1, m2, llo, dl)
+        call assert_relative_error(dl, 2.0_wp**(-53), 1.0e-3_wp, "one-ulp bin keeps its width (1 + x == 1 branch)", &
+                                   total_tests, total_failures)
+        call assert_true(dl > 0.0_wp, "one-ulp bin is not rounded to zero", total_tests, total_failures)
+        call assert_relative_error(llo, log(m1), 1.0e-15_wp, "ln of the lower edge", total_tests, total_failures)
+
+        m1 = 0.3_wp; m2 = 0.9_wp
+        call imf_bin_logs(m1, m2, llo, dl)
+        call assert_relative_error(dl, log(3.0_wp), 1.0e-14_wp, "wide bin: ln(m2/m1)", total_tests, total_failures)
+    end subroutine test_bin_logs_edge_cases
+
+    !> A mass grid that is not increasing yields a bin with its upper edge below its lower edge: the
+    !> bin is skipped (weight 0) with a warning, and its neighbours are unaffected.
+    subroutine test_non_monotonic_mass_grid()
+        type(opensps_context_t), allocatable :: ctx, ref_ctx
+        real(WP) :: mini(5), w(5), w_ok(5)
+        logical :: ok
+
+        call print_group("compute_imf_weights: a non-monotonic mass grid skips the bad bin")
+        call setup_imf_context(ctx, 0)
+        ! Bin i spans the midpoints to its neighbours: bin 3 runs from (0.8 + 0.3) / 2 down to (0.3 + 0.2) / 2
+        mini = [0.1_wp, 0.8_wp, 0.3_wp, 0.2_wp, 5.0_wp]
+        call compute_imf_weights(ctx, mini, w, 5)
+        ok = w(3) == 0.0_wp .and. w(1) > 0.0_wp .and. w(5) > 0.0_wp
+        call assert_true(ok, "the bin with m2 < m1 has zero weight, the others do not", total_tests, total_failures)
+        ! the first bin does not see the bad grid point beyond its own upper edge
+        call setup_imf_context(ref_ctx, 0)
+        mini = [0.1_wp, 0.8_wp, 1.0_wp, 2.0_wp, 5.0_wp]
+        call compute_imf_weights(ref_ctx, mini, w_ok, 5)
+        call assert_relative_error(w(1), w_ok(1), 1.0e-14_wp, "bin 1 unaffected", total_tests, total_failures)
+        deallocate(ctx, ref_ctx)
+    end subroutine test_non_monotonic_mass_grid
+
+    !> exp_reduced_kp(x): exp of an FP64 argument in kernel precision, by exponent reduction. Against
+    !> exp(x) in FP64 across the range where the result is normal (a few ulp of KP), with the clamps:
+    !> 0 below the smallest normal, huge above the largest, for any argument. Host evaluation: the
+    !> library's device code is a separate image that a test executable's target region cannot call
+    !> into (the link fails). The functions are called only by imf_bin_weights_tab under the optional
+    !> -Dfp32_imf_weights=true (FP32 IMF weights on the device), so a default build never runs them;
+    !> this test is where the arithmetic is checked in every build.
+    subroutine test_exp_reduced_kp()
+        integer, parameter :: N = 241
+        real(WP) :: x(N + 6)
+        real(KP) :: e(N + 6)
+        real(WP) :: lnmin, lnmax, ref, worst
+        integer :: i
+
+        call print_group("exp_reduced_kp: accuracy, flush to zero, overflow to huge")
+        lnmin = real(minexponent(1.0_KP), WP) * log(2.0_wp)       ! below this the result is not normal
+        lnmax = real(maxexponent(1.0_KP), WP) * log(2.0_wp)
+        do i = 1, N
+            x(i) = (lnmin + 2.0_wp) + (lnmax - 2.0_wp - lnmin - 2.0_wp) * real(i - 1, WP) / real(N - 1, WP)
+        end do
+        x(N + 1) = 0.0_wp
+        x(N + 2) = lnmin - 3.0_wp          ! flushes to zero
+        x(N + 3) = lnmax + 3.0_wp          ! saturates to huge
+        x(N + 4) = -1.0e30_wp              ! clamped argument
+        x(N + 5) = 1.0e30_wp
+        x(N + 6) = 1.0e-9_wp
+        call eval_exp_reduced(size(x), x, e)
+
+        ! The reduction x - n ln 2 uses one FP64 constant for ln 2 (error 2**-53 relative, times n) and
+        ! rounds the product n ln 2 (half an ulp): the argument carries up to ~2e-16 |x| of error on top
+        ! of the rounding to KP (negligible against FP32's 6e-8 over its range, visible when KP is FP64)
+        worst = 0.0_wp
+        do i = 1, N
+            ref = exp(x(i))
+            worst = max(worst, abs(real(e(i), WP) - ref) / ref - 2.5e-16_wp * abs(x(i)))
+        end do
+        write (*, '(A,ES10.2)') '# exp_reduced_kp: worst relative error beyond the reduction term ', worst
+        call assert_true(worst <= 4.0_wp * real(epsilon(1.0_KP), WP), &
+                         "within 4 ulp of exp(x) over the normal range (plus the argument reduction's own rounding)", &
+                         total_tests, total_failures)
+        call assert_true(e(N + 1) == 1.0_KP, "exp(0) = 1 exactly", total_tests, total_failures)
+        call assert_true(e(N + 2) == 0.0_KP, "below the smallest normal: 0", total_tests, total_failures)
+        call assert_true(e(N + 3) == huge(1.0_KP), "above the largest: huge", total_tests, total_failures)
+        call assert_true(e(N + 4) == 0.0_KP .and. e(N + 5) == huge(1.0_KP), "arguments of 1e30 are clamped", &
+                         total_tests, total_failures)
+        call assert_relative_error(real(e(N + 6), WP), 1.0_wp + 1.0e-9_wp, 4.0_wp * real(epsilon(1.0_KP), WP), &
+                                   "exp of a tiny argument", total_tests, total_failures)
+    end subroutine test_exp_reduced_kp
+
+    subroutine eval_exp_reduced(n, x, e)
+        integer, intent(in) :: n
+        real(WP), intent(in) :: x(n)
+        real(KP), intent(out) :: e(n)
+        integer :: i
+        do i = 1, n
+            e(i) = exp_reduced_kp(x(i))
+        end do
+    end subroutine eval_exp_reduced
+
+    !> expm1_kp(y) = exp(y) - 1 without cancellation: against the Taylor sum of the exponential in
+    !> FP64, over small arguments (the series branch, |y| < 1/4), at its switch, and for large ones
+    !> (exp(y) - 1: loses at most a factor 4); the tiny-argument limit (expm1(y) = y to rounding), and
+    !> the identity (1 + expm1(y)) (1 + expm1(-y)) = 1. Host evaluation (see test_exp_reduced_kp).
+    subroutine test_expm1_kp()
+        integer, parameter :: N = 81
+        real(KP) :: y(N + 3), r(N + 3)
+        real(WP) :: ref, term, worst_small, worst_large, prod
+        integer :: i, k
+
+        call print_group("expm1_kp: no cancellation for small arguments, exp(y) - 1 for large")
+        do i = 1, N
+            y(i) = real(-2.0_wp + 4.0_wp * real(i - 1, WP) / real(N - 1, WP), KP)
+        end do
+        y(N + 1) = 1.0e-6_KP
+        y(N + 2) = -1.0e-6_KP
+        y(N + 3) = 1.0e-30_KP
+        call eval_expm1(size(y), y, r)
+
+        worst_small = 0.0_wp
+        worst_large = 0.0_wp
+        do i = 1, N + 2
+            ! Taylor sum in FP64 of the KP-rounded argument
+            ref = 0.0_wp
+            term = 1.0_wp
+            do k = 1, 40
+                term = term * real(y(i), WP) / real(k, WP)
+                ref = ref + term
+            end do
+            if (ref == 0.0_wp) cycle
+            if (abs(y(i)) < 0.25_KP) then
+                worst_small = max(worst_small, abs(real(r(i), WP) - ref) / abs(ref))
+            else
+                worst_large = max(worst_large, abs(real(r(i), WP) - ref) / abs(ref))
+            end if
+        end do
+        write (*, '(A,2ES10.2)') '# expm1_kp: worst relative error (series, large): ', worst_small, worst_large
+        ! the series is truncated at y**7: 5e-10 relative (the FP32 build's 6e-8 is far above it)
+        call assert_true(worst_small <= max(8.0_wp * real(epsilon(1.0_KP), WP), 1.0e-9_wp), &
+                         "series branch: relative error at the truncation / rounding level", total_tests, total_failures)
+        call assert_true(worst_large <= 8.0_wp * real(epsilon(1.0_KP), WP), &
+                         "exp(y) - 1 branch: within a few ulp (cancellation <= 4)", total_tests, total_failures)
+        call assert_relative_error(real(r(N + 3), WP), 1.0e-30_wp, 1.0e-6_wp, "expm1 of a tiny argument is the argument", &
+                                   total_tests, total_failures)
+        prod = (1.0_wp + real(r(N + 1), WP)) * (1.0_wp + real(r(N + 2), WP))
+        call assert_relative_error(prod, 1.0_wp, 1.0e-9_wp, "(1 + expm1(y)) (1 + expm1(-y)) = 1", total_tests, total_failures)
+        call assert_true(all(r(1:N) /= 0.0_KP .or. y(1:N) == 0.0_KP), "nonzero for every nonzero argument", &
+                         total_tests, total_failures)
+    end subroutine test_expm1_kp
+
+    subroutine eval_expm1(n, y, r)
+        integer, intent(in) :: n
+        real(KP), intent(in) :: y(n)
+        real(KP), intent(out) :: r(n)
+        integer :: i
+        do i = 1, n
+            r(i) = expm1_kp(y(i))
+        end do
+    end subroutine eval_expm1
 
 end module test_opensps_imf_mod

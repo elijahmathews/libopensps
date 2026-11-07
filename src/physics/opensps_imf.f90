@@ -20,6 +20,7 @@ module opensps_imf
     public :: IMF_NPAR, IMF_P_SALP, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE, IMF_P_LOWER_LIMIT, &
               IMF_P_UPPER_LIMIT, IMF_P_LOWER_BOUND, IMF_P_MLIM_BH, IMF_P_MLIM_NS, IMF_P_NUSER, IMF_P_USER
     public :: CHAB_MC, CHAB_SIGMA2, CHAB_IND
+    public :: exp_reduced_kp, expm1_kp   ! (the FP32 kernels' exponentials; tested directly, on host and device)
 
     ! ------------------------------------------------------------------------
     ! CONSTANTS
