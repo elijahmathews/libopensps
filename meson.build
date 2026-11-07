@@ -192,6 +192,12 @@ accel_dep = declare_dependency(
 
 # Native threads: the setup-cache lock (src/core/opensps_setup_lock.c) is a pthread mutex
 threads_dep = dependency('threads')
+if fc_id in ['llvm-flang', 'flang']
+    # LLVM flang ignores -pthread when compiling and says so for every Fortran file ("argument
+    # unused during compilation"), and its driver has no -Wno-unused-command-line-argument; the
+    # library needs the flag only to link (the mutex is plain pthread_mutex_t, no -D_REENTRANT)
+    threads_dep = threads_dep.partial_dependency(link_args : true)
+endif
 
 omp_dep = []
 if get_option('enable_openmp')
