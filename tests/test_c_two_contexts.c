@@ -11,6 +11,7 @@
 #include "opensps.h"
 #include "test_c_data.h"
 
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,15 +38,24 @@ static int batch(int h, double *mags, double *spec, double *mass) {
     return s;
 }
 
-/* Magnitudes of bands with no flux (> 100 mag, e.g. X-ray bands of an old population) are noise
- * around the floor and change from one identical batch to the next, even on the host; the
- * physical ones must agree to SAME_MAG_TOL. The band sums are not in a fixed order on the A100
- * (nvfortran), so identical batches differ by an ulp or so (7e-15 mag seen, with one context
- * and no second one); an unmapped or stale device array changes results by far more. */
-#define SAME_MAG_TOL 1e-10
+/* Identical batches agree to rounding, not bit for bit: on a GPU the band and age sums are not in
+ * a fixed order (7e-15 mag seen on the A100 with nvfortran, with one context and no second one).
+ * The tolerance follows the kernel precision the library reports (100 eps of KP, as the other
+ * tests; 1e-10 for double kernels); an unmapped or stale device array changes results by far more.
+ * A magnitude error is about 1.09 times the relative flux error, so the same number serves.
+ * Magnitudes of bands with no flux (> 100 mag, e.g. X-ray bands of an old population) are noise
+ * around the floor and change from one identical batch to the next, even on the host: skipped. */
+static double tol = 1e-10;
+
+static int close_rel(const double *x, const double *y, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        if (fabs(x[i] - y[i]) > tol * fmax(fabs(x[i]), fabs(y[i]))) return 0;
+    return 1;
+}
+
 static int same_mags(const double *x, const double *y, size_t n) {
     for (size_t i = 0; i < n; i++)
-        if (fabs(x[i] - y[i]) > SAME_MAG_TOL && (x[i] < 100.0 || y[i] < 100.0)) return 0;
+        if (fabs(x[i] - y[i]) > tol && (x[i] < 100.0 || y[i] < 100.0)) return 0;
     return 1;
 }
 
@@ -64,6 +74,14 @@ int main(void) {
     s = batch(a, mags0, spec0, mass0);
     printf("context A, first batch: status %d, mass = %g %g\n", s, mass0[0], mass0[1]);
     if (s) { printf("FAIL: first batch\n"); return 1; }
+    {   /* kernel precision of the build: 4 bytes per value (single) or 8 (double) */
+        void *dptr = NULL;
+        int dn = 0, dnspec = 0, dbytes = 0, dst = 0;
+        opensps_context_batch_spec_device(a, &dptr, &dnspec, &dn, &dbytes, &dst);
+        if (dst != 0 || (dbytes != 4 && dbytes != 8)) { printf("FAIL: kernel precision unknown\n"); return 1; }
+        tol = dbytes == 4 ? 100.0 * FLT_EPSILON : 1e-10;
+        printf("kernel precision: %d bytes, tolerance %g\n", dbytes, tol);
+    }
 
     for (int round = 0; round < 2; round++) {
         int b = make_context();
@@ -71,7 +89,7 @@ int main(void) {
         if (round == 1) {   /* the second round also runs a batch on B before destroying it */
             double *mb = calloc(nm, sizeof(double)), *sb = calloc(ns, sizeof(double)), massb[N_MOD];
             s = batch(b, mb, sb, massb);
-            if (s || memcmp(massb, mass0, sizeof mass0) != 0) {
+            if (s || !close_rel(massb, mass0, N_MOD)) {
                 printf("FAIL: context B batch (status %d, mass = %g %g)\n", s, massb[0], massb[1]);
                 failures++;
             }
@@ -81,12 +99,11 @@ int main(void) {
 
         s = batch(a, mags1, spec1, mass1);
         printf("context A, after B (round %d): status %d, mass = %g %g\n", round, s, mass1[0], mass1[1]);
-        if (s || memcmp(mass1, mass0, sizeof mass0) != 0 || !same_mags(mags1, mags0, nm) ||
-            memcmp(spec1, spec0, sizeof(double) * ns) != 0) {
+        if (s || !close_rel(mass1, mass0, N_MOD) || !same_mags(mags1, mags0, nm) || !close_rel(spec1, spec0, ns)) {
             printf("FAIL: context A changed after context B (round %d): mass %s, mags %s, spec %s\n", round,
-                   memcmp(mass1, mass0, sizeof mass0) ? "differ" : "equal",
+                   close_rel(mass1, mass0, N_MOD) ? "equal" : "differ",
                    same_mags(mags1, mags0, nm) ? "equal" : "differ",
-                   memcmp(spec1, spec0, sizeof(double) * ns) ? "differ" : "equal");
+                   close_rel(spec1, spec0, ns) ? "equal" : "differ");
             failures++;
         }
     }
