@@ -33,6 +33,7 @@ program test_csp_batch_grad
     !> validation (roadmap priority 4); FP32 builds check the same with differences sized for FP32.
     !> Requires the data tree, like the regression tests.
 
+    use, intrinsic :: iso_fortran_env, only: int64
     use opensps_precision, only: WP, KP
     use opensps_types, only: PARAMS
     use opensps_api, only: opensps_create, opensps_setup
@@ -1047,7 +1048,12 @@ contains
     end function loss_of
 
     real(WP) function urand()
-        seed = mod(1103515245 * seed + 12345, 2147483647)
+        ! The 32-bit product wraps (the generator's definition); formed in 64 bits and wrapped by
+        ! hand, since a signed overflow is undefined behaviour (UBSan aborts on it)
+        integer(int64) :: t
+        t = iand(1103515245_int64 * int(seed, int64) + 12345_int64, int(z'FFFFFFFF', int64))
+        if (t >= 2147483648_int64) t = t - 4294967296_int64
+        seed = mod(int(t), 2147483647)
         if (seed < 0) seed = seed + 2147483647
         urand = real(seed, WP) / 2147483647.0_wp
     end function urand
