@@ -54,12 +54,13 @@ module opensps_c_api
     ! Context pool for handle-based API
     ! Each context is allocated once and keeps its host address for as long as the process runs:
     ! device mappings (OpenMP target) are keyed by the host address of the context and of its
-    ! allocatable components, so growing the pool must move ownership (MOVE_ALLOC), never copy
-    ! the contexts, which would free the old components under their live device mappings
+    ! allocatable components, so growing the pool copies the slots (pointers), never the
+    ! contexts: a copy of a context frees the old components under their live device mappings.
+    ! A slot is reused after its context is destroyed and its context is never freed.
     type :: ctx_slot_t
-        type(opensps_context_t), allocatable :: c
+        type(opensps_context_t), pointer :: c => null()
     end type ctx_slot_t
-    type(ctx_slot_t), allocatable, target :: ctx_pool(:)
+    type(ctx_slot_t), allocatable :: ctx_pool(:)
     logical, allocatable :: ctx_inuse(:)
     !> Per handle, for opensps_context_compute_csp: the SSP grids computed so far (one per
     !> metallicity, kept until an SSP parameter changes) and the last single CSP's outputs
@@ -87,6 +88,12 @@ contains
         end if
     end subroutine opensps_ensure_default_ctx
 
+    subroutine opensps_context_new_slot_context(slot)
+        type(ctx_slot_t), intent(INOUT) :: slot
+
+        allocate (slot%c)
+    end subroutine opensps_context_new_slot_context
+
     subroutine opensps_context_alloc_slot(slot)
         integer, intent(OUT) :: slot
         integer :: i, n
@@ -96,7 +103,7 @@ contains
 
         if (.not. ALLOCATED(ctx_pool)) then
             allocate (ctx_pool(1))
-            allocate (ctx_pool(1)%c)
+            call opensps_context_new_slot_context(ctx_pool(1))
             allocate (ctx_inuse(1))
             allocate (ctx_store(1))
             ctx_inuse = .false.
@@ -114,10 +121,8 @@ contains
             n = SIZE(ctx_pool)
             allocate (new_pool(n + 1))
             allocate (new_inuse(n + 1))
-            do i = 1, n
-                call MOVE_ALLOC(ctx_pool(i)%c, new_pool(i)%c)   ! the context stays where it is
-            end do
-            allocate (new_pool(n + 1)%c)
+            new_pool(1:n) = ctx_pool(1:n)   ! the slots point at the same contexts: none moves
+            call opensps_context_new_slot_context(new_pool(n + 1))
             new_inuse(1:n) = ctx_inuse
             new_inuse(n + 1) = .false.
             call MOVE_ALLOC(new_pool, ctx_pool)
@@ -376,16 +381,19 @@ contains
         call c_to_f_string(c_dust, dust_type_in)
         call reset_store(ctx_store(handle))
 
-        if (LEN_TRIM(isoc_type_in) == 0 .and. LEN_TRIM(spec_type_in) == 0 .and. &
-            LEN_TRIM(dust_type_in) == 0) then
-            call opensps_setup(ctx_pool(handle)%c, zin)
-        else if (LEN_TRIM(spec_type_in) == 0 .and. LEN_TRIM(dust_type_in) == 0) then
-            call opensps_setup(ctx_pool(handle)%c, zin, TRIM(isoc_type_in))
-        else if (LEN_TRIM(dust_type_in) == 0) then
-            call opensps_setup(ctx_pool(handle)%c, zin, TRIM(isoc_type_in), TRIM(spec_type_in))
-        else
-            call opensps_setup(ctx_pool(handle)%c, zin, TRIM(isoc_type_in), TRIM(spec_type_in), TRIM(dust_type_in))
-        end if
+        ! The names without their trailing blanks, as substrings (what TRIM returns, without a temporary)
+        associate (isoc => isoc_type_in(1:LEN_TRIM(isoc_type_in)), spec => spec_type_in(1:LEN_TRIM(spec_type_in)), &
+                   dust => dust_type_in(1:LEN_TRIM(dust_type_in)))
+            if (LEN(isoc) == 0 .and. LEN(spec) == 0 .and. LEN(dust) == 0) then
+                call opensps_setup(ctx_pool(handle)%c, zin)
+            else if (LEN(spec) == 0 .and. LEN(dust) == 0) then
+                call opensps_setup(ctx_pool(handle)%c, zin, isoc)
+            else if (LEN(dust) == 0) then
+                call opensps_setup(ctx_pool(handle)%c, zin, isoc, spec)
+            else
+                call opensps_setup(ctx_pool(handle)%c, zin, isoc, spec, dust)
+            end if
+        end associate
     end subroutine opensps_context_setup_handle
 
     subroutine opensps_context_set_int_handle(handle, c_key, value, status) &
@@ -407,7 +415,7 @@ contains
         end if
 
         call c_to_f_string(c_key, key)
-        call opensps_set_param_int(ctx_pool(handle)%c, TRIM(key), value, status)
+        call opensps_set_param_int(ctx_pool(handle)%c, key(1:LEN_TRIM(key)), value, status)
         ! zmet only selects among the stored grids
         if (status == 0 .and. TRIM(key) /= 'zmet' .and. is_ssp_sensitive_int_param(TRIM(key))) &
             call invalidate_ssps(ctx_store(handle))
@@ -432,7 +440,7 @@ contains
         end if
 
         call c_to_f_string(c_key, key)
-        call opensps_set_param_float(ctx_pool(handle)%c, TRIM(key), real(value, WP), status)
+        call opensps_set_param_float(ctx_pool(handle)%c, key(1:LEN_TRIM(key)), real(value, WP), status)
         ! The nebular parameters change the SSPs only with nebular emission in them
         ! (add_neb_emission = 2), as in opensps_context_compute_csp_batch
         if (status == 0 .and. is_ssp_sensitive_float_param(TRIM(key))) then
@@ -463,7 +471,7 @@ contains
 
         call c_to_f_string(c_key, key)
         call c_to_f_string(c_val, val)
-        call opensps_set_param_str(ctx_pool(handle)%c, TRIM(key), TRIM(val), status)
+        call opensps_set_param_str(ctx_pool(handle)%c, key(1:LEN_TRIM(key)), val(1:LEN_TRIM(val)), status)
         if (status == 0 .and. is_ssp_sensitive_str_param(TRIM(key))) call invalidate_ssps(ctx_store(handle))
     end subroutine opensps_context_set_str_handle
 
