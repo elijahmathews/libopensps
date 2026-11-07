@@ -176,9 +176,9 @@ PROGRAM GENERATE_TEST_DATA
   WRITE(*,*) 'Running Test Case 2: CSP (Tau=2.0, Dust=1.0)...'
 
   pset%sfh   = 1     ! Tau model
-  pset%tau   = 2.0   
-  pset%dust1 = 1.0   
-  pset%dust2 = 0.3
+  pset%tau   = 2.0_wp
+  pset%dust1 = 1.0_wp
+  pset%dust2 = 0.3_wp   ! a default-real 0.3 would store 0.30000001192...; test_runner uses 0.3_wp
   
   ! Re-run generate_ssp_grid
    call opensps_context_set_pset(ctx, pset)
