@@ -61,6 +61,9 @@ program test_opensps
     use test_opensps_spectral_library_mod, only: run_opensps_spectral_library_tests, &
                                   failures_spectral_library => total_failures, &
                                   tests_spectral_library => total_tests
+    use test_opensps_batch_photometry_mod, only: run_opensps_batch_photometry_tests, &
+                                  failures_batch_photometry => total_failures, &
+                                  tests_batch_photometry => total_tests
     use test_opensps_photometry_mod, only: run_opensps_photometry_tests, &
                                   failures_photometry => total_failures, &
                                   tests_photometry => total_tests
@@ -114,6 +117,7 @@ program test_opensps
     if (selected('opensps_ssp')) call run_opensps_ssp_tests()
     if (selected('opensps_stellar_modifications')) call run_opensps_stellar_modifications_tests()
 
+    if (selected('opensps_batch_photometry')) call run_opensps_batch_photometry_tests()
     if (selected('opensps_photometry')) call run_opensps_photometry_tests()
     if (selected('opensps_smoothing')) call run_opensps_smoothing_tests()
     if (selected('opensps_spectral_indices')) call run_opensps_spectral_indices_tests()
@@ -222,6 +226,11 @@ program test_opensps
     )
 
     call print_summary_line( &
+        "opensps_batch_photometry", &
+        (tests_batch_photometry - failures_batch_photometry), &
+        tests_batch_photometry &
+    )
+    call print_summary_line( &
         "opensps_photometry", &
         (tests_photometry - failures_photometry), &
         tests_photometry &
@@ -261,6 +270,7 @@ program test_opensps
                            failures_sfh + &
                            failures_ssp + &
                            failures_stellar_modifications + &
+                           failures_batch_photometry + &
                            failures_photometry + &
                            failures_smoothing + &
                            failures_spectral_indices + &
@@ -285,6 +295,7 @@ program test_opensps
                         tests_sfh + &
                         tests_ssp + &
                         tests_stellar_modifications + &
+                        tests_batch_photometry + &
                         tests_photometry + &
                         tests_smoothing + &
                         tests_spectral_indices + &

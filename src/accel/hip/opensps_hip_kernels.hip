@@ -1801,6 +1801,65 @@ __global__ void __launch_bounds__(256, 4) band_fluxes_kernel(
     d_fband[(size_t)m * nbands + b] = (double)s;
 }
 
+
+// Small batches: one workgroup per (model, band). The one-thread-per-(model, band) kernel above
+// leaves the GPU almost idle when there are few models (N = 1: one working lane per band, each
+// summing up to thousands of pixels serially). Here the pixels of a band are dealt out to the
+// threads of a workgroup (thread t takes pixels j_lo + t, + BF_SMALL_THREADS, ...), each thread sums
+// its share serially (compensated at FP32), and the partial sums are combined by a tree in a fixed
+// order in LDS. The order of every addition depends only on the indices, never on the scheduling,
+// so identical batches give identical results, and the tree sum is as accurate as the serial one.
+#define BF_SMALL_THREADS 256
+// Batches of fewer models than this use the workgroup kernel (R9700, FP32, us per model: N = 32
+// 64 vs 69 for the other kernel, N = 48 49 vs 47, N = 100 37 vs 26)
+#define BF_SMALL_N 40
+
+template <typename T_KP>
+__global__ void __launch_bounds__(BF_SMALL_THREADS) band_fluxes_small_kernel(
+    int n_mod,
+    int nspec,
+    int nbands,
+    const T_KP* __restrict__ d_bands_t,
+    const int*  __restrict__ d_j_lo,
+    const int*  __restrict__ d_j_hi,
+    const int*  __restrict__ d_do_band,
+    const T_KP* __restrict__ d_wt,
+    const T_KP* __restrict__ d_fobs_t,
+    double*     __restrict__ d_fband
+) {
+    const int m = blockIdx.x;
+    const int b = blockIdx.y;
+    const int t = threadIdx.x;
+    __shared__ T_KP partial[BF_SMALL_THREADS];
+
+    // (the whole workgroup takes this branch together)
+    if (d_do_band[b] == 0) {
+        if (t == 0) d_fband[(size_t)m * nbands + b] = 0.0;
+        return;
+    }
+
+    const int j_start = d_j_lo[b] - 1;   // 0-based
+    const int j_end   = d_j_hi[b] - 1;
+
+    T_KP s = 0;
+    T_KP c = 0;
+    for (int j = j_start + t; j <= j_end; j += BF_SMALL_THREADS) {
+        const T_KP w  = d_wt[j];
+        const T_KP b0 = (j < nspec)     ? d_bands_t[(size_t)b + (size_t)j * nbands] : (T_KP)0;
+        const T_KP f0 = (j < nspec)     ? d_fobs_t[(size_t)m + (size_t)j * n_mod]   : (T_KP)0;
+        const T_KP b1 = (j + 1 < nspec) ? d_bands_t[(size_t)b + (size_t)(j + 1) * nbands] : (T_KP)0;
+        const T_KP f1 = (j + 1 < nspec) ? d_fobs_t[(size_t)m + (size_t)(j + 1) * n_mod]   : (T_KP)0;
+        kahan_add(w * (f0 * b0 + f1 * b1), s, c);
+    }
+    partial[t] = s - c;
+    __syncthreads();
+    for (int stride = BF_SMALL_THREADS / 2; stride > 0; stride >>= 1) {
+        if (t < stride) partial[t] += partial[t + stride];
+        __syncthreads();
+    }
+    if (t == 0) d_fband[(size_t)m * nbands + b] = (double)partial[0];
+}
+
 extern "C" {
 
 void opensps_hip_band_fluxes_sp(
@@ -1817,12 +1876,18 @@ void opensps_hip_band_fluxes_sp(
     void*         stream
 ) {
     if (n_mod <= 0 || nbands <= 0) return;
-    dim3 block(32, 1);
-    dim3 grid((n_mod + 31) / 32, nbands);
     hipStream_t s = (hipStream_t)stream;
-    band_fluxes_kernel<float><<<grid, block, 0, s>>>(
-        n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband
-    );
+    if (n_mod < BF_SMALL_N) {
+        band_fluxes_small_kernel<float><<<dim3(n_mod, nbands), BF_SMALL_THREADS, 0, s>>>(
+            n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband
+        );
+    } else {
+        dim3 block(32, 1);
+        dim3 grid((n_mod + 31) / 32, nbands);
+        band_fluxes_kernel<float><<<grid, block, 0, s>>>(
+            n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband
+        );
+    }
     (void)hipStreamSynchronize(s);
 }
 
@@ -1840,12 +1905,18 @@ void opensps_hip_band_fluxes_dp(
     void*         stream
 ) {
     if (n_mod <= 0 || nbands <= 0) return;
-    dim3 block(32, 1);
-    dim3 grid((n_mod + 31) / 32, nbands);
     hipStream_t s = (hipStream_t)stream;
-    band_fluxes_kernel<double><<<grid, block, 0, s>>>(
-        n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband
-    );
+    if (n_mod < BF_SMALL_N) {
+        band_fluxes_small_kernel<double><<<dim3(n_mod, nbands), BF_SMALL_THREADS, 0, s>>>(
+            n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband
+        );
+    } else {
+        dim3 block(32, 1);
+        dim3 grid((n_mod + 31) / 32, nbands);
+        band_fluxes_kernel<double><<<grid, block, 0, s>>>(
+            n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband
+        );
+    }
     (void)hipStreamSynchronize(s);
 }
 
