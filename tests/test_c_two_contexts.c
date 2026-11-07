@@ -11,6 +11,7 @@
 #include "opensps.h"
 #include "test_c_data.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,10 +39,13 @@ static int batch(int h, double *mags, double *spec, double *mass) {
 
 /* Magnitudes of bands with no flux (> 100 mag, e.g. X-ray bands of an old population) are noise
  * around the floor and change from one identical batch to the next, even on the host; the
- * physical ones must agree exactly. */
+ * physical ones must agree to SAME_MAG_TOL. The band sums are not in a fixed order on the A100
+ * (nvfortran), so identical batches differ by an ulp or so (7e-15 mag seen, with one context
+ * and no second one); an unmapped or stale device array changes results by far more. */
+#define SAME_MAG_TOL 1e-10
 static int same_mags(const double *x, const double *y, size_t n) {
     for (size_t i = 0; i < n; i++)
-        if (x[i] != y[i] && (x[i] < 100.0 || y[i] < 100.0)) return 0;
+        if (fabs(x[i] - y[i]) > SAME_MAG_TOL && (x[i] < 100.0 || y[i] < 100.0)) return 0;
     return 1;
 }
 
