@@ -395,6 +395,7 @@ message('Data root of the regression and stress suites: ' + data_home)
 
 # 2. Unit Tests
 unit_test_sources = files(
+    'tests/core/test_opensps_build_info.f90',
     'tests/core/test_opensps_cache.f90',
     'tests/core/test_opensps_context.f90',
     'tests/core/test_opensps_context_types.f90',
@@ -438,7 +439,7 @@ unit_env.set('FSPS_TEST_LIBRARY', join_paths(meson.project_source_root(), 'tests
 # Reference tables committed in the repository (tests/data), e.g. tests/data/imf_powerlaw_bins.txt
 unit_env.set('FSPS_TEST_SOURCE_ROOT', meson.project_source_root())
 unit_modules = [
-    'opensps_cache', 'opensps_context', 'opensps_context_types', 'opensps_strings', 'opensps_types', 'opensps_io',
+    'opensps_build_info', 'opensps_cache', 'opensps_context', 'opensps_context_types', 'opensps_strings', 'opensps_types', 'opensps_io',
     'opensps_integration', 'opensps_interpolation', 'opensps_special_functions', 'opensps_cosmology', 'opensps_csp',
     'opensps_dust', 'opensps_gas', 'opensps_imf', 'opensps_sfh', 'opensps_ssp', 'opensps_stellar_modifications',
     'opensps_photometry', 'opensps_smoothing', 'opensps_spectral_indices', 'opensps_spectral_library',
