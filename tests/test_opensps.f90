@@ -4,6 +4,9 @@ program test_opensps
     !> Aggregates results from individual test modules.
 
     ! Core modules
+    use test_opensps_c_api_mod, only: run_opensps_c_api_tests, &
+                                   failures_c_api => total_failures, &
+                                   tests_c_api => total_tests
     use test_opensps_build_info_mod, only: run_opensps_build_info_tests, &
                                         failures_build_info => total_failures, &
                                         tests_build_info => total_tests
@@ -88,6 +91,7 @@ program test_opensps
     call print_major_header("FSPS UNIT TEST SUITE")
 
     ! Run all the tests
+    if (selected('opensps_c_api')) call run_opensps_c_api_tests()
     if (selected('opensps_build_info')) call run_opensps_build_info_tests()
     if (selected('opensps_cache')) call run_opensps_cache_tests()
     if (selected('opensps_context')) call run_opensps_context_tests()
@@ -118,6 +122,11 @@ program test_opensps
     ! --- Summary ---
     call print_major_header("FSPS UNIT TEST FINAL REPORT")
     
+    call print_summary_line( &
+        "opensps_c_api", &
+        (tests_c_api - failures_c_api), &
+        tests_c_api &
+    )
     call print_summary_line( &
         "opensps_build_info", &
         (tests_build_info - failures_build_info), &
@@ -233,7 +242,8 @@ program test_opensps
         tests_spectral_library &
     )
     
-    grand_total_failures = failures_cache + &
+    grand_total_failures = failures_c_api + &
+ failures_cache + &
                            failures_context + &
                            failures_context_types + &
                            failures_build_info + &
@@ -256,7 +266,8 @@ program test_opensps
                            failures_spectral_indices + &
                            failures_spectral_library
     
-    grand_total_tests = tests_cache + &
+    grand_total_tests = tests_c_api + &
+ tests_cache + &
                         tests_context + &
                         tests_context_types + &
                         tests_build_info + &
