@@ -6,7 +6,7 @@ module test_opensps_ssp_mod
     use opensps_ssp, only: generate_ssp_grid, isochrone_buffer_t, init_isochrone_buffer, reset_buffer, &
                         free_isochrone_buffer, load_timestep_data, apply_isochrone_physics, &
                         compute_integrated_properties, accumulate_spectrum, interpolate_time_grid, &
-                        configure_imf_parameters, compute_interpolated_ssp
+                        configure_imf_parameters, compute_interpolated_ssp, finish_ssp_grid
     use opensps_spectral_library, only: get_stellar_spectrum
     use opensps_imf, only: compute_imf_weights
     use opensps_stellar_modifications, only: add_remnant_mass, modify_giant_branch
@@ -47,6 +47,9 @@ contains
         call test_interp_grid_z_only()
         call test_mdf_smoothing_kernel()
         call test_mdf_power_law()
+        call test_finish_stage_flags_off()
+        call test_finish_xrb_stage()
+        call test_finish_lsf_stage()
 
         call print_summary_line("Module Summary", total_tests - total_failures, total_tests)
     end subroutine run_opensps_ssp_tests
@@ -735,5 +738,137 @@ contains
                    ctx%state%nmass_isoc)
         deallocate(ctx)
     end subroutine test_remnants_ignore_appended_stragglers
+
+    ! ------------------------------------------------------------------------
+    ! Post-processing stages of the SSP grid (finish_ssp_grid), shared by generate_ssp_grid and the
+    ! batched SSP operator: with every stage off the grid is untouched; the X-ray binary stage adds
+    ! its spectrum once; the LSF stage smooths every time column once, to the tabulated width
+    ! ------------------------------------------------------------------------
+
+    subroutine test_finish_stage_flags_off()
+        type(opensps_context_t), allocatable :: ctx
+        type(params) :: pset
+        real(WP) :: mass(2), lbol(2), spec(5, 2), mass0(2), lbol0(2), spec0(5, 2)
+        integer :: i
+
+        call print_group("finish_ssp_grid: no stage enabled leaves the grid untouched")
+        allocate(ctx)
+        mass = [1.5_wp, 2.5_wp]; lbol = [-1.0_wp, 0.5_wp]
+        spec = reshape([(real(i, WP) * 0.3_wp, i = 1, 10)], [5, 2])
+        mass0 = mass; lbol0 = lbol; spec0 = spec
+        call finish_ssp_grid(ctx, pset, mass, lbol, spec)
+        call assert_true(all(mass == mass0) .and. all(lbol == lbol0) .and. all(spec == spec0), &
+                         "mass, L_bol and spectra are bit-identical", total_tests, total_failures)
+        deallocate(ctx)
+    end subroutine test_finish_stage_flags_off
+
+    subroutine test_finish_xrb_stage()
+        type(opensps_context_t), allocatable :: ctx
+        type(params) :: pset
+        integer, parameter :: NW = 4, NT = 1, NAGE = 2, NZ = 2
+        real(WP), allocatable, target :: grid(:, :, :), ages(:), zgrid(:), time_full(:), zlegend(:)
+        real(WP) :: mass(NT), lbol(NT), spec(NW, NT), spec0(NW, NT)
+
+        call print_group("finish_ssp_grid: the X-ray binary stage adds its spectrum once")
+        allocate(ctx, grid(NW, NAGE, NZ), ages(NAGE), zgrid(NZ), time_full(NT), zlegend(1))
+        grid = 0.0_wp
+        grid(:, 1, 1) = [1.0_wp, 2.0_wp, 3.0_wp, 4.0_wp]       ! the node the SSP time and metallicity sit on
+        grid(:, 2, 1) = [40.0_wp, 30.0_wp, 20.0_wp, 10.0_wp]
+        grid(:, :, 2) = 99.0_wp
+        ages = [1.0_wp, 2.0_wp]; zgrid = [0.0_wp, 0.5_wp]; time_full = [1.0_wp]; zlegend(1) = 0.02_wp
+        ctx%state%spec_xrb => grid
+        ctx%state%ages_xrb => ages
+        ctx%state%zmet_xrb => zgrid
+        ctx%state%time_full => time_full
+        ctx%state%zlegend => zlegend
+        ctx%state%zsol = 0.02_wp
+        ctx%state%nt = NT
+        ctx%state%nt_xrb = NAGE
+        ctx%state%nz_xrb = NZ
+        ctx%add_xrb_emission_val = 1
+        pset%zmet = 1
+        pset%frac_xrb = 1.0_wp
+
+        spec0 = reshape([10.0_wp, 20.0_wp, 30.0_wp, 40.0_wp], [NW, NT])
+        spec = spec0
+        mass = 1.0_wp; lbol = 0.0_wp
+        call finish_ssp_grid(ctx, pset, mass, lbol, spec)
+        call assert_true(all(abs(spec(:, 1) - (spec0(:, 1) + grid(:, 1, 1))) <= 1.0e-12_wp), &
+                         "spectrum = SSP + X-ray binaries (once)", total_tests, total_failures)
+        call assert_true(mass(1) == 1.0_wp .and. lbol(1) == 0.0_wp, "mass and L_bol are not touched by the stage", &
+                         total_tests, total_failures)
+
+        ! the fraction scales the addition; zero adds nothing
+        pset%frac_xrb = 0.25_wp
+        spec = spec0
+        call finish_ssp_grid(ctx, pset, mass, lbol, spec)
+        call assert_true(all(abs(spec(:, 1) - (spec0(:, 1) + 0.25_wp * grid(:, 1, 1))) <= 1.0e-12_wp), &
+                         "the X-ray binary fraction scales the addition", total_tests, total_failures)
+        ! stage off: no addition even with the grid loaded
+        ctx%add_xrb_emission_val = 0
+        spec = spec0
+        call finish_ssp_grid(ctx, pset, mass, lbol, spec)
+        call assert_true(all(spec == spec0), "stage off: spectrum unchanged", total_tests, total_failures)
+        deallocate(ctx, grid, ages, zgrid, time_full, zlegend)
+    end subroutine test_finish_xrb_stage
+
+    subroutine test_finish_lsf_stage()
+        type(opensps_context_t), allocatable :: ctx
+        type(params) :: pset
+        integer, parameter :: NW = 2001, NT = 3
+        real(WP), parameter :: SIGMA_KMS = 300.0_wp, LAM0 = 5000.0_wp
+        real(WP) :: mass(NT), lbol(NT), spec(NW, NT), spec0(NW, NT)
+        real(WP) :: lam(NW), flux, mean, var, expect_sigma
+        integer :: i, i0
+
+        call print_group("finish_ssp_grid: the LSF stage smooths each time column once, to the tabulated width")
+        allocate(ctx)
+        do i = 1, NW
+            lam(i) = 3999.0_wp + real(i, WP)               ! 4000 ... 6000 A, 1 A pixels
+        end do
+        allocate(ctx%state%spec_lambda(NW))
+        ctx%state%spec_lambda = lam
+        allocate(ctx%state%lsfinfo%lsf(NW))
+        ctx%state%lsfinfo%lsf = SIGMA_KMS
+        ctx%state%lsfinfo%minlam = 4500.0_wp
+        ctx%state%lsfinfo%maxlam = 5500.0_wp
+        ctx%smooth_velocity_val = 1
+        ctx%smooth_lsf_val = 1
+        i0 = nint(LAM0 - 3999.0_wp)
+
+        spec0 = 0.0_wp
+        spec0(i0, 1) = 1.0_wp                  ! a line inside the window
+        spec0(201, 2) = 1.0_wp                 ! a line (4200 A) outside the window
+        spec0(:, 3) = 1.0_wp                   ! a flat continuum
+        spec = spec0
+        mass = 1.0_wp; lbol = 0.0_wp
+        call finish_ssp_grid(ctx, pset, mass, lbol, spec)
+
+        ! the line: flux conserved, centred, Gaussian of sigma = lambda sigma_v / c (once: twice would be x sqrt 2)
+        flux = sum(spec(:, 1))
+        mean = sum(lam * spec(:, 1)) / flux
+        var = sum((lam - mean)**2 * spec(:, 1)) / flux
+        expect_sigma = LAM0 * SIGMA_KMS / (C_LIGHT * 1.0e-13_wp)       ! C_LIGHT is in A/s: km/s = 1e-13 of it
+        ! (the kernel is cut at 4 sigma and sampled on 1 A pixels: ~1e-6 of the flux, ~0.01 A of the centre and
+        ! ~0.1% of the width; a second pass would widen the line by sqrt 2, 41%)
+        call assert_relative_error(flux, 1.0_wp, 1.0e-4_wp, "the line's flux is conserved", total_tests, total_failures)
+        call assert_true(abs(mean - LAM0) < 0.05_wp, "the line stays centred (to 1% of its width)", total_tests, total_failures)
+        call assert_relative_error(sqrt(var), expect_sigma, 0.01_wp, "the line's width is lambda sigma_v / c (smoothed once)", &
+                                   total_tests, total_failures)
+        call assert_true(all(spec(:, 2) == spec0(:, 2)), "a line outside the LSF window is untouched", &
+                         total_tests, total_failures)
+        call assert_true(all(abs(spec(600:1400, 3) - 1.0_wp) < 1.0e-9_wp), "a flat continuum stays flat", &
+                         total_tests, total_failures)
+        call assert_true(all(mass == 1.0_wp) .and. all(lbol == 0.0_wp), "mass and L_bol are not touched", &
+                         total_tests, total_failures)
+
+        ! stage off: nothing happens
+        ctx%smooth_lsf_val = 0
+        spec = spec0
+        call finish_ssp_grid(ctx, pset, mass, lbol, spec)
+        call assert_true(all(spec == spec0), "stage off: spectra unchanged", total_tests, total_failures)
+        deallocate(ctx%state%spec_lambda, ctx%state%lsfinfo%lsf)
+        deallocate(ctx)
+    end subroutine test_finish_lsf_stage
 
 end module test_opensps_ssp_mod
