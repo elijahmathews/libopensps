@@ -860,8 +860,9 @@ contains
 
         !> Models per gang: the threads of a gang share one band, hence one trip count (no
         !> divergence)
-        integer, parameter :: MBLK = 128, SMALL_N = 16
-        integer  :: m, j, b, mb, ml
+        integer, parameter :: MBLK = 128, SMALL_N = 16, NCH = 64
+        integer  :: m, j, b, mb, ml, ch, jlo, jhi, nj
+        real(KP), allocatable :: part(:, :, :)
         real(KP) :: s, c, term, tsum
 
 #if defined(OPENSPS_HIP)
@@ -874,26 +875,60 @@ contains
         ! distribute loop was lost, and the teams loop reduction is a plain FP32 tree sum, ~4e-5 mag
         ! at 6000 pixels; the compensated kernel below serves every N)
         if (n_mod < SMALL_N) then
-            ! Few spectra: a gang per (band, spectrum), the pixels reduced across its threads
-            ! (a tree reduction, pairwise like the dust integrals in opensps_dust). Measured on the
-            ! P100: 1 spectrum 0.65 -> 0.03 ms; slower than the kernel below from ~100 spectra
-#ifdef OMP_TARGET
-            !$omp target teams distribute collapse(2) private(s)
-#endif
+            ! Few spectra: a thread per (band, spectrum, chunk). The pixels of a band are cut into
+            ! NCH contiguous chunks, each summed serially by one thread into its own slot of part
+            ! (compensated at FP32), and the NCH partial sums are then combined serially in a fixed
+            ! order. The order of every addition is fixed by the indices, not by the scheduling, so
+            ! the result is bit-reproducible (issue #48: the parallel do reduction it replaces
+            ! combined the partial sums in an order the runtime chose, and raced in the
+            ! accumulator), and the chunked sum is pairwise-like, as accurate as the tree sum.
+            allocate(part(nbands, n_mod, NCH))
+            !$omp target data map(alloc: part)
+            !$omp target teams distribute parallel do collapse(3) private(s, c, term, tsum, j, jlo, jhi, nj)
+            do b = 1, nbands
+                do m = 1, n_mod
+                    do ch = 1, NCH
+                        s = 0.0_KP
+                        c = 0.0_KP
+                        if (do_band(b) /= 0) then
+                            nj = j_hi(b) - j_lo(b) + 1
+                            jlo = j_lo(b) + ((ch - 1) * nj) / NCH
+                            jhi = j_lo(b) + (ch * nj) / NCH - 1
+                            do j = jlo, jhi
+                                if (KP == WP) then
+                                    s = s + wt(j) * (fobs_t(m, j) * bands_t(b, j) + fobs_t(m, j + 1) * bands_t(b, j + 1))
+                                else
+                                    term = wt(j) * (fobs_t(m, j) * bands_t(b, j) + fobs_t(m, j + 1) * bands_t(b, j + 1)) - c
+                                    tsum = s + term
+                                    c = (tsum - s) - term
+                                    s = tsum
+                                end if
+                            end do
+                        end if
+                        part(b, m, ch) = s
+                    end do
+                end do
+            end do
+            !$omp target teams distribute parallel do collapse(2) private(s, c, term, tsum, ch)
             do b = 1, nbands
                 do m = 1, n_mod
                     s = 0.0_KP
-                    if (do_band(b) /= 0) then
-#ifdef OMP_TARGET
-                        !$omp parallel do reduction(+:s)
-#endif
-                        do j = j_lo(b), j_hi(b)
-                            s = s + wt(j) * (fobs_t(m, j) * bands_t(b, j) + fobs_t(m, j + 1) * bands_t(b, j + 1))
-                        end do
-                    end if
+                    c = 0.0_KP
+                    do ch = 1, NCH
+                        if (KP == WP) then
+                            s = s + part(b, m, ch)
+                        else
+                            term = part(b, m, ch) - c
+                            tsum = s + term
+                            c = (tsum - s) - term
+                            s = tsum
+                        end if
+                    end do
                     fband(b, m) = real(s, WP)
                 end do
             end do
+            !$omp end target data
+            deallocate(part)
             return
         end if
 #endif
