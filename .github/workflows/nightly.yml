@@ -41,6 +41,7 @@ jobs:
             stress_env: FSPS_STRESS_ITERS=20
     env:
       OMP_NUM_THREADS: 4
+      DATA_RELEASE: ${{ vars.FSPS_DATA_RELEASE }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -67,7 +68,21 @@ jobs:
         if: matrix.install == 'nvidia-hpc'
         run: echo "MTH_I_ARCH=avx2" >> "$GITHUB_ENV"
       - run: pipx install meson && pipx install ninja
-      - run: meson setup build -Denable_stress_testing=true ${{ matrix.setup_args }}
+      # The data release (repository variable FSPS_DATA_RELEASE), as in ci.yml: without it the
+      # regression tests skip and the stress tests stop at "FSPS data path not found" (issue #80).
+      # The verified archives are cached per release, so a release is downloaded once.
+      - name: Cache the data release
+        if: env.DATA_RELEASE != ''
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/opensps-data
+          key: opensps-data-${{ env.DATA_RELEASE }}
+      - name: Fetch the data release
+        if: env.DATA_RELEASE != ''
+        run: |
+          python3 tools/fetch_data.py "$HOME/opensps-data" --release "$DATA_RELEASE"
+          echo "DATA_ARGS=-Ddata_home=$HOME/opensps-data" >> "$GITHUB_ENV"
+      - run: meson setup build -Denable_stress_testing=true ${{ matrix.setup_args }} $DATA_ARGS
       - run: meson compile -C build
       # Real-data code paths under ASan (too slow, ~6 min, for per-change CI)
       - name: Unit and regression tests
@@ -100,6 +115,8 @@ jobs:
     name: Newest / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    env:
+      DATA_RELEASE: ${{ vars.FSPS_DATA_RELEASE }}
     strategy:
       fail-fast: false
       matrix:
@@ -125,7 +142,21 @@ jobs:
           compiler: ${{ matrix.toolchain }}
           version: ${{ matrix.version }}
       - run: pipx install meson && pipx install ninja
-      - run: meson setup build --buildtype=release
+      # The data release (repository variable FSPS_DATA_RELEASE), as in ci.yml: without it the
+      # regression tests skip and the stress tests stop at "FSPS data path not found" (issue #80).
+      # The verified archives are cached per release, so a release is downloaded once.
+      - name: Cache the data release
+        if: env.DATA_RELEASE != ''
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/opensps-data
+          key: opensps-data-${{ env.DATA_RELEASE }}
+      - name: Fetch the data release
+        if: env.DATA_RELEASE != ''
+        run: |
+          python3 tools/fetch_data.py "$HOME/opensps-data" --release "$DATA_RELEASE"
+          echo "DATA_ARGS=-Ddata_home=$HOME/opensps-data" >> "$GITHUB_ENV"
+      - run: meson setup build --buildtype=release $DATA_ARGS
       - run: meson compile -C build
       - run: meson test -C build --suite unit --suite regression --print-errorlogs
       - if: failure()
@@ -145,13 +176,28 @@ jobs:
     timeout-minutes: 60
     env:
       OMP_TARGET_OFFLOAD: MANDATORY   # a silent host fallback fails
+      DATA_RELEASE: ${{ vars.FSPS_DATA_RELEASE }}
     steps:
       - uses: actions/checkout@v7
       - name: Toolchain and device
         run: |
           nvfortran --version
           nvidia-smi
-      - run: meson setup build --buildtype=release -Daccel=omp_gpu
+      # The data release (repository variable FSPS_DATA_RELEASE), as in ci.yml: without it the
+      # regression tests skip and the stress tests stop at "FSPS data path not found" (issue #80).
+      # The verified archives are cached per release, so a release is downloaded once.
+      - name: Cache the data release
+        if: env.DATA_RELEASE != ''
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/opensps-data
+          key: opensps-data-${{ env.DATA_RELEASE }}
+      - name: Fetch the data release
+        if: env.DATA_RELEASE != ''
+        run: |
+          python3 tools/fetch_data.py "$HOME/opensps-data" --release "$DATA_RELEASE"
+          echo "DATA_ARGS=-Ddata_home=$HOME/opensps-data" >> "$GITHUB_ENV"
+      - run: meson setup build --buildtype=release -Daccel=omp_gpu $DATA_ARGS
         env:
           FC: nvfortran
           CC: nvc
