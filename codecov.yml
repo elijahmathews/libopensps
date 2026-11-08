@@ -1,3 +1,22 @@
+# Coverage is its own signal (meta-CI): these statuses go red on a pull request when coverage
+# falls short, separately from the CI workflow, whose result stays about builds and tests.
+# Policy and the exception for GPU-only changes: doc/CI.md ("Coverage") and CONTRIBUTING.md.
+coverage:
+  status:
+    project:
+      default:
+        # No decrease against the base commit (0.1% absorbs run-to-run differences in what the
+        # coverage job can run)
+        target: auto
+        threshold: 0.1%
+        informational: false
+    patch:
+      default:
+        # Changed lines the unit and regression suites do not run
+        target: 85%
+        threshold: 0%
+        informational: false
+
 # Don't track coverage of the tests themselves
 ignore:
   - "tests"
