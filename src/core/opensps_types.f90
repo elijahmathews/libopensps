@@ -67,10 +67,11 @@ module opensps_types
         integer :: type = 0, use_simha_limits = 0
     end type SFHPARAMS
 
-    !> @brief Line-spread function container.
+    !> @brief Line-spread function container: the instrumental velocity dispersion as a table
+    !> (wavelength in Angstrom, increasing; sigma in km/s), supplied through the context
+    !> (opensps_context_set_lsf). Not allocated until one is supplied.
     type TLSF
-        real(WP), allocatable :: lsf(:)
-        real(WP) :: minlam = 0.0_wp, maxlam = 0.0_wp
+        real(WP), allocatable :: lam(:), sigma(:)
     end type TLSF
 
     !> @brief Observational data container.

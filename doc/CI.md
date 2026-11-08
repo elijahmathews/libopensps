@@ -15,6 +15,25 @@ variable `FSPS_DATA_RELEASE` (`tools/fetch_data.py`, cached per release). Withou
 tests skip and the stress tests stop at "FSPS data path not found", so a nightly run that fails in
 well under a minute at the stress step is a data problem first (issue #80).
 
+## Coverage
+
+Coverage is reported separately from the build and test results: it is meta-CI. The `gfortran /
+Linux x86-64 / coverage` job uploads its report to Codecov, which posts two commit statuses on
+every pull request (`codecov/project`, `codecov/patch`); each goes red on its own when it fails,
+and the CI workflow (and its README badge) stays about builds and tests. The CI workflow fails on
+coverage only if the upload itself fails.
+
+- `codecov/patch`: at least 85% of the changed lines the report measures must be run by the unit
+  and regression suites.
+- `codecov/project`: coverage must not fall against the base commit (a 0.1% allowance).
+- Codecov counts a line with an untaken branch as partial, which does not count as covered, so a
+  line is covered for the check only when each of its branches runs. gcovr's own line rate
+  (about 86%) is higher than the Codecov figure (about 72%) for this reason.
+- GPU-only code is not measured: `.hip` files, and Fortran blocks under `#ifdef OMP_TARGET`, are
+  not in the CPU build's report, so CI neither counts nor checks them. Such changes are verified
+  on real hardware (state which in the pull request). A pull request whose measured patch
+  coverage falls short is the exception, merged only with an explicit override and a stated reason.
+
 ## What each per-change job covers
 
 | Job | Compiler | Hardware | Notes |

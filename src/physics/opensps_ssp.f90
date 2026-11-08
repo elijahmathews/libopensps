@@ -35,13 +35,13 @@ module opensps_ssp
                                           add_remnant_mass, &
                                           add_xray_binaries
     use opensps_gas, only: apply_nebular_emission
-    use opensps_smoothing, only: apply_smoothing
+    use opensps_smoothing, only: smooth_lsf
     use opensps_spectral_library, only: get_stellar_spectrum, get_stellar_terms, SRC_MAIN_LIB, SRC_WMBASIC, &
                                      SRC_AGB_O, SRC_AGB_C, SRC_PAGB, SRC_WRN, SRC_WRC, SRC_AGB_CAR
     use opensps_photometry, only: compute_magnitudes
 
     !> Math Modules
-    use opensps_interpolation, only: find_interval
+    use opensps_interpolation, only: find_interval, interpolate_linear
     use opensps_dust, only: get_agb_dust_terms
     use opensps_constants, only: C_LIGHT
     use opensps_integration, only: integrate_trapezoid_array
@@ -88,7 +88,6 @@ module opensps_ssp
     ! CONSTANTS
     ! ------------------------------------------------------------------------
     real(WP), parameter :: MIN_WEIGHT_CUTOFF = 0.0_wp     ! Skip stars with negligible weight
-    real(WP), parameter :: SMOOTHING_SIGMA_FLAG = 99.0_wp ! Flag to use variable sigma from LSF
     real(WP), parameter :: LN10 = log(10.0_wp)            ! Natural log of 10
     integer, parameter :: BATCH_SIZE = 32                 ! Process stars in chunks for L1 cache locality
 
@@ -1791,41 +1790,43 @@ contains
 
     end subroutine configure_imf_parameters
     
-    !> @brief Applies instrumental Line Spread Function (LSF) smoothing to the grid.
+    !> @brief Applies the instrumental Line Spread Function (LSF) smoothing to the grid.
     !>
     !> @details
-    !> Iterates over every time step in the spectral grid and convolves the 
-    !> spectrum with the user-provided LSF (if loaded).
+    !> The context's LSF table (opensps_context_set_lsf: sigma in km/s over wavelength) is
+    !> interpolated linearly onto the library's wavelength grid, between the table's first and last
+    !> wavelength (0, no smoothing, outside), and every time column of the spectral grid is
+    !> convolved with a Gaussian of that velocity dispersion, once. The convolution is in velocity
+    !> whatever `smooth_velocity` is: the table is in km/s.
     !>
-    !> @param[in]     ctx       Simulation context (contains LSF data).
+    !> @param[in]     ctx       Simulation context (contains the LSF table).
     !> @param[in,out] spec_grid The full spectral grid (Lambda, Time).
     subroutine apply_lsf_smoothing_grid(ctx, spec_grid)
         type(opensps_context_t), intent(in)    :: ctx
         real(WP), intent(inout), contiguous :: spec_grid(:,:)
 
-        integer :: j, n_times
+        real(WP), allocatable :: sigma(:)
+        real(WP) :: minlam, maxlam
+        integer :: i, j, n_lam
 
-        n_times = size(spec_grid, 2)
+        if (.not. allocated(ctx%state%lsfinfo%lam)) return
+        n_lam = size(ctx%state%lsfinfo%lam)
+        minlam = ctx%state%lsfinfo%lam(1)
+        maxlam = ctx%state%lsfinfo%lam(n_lam)
 
-        ! Loop over time columns
-        do j = 1, n_times
-            
-            ! Call the smoothing kernel for this specific time step.
-            ! Note: The '99.0_wp' is a special flag in opensps_smoothing indicating
-            ! that we should use the tabulated LSF kernel rather than a 
-            ! simple Gaussian velocity dispersion.
-            
-            call apply_smoothing( &
-                ctx, &
-                ctx%state%spec_lambda, &      ! Wavelength grid
-                spec_grid(:, j), &            ! Spectrum (in/out)
-                SMOOTHING_SIGMA_FLAG, &       ! Sigma flag
-                ctx%state%lsfinfo%minlam, &   ! LSF range min
-                ctx%state%lsfinfo%maxlam, &   ! LSF range max
-                ctx%state%lsfinfo%lsf)        ! LSF kernel array
-
+        allocate (sigma(size(spec_grid, 1)))
+        do i = 1, size(spec_grid, 1)
+            if (ctx%state%spec_lambda(i) >= minlam .and. ctx%state%spec_lambda(i) <= maxlam) then
+                sigma(i) = interpolate_linear(ctx%state%lsfinfo%lam, ctx%state%lsfinfo%sigma, &
+                                              ctx%state%spec_lambda(i))
+            else
+                sigma(i) = 0.0_wp
+            end if
         end do
 
+        do j = 1, size(spec_grid, 2)
+            call smooth_lsf(ctx%state%spec_lambda, spec_grid(:, j), sigma, minlam, maxlam)
+        end do
     end subroutine apply_lsf_smoothing_grid
 
     ! ------------------------------------------------------------------------

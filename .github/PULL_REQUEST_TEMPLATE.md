@@ -13,6 +13,8 @@ Body (wrapped at ~72 characters):
   - What changed and why (with timings, maximum differences, or test counts where they matter).
   - Any change in physical results: size, reason, legacy FSPS parity check (`tools/legacy_parity/`), and reference updates.
   - What was run locally: FP64 and FP32 unit + regression suites, `tools/compare_builds/` for GPU/offload changes.
+  - Coverage: new code should reach the 85% patch target (both sides of new branches); for GPU-only
+    changes, which CI does not measure, name the hardware and toolchains they were verified on.
 
 Footers (as applicable):
   BREAKING CHANGE: <what callers must change>

@@ -61,7 +61,7 @@ What it adds to FSPS:
 - **Free IMF parameters per model.** SSP operators decouple the isochrones from the IMF integrals,
   so IMF slopes, characteristic masses and bounds can vary from galaxy to galaxy within a batch.
 - **Optional FP32 kernels.** `-Dkernel_precision=single` runs the per-pixel kernels in single
-  precision (setup, isochrones and weights stay in double). It is much faster on GPUs with slow
+  precision (setup, isochrones and the other weights stay in double). It is much faster on GPUs with slow
   FP64, and the regression suite checks it against the FP64 references. See
   [doc/MIXED_PRECISION.md](doc/MIXED_PRECISION.md) for the accuracy evidence.
 - **Thread-safe contexts.** Independent `Context` objects replace FSPS's global state, so several
@@ -189,9 +189,7 @@ Useful options:
 
 - `-Denable_openmp=true` runs the library's OpenMP loops on the host cores.
 - `-Dcpu_baseline=generic|x86-64-v3|native` sets the instruction-set level (default `generic`).
-- `-Dkernel_precision=single` builds FP32 kernels; `-Dfp32_imf_weights=true` additionally computes
-  power-law IMF bin weights in FP32 (a small extra speedup on GPUs with slow FP64; see
-  [doc/MIXED_PRECISION.md](doc/MIXED_PRECISION.md)).
+- `-Dkernel_precision=single` builds FP32 kernels (see [doc/MIXED_PRECISION.md](doc/MIXED_PRECISION.md)).
 - `-Dtests=false` skips the test and benchmark programs (use this when building as a subproject).
 - `-Dtrace=true` adds ROCTX/NVTX markers for GPU profiling.
 

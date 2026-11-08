@@ -7,6 +7,7 @@ module opensps_imf
     !> parameterizations (Salpeter, Chabrier, Kroupa, etc.) and to compute
     !> the mass weights for SSP generation.
     
+    use, intrinsic :: iso_fortran_env, only: error_unit
     use opensps_precision, only: WP, KP
     use opensps_context_types, only: opensps_context_t
     implicit none
@@ -20,6 +21,7 @@ module opensps_imf
     public :: IMF_NPAR, IMF_P_SALP, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE, IMF_P_LOWER_LIMIT, &
               IMF_P_UPPER_LIMIT, IMF_P_LOWER_BOUND, IMF_P_MLIM_BH, IMF_P_MLIM_NS, IMF_P_NUSER, IMF_P_USER
     public :: CHAB_MC, CHAB_SIGMA2, CHAB_IND
+    public :: exp_reduced_kp, expm1_kp   ! (the FP32 kernels' exponentials; tested directly, on host and device)
 
     ! ------------------------------------------------------------------------
     ! CONSTANTS
@@ -145,7 +147,7 @@ contains
 
             ! Validate Monotonicity
             if (m2 < m1) then
-                write(*, '("[OPENSPS-IMF] Warning: Non-monotonic mass bin at index ", I0, &
+                write(error_unit, '("[OPENSPS-IMF] Warning: Non-monotonic mass bin at index ", I0, &
                          & " (m1=", ES10.3, ", m2=", ES10.3, ")")') i, m1, m2
                 cycle
             end if
@@ -527,11 +529,10 @@ contains
                     ! c (hi**e - lo**e) / e = c lo**e expm1(e dl) / e: smooth through e = 0 (no
                     ! special case for slopes near 1, where the difference form divides a
                     ! cancellation by a small e)
-#if defined(OPENSPS_FP32_IMF_WEIGHTS)
-                    ! -Dfp32_imf_weights=true (FP32 kernels only): the exponentials in kernel
-                    ! precision, the exponent e ln lo (up to ~25) formed and reduced in FP64
-                    ! (doc/MIXED_PRECISION.md, rule 7); mass and L_bol then good to ~3e-8 (L_bol
-                    ! ~7e-7 at extreme IMF parameters)
+#if defined(KERNEL_SINGLE_PRECISION)
+                    ! FP32 kernels: the exponentials in kernel precision, the exponent e ln lo (up
+                    ! to ~25) formed and reduced in FP64 (doc/MIXED_PRECISION.md, rule 7); mass and
+                    ! L_bol then good to ~3e-8 (L_bol ~7e-7 at extreme IMF parameters)
                     val = real(real(ce, KP) * exp_reduced_kp(e * llo(k)) * expm1_kp(real(e * dl(k), KP)), WP)
 #else
                     ! lo**e: from the previous bin when it ends where this one starts (consecutive
@@ -1021,152 +1022,5 @@ contains
         end if
 
     end function get_imf_value
-
-    ! ------------------------------------------------------------------------
-    ! SPECIFIC IMF IMPLEMENTATIONS
-    ! ------------------------------------------------------------------------
-
-    pure subroutine imf_salpeter(ctx, m, val)
-#ifdef OMP_TARGET
-        !$omp declare target
-#endif
-        type(opensps_context_t), intent(in) :: ctx
-        real(WP), intent(in) :: m
-        real(WP), intent(out) :: val
-        
-        ! Power law: m^(-alpha)
-        val = m**(-ctx%state%salp_ind)
-    end subroutine imf_salpeter
-
-    pure subroutine imf_chabrier(m, val)
-#ifdef OMP_TARGET
-        !$omp declare target
-#endif
-        real(WP), intent(in) :: m
-        real(WP), intent(out) :: val
-        real(WP) :: log_m, log_mc, term
-
-        log_mc = log10(CHAB_MC)
-
-        if (m < 1.0_wp) then
-            ! Log-normal part
-            log_m = log10(m)
-            term = (log_m - log_mc)**2 / (2.0_wp * CHAB_SIGMA2)
-            val = exp(-term) / m
-        else
-            ! Power law part
-            term = log_mc**2 / (2.0_wp * CHAB_SIGMA2)
-            val = exp(-term) * m**(-CHAB_IND) / m
-        end if
-    end subroutine imf_chabrier
-
-    pure subroutine imf_kroupa(ctx, m, val)
-#ifdef OMP_TARGET
-        !$omp declare target
-#endif
-        type(opensps_context_t), intent(in) :: ctx
-        real(WP), intent(in) :: m
-        real(WP), intent(out) :: val
-        real(WP), dimension(3) :: alpha
-
-        alpha = ctx%state%imf_alpha
-
-        if (m >= 0.08_wp .and. m < 0.5_wp) then
-            val = m**(-alpha(1))
-        else if (m >= 0.5_wp .and. m < 1.0_wp) then
-            val = 0.5_wp**(-alpha(1) + alpha(2)) * m**(-alpha(2))
-        else if (m >= 1.0_wp) then
-            val = 0.5_wp**(-alpha(1) + alpha(2)) * m**(-alpha(3))
-        else
-            val = 0.0_wp
-        end if
-    end subroutine imf_kroupa
-
-    pure subroutine imf_vandokkum(ctx, m, val)
-#ifdef OMP_TARGET
-        !$omp declare target
-#endif
-        type(opensps_context_t), intent(in) :: ctx
-        real(WP), intent(in) :: m
-        real(WP), intent(out) :: val
-        real(WP) :: breakpoint, term, log_m, log_mc
-
-        breakpoint = VD_NC * ctx%state%imf_vdmc
-        log_mc = log10(ctx%state%imf_vdmc)
-
-        if (m <= breakpoint) then
-            ! Lognormal-ish
-            log_m = log10(m)
-            term = (log_m - log_mc)**2 / (2.0_wp * VD_SIGMA2)
-            val = VD_AL * (0.5_wp * breakpoint)**(-VD_IND) * exp(-term)
-        else
-            ! Power law
-            val = VD_AH * m**(-VD_IND)
-        end if
-
-        ! Convert from dn/dlnM to dn/dM
-        val = val / m
-    end subroutine imf_vandokkum
-
-    pure subroutine imf_dave(ctx, m, val)
-#ifdef OMP_TARGET
-        !$omp declare target
-#endif
-        type(opensps_context_t), intent(in) :: ctx
-        real(WP), intent(in) :: m
-        real(WP), intent(out) :: val
-        real(WP), dimension(3) :: alpha
-        real(WP) :: mdave
-
-        alpha = ctx%state%imf_alpha
-        mdave = ctx%state%imf_mdave
-
-        if (m >= 0.08_wp .and. m < mdave) then
-            val = m**(-alpha(1))
-        else if (m >= mdave) then
-            val = mdave**(-alpha(1) + alpha(2)) * m**(-alpha(2))
-        else
-            val = 0.0_wp
-        end if
-    end subroutine imf_dave
-
-    pure subroutine imf_user_defined(ctx, m, val)
-#ifdef OMP_TARGET
-        !$omp declare target
-#endif
-        type(opensps_context_t), intent(in) :: ctx
-        real(WP), intent(in) :: m
-        real(WP), intent(out) :: val
-        integer :: n
-        real(WP) :: imfcu
-        integer :: n_user
-
-        ! Alias for cleaner syntax
-        n_user = ctx%state%n_user_imf
-
-        val = 0.0_wp
-
-        ! First segment
-        if (m >= ctx%state%imf_user_alpha(1,1) .and. &
-            m <  ctx%state%imf_user_alpha(2,1)) then
-            val = m**(-ctx%state%imf_user_alpha(3,1))
-        end if
-
-        ! Subsequent segments
-        imfcu = 1.0_wp
-        do n = 2, n_user
-            if (m >= ctx%state%imf_user_alpha(1,n) .and. &
-                m <  ctx%state%imf_user_alpha(2,n)) then
-                
-                val = m**(-ctx%state%imf_user_alpha(3,n)) * &
-                         ctx%state%imf_user_alpha(1,n)**(-ctx%state%imf_user_alpha(3,n-1) + &
-                         ctx%state%imf_user_alpha(3,n)) * imfcu
-            end if
-            
-            ! Update cumulative factor
-            imfcu = imfcu * ctx%state%imf_user_alpha(1,n)**(-ctx%state%imf_user_alpha(3,n-1) + &
-                    ctx%state%imf_user_alpha(3,n))
-        end do
-    end subroutine imf_user_defined
 
 end module opensps_imf

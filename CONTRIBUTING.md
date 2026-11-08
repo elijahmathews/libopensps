@@ -53,6 +53,16 @@ meson test -C build --suite unit --suite regression    # needs OPENSPS_DATA_HOME
 - GPU or OpenMP-offload changes: compare the GPU build with the CPU build over the case matrix
   (`tools/compare_builds/`).
 
+## Test coverage
+
+Each pull request should raise coverage towards the project's goal, not just hold it. Codecov
+posts `codecov/patch` (at least 85% of the changed lines run by the unit and regression suites;
+a line with an untaken branch counts as partial, so test both sides of new conditions) and
+`codecov/project` (no decrease). They are separate from the CI workflow, which is about builds
+and tests. A change that cannot meet the patch target (for instance a GPU-only change, which the
+CPU coverage build does not measure) is the exception: say so in the pull request and expect to
+override the check explicitly. See `doc/CI.md`.
+
 ## Linting
 
 No formatter or linter is enforced for the Fortran sources yet; follow the conventions below.
@@ -65,8 +75,8 @@ GitHub workflow files are checked with `actionlint`.
   constants.
 - **Modules:** `implicit none` and `private` by default, with an explicit `public` list. Every
   dummy argument has an `intent`.
-- **Precision:** use the two kinds of `src/core`: `WP` (always FP64) for setup, weights and the
-  public API, `KP` (kernel precision) for per-pixel arrays. Never write `real(8)` or literal
+- **Precision:** use the two kinds of `src/core`: `WP` (always FP64) for setup, weights (the batched SSP's per-model IMF bin weights take FP32
+  arithmetic in FP32 builds) and the public API, `KP` (kernel precision) for per-pixel arrays. Never write `real(8)` or literal
   kinds.
 - **No magic numbers:** physical constants and model parameters are named constants, with
   their source in a comment.

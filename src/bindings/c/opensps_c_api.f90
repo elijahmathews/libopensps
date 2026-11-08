@@ -31,7 +31,8 @@ module opensps_c_api
     use opensps_photometry, only: compute_magnitudes
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                             is_ssp_sensitive_float_param, is_ssp_sensitive_int_param, &
-                            is_ssp_sensitive_str_param, opensps_context_prepare_csp_workspace
+                            is_ssp_sensitive_str_param, opensps_context_prepare_csp_workspace, &
+                            opensps_context_set_lsf
     use opensps_csp_batch, only: compute_csp_batch, batch_spectra_device, batch_spectra_host, &
                                  BGRAD_FAGN, BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, &
                                  BGRAD_DUST1_INDEX, BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, &
@@ -1575,6 +1576,43 @@ contains
         end associate
     end subroutine opensps_context_set_sfh_tab_handle
 
+    ! The instrumental line spread function of a context: sigma (km/s) over wavelength (Angstrom,
+    ! strictly increasing). Applied to the SSPs with smooth_lsf = 1; n = 0 removes the table.
+    subroutine opensps_context_set_lsf_handle(handle, n, c_lambda, c_sigma, status) &
+        bind(C, name="opensps_context_set_lsf")
+        integer(c_int), value :: handle, n
+        type(c_ptr), value :: c_lambda, c_sigma
+        integer(c_int), intent(OUT) :: status
+        real(c_double), pointer :: f_lam(:), f_sig(:)
+        real(WP) :: none_(0)
+        integer :: st
+
+        status = 0
+        if (.not. handle_ok(handle)) then
+            status = 1
+            return
+        end if
+        associate(ctx => ctx_pool(handle)%c)
+        if (n < 0 .or. (n > 0 .and. (.not. c_associated(c_lambda) .or. .not. c_associated(c_sigma)))) then
+            status = 3
+            call opensps_set_error(3, 'opensps_context_set_lsf: n must be >= 0 and the arrays given for n > 0')
+            return
+        end if
+        if (n == 0) then
+            call opensps_context_set_lsf(ctx, none_, none_, st)
+        else
+            call c_f_pointer(c_lambda, f_lam, [n])
+            call c_f_pointer(c_sigma, f_sig, [n])
+            call opensps_context_set_lsf(ctx, f_lam, f_sig, st)
+        end if
+        if (st /= 0) then
+            status = 3
+            call opensps_set_error(3, 'opensps_context_set_lsf: the table needs n >= 2, strictly increasing ' // &
+                                      'wavelengths and finite, non-negative sigma')
+        end if
+        end associate
+    end subroutine opensps_context_set_lsf_handle
+
     ! -------------------------------------------------------------------------
     ! Single CSP (compute_csp_scenario) on a context
     ! -------------------------------------------------------------------------
@@ -2987,21 +3025,36 @@ contains
         global_pset%ssp_gen_age(1:n_age) = f_mask(1:n_age)
     end subroutine opensps_set_ssp_gen_age
 
-    ! Provide a wavelength-dependent LSF (sigma in km/s).
+    ! Provide a wavelength-dependent LSF (sigma in km/s per pixel of the library's wavelength grid,
+    ! for the pixels between wlo and whi): the legacy form of opensps_context_set_lsf, for the
+    ! default context after its setup (the grid must be known).
     subroutine opensps_set_ssp_lsf(nsv, c_sigma, wlo, whi) bind(C, name="opensps_set_ssp_lsf")
         integer(c_int), value :: nsv
         type(c_ptr), value :: c_sigma
         real(c_double), value :: wlo, whi
         real(WP), pointer :: f_sigma(:)
-
-        call C_F_POINTER(c_sigma, f_sigma, [nsv])
+        real(WP), allocatable :: lam(:), sig(:)
+        integer :: n, st
 
         call opensps_ensure_default_ctx()
-        opensps_default_ctx%state%lsfinfo%minlam = real(wlo, WP)
-        opensps_default_ctx%state%lsfinfo%maxlam = real(whi, WP)
-        if (ALLOCATED(opensps_default_ctx%state%lsfinfo%lsf)) deallocate (opensps_default_ctx%state%lsfinfo%lsf)
-        allocate (opensps_default_ctx%state%lsfinfo%lsf(nsv))
-        opensps_default_ctx%state%lsfinfo%lsf = f_sigma
+        if (.not. associated(opensps_default_ctx%state%spec_lambda) .or. nsv < 2 .or. &
+            .not. c_associated(c_sigma)) then
+            call opensps_set_error(3, 'opensps_set_ssp_lsf: run setup first; nsv must be >= 2 and sigma given')
+            return
+        end if
+        n = min(int(nsv), size(opensps_default_ctx%state%spec_lambda))
+        call C_F_POINTER(c_sigma, f_sigma, [nsv])
+        lam = pack(opensps_default_ctx%state%spec_lambda(1:n), &
+                   opensps_default_ctx%state%spec_lambda(1:n) >= real(wlo, WP) .and. &
+                   opensps_default_ctx%state%spec_lambda(1:n) <= real(whi, WP))
+        sig = pack(f_sigma(1:n), opensps_default_ctx%state%spec_lambda(1:n) >= real(wlo, WP) .and. &
+                   opensps_default_ctx%state%spec_lambda(1:n) <= real(whi, WP))
+        if (size(lam) < 2) then
+            call opensps_set_error(3, 'opensps_set_ssp_lsf: fewer than two pixels between wlo and whi')
+            return
+        end if
+        call opensps_context_set_lsf(opensps_default_ctx, lam, sig, st)
+        if (st /= 0) call opensps_set_error(3, 'opensps_set_ssp_lsf: the table is not valid')
     end subroutine opensps_set_ssp_lsf
 
     ! Smooth a spectrum using a Gaussian kernel.

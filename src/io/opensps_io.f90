@@ -18,7 +18,6 @@ module opensps_io
     !>     - AGB (Lancon & Wood, Aringer) and Post-AGB (Rauch) spectra.
     !>     - Nebular emission grids (Cloudy) and Dust emission templates (Draine & Li, THEMIS).
     !>     - Dust attenuation curves (Calzetti, SMC, Witt & Gordon).
-    !>     - Line Spread Functions (LSF) for instrument smoothing.
     !> - **Calibration:** Loading filter transmission curves and standard SEDs (Vega, Sun).
     !>
     !> **2. Runtime Operations:**
@@ -80,7 +79,6 @@ module opensps_io
     public :: load_post_agb_spectra
     public :: load_attenuation_curves
     public :: load_wmbasic_spectra
-    public :: load_lsf_data
     public :: load_spectral_grid_axes
     public :: isochrone_kind
     public :: use_standard_library
@@ -2391,74 +2389,6 @@ contains
 
         deallocate(wmb_lam, wmb_spec_raw, wmbsi)
     end subroutine load_wmbasic_spectra
-
-    !> @brief Loads the Line Spread Function (LSF) for spectral smoothing.
-    !>
-    !> @details
-    !> Reads the user-supplied LSF curve from `data/lsf.dat`. This file defines the 
-    !> instrumental or physical broadening profile (wavelength vs sigma) to be applied 
-    !> to the SSPs if smoothing is enabled.
-    !>
-    !> **Processing Steps:**
-    !> 1. Reads raw (Wavelength, Sigma) pairs from the ASCII file.
-    !> 2. Identifies the valid wavelength range (`minlam`, `maxlam`).
-    !> 3. Linearly interpolates the LSF sigma onto the master wavelength grid (`spec_lambda`).
-    !>
-    !> **Boundary Conditions:**
-    !> Master wavelengths falling outside the range defined in `lsf.dat` are assigned 
-    !> an LSF sigma of 0.0 (no smoothing).
-    !>
-    !> @param[inout] ctx The FSPS context. Populates `ctx%state%lsfinfo`.
-    subroutine load_lsf_data(ctx)
-        type(opensps_context_t), intent(inout) :: ctx
-        
-        integer :: u_file, io_stat, i
-        character(len=1024) :: file_path
-        ! Use allocatable arrays to avoid stack overflow (NTABMAX can be large)
-        real(WP), allocatable :: lsflam(:), lsfsig(:)
-        integer :: n_points
-
-        allocate(lsflam(NTABMAX), lsfsig(NTABMAX))
-
-        ! Initialize to zero to prevent garbage data
-        lsflam = 0.0_wp
-        lsfsig = 0.0_wp
-
-        file_path = trim(ctx%sps_home) // '/data/lsf.dat'
-        open(newunit=u_file, file=trim(file_path), status='old', action='read', iostat=io_stat)
-        if (io_stat /= 0) call handle_read_error(file_path, 0)
-
-        n_points = 0
-        do i = 1, NTABMAX
-            read(u_file, *, iostat=io_stat) lsflam(i), lsfsig(i)
-            if (io_stat /= 0) exit
-            n_points = i
-        end do
-        close(u_file)
-
-        if (n_points == 0) then
-             write(error_unit, '("[OPENSPS_IO] Error: lsf.dat is empty or invalid")')
-             error stop
-        end if
-
-        ctx%state%lsfinfo%minlam = lsflam(1)
-        ctx%state%lsfinfo%maxlam = lsflam(n_points)
-
-        ! Interpolate onto master grid
-        do i = 1, ctx%state%nspec
-            if (ctx%state%spec_lambda(i) >= lsflam(1) .and. &
-                ctx%state%spec_lambda(i) <= lsflam(n_points)) then
-                
-                ctx%state%lsfinfo%lsf(i) = interpolate_linear( &
-                    lsflam(1:n_points), lsfsig(1:n_points), ctx%state%spec_lambda(i))
-            else
-                ctx%state%lsfinfo%lsf(i) = 0.0_wp
-            end if
-        end do
-
-        deallocate(lsflam, lsfsig)
-
-    end subroutine load_lsf_data
 
     ! ========================================================================
     ! TABULAR SFH

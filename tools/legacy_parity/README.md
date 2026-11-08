@@ -82,6 +82,7 @@ loses energy, or uses rounded constants.
 | Reddy curve constant blueward of exactly 1500 A | Legacy holds the value of the pixel below 1500 A (grid-dependent): 2e-3 below 1500 A | dust_type 6 |
 | CCM UV/optical junction matched at exactly x = 3.3 | Legacy matches at the nearest pixel (grid-dependent): 2e-5 at 3000 A | dust_type 1 |
 | Velocity smoothing kernel | Exact across the MILES grid-spacing jumps, where legacy's is wrong: up to 1.3% at those pixels for sigma = 150 km/s | smooth_velocity |
+| LSF smoothing (`smooth_lsf`) always a velocity convolution by the context's LSF table | Legacy passes a placeholder sigma of 99 to `smoothspec`, which with `smooth_velocity = 0` convolves with a 99 A Gaussian and ignores the LSF table (the table is read from `lsf.dat` there; here it is supplied through the context) | `smooth_lsf` with `smooth_velocity = 0` |
 | Remnant turn-off from the native isochrone, not appended blue stragglers | Legacy loses 2-5% of M_* with sbss > 0 | sbss > 0 |
 | Blue-straggler ZAMS from main-sequence arrivals | On MIST, legacy places stragglers among M dwarfs (no light); the fork on the upper MS (+0.011 dex L_bol at 10 Gyr for sbss = 2) | sbss > 0 |
 | BPASS L_bol from the integral of its spectra | Legacy reports log L = 0 at every age | BPASS |
