@@ -16,7 +16,8 @@ GPU offload, batched SSPs and CSPs for SED fitting).
   `src/math`, `src/io`, `src/bindings` (C API; `include/`).
 - Two real kinds (`src/core/opensps_precision.f90`): `WP` is always FP64 (setup, isochrones, IMF
   and SFH weights, the public API); `KP` is the kernel precision, FP64 by default and FP32
-  with `-Dkernel_precision=single`.
+  with `-Dkernel_precision=single` (which also takes the batched SSP's per-model IMF bin weights
+  in FP32 arithmetic, stored in `WP`: `doc/MIXED_PRECISION.md`).
 - Assume the user is an astronomer and an SPS expert: explain software matters plainly; justify
   every physics decision with a reason that would satisfy a referee.
 
