@@ -431,7 +431,7 @@ contains
     !>             + qbar(t) cz q_p,
     !>   imf_bar(i) = sum_p w_p bar d w_p / d theta_i (theta: imf1, imf2, imf3, vdmc, mdave; d w_p / d
     !>   theta by central differences of the closed-form bin integrals, imf_bin_weights_tab: step
-    !>   1e-6, error ~1e-10 relative; with -Dfp32_imf_weights step 1e-3, ~1e-4),
+    !>   1e-6, error ~1e-10 relative; in FP32 builds step 1e-3, ~1e-4),
     !>   fesc_bar, and zbar = d L / d dz (the two metallicity passes' difference, as the weights
     !>   blend them: linearly, L_bol in log).
     !> Chunks of CHG models (the point weights are chunk x points arrays); atomic adds where the
@@ -1009,13 +1009,13 @@ contains
     end function imf_row_acts
 
     !> The step of the IMF parameter's central difference: relative 1e-6 (the FP64 weights: error
-    !> ~1e-10); with -Dfp32_imf_weights 1e-3 (the weights' FP32 rounding, ~1e-7, over the step: ~1e-4)
+    !> ~1e-10); in FP32 builds 1e-3 (the weights' FP32 rounding, ~1e-7, over the step: ~1e-4)
     pure real(WP) function adj_step(x)
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
         real(WP), intent(in) :: x
-#if defined(OPENSPS_FP32_IMF_WEIGHTS)
+#if defined(KERNEL_SINGLE_PRECISION)
         adj_step = 1.0e-3_wp * max(abs(x), 1.0e-2_wp)
 #else
         adj_step = 1.0e-6_wp * max(abs(x), 1.0e-2_wp)

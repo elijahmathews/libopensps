@@ -7,6 +7,7 @@ module opensps_imf
     !> parameterizations (Salpeter, Chabrier, Kroupa, etc.) and to compute
     !> the mass weights for SSP generation.
     
+    use, intrinsic :: iso_fortran_env, only: error_unit
     use opensps_precision, only: WP, KP
     use opensps_context_types, only: opensps_context_t
     implicit none
@@ -146,7 +147,7 @@ contains
 
             ! Validate Monotonicity
             if (m2 < m1) then
-                write(*, '("[OPENSPS-IMF] Warning: Non-monotonic mass bin at index ", I0, &
+                write(error_unit, '("[OPENSPS-IMF] Warning: Non-monotonic mass bin at index ", I0, &
                          & " (m1=", ES10.3, ", m2=", ES10.3, ")")') i, m1, m2
                 cycle
             end if
@@ -528,11 +529,10 @@ contains
                     ! c (hi**e - lo**e) / e = c lo**e expm1(e dl) / e: smooth through e = 0 (no
                     ! special case for slopes near 1, where the difference form divides a
                     ! cancellation by a small e)
-#if defined(OPENSPS_FP32_IMF_WEIGHTS)
-                    ! -Dfp32_imf_weights=true (FP32 kernels only): the exponentials in kernel
-                    ! precision, the exponent e ln lo (up to ~25) formed and reduced in FP64
-                    ! (doc/MIXED_PRECISION.md, rule 7); mass and L_bol then good to ~3e-8 (L_bol
-                    ! ~7e-7 at extreme IMF parameters)
+#if defined(KERNEL_SINGLE_PRECISION)
+                    ! FP32 kernels: the exponentials in kernel precision, the exponent e ln lo (up
+                    ! to ~25) formed and reduced in FP64 (doc/MIXED_PRECISION.md, rule 7); mass and
+                    ! L_bol then good to ~3e-8 (L_bol ~7e-7 at extreme IMF parameters)
                     val = real(real(ce, KP) * exp_reduced_kp(e * llo(k)) * expm1_kp(real(e * dl(k), KP)), WP)
 #else
                     ! lo**e: from the previous bin when it ends where this one starts (consecutive

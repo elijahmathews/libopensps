@@ -21,7 +21,8 @@ module opensps_precision
 #endif
 
     !> Kernel precision: the per-pixel arithmetic of the expensive kernels (stellar templates,
-    !> SSP accumulation) and the arrays they read. Setup, isochrones and weights stay in WP.
+    !> SSP accumulation) and the arrays they read. Setup, isochrones and weights stay in WP, except the batched SSP's per-model IMF bin
+    !> weights (imf_bin_weights_tab), whose arithmetic is KP when KP is FP32 (stored in WP).
     !> FP64 by default; -DKERNEL_SINGLE_PRECISION selects FP32, the precision that consumer and
     !> workstation GPUs run at full rate.
 #ifdef KERNEL_SINGLE_PRECISION

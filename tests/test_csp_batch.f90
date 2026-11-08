@@ -56,10 +56,10 @@ program test_csp_batch
     ! cancellation (imf_bin_weights_tab; integrate_powerlaw since #40), so the spectra agree to the
     ! usual tolerance (the difference form had cost the oracle ~7e-10)
     real(WP), parameter :: IMF_SPEC_RTOL = SPEC_RTOL
-    ! Mass and L_bol with the IMF per model: FP64 weights, unless built with -Dfp32_imf_weights=true
-    ! (FP32 kernels; per age ~3e-8 measured on MIST against quad precision, L_bol up to 7.3e-7 at
-    ! extreme IMF parameters on the A100)
-#if defined(OPENSPS_FP32_IMF_WEIGHTS)
+    ! Mass and L_bol with the IMF per model: FP64 weights in FP64 builds; FP32 builds take the bin
+    ! weights in FP32 arithmetic (per age ~3e-8 measured on MIST against quad precision, L_bol up to
+    ! 7.3e-7 at extreme IMF parameters on the A100)
+#if defined(KERNEL_SINGLE_PRECISION)
     real(WP), parameter :: IMF_SCAL_TOL = 1.0e-6_wp
 #else
     real(WP), parameter :: IMF_SCAL_TOL = 1.0e-12_wp

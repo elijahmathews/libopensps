@@ -533,13 +533,13 @@ contains
     !> rounded ratio), slopes 0.3 to 5 at 0.08 to 300 M_sun, bins up to a factor 10 wide, and either
     !> side of the switch between the series and exp(y) - 1 in imf_bin_weights_tab.
     !> imf_bin_weights_tab (the batched SSP's weights) must be within 1e-14 of the reference in
-    !> every category; built with -Dfp32_imf_weights=true (FP32 kernels) its power-law bins are FP32
-    !> arithmetic (exponents reduced in FP64), within 16 ulp of FP32 (1.9e-6; 2.8e-7 on MIST).
+    !> every category; in FP32 builds its power-law bins are FP32 arithmetic (exponents reduced in
+    !> FP64), within 16 ulp of FP32 (1.9e-6; 2.8e-7 on MIST).
     !> The difference of powers (the single SSP's weights before #40) is evaluated on the same bins
     !> and its worst error printed beside it: the failure modes the table form removes, measured.
     subroutine test_powerlaw_bin_worst_cases()
-#if defined(OPENSPS_FP32_IMF_WEIGHTS)
-        real(WP), parameter :: TOL = 16.0_wp * real(epsilon(1.0_KP), WP)   ! FP32 IMF weights (opt-in)
+#if defined(KERNEL_SINGLE_PRECISION)
+        real(WP), parameter :: TOL = 16.0_wp * real(epsilon(1.0_KP), WP)   ! FP32 IMF weights
 #else
         real(WP), parameter :: TOL = 1.0e-14_wp
 #endif
@@ -668,8 +668,8 @@ contains
                     ref = 0.0_wp
                     if (m2(k) > lo) ref = imf_integral_p(t, p, lo, m2(k), .false.)
                     tol = 1.0e-13_wp + 40.0_wp * epsilon(1.0_wp) * lo / (m2(k) - lo)
-#if defined(OPENSPS_FP32_IMF_WEIGHTS)
-                    tol = tol + 16.0_wp * real(epsilon(1.0_KP), WP)   ! FP32 IMF weights (opt-in)
+#if defined(KERNEL_SINGLE_PRECISION)
+                    tol = tol + 16.0_wp * real(epsilon(1.0_KP), WP)   ! FP32 IMF weights
 #endif
                     if (ref == 0.0_wp) then
                         if (w(k) /= 0.0_wp) n_bad = n_bad + 1
@@ -851,9 +851,8 @@ contains
     !> exp(x) in FP64 across the range where the result is normal (a few ulp of KP), with the clamps:
     !> 0 below the smallest normal, huge above the largest, for any argument. Host evaluation: the
     !> library's device code is a separate image that a test executable's target region cannot call
-    !> into (the link fails). The functions are called only by imf_bin_weights_tab under the optional
-    !> -Dfp32_imf_weights=true (FP32 IMF weights on the device), so a default build never runs them;
-    !> this test is where the arithmetic is checked in every build.
+    !> into (the link fails). The functions are called only by imf_bin_weights_tab in FP32 builds, so
+    !> an FP64 build never runs them; this test checks the arithmetic in every build.
     subroutine test_exp_reduced_kp()
         integer, parameter :: N = 241
         real(WP) :: x(N + 6)

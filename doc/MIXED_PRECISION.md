@@ -16,9 +16,11 @@ meson setup build -Dkernel_precision=single     # default: double
 `src/core/opensps_precision.f90` defines two kinds:
 
 - `WP` (always FP64): setup, isochrones, IMF and SFH weights, masses, luminosities, all scalar
-  bookkeeping, and the public API (C and Fortran interfaces stay double).
+  bookkeeping, and the public API (C and Fortran interfaces stay double). The one exception is
+  the per-model IMF bin weights of the batched SSP, below.
 - `KP` (kernel precision; FP64 by default, FP32 with `-Dkernel_precision=single`): the
-  per-pixel arrays and arithmetic of the expensive kernels.
+  per-pixel arrays and arithmetic of the expensive kernels, and the batched SSP's per-model IMF
+  bin weights.
 
 With `KP = WP` the default build is unchanged: SSP spectra are bit-identical and CSP outputs
 move by at most 2e-14 (the more accurate absorbed-luminosity integral below).
@@ -151,19 +153,28 @@ dust shell, which are bilinear (templates times the shell's transfer function), 
 per dust-grid corner. This is the matrix-vector form (templates x weights); batched over ages
 or models it is a dense matrix product.
 
-## Option: FP32 IMF weights (`-Dfp32_imf_weights=true`, off by default)
+## IMF weights of the batched SSP
 
-With FP32 kernels, the batched SSP's IMF weights (`imf_bin_weights_tab`) can also be computed in
-FP32: per power-law bin, the exponent e ln m is formed and reduced in FP64 (x = n ln 2 + r) and
-the exponential and expm1 are FP32. Measured on the R9700 (2026-11-02, FP32 kernels, N = 10^4):
-`full_smooth_imf` 75.5 -> 69.1 us/model (-8%), `full_smooth_z_imf` 118.1 -> 106.9 (-9%).
-The cost is accuracy of the WP outputs that FP32 builds otherwise keep exact: per bin a few FP32
-ulp (2.8e-7 worst on MIST), per age ~3e-8 in mass, L_bol, star counts and ionizing photons
-(against quad precision) at ordinary IMF parameters; at extreme ones (`imf_batch_dump`'s 64 models)
-the A100 measured mass to 4e-8 and L_bol to 7.3e-7 against the FP64 weights; spectra and magnitudes do not change measurably (their FP32 differences
-are ~10x larger). Off by default so that mass and L_bol stay FP64-exact; the tests' tolerances
-follow the option (`test_opensps_imf`: 16 ulp of FP32 per bin; `test_csp_batch`: 1e-6 for mass
-and L_bol with the IMF per model).
+With FP32 kernels, the batched SSP's per-model IMF bin weights (`imf_bin_weights_tab`, the IMF
+free per model) take FP32 arithmetic in their power-law bins: per bin, the exponent e ln m is
+formed and reduced in FP64 (x = n ln 2 + r, `exp_reduced_kp`) and the exponential and expm1
+(`expm1_kp`) are FP32; the weights are stored in WP. The single-context SSP and all IMF weights
+of FP64 builds stay FP64. On the R9700 (FP32 kernels, N = 10^4) this takes `full_smooth_imf` from
+75.5 to 69.1 us/model (-8%) and `full_smooth_z_imf` from 118.1 to 106.9 (-9%); the A100 gains
+nothing measurable.
+
+Accuracy of the FP32 build against FP64 (CPU, `tools/compare_builds/imf_batch_dump`: 64 models
+at extreme IMF parameters, MIST + MILES, z = 0.5, nebular, IGM, AGN and dust emission, each of IMF
+types 1-4): spectra within 3.4e-7 relative and magnitudes within 2.5e-7 mag (the FP32 kernels'
+own error, unchanged by the weights); mass within 4.2e-8 and L_bol within 5.2e-7 (the A100
+measured 4e-8 and 7.3e-7). At ordinary IMF parameters the weights are good to a few FP32 ulp per
+bin (2.8e-7 worst on MIST) and mass, L_bol, star counts and ionizing photons to ~3e-8 per age
+(against quad precision). Mass and L_bol of an FP32 build therefore carry the same ~1e-7 noise
+as its spectra; the FP64 build keeps them exact. The finite differences of the closed-form bin
+integrals that give the IMF parameters' gradients use a relative step of 1e-3 in FP32 builds
+(error ~1e-4, the weights' rounding ~1e-7 over the step) and 1e-6 in FP64 builds (~1e-10). The tests' tolerances follow the
+kernel precision (`test_opensps_imf`: 16 ulp of FP32 per bin; `test_csp_batch`: 1e-6 for mass and
+L_bol with the IMF per model).
 
 ## Caveats
 
