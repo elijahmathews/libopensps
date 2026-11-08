@@ -291,7 +291,7 @@ void opensps_set_str(const char *key, const char *value);
 void opensps_set_sfh_tab(int ntab, double *age, double *sfr, double *met);
 void opensps_set_mag_compute(int n_bands, int *mask);
 void opensps_set_ssp_gen_age(int n_age, int *mask);
-void opensps_set_ssp_lsf(int nsv, double *sigma, double wlo, double whi);
+void opensps_set_ssp_lsf(int nsv, double *sigma, double wlo, double whi);  // legacy form of opensps_context_set_lsf, default context, after setup
 
 ```
 

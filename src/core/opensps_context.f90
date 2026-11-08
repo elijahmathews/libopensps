@@ -25,6 +25,7 @@ module opensps_context
     public :: opensps_context_ensure_setup
     public :: opensps_context_destroy
     public :: opensps_context_set_pset
+    public :: opensps_context_set_lsf
     public :: opensps_context_get_pset
     public :: opensps_context_set_param_int
     public :: opensps_context_set_param_float
@@ -217,6 +218,59 @@ contains
         end if
         ctx%pset = pset_in
     end subroutine opensps_context_set_pset
+
+    !> @brief Supply the instrumental line spread function of the context: the velocity
+    !> dispersion sigma (km/s) as a table over wavelength (Angstrom, strictly increasing).
+    !>
+    !> @details
+    !> With `smooth_lsf = 1`, every SSP spectrum the context generates (and every SSP basis the
+    !> batched SSP operator builds) is convolved with a Gaussian of this velocity dispersion,
+    !> interpolated linearly onto the spectral library's wavelength grid; between the table's
+    !> first and last wavelength only (pixels outside, or where sigma is 0, are left alone). The
+    !> convolution is in velocity whatever `smooth_velocity` is, since the table is in km/s. It acts
+    !> on the stellar light of each SSP (and the SSP-level nebular emission, add_neb_emission = 2),
+    !> in the rest frame, before dust, the IGM, redshift and the nebular emission added per CSP: a
+    !> spectrograph's resolution at z = 0, not an observed-frame PSF (the output smoothing,
+    !> sigma_smooth, is the last step). The table belongs to the context: it survives a new setup, and a library with another
+    !> wavelength grid is served by the same table. Supplying one marks the SSP basis stale.
+    !> Empty arrays remove the table.
+    !>
+    !> @param[inout] ctx    Context to update.
+    !> @param[in]    lambda Wavelengths (Angstrom), strictly increasing, at least 2.
+    !> @param[in]    sigma  Velocity dispersion at each wavelength (km/s), finite, not negative.
+    !> @param[out]   status 0, or 1 if the table is not valid (the context is unchanged).
+    subroutine opensps_context_set_lsf(ctx, lambda, sigma, status)
+        type(opensps_context_t), intent(inout) :: ctx
+        real(WP), intent(in) :: lambda(:), sigma(:)
+        integer, intent(out) :: status
+        integer :: n
+
+        status = 0
+        n = size(lambda)
+        if (n == 0 .and. size(sigma) == 0) then
+            if (allocated(ctx%state%lsfinfo%lam)) deallocate (ctx%state%lsfinfo%lam)
+            if (allocated(ctx%state%lsfinfo%sigma)) deallocate (ctx%state%lsfinfo%sigma)
+        else
+            if (size(sigma) /= n .or. n < 2) then
+                status = 1
+                return
+            end if
+            if (.not. (all(abs(lambda) <= huge(1.0_WP)) .and. all(abs(sigma) <= huge(1.0_WP)))) then
+                status = 1       ! (NaN fails the comparison too)
+                return
+            end if
+            if (any(lambda(2:n) <= lambda(1:n - 1)) .or. any(sigma < 0.0_WP)) then
+                status = 1
+                return
+            end if
+            if (allocated(ctx%state%lsfinfo%lam)) deallocate (ctx%state%lsfinfo%lam)
+            if (allocated(ctx%state%lsfinfo%sigma)) deallocate (ctx%state%lsfinfo%sigma)
+            allocate (ctx%state%lsfinfo%lam(n), source=lambda)
+            allocate (ctx%state%lsfinfo%sigma(n), source=sigma)
+        end if
+        ctx%settings_dirty = .true.
+        ctx%state%ssp_basis_is_dirty = .true.
+    end subroutine opensps_context_set_lsf
 
     !> @brief Retrieve the current context parameter set.
     !> @param[in] ctx Context to read.
@@ -1207,11 +1261,6 @@ contains
             !$omp target enter data map(to: ctx%state%zmet_xrb)
 #endif
         end if
-        if (allocated(ctx%state%lsfinfo%lsf)) then
-#ifdef OMP_TARGET
-            !$omp target enter data map(to: ctx%state%lsfinfo%lsf)
-#endif
-        end if
         ! Powell and Sedfit data are usually observation data, typically not needed for simulation,
         ! but we include them to be safe if they are present.
         if (allocated(ctx%state%powell_data%mags)) then
@@ -1359,11 +1408,6 @@ contains
             if (allocated(s%powell_data%mags)) then
 #ifdef OMP_TARGET
                 !$omp target exit data map(delete: s%powell_data%mags)
-#endif
-            end if
-            if (allocated(s%lsfinfo%lsf)) then
-#ifdef OMP_TARGET
-                !$omp target exit data map(delete: s%lsfinfo%lsf)
 #endif
             end if
             if (associated(s%zmet_xrb)) then

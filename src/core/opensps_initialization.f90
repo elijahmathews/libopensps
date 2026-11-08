@@ -31,7 +31,7 @@ module opensps_initialization
                        load_dust_emission_table, load_nebular_grid, load_filter_definitions, &
                        load_standard_sed, load_index_definitions, load_wr_spectra, &
                        load_agb_spectra, load_post_agb_spectra, load_attenuation_curves, &
-                       load_wmbasic_spectra, load_lsf_data, load_agn_dust_models, &
+                       load_wmbasic_spectra, load_agn_dust_models, &
                        apply_legacy_filter_norm, isochrone_kind, load_spectral_grid_axes, &
                        use_standard_library, library_spec, metallicity_axis
     use opensps_datalib, only: datalib_t, datalib_available, datalib_open, datalib_meta_real, datalib_axis_len, &
@@ -271,7 +271,6 @@ contains
 
         ! Context-local state that depends on settings outside the cache key
         call compute_imf_lower_bound(ctx, zin)
-        if (ctx%smooth_lsf_val == 1) call load_lsf_data(ctx)
         call compute_local_properties(ctx)
 
         ctx%state%check_sps_setup = 1
@@ -1112,7 +1111,6 @@ contains
     !> - `spec_ssp_zz`: The computed SSP grid [nspec, ntfull, nz].
     !> - `mass_ssp_zz`, `lbol_ssp_zz`: Stellar mass and luminosity grids.
     !> - `weight_ssp`: Weights for interpolation.
-    !> - `lsfinfo%lsf`: Buffer for the Line Spread Function.
     !>
     !> @param[inout] ctx The FSPS context to allocate.
     subroutine allocate_local_workspace(ctx)
@@ -1123,7 +1121,6 @@ contains
         if (allocated(ctx%state%mass_ssp_zz)) deallocate (ctx%state%mass_ssp_zz)
         if (allocated(ctx%state%lbol_ssp_zz)) deallocate (ctx%state%lbol_ssp_zz)
         if (allocated(ctx%state%weight_ssp)) deallocate (ctx%state%weight_ssp)
-        if (allocated(ctx%state%lsfinfo%lsf)) deallocate (ctx%state%lsfinfo%lsf)
 
         ! Allocate SSP Grids
         ! Dimensions: (Wavelengths, Time Steps, Metallicity)
@@ -1134,15 +1131,11 @@ contains
         ! Allocate Weighting Buffer
         allocate (ctx%state%weight_ssp(ctx%state%ntfull, ctx%state%nz))
 
-        ! Allocate Line Spread Function Buffer
-        allocate (ctx%state%lsfinfo%lsf(ctx%state%nspec))
-
         ! Initialize to zero to prevent garbage data
         ctx%state%spec_ssp_zz = 0.0_wp
         ctx%state%mass_ssp_zz = 0.0_wp
         ctx%state%lbol_ssp_zz = 0.0_wp
         ctx%state%weight_ssp = 0.0_wp
-        ctx%state%lsfinfo%lsf = 0.0_wp
 
     end subroutine allocate_local_workspace
 

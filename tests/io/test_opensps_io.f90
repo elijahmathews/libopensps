@@ -6,7 +6,7 @@ module test_opensps_io_mod
     use opensps_io, only: read_isochrone_database, write_binary_spectral_lib, read_spectral_binary, read_bpass_data, &
                         load_zlegend_file, load_wavelength_grid, load_filter_definitions, load_nebular_grid, &
                         load_dust_emission_table, load_tabular_sfh, write_csp_output_files, write_isochrone_cmd, &
-                        load_index_definitions, load_attenuation_curves, load_lsf_data, load_standard_sed
+                        load_index_definitions, load_attenuation_curves, load_standard_sed
     use opensps_integration, only: integrate_trapezoid_array
     use opensps_datalib, only: datalib_t, datalib_open, datalib_axis_values, datalib_check_array, datalib_read_real
     use, intrinsic :: iso_fortran_env, only: int64
@@ -49,7 +49,6 @@ contains
         call test_output_mode_flags()
 
         call test_load_standard_sed()
-        call test_load_lsf_data()
         call test_attenuation_curves()
         call test_index_definitions()
 
@@ -853,42 +852,6 @@ contains
                    ctx%state%vega_spec, ctx%state%sun_spec, ctx%state%magvega, ctx%state%magsun)
         if (allocated(ctx)) deallocate(ctx)
     end subroutine test_load_standard_sed
-
-    subroutine test_load_lsf_data()
-        type(opensps_context_t), allocatable :: ctx
-        character(len=256) :: root, file_path
-        integer :: u, i
-
-        allocate(ctx)
-        call print_group("LSF Data Loading")
-        call make_temp_root(root)
-        call ensure_dir(trim(root) // '/data')
-
-        ctx%sps_home = trim(root)
-        ctx%state%nspec = 50
-        allocate(ctx%state%spec_lambda(50))
-        allocate(ctx%state%lsfinfo%lsf(50))
-
-        do i=1, 50
-            ctx%state%spec_lambda(i) = 4000.0_wp + 20.0_wp * real(i-1, WP)
-        end do
-
-        file_path = trim(root) // '/data/lsf.dat'
-        open(newunit=u, file=trim(file_path), status='replace', action='write')
-        write(u, *) 4000.0_wp, 10.0_wp
-        write(u, *) 5000.0_wp, 20.0_wp
-        close(u)
-
-        call load_lsf_data(ctx)
-
-        ! Check interpolation at index 25 (~4480A)
-        ! Expected approx 14.8
-        call assert_true(ctx%state%lsfinfo%lsf(25) > 10.0_wp .and. ctx%state%lsfinfo%lsf(25) < 20.0_wp, &
-                         "LSF interpolated", total_tests, total_failures)
-
-        deallocate(ctx%state%spec_lambda, ctx%state%lsfinfo%lsf)
-        deallocate(ctx)
-    end subroutine test_load_lsf_data
 
     subroutine test_attenuation_curves()
         type(opensps_context_t), allocatable :: ctx

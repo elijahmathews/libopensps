@@ -504,7 +504,8 @@ contains
         if (associated(state%spec_xrb)) nullify (state%spec_xrb)
         if (associated(state%ages_xrb)) nullify (state%ages_xrb)
         if (associated(state%zmet_xrb)) nullify (state%zmet_xrb)
-        if (allocated(state%lsfinfo%lsf)) deallocate (state%lsfinfo%lsf)
+        if (allocated(state%lsfinfo%lam)) deallocate (state%lsfinfo%lam)
+        if (allocated(state%lsfinfo%sigma)) deallocate (state%lsfinfo%sigma)
         if (allocated(state%powell_data%mags)) deallocate (state%powell_data%mags)
         if (allocated(state%powell_data%magerr)) deallocate (state%powell_data%magerr)
         if (allocated(state%powell_data%spec)) deallocate (state%powell_data%spec)
@@ -553,8 +554,6 @@ contains
         state%zsol_spec = 0.0_wp
         state%zpow2 = 1.0_wp
         state%ntabsfh = 0
-        state%lsfinfo%minlam = 0.0_wp
-        state%lsfinfo%maxlam = 0.0_wp
         state%str_dustem = 'DL07'
         state%imf_alpha = 1.3_wp
         state%imf_vdmc = 0.08_wp

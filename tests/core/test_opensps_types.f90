@@ -123,9 +123,8 @@ contains
         
         call print_group("TLSF Default Initialization")
 
-        call assert_float_equals(0.0_wp, lsf_obj%minlam, 1.0e-6_wp, "minlam defaults to 0.0", total_tests, total_failures)
-        call assert_float_equals(0.0_wp, lsf_obj%maxlam, 1.0e-6_wp, "maxlam defaults to 0.0", total_tests, total_failures)
-        call assert_true(.not. allocated(lsf_obj%lsf), "lsf array is unallocated", total_tests, total_failures)
+        call assert_true(.not. allocated(lsf_obj%lam) .and. .not. allocated(lsf_obj%sigma), &
+                         "no LSF table until one is supplied", total_tests, total_failures)
 
     end subroutine test_tlsf_initialization
 

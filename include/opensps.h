@@ -144,6 +144,14 @@ void opensps_context_get_filter_data(int handle, double *wave_eff, double *mag_v
 void opensps_context_set_sfh_tab(int handle, int ntab, const double *age, const double *sfr,
                               const double *met, int *status);
 
+// Instrumental line spread function: velocity dispersion sigma [km/s] at n wavelengths lambda [Angstrom,
+// strictly increasing, n >= 2], interpolated onto the library's wavelength grid between lambda[0] and
+// lambda[n-1]. Applied to the SSPs with smooth_lsf = 1, as a velocity convolution whatever
+// smooth_velocity is (the stellar light of each SSP in the rest frame, before dust, the IGM and
+// redshift). n = 0 removes the table. The table belongs to the context and survives a new setup;
+// supplying one invalidates the SSP basis. status 3 if the table is not valid.
+void opensps_context_set_lsf(int handle, int n, const double *lambda, const double *sigma, int *status);
+
 // Path Queries
 void opensps_context_get_paths(int handle, char *sps_home, int sps_len,
                             char *data_home, int data_len, char *output_home, int out_len);

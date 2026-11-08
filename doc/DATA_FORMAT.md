@@ -76,7 +76,9 @@ reading; it stays in the code in the new design (Section 5).
 | AGB (`load_agb_spectra`) | `AGB_spectra/{Orich,Crich,Crich_Aringer}.{teff,spec}` | O-rich Teff tabulated per spectral type and 22 [Z/Zsun]; C-rich and `Crich_Aringer` one Teff per spectrum; spectra as rows (wavelength, one column per type) | Teff interpolated to the isochrone Z and logged; spectra linear onto the grid, floor 1e-308 |
 | Dusty AGB shells (`load_dusty_agb_spectra`) | `dust/dusty/{Orich,Crich}_dusty.spec` | number of wavelengths, wavelength line, then 6 Teff x 50 tau blocks: (Teff, tau) label and a transfer-function line | linear onto the grid from the first tabulated wavelength |
 | X-ray binaries (`load_xrb_spectra`) | `spectra/xrb/xsp.lambda`, `xsp_feh<feh>.spec` (11 [Fe/H]) | 10 lines (ages) of 15000 values each; ages and [Fe/H] in the code | linear onto the grid, floor 1e-308, x L_sun |
-| LSF, IMF, SFH (`load_lsf_data`, `opensps_ssp`, `load_tabular_sfh`) | `lsf.dat`, `imf.dat` (or `imf_filename`), `sfh.dat` (or `sfh_filename`) | small user-editable text tables | unchanged by this work |
+| IMF, SFH (`opensps_ssp`, `load_tabular_sfh`) | `imf.dat` (or `imf_filename`), `sfh.dat` (or `sfh_filename`) | small user-editable text tables | unchanged by this work |
+
+The line spread function is not read from a file: it is supplied through the context (`opensps_context_set_lsf`, `opensps_set_ssp_lsf`), so a release's `data/lsf.dat`, where present, is unused.
 
 Unit conventions that are implicit today (they become explicit `units` in the manifests):
 
@@ -137,7 +139,7 @@ is small and complete. JSON has no comments; manifests have `title` and `notes` 
   libraries/<kind>/<name>/manifest.json
   libraries/<kind>/<name>/*.bin       arrays referenced by the manifest
   data/                               small text tables in their legacy formats (allindices.dat,
-                                      lsf.dat, imf.dat, sfh.dat, ...) and user input files
+                                      imf.dat, sfh.dat, ...) and user input files
 ```
 
 `<kind>` is one of the kinds of Section 3, `<name>` the library name passed to `opensps_setup`

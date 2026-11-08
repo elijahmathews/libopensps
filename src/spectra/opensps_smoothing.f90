@@ -18,7 +18,7 @@ module opensps_smoothing
     private
 
     public :: apply_smoothing, apply_smoothing_adjoint
-    public :: smooth_velocity
+    public :: smooth_velocity, smooth_lsf
     public :: velocity_kernel_t, build_velocity_kernel, apply_velocity_kernel
 
     ! --------------------------------------------------------------------------
@@ -137,6 +137,30 @@ contains
         if (size(lambda) < 2 .or. sigma <= SAFE_FLOOR) return
         call convolve_variable_resolution(lambda, spec, sigma, minl, maxl)
     end subroutine smooth_velocity
+
+    !> @brief Gaussian smoothing in velocity by a dispersion that varies with wavelength.
+    !>
+    !> @details
+    !> The instrumental line spread function: pixel i is smoothed with sigma(i) km/s. Always the
+    !> velocity convolution, whatever `smooth_velocity` and `smoothspec_fast` are set to (those
+    !> choose how the user's output smoothing is done), since sigma is in km/s. Only pixels with
+    !> minl <= lambda <= maxl and sigma > 0 change.
+    !>
+    !> @param[in]     lambda Wavelength grid (Angstrom), increasing.
+    !> @param[in,out] spec   Flux array, modified in place.
+    !> @param[in]     sigma  Velocity dispersion per pixel (km/s), same size as lambda.
+    !> @param[in]     minl   Minimum wavelength to smooth.
+    !> @param[in]     maxl   Maximum wavelength to smooth.
+    subroutine smooth_lsf(lambda, spec, sigma, minl, maxl)
+        real(WP), dimension(:), intent(in), contiguous :: lambda
+        real(WP), dimension(:), intent(inout), contiguous :: spec
+        real(WP), dimension(:), intent(in), contiguous :: sigma
+        real(WP), intent(in) :: minl, maxl
+
+        if (size(lambda) < 2) return
+        ! (the global sigma is not used when a per-pixel sigma is given)
+        call convolve_variable_resolution(lambda, spec, 0.0_wp, minl, maxl, sigma)
+    end subroutine smooth_lsf
 
     ! ------------------------------------------------------------------------
     ! PRIVATE HELPER KERNELS

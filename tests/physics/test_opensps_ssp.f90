@@ -7,6 +7,7 @@ module test_opensps_ssp_mod
                         free_isochrone_buffer, load_timestep_data, apply_isochrone_physics, &
                         compute_integrated_properties, accumulate_spectrum, interpolate_time_grid, &
                         configure_imf_parameters, compute_interpolated_ssp, finish_ssp_grid
+    use opensps_context, only: opensps_context_set_lsf
     use opensps_spectral_library, only: get_stellar_spectrum
     use opensps_imf, only: compute_imf_weights
     use opensps_stellar_modifications, only: add_remnant_mass, modify_giant_branch
@@ -50,6 +51,8 @@ contains
         call test_finish_stage_flags_off()
         call test_finish_xrb_stage()
         call test_finish_lsf_stage()
+        call test_finish_lsf_varies_with_wavelength()
+        call test_context_set_lsf()
 
         call print_summary_line("Module Summary", total_tests - total_failures, total_tests)
     end subroutine run_opensps_ssp_tests
@@ -828,10 +831,11 @@ contains
         end do
         allocate(ctx%state%spec_lambda(NW))
         ctx%state%spec_lambda = lam
-        allocate(ctx%state%lsfinfo%lsf(NW))
-        ctx%state%lsfinfo%lsf = SIGMA_KMS
-        ctx%state%lsfinfo%minlam = 4500.0_wp
-        ctx%state%lsfinfo%maxlam = 5500.0_wp
+        ! the table: 300 km/s from 4400 to 5600 A (two points; interpolated onto the 1 A grid), so the LSF
+        ! window is that range
+        allocate(ctx%state%lsfinfo%lam(2), ctx%state%lsfinfo%sigma(2))
+        ctx%state%lsfinfo%lam = [4500.0_wp, 5500.0_wp]
+        ctx%state%lsfinfo%sigma = SIGMA_KMS
         ctx%smooth_velocity_val = 1
         ctx%smooth_lsf_val = 1
         i0 = nint(LAM0 - 3999.0_wp)
@@ -867,8 +871,125 @@ contains
         spec = spec0
         call finish_ssp_grid(ctx, pset, mass, lbol, spec)
         call assert_true(all(spec == spec0), "stage off: spectra unchanged", total_tests, total_failures)
-        deallocate(ctx%state%spec_lambda, ctx%state%lsfinfo%lsf)
+        deallocate(ctx%state%spec_lambda)
         deallocate(ctx)
     end subroutine test_finish_lsf_stage
+
+    !> The tabulated sigma is interpolated onto the library grid pixel by pixel: two lines in one
+    !> spectrum get the widths of the table at their own wavelengths. The convolution is in velocity
+    !> whatever smooth_velocity and smoothspec_fast are: every combination gives the same lines.
+    subroutine test_finish_lsf_varies_with_wavelength()
+        type(opensps_context_t), allocatable :: ctx
+        type(params) :: pset
+        integer, parameter :: NW = 2001, NT = 1
+        real(WP), parameter :: L1 = 4600.0_wp, L2 = 5400.0_wp
+        real(WP) :: mass(NT), lbol(NT), spec(NW, NT), spec0(NW, NT), spec_ref(NW, NT)
+        real(WP) :: lam(NW), s1, s2, c_kms, sig1, sig2
+        integer :: i, i1, i2, mode, fast
+
+        call print_group("finish_ssp_grid: the LSF follows the table; velocity smoothing whatever the user's settings")
+        allocate(ctx)
+        do i = 1, NW
+            lam(i) = 3999.0_wp + real(i, WP)
+        end do
+        allocate(ctx%state%spec_lambda(NW))
+        ctx%state%spec_lambda = lam
+        ! 100 km/s at 4500 A rising linearly to 500 km/s at 5500 A
+        allocate(ctx%state%lsfinfo%lam(2), ctx%state%lsfinfo%sigma(2))
+        ctx%state%lsfinfo%lam = [4500.0_wp, 5500.0_wp]
+        ctx%state%lsfinfo%sigma = [100.0_wp, 500.0_wp]
+        ctx%smooth_lsf_val = 1
+        c_kms = C_LIGHT * 1.0e-13_wp
+        i1 = nint(L1 - 3999.0_wp); i2 = nint(L2 - 3999.0_wp)
+        spec0 = 0.0_wp
+        spec0(i1, 1) = 1.0_wp
+        spec0(i2, 1) = 1.0_wp
+        mass = 1.0_wp; lbol = 0.0_wp
+
+        do mode = 0, 1
+            do fast = 0, 1
+                ctx%smooth_velocity_val = mode
+                ctx%smoothspec_fast_val = fast
+                spec = spec0
+                call finish_ssp_grid(ctx, pset, mass, lbol, spec)
+                if (mode == 1 .and. fast == 1) spec_ref = spec
+                if (mode == 1 .and. fast == 1) then
+                    s1 = line_width(lam, spec(:, 1), L1 - 60.0_wp, L1 + 60.0_wp)
+                    s2 = line_width(lam, spec(:, 1), L2 - 60.0_wp, L2 + 60.0_wp)
+                    ! sigma(4600) = 140 km/s, sigma(5400) = 460 km/s (linear interpolation of the table)
+                    sig1 = L1 * 140.0_wp / c_kms
+                    sig2 = L2 * 460.0_wp / c_kms
+                    call assert_relative_error(s1, sig1, 0.02_wp, "the line at 4600 A has the width of 140 km/s", &
+                                               total_tests, total_failures)
+                    call assert_relative_error(s2, sig2, 0.01_wp, "the line at 5400 A has the width of 460 km/s", &
+                                               total_tests, total_failures)
+                end if
+            end do
+        end do
+        ! every combination of the user's smoothing settings gives the same spectrum
+        ctx%smooth_velocity_val = 0; ctx%smoothspec_fast_val = 0
+        spec = spec0
+        call finish_ssp_grid(ctx, pset, mass, lbol, spec)
+        call assert_true(all(spec == spec_ref), "smooth_velocity = 0 gives the same LSF smoothing", &
+                         total_tests, total_failures)
+        ctx%smooth_velocity_val = 1; ctx%smoothspec_fast_val = 0
+        spec = spec0
+        call finish_ssp_grid(ctx, pset, mass, lbol, spec)
+        call assert_true(all(spec == spec_ref), "smoothspec_fast = 0 gives the same LSF smoothing", &
+                         total_tests, total_failures)
+        deallocate(ctx%state%spec_lambda)
+        deallocate(ctx)
+    end subroutine test_finish_lsf_varies_with_wavelength
+
+    !> Second moment of a single line's profile within [lo, hi]
+    real(WP) function line_width(lam, f, lo, hi)
+        real(WP), intent(in) :: lam(:), f(:), lo, hi
+        logical :: m(size(lam))
+        real(WP) :: tot, mean
+        m = lam >= lo .and. lam <= hi
+        tot = sum(f, m)
+        mean = sum(lam * f, m) / tot
+        line_width = sqrt(sum((lam - mean)**2 * f, m) / tot)
+    end function line_width
+
+    !> opensps_context_set_lsf: the table is stored, marks the SSP basis stale, is replaced by the
+    !> next one, and every invalid table is refused (status 1) with the stored one untouched.
+    subroutine test_context_set_lsf()
+        type(opensps_context_t), allocatable :: ctx
+        real(WP) :: nan
+        integer :: st
+        logical :: ok
+
+        call print_group("opensps_context_set_lsf")
+        allocate(ctx)
+        nan = 0.0_wp
+        nan = nan / nan * 0.0_wp
+        ctx%state%ssp_basis_is_dirty = .false.
+        ctx%settings_dirty = .false.
+        call opensps_context_set_lsf(ctx, [4000.0_wp, 5000.0_wp], [100.0_wp, 200.0_wp], st)
+        call assert_true(st == 0 .and. size(ctx%state%lsfinfo%lam) == 2 .and. ctx%state%ssp_basis_is_dirty .and. &
+                         ctx%settings_dirty, "a table is stored and the SSP basis marked stale", total_tests, total_failures)
+        call opensps_context_set_lsf(ctx, [4000.0_wp, 5000.0_wp, 6000.0_wp], [1.0_wp, 2.0_wp, 3.0_wp], st)
+        call assert_true(st == 0 .and. size(ctx%state%lsfinfo%lam) == 3, "the next table replaces it", &
+                         total_tests, total_failures)
+        call opensps_context_set_lsf(ctx, [4000.0_wp], [100.0_wp], st)
+        call assert_true(st == 1, "one point: refused", total_tests, total_failures)
+        call opensps_context_set_lsf(ctx, [4000.0_wp, 5000.0_wp], [100.0_wp], st)
+        call assert_true(st == 1, "mismatched sizes: refused", total_tests, total_failures)
+        call opensps_context_set_lsf(ctx, [5000.0_wp, 4000.0_wp], [100.0_wp, 100.0_wp], st)
+        call assert_true(st == 1, "decreasing wavelengths: refused", total_tests, total_failures)
+        call opensps_context_set_lsf(ctx, [4000.0_wp, 5000.0_wp], [100.0_wp, -1.0_wp], st)
+        call assert_true(st == 1, "negative sigma: refused", total_tests, total_failures)
+        call opensps_context_set_lsf(ctx, [4000.0_wp, 5000.0_wp], [100.0_wp, nan], st)
+        call assert_true(st == 1, "NaN sigma: refused", total_tests, total_failures)
+        call opensps_context_set_lsf(ctx, [4000.0_wp, nan], [100.0_wp, 100.0_wp], st)
+        call assert_true(st == 1, "NaN wavelength: refused", total_tests, total_failures)
+        ok = size(ctx%state%lsfinfo%lam) == 3 .and. all(ctx%state%lsfinfo%sigma == [1.0_wp, 2.0_wp, 3.0_wp])
+        call assert_true(ok, "refused tables leave the stored one untouched", total_tests, total_failures)
+        call opensps_context_set_lsf(ctx, [real(WP) ::], [real(WP) ::], st)
+        call assert_true(st == 0 .and. .not. allocated(ctx%state%lsfinfo%lam) .and. .not. allocated(ctx%state%lsfinfo%sigma), &
+                         "empty arrays remove the table", total_tests, total_failures)
+        deallocate(ctx)
+    end subroutine test_context_set_lsf
 
 end module test_opensps_ssp_mod

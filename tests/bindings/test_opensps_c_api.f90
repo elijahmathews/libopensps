@@ -1,10 +1,11 @@
 module test_opensps_c_api_mod
-    use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_associated, c_char, c_null_char, c_double
+    use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_associated, c_char, c_null_char, c_double, c_null_ptr
     use opensps_c_api, only: opensps_context_create_handle, opensps_context_destroy_handle, ctx_pool, &
                              opensps_context_set_str_handle, opensps_context_set_int_handle, &
                              opensps_context_set_float_handle, opensps_context_get_paths_handle, &
                              opensps_context_get_dims_handle, opensps_context_get_nspec_handle, &
-                             opensps_context_get_nindx_handle, opensps_context_get_zsol_handle
+                             opensps_context_get_nindx_handle, opensps_context_get_zsol_handle, &
+                             opensps_context_set_lsf_handle
     use test_utils_mod, only: print_group, print_summary_line, print_minor_header, assert_true
     implicit none
 
@@ -30,6 +31,7 @@ contains
         call test_accessors_of_a_context()
         call test_setters_of_a_context()
         call test_accessors_reject_bad_handles()
+        call test_set_lsf_handle()
 
         call print_summary_line("Module Summary", total_tests - total_failures, total_tests)
     end subroutine run_opensps_c_api_tests
@@ -184,5 +186,59 @@ contains
         call opensps_context_get_dims_handle(h + 1000_c_int, n_spec, n_time, st)
         call assert_true(st == 1, "A handle beyond the pool is rejected", total_tests, total_failures)
     end subroutine test_accessors_reject_bad_handles
+
+    !> opensps_context_set_lsf through the handle API: a valid table is stored in the context (and
+    !> marks its SSP basis stale), every kind of invalid table is refused with status 3 and leaves the
+    !> stored table alone, n = 0 removes it, and a bad handle gives status 1.
+    subroutine test_set_lsf_handle()
+        integer(c_int) :: h, st
+        real(c_double), target :: lam(3), sig(3), bad_lam(3), neg_sig(3), nan_sig(3), nanv
+        logical :: ok
+
+        call print_group("opensps_context_set_lsf")
+        lam = [4000.0_c_double, 5000.0_c_double, 6000.0_c_double]
+        sig = [100.0_c_double, 200.0_c_double, 150.0_c_double]
+        bad_lam = [4000.0_c_double, 4000.0_c_double, 6000.0_c_double]       ! not strictly increasing
+        neg_sig = [100.0_c_double, -1.0_c_double, 150.0_c_double]
+        nanv = 0.0_c_double
+        nan_sig = [100.0_c_double, 1.0_c_double / nanv * 0.0_c_double, 150.0_c_double]
+
+        call opensps_context_create_handle(h, st)
+        associate(ctx => ctx_pool(h)%c)
+        ctx%state%ssp_basis_is_dirty = .false.
+        ctx%settings_dirty = .false.
+        call opensps_context_set_lsf_handle(h, 3_c_int, c_loc(lam), c_loc(sig), st)
+        call assert_true(st == 0, "a valid table: status 0", total_tests, total_failures)
+        ok = allocated(ctx%state%lsfinfo%lam) .and. allocated(ctx%state%lsfinfo%sigma)
+        if (ok) ok = all(ctx%state%lsfinfo%lam == lam) .and. all(ctx%state%lsfinfo%sigma == sig)
+        call assert_true(ok, "the table is stored in the context", total_tests, total_failures)
+        call assert_true(ctx%state%ssp_basis_is_dirty .and. ctx%settings_dirty, "the SSP basis is marked stale", &
+                         total_tests, total_failures)
+
+        call opensps_context_set_lsf_handle(h, 3_c_int, c_loc(bad_lam), c_loc(sig), st)
+        call assert_true(st == 3, "wavelengths not strictly increasing: status 3", total_tests, total_failures)
+        call opensps_context_set_lsf_handle(h, 3_c_int, c_loc(lam), c_loc(neg_sig), st)
+        call assert_true(st == 3, "a negative sigma: status 3", total_tests, total_failures)
+        call opensps_context_set_lsf_handle(h, 3_c_int, c_loc(lam), c_loc(nan_sig), st)
+        call assert_true(st == 3, "a NaN sigma: status 3", total_tests, total_failures)
+        call opensps_context_set_lsf_handle(h, 1_c_int, c_loc(lam), c_loc(sig), st)
+        call assert_true(st == 3, "fewer than two points: status 3", total_tests, total_failures)
+        call opensps_context_set_lsf_handle(h, -1_c_int, c_loc(lam), c_loc(sig), st)
+        call assert_true(st == 3, "a negative count: status 3", total_tests, total_failures)
+        call opensps_context_set_lsf_handle(h, 3_c_int, c_loc(lam), c_null_ptr, st)
+        call assert_true(st == 3, "a missing array: status 3", total_tests, total_failures)
+        ok = allocated(ctx%state%lsfinfo%lam)
+        if (ok) ok = all(ctx%state%lsfinfo%lam == lam) .and. all(ctx%state%lsfinfo%sigma == sig)
+        call assert_true(ok, "refused tables leave the stored one alone", total_tests, total_failures)
+
+        call opensps_context_set_lsf_handle(h, 0_c_int, c_null_ptr, c_null_ptr, st)
+        call assert_true(st == 0 .and. .not. allocated(ctx%state%lsfinfo%lam) .and. .not. allocated(ctx%state%lsfinfo%sigma), &
+                         "n = 0 removes the table", total_tests, total_failures)
+        end associate
+        call opensps_context_destroy_handle(h, st)
+
+        call opensps_context_set_lsf_handle(-5_c_int, 3_c_int, c_loc(lam), c_loc(sig), st)
+        call assert_true(st == 1, "a bad handle: status 1", total_tests, total_failures)
+    end subroutine test_set_lsf_handle
 
 end module test_opensps_c_api_mod
