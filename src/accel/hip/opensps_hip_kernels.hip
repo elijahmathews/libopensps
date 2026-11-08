@@ -1517,9 +1517,9 @@ __global__ void __launch_bounds__(128, 8) imf_pieces_weights_kernel(
     T_WK*         __restrict__ d_wk,
     double*       __restrict__ d_pps
 ) {
-    int tj = threadIdx.x; // 0..31 (model j)
+    int tj = threadIdx.x; // 0..31 (model within the block)
     int tq = threadIdx.y; // 0..3 (piece within block)
-    int j = tj;
+    int j = blockIdx.x * blockDim.x + tj;   // model of the chunk (a chunk has up to 2048)
     int q = blockIdx.y * blockDim.y + tq; // 0..n_pc_max-1
 
     bool valid_j = (j < nc);

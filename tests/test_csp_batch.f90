@@ -109,6 +109,7 @@ program test_csp_batch
     zred_per_model = .false.
     ! The IMF per model (template operator) against each model's own basis
     call check_imf_per_model()
+    call check_imf_many_models()
     call check_imf_unsupported()
     ! compute_csp_scenario: all-ages outputs against single-age calls, in each mode, on the
     ! one-metallicity basis
@@ -486,6 +487,60 @@ contains
         call imf_case("Chabrier, 0.3-0.5 Msun", 1, 0.3_wp, 0.5_wp)
         call imf_case("van Dokkum, characteristic mass varied, 0.1-0.3 Msun", 3, 0.1_wp, 0.3_wp)
     end subroutine check_imf_per_model
+
+    !> A batch of more models than one block of the GPU kernels (32) or one pass: every model of
+    !> the IMF-per-model batch against the same model computed alone through the same operator.
+    !> (The IMF weights kernel of the HIP builds once ignored the block index and computed only the
+    !> first 32 models of a chunk; the 12 models of check_imf_per_model never reached the second block.)
+    subroutine check_imf_many_models()
+        ! (the sums run in another order in a batch of 70 than in a batch of 1: ~1e-11 in FP64; a model the
+        ! kernel skipped differs by order 1)
+        integer, parameter :: NB = 70
+        integer, parameter :: TYPES(3) = [0, 2, 4]
+        type(PARAMS) :: pset, psets(NB)
+        type(ssp_opset_t) :: op
+        real(WP), allocatable :: mags(:, :), g1(:, :)
+        real(WP) :: mass(NB), lbol(NB), m1(1), l1(1), d_mag, d_scal
+        integer  :: it, m, status
+        character(len=1) :: tl
+
+        call print_group("Batched CSP: IMF per model, more models than one GPU block (70)")
+        allocate(mags(ctx%state%nbands, NB), g1(ctx%state%nbands, 1))
+        do it = 1, size(TYPES)
+            write(tl, '(I1)') TYPES(it)
+            call set_int('imf_type', TYPES(it))
+            call set_float('imf_lower_limit', 0.08_wp); call set_float('imf_upper_limit', 120.0_wp)
+            call set_model(1, 0.5_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pset)
+            call build_set(pset, op)
+            do m = 1, NB
+                call set_model(1 + mod(m - 1, N_MOD), 0.5_wp)
+                call set_float('imf1', 0.4_wp + 0.02_wp * m); call set_float('imf2', 1.5_wp + 0.01_wp * m)
+                call set_float('imf3', 1.9_wp + 0.015_wp * mod(m, 17))
+                call set_float('mdave', 0.3_wp + 0.01_wp * mod(m, 41))
+                call opensps_context_prepare_pset(ctx)
+                call opensps_context_get_pset(ctx, psets(m))
+            end do
+            call compute_csp_batch(ctx, psets, mags, status, mass=mass, lbol=lbol, ssp_ops=op)
+            call assert_true(status == 0, "70 models, IMF type " // tl // ": status 0", &
+                             total_tests, total_failures)
+            d_mag = 0.0_wp
+            d_scal = 0.0_wp
+            do m = 1, NB
+                call compute_csp_batch(ctx, psets(m:m), g1, status, mass=m1, lbol=l1, ssp_ops=op)
+                d_mag = max(d_mag, maxval(abs(mags(:, m) - g1(:, 1)), mask=g1(:, 1) < 30.0_wp))
+                d_scal = max(d_scal, abs(mass(m) / m1(1) - 1.0_wp), abs(lbol(m) / l1(1) - 1.0_wp))
+            end do
+            write(*, '(A,2ES10.2)') "# 70 models, max difference (mag, mass/lbol): ", d_mag, d_scal
+            call assert_true(d_mag <= MAG_TOL, "70 models, IMF type " // tl // &
+                             ": magnitudes equal those of single-model batches", total_tests, total_failures)
+            call assert_true(d_scal <= max(IMF_SCAL_TOL, 1.0e-9_wp), "70 models, IMF type " // tl // &
+                             ": mass, L_bol equal those of single-model batches", total_tests, total_failures)
+            call ssp_opset_free(op)
+        end do
+        deallocate(mags, g1)
+    end subroutine check_imf_many_models
 
     !> The IMF-per-model batch rejects (status 2) what it does not support: a model whose metallicity
     !> or isochrone modifications differ from the operator's, and accepts models that share them.
