@@ -108,24 +108,24 @@ R9700 (ROCm 7.2.4 container, amdflang, FP32 kernels), N = 10^4, `rocprofv3` kern
 | nebular lines (`nebular_kernels`, FP64 `10**x` per age) | 32.7 | in the kernel above |
 | IGM optical depth and transmission | 20.5 | < 1 |
 | observed-frame resampling (`observed_frame_z`) | 13.5 | 9.6 |
-| attenuation (`attenuate_batch`, `dl07_shape` at KP) | 10.5 | (FP32 template interpolation; see the note below) |
+| attenuation (`attenuate_batch`) | 10.5 | unchanged (10-15 across runs: the GPU clock) |
 | band integrals (159 bands; 29 with the band mask) | 10.4 | 12.1 (2 with the mask) |
 | age sums, library templates, dust emission, AGN | unchanged | unchanged |
 | **sum of kernels** | **190** | **92** |
 
-Cost per model (us, `tests/benchmark_csp_batch`, N = 10^4, median of three alternating rounds, same machine and
+Cost per model (us, `tests/benchmark_csp_batch`, N = 10^4, median of four alternating rounds, same machine and
 toolchain; before = `main` at 3e2ac9):
 
 | config | before | after |
 |---|---|---|
-| `basic` | 6.5 | 6.4 |
-| `full` | 20.3 | 13.0 (1.55x) |
-| `full_z` | 21.9 | 14.7 (1.49x) |
-| `full_smooth` | 22.1 | 15.5 (1.43x) |
-| `full_z_fit` | 23.1 | 15.3 (1.51x) |
+| `basic` | 6.6 | 6.8 (unchanged) |
+| `full` | 20.3 | 13.9 (1.46x) |
+| `full_z` | 21.2 | 14.9 (1.42x) |
+| `full_smooth` | 21.2 | 16.1 (1.32x) |
+| `full_z_fit` | 22.9 | 15.4 (1.49x) |
 
 Through Python, the fit path (N = 8192 models, all 19 parameters per model, SSP weights supplied, steady state):
-23.0 us per model before, 8.4 after, 7.6 with 29 of the 159 bands selected (`opensps_context_set_mag_compute`).
+23.0 us per model before, 8.7 after (2.7x), 7.9 with 29 of the 159 bands selected (2.9x) (`opensps_context_set_mag_compute`).
 
 - **Why FP64 was the cost.** The nebular continuum did ~400 FP64 operations per (pixel, model): the table
   interpolation, the exponent reduction and the exponentials of about ten age intervals. The R9700's FP64 rate
@@ -144,7 +144,7 @@ Through Python, the fit path (N = 8192 models, all 19 parameters per model, SSP 
 - **A bug the work found** (#87): the GPU build crashes on the host with `OMP_NUM_THREADS=1` for batches under 16
   models; no fit sends fewer.
 - **Not done, by size of what is left** (per call, after): age sums 14.5 ms (a GEMM-like tiled kernel would be the
-  gain; tile-size sweeps gave at most 6%), attenuation 13.7, band integrals 12.1 (2 with the mask), nebular 10.4,
+  gain; tile-size sweeps gave at most 6%), attenuation about 11-14, band integrals 12.1 (2 with the mask), nebular 10.4,
   observed frame 9.6 (an LDS-transposed kernel, or integrating the bands from the total directly), 10-17 ms per
   call outside kernels (kernel launches ~0.3 ms each). A direct FP32 exponential for |x| < 16 in `exp_kp` would
   take 3.5 ms off the attenuation at |x| eps / 2 of rounding of the argument; left out.

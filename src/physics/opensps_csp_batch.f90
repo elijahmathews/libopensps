@@ -1717,26 +1717,17 @@ contains
         integer, intent(in)              :: i, iq, iu
         real(WP), intent(in)             :: wq, wu, gam
         real(KP) :: shape
-        real(KP) :: lo, hi, kq, ku, c00, c10, c11, c01
+        real(WP) :: lo, hi
 
-        ! At kernel precision: the template is a convex combination of positive grid values (weights in
-        ! [0, 1] summing to 1), so there is no cancellation and the rounding is a few eps of KP (the table
-        ! stays in WP: the loads are the cost, the FP64 arithmetic was the rest)
-        kq = real(wq, KP)
-        ku = real(wu, KP)
-        c00 = (1.0_KP - kq) * (1.0_KP - ku)
-        c10 = kq * (1.0_KP - ku)
-        c11 = kq * ku
-        c01 = (1.0_KP - kq) * ku
-        lo = c00 * real(ctx%state%dustem2_dustem(i, iq,   2*iu - 1), KP) + &
-             c10 * real(ctx%state%dustem2_dustem(i, iq+1, 2*iu - 1), KP) + &
-             c11 * real(ctx%state%dustem2_dustem(i, iq+1, 2*(iu+1) - 1), KP) + &
-             c01 * real(ctx%state%dustem2_dustem(i, iq,   2*(iu+1) - 1), KP)
-        hi = c00 * real(ctx%state%dustem2_dustem(i, iq,   2*iu), KP) + &
-             c10 * real(ctx%state%dustem2_dustem(i, iq+1, 2*iu), KP) + &
-             c11 * real(ctx%state%dustem2_dustem(i, iq+1, 2*(iu+1)), KP) + &
-             c01 * real(ctx%state%dustem2_dustem(i, iq,   2*(iu+1)), KP)
-        shape = max((1.0_KP - real(gam, KP)) * lo + real(gam, KP) * hi, tiny(1.0_KP))
+        lo = (1-wq)*(1-wu) * ctx%state%dustem2_dustem(i, iq,   2*iu - 1) + &
+             wq    *(1-wu) * ctx%state%dustem2_dustem(i, iq+1, 2*iu - 1) + &
+             wq    *wu     * ctx%state%dustem2_dustem(i, iq+1, 2*(iu+1) - 1) + &
+             (1-wq)*wu     * ctx%state%dustem2_dustem(i, iq,   2*(iu+1) - 1)
+        hi = (1-wq)*(1-wu) * ctx%state%dustem2_dustem(i, iq,   2*iu) + &
+             wq    *(1-wu) * ctx%state%dustem2_dustem(i, iq+1, 2*iu) + &
+             wq    *wu     * ctx%state%dustem2_dustem(i, iq+1, 2*(iu+1)) + &
+             (1-wq)*wu     * ctx%state%dustem2_dustem(i, iq,   2*(iu+1))
+        shape = max(real((1.0_wp - gam) * lo + gam * hi, KP), tiny(1.0_KP))
     end function dl07_shape
 
     !> Derivatives of dl07_shape with respect to its interpolation weights wq, wu and the mix gamma
