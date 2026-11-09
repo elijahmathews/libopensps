@@ -91,7 +91,7 @@ module opensps_csp_batch
     use opensps_sfh, only: get_sfh_properties_at_age
     use opensps_dust, only: compute_attenuation_curve_point, one_minus_trans
     use opensps_interpolation, only: find_interval, find_interval_with_hint
-    use opensps_cosmology, only: igm_tau, igm_tau_dz
+    use opensps_cosmology, only: igm_tau, igm_tau_dz, igm_tau_pixel_terms, igm_tau_z_terms, IGM_NTERM
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
     use opensps_gas, only: get_grid_indices_weights, prepare_line_gaussians
     use opensps_spectral_indices, only: compute_spectral_indices_columns
@@ -2915,24 +2915,62 @@ contains
         integer(int64), intent(in), target :: pbuf(NPW, n_mod)
 #endif
         real(KP), intent(inout)          :: tau(nspec, n_mod), total(nspec, n_mod)
-        integer  :: m, j, jmax
+        integer  :: m, j, jmax, jtop
         real(WP) :: tmax
+        real(WP), allocatable :: ta(:, :), tb(:, :)
         type(params_core), pointer :: pl
 
+        ! Only the pixels below Lyman-alpha (the wavelengths are ascending) have an optical depth: the
+        ! others keep their flux (exp(0) = 1), as before. The optical depth is the sum of IGM_NTERM terms,
+        ! a wavelength factor (a table over these pixels, formed here) times a redshift factor (per model)
+        jtop = 0
+        do j = 1, nspec
+            if (ctx%state%spec_lambda(j) < 1215.67_wp) jtop = j
+        end do
+        if (jtop == 0) return
+        allocate(ta(IGM_NTERM, jtop), tb(IGM_NTERM, n_mod))
+        ta = 0.0_wp
+        tb = 0.0_wp
+
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(pl) &
-        !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda)
+        !$omp target data map(alloc: ta, tb) map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda)
+#endif
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do
+#elif defined(_OPENMP)
+        !$omp parallel do
+#endif
+        do j = 1, jtop
+            call igm_tau_pixel_terms(ctx%state%spec_lambda(j), ta(:, j))
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(pl)
+#elif defined(_OPENMP)
+        !$omp parallel do private(pl)
+#endif
+        do m = 1, n_mod
+#if !defined(__flang__)
+            pl => pbuf(m)%params_core
+#else
+            call c_f_pointer(c_loc(pbuf(1, m)), pl)
+#endif
+            if (pl%zred > SAFE_FLOOR) call igm_tau_z_terms(1.0_wp + pl%zred, tb(:, m))
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(pl)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(pl)
 #endif
         do m = 1, n_mod
-            do j = 1, nspec
+            do j = 1, jtop
 #if !defined(__flang__)
                 pl => pbuf(m)%params_core
 #else
                 call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
-                if (pl%zred > SAFE_FLOOR) tau(j, m) = real(igm_tau(ctx%state%spec_lambda(j), 1.0_wp + pl%zred), KP)
+                if (pl%zred > SAFE_FLOOR) tau(j, m) = real(ta(1, j) * tb(1, m) + ta(2, j) * tb(2, m) + &
+                                                           ta(3, j) * tb(3, m) + ta(4, j) * tb(4, m) + &
+                                                           ta(5, j) * tb(5, m) + ta(6, j) * tb(6, m), KP)
             end do
         end do
         ! The short-wavelength cap, one thread per model
@@ -2950,7 +2988,7 @@ contains
             if (pl%zred > SAFE_FLOOR) then
                 tmax = 0.0_wp
                 jmax = 1
-                do j = 1, nspec
+                do j = 1, jtop
                     if (tau(j, m) > tmax) then
                         tmax = tau(j, m)
                         jmax = j
@@ -2969,7 +3007,7 @@ contains
         !$omp parallel do collapse(2) private(pl)
 #endif
         do m = 1, n_mod
-            do j = 1, nspec
+            do j = 1, jtop
 #if !defined(__flang__)
                 pl => pbuf(m)%params_core
 #else
@@ -2979,6 +3017,9 @@ contains
                     total(j, m) = total(j, m) * real(exp(-real(tau(j, m), WP) * pl%igm_factor), KP)
             end do
         end do
+#if defined(OMP_TARGET)
+        !$omp end target data
+#endif
     end subroutine apply_igm_z
 
     !> Common IGM transmission.

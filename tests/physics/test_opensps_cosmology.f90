@@ -4,7 +4,8 @@ module test_opensps_cosmology_mod
     use opensps_context_types, only: opensps_context_t
     use opensps_interpolation, only: find_interval
     use opensps_cosmology, only: air_to_vacuum, vacuum_to_air, get_universe_age, get_luminosity_distance, &
-                              compute_igm_transmission, convolve_with_mdf
+                              compute_igm_transmission, convolve_with_mdf, igm_tau, igm_tau_pixel_terms, &
+                              igm_tau_z_terms, IGM_NTERM
     use test_utils_mod, only: print_group, print_summary_line, print_minor_header, &
                               assert_float_equals, assert_true, assert_relative_error
     implicit none
@@ -65,6 +66,7 @@ contains
         call test_igm_transparent()
         call test_igm_lyman_limit()
         call test_igm_madau_cap()
+        call test_igm_tau_terms()
 
         call test_mdf_path_normalization()
         call test_mdf_interpolation_map()
@@ -234,6 +236,44 @@ contains
         call assert_true(tau_blue > tau_red, "Blueward Lyman limit more opaque", total_tests, total_failures)
         call assert_true(tau_red > 0.0_wp, "Redward Lyman limit nonzero tau", total_tests, total_failures)
     end subroutine test_igm_lyman_limit
+
+
+    !> The batch's factored optical depth, sum_k a_k(wavelength) b_k(1 + z), against igm_tau (the Madau sums with
+    !> powers per line) over wavelengths from the Lyman continuum to above Lyman-alpha and redshifts 0.01-7: they
+    !> agree to rounding, vanish above Lyman-alpha, and are not worse than igm_tau at the Lyman limit, where the
+    !> continuum's differences of powers cancel
+    subroutine test_igm_tau_terms()
+        real(WP) :: a(IGM_NTERM), b(IGM_NTERM), w, opz, t_ref, t_new, rel, worst, worst_above
+        integer :: iw, iz
+        call print_group("igm_tau as a sum of wavelength x redshift terms")
+        worst = 0.0_wp
+        worst_above = 0.0_wp
+        do iz = 0, 40
+            opz = 1.01_wp * (1.0_wp + 6.0_wp * real(iz, WP) / 40.0_wp)
+            call igm_tau_z_terms(opz, b)
+            do iw = 0, 400
+                ! 100 to 1300 Angstrom, with extra points just below the Lyman limit (911.75)
+                w = 100.0_wp + 3.0_wp * real(iw, WP)
+                if (mod(iw, 20) == 7) w = 911.75_wp - 10.0_wp ** (-0.05_wp * real(iw, WP))
+                call igm_tau_pixel_terms(w, a)
+                t_new = sum(a * b)
+                t_ref = igm_tau(w, opz)
+                if (w > 1215.67_wp) then
+                    worst_above = max(worst_above, abs(t_new) + abs(t_ref))
+                else if (abs(t_ref) > 1.0e-12_wp) then
+                    ! relative to the largest term, which sets the rounding of the reference near the Lyman limit
+                    rel = abs(t_new - t_ref) / max(abs(t_ref), 1.0e-6_wp)
+                    worst = max(worst, rel)
+                end if
+            end do
+        end do
+        write (*, '(A,ES10.2)') '# worst relative difference from igm_tau: ', worst
+        call assert_true(worst < 1.0e-8_wp, "factored optical depth equals igm_tau to rounding", total_tests, total_failures)
+        call assert_true(worst_above == 0.0_wp, "no optical depth above Lyman-alpha", total_tests, total_failures)
+        call igm_tau_pixel_terms(1000.0_wp, a)
+        call assert_true(a(1) > 0.0_wp .and. a(2) > 0.0_wp .and. all(a(3:6) == 0.0_wp), &
+                         "between the Lyman limit and Lyman-alpha: series and metal terms only", total_tests, total_failures)
+    end subroutine test_igm_tau_terms
 
     subroutine test_igm_madau_cap()
         integer, parameter :: n = 10
