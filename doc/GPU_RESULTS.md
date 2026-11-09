@@ -135,6 +135,8 @@ Through Python, the fit path (N = 8192 models, all 19 parameters per model, SSP 
   it is now done once for up to 8 models of a cell and the models share it (rule 8 of `MIXED_PRECISION.md`).
   Errors: 6.3e-7 worst per pixel on synthetic tables with wide structure (one-thread-per-model kernel 2.8e-7),
   unchanged on the matrix cases.
+- `OPENSPS_NEB_GROUP=0` (environment, FP32 HIP builds) selects the previous one-thread-per-model nebular kernel, for
+  A/B timing; 2, 4 or 8 set the group size (default 8).
 - **IGM.** Madau's optical depth is a sum of powers of the observed wavelength: a table over the pixels below
   Lyman-alpha plus six redshift factors per model (agrees with `igm_tau` to 2e-13); the pixels above it keep their
   flux without an exponential.
