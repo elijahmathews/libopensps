@@ -11,16 +11,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define N_MOD 5
+#define N_MOD 48   /* a batch of a size on which the per-model IGM and the other batched kernels run on many threads */
 #define N_PAR 3
 
 int main(void) {
     skip_without_data();
     int status = 0, h = 0, ntfull = 0, nbands = 0, failures = 0;
     const char *names[N_PAR] = {"dust2", "logzsol", "zred"};
-    double dust2[N_MOD] = {0.05, 0.3, 0.6, 1.0, 0.1};
-    double logz[N_MOD] = {-1.5, -0.5, 0.0, 0.15, -0.8};
-    double zred[N_MOD] = {0.1, 0.5, 1.0, 2.0, 0.3};
+    double dust2[N_MOD], logz[N_MOD], zred[N_MOD];
+    for (int m = 0; m < N_MOD; m++) {
+        dust2[m] = 0.05 + 0.02 * (m % 37);
+        logz[m] = -1.5 + 0.03 * (m % 53);
+        zred[m] = 0.1 + 0.05 * (m % 47);
+    }
     const double *values[N_PAR] = {dust2, logz, zred};
 
     opensps_context_create(&h, &status);

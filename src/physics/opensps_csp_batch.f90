@@ -2949,10 +2949,10 @@ contains
         tb = 0.0_wp
 
 #if defined(OMP_TARGET)
-        !$omp target data map(alloc: ta, tb) map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda)
+        !$omp target data map(alloc: ta, tb)
 #endif
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do
+        !$omp target teams distribute parallel do map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda)
 #elif defined(_OPENMP)
         !$omp parallel do
 #endif
