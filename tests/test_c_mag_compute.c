@@ -1,0 +1,99 @@
+/* opensps_context_set_mag_compute: the bands a context computes. A batch with a mask returns, for the
+ * bands in the mask, the same magnitudes as the batch without it (bit for bit: the band integrals do not
+ * depend on the other bands), NaN for the others; a NULL mask restores all bands; a bad handle and an
+ * out-of-range count are rejected. Also with the magnitudes at per-model redshifts (the fitting
+ * configuration: the redshift is a batch parameter). Requires a data root, skipped without one. */
+#include "opensps.h"
+#include "test_c_data.h"
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define N_MOD 5
+#define N_PAR 3
+
+int main(void) {
+    skip_without_data();
+    int status = 0, h = 0, ntfull = 0, nbands = 0, failures = 0;
+    const char *names[N_PAR] = {"dust2", "logzsol", "zred"};
+    double dust2[N_MOD] = {0.05, 0.3, 0.6, 1.0, 0.1};
+    double logz[N_MOD] = {-1.5, -0.5, 0.0, 0.15, -0.8};
+    double zred[N_MOD] = {0.1, 0.5, 1.0, 2.0, 0.3};
+    const double *values[N_PAR] = {dust2, logz, zred};
+
+    opensps_context_create(&h, &status);
+    opensps_context_setup(-1, "mist", "miles", "DL07", h, &status);
+    if (status != 0) { printf("setup failed\n"); return 1; }
+    opensps_context_set_int(h, "add_igm_absorption", 1, &status);
+    opensps_context_get_ntfull(h, &ntfull, &status);
+    opensps_context_get_nbands(h, &nbands, &status);
+
+    double *w = malloc(sizeof(double) * ntfull * N_MOD);
+    for (int m = 0; m < N_MOD; m++) {
+        double sum = 0.0;
+        for (int k = 0; k < ntfull; k++) {
+            double x = (k - (0.3 + 0.1 * m) * ntfull) / (0.15 * ntfull);
+            w[(size_t)m * ntfull + k] = exp(-0.5 * x * x) + 1e-3;
+            sum += w[(size_t)m * ntfull + k];
+        }
+        for (int k = 0; k < ntfull; k++) w[(size_t)m * ntfull + k] /= sum;
+    }
+    double *all = malloc(sizeof(double) * nbands * N_MOD), *sel = malloc(sizeof(double) * nbands * N_MOD);
+    int *mask = calloc(nbands, sizeof(int));
+    double mass[N_MOD], lbol[N_MOD];
+
+    opensps_context_compute_csp_batch(h, N_MOD, N_PAR, names, values, w, all, NULL, mass, lbol,
+                                   NULL, NULL, NULL, NULL, &status);
+    if (status != 0) { printf("batch: status %d\n", status); return 1; }
+
+    /* A few bands, one of them the last */
+    int chosen[4] = {0, 3, nbands / 2, nbands - 1};
+    for (int i = 0; i < 4; i++) mask[chosen[i]] = 1;
+    opensps_context_set_mag_compute(h, nbands, mask, &status);
+    if (status != 0) { printf("FAIL: set_mag_compute status %d\n", status); failures++; }
+    opensps_context_compute_csp_batch(h, N_MOD, N_PAR, names, values, w, sel, NULL, mass, lbol,
+                                   NULL, NULL, NULL, NULL, &status);
+    if (status != 0) { printf("batch with a mask: status %d\n", status); return 1; }
+    int ok = 1;
+    for (int m = 0; m < N_MOD; m++)
+        for (int b = 0; b < nbands; b++) {
+            double v = sel[(size_t)m * nbands + b], a = all[(size_t)m * nbands + b];
+            if (mask[b]) { if (!(v == a || (v != v && a != a))) ok = 0; }
+            else if (v == v) ok = 0;
+        }
+    if (!ok) { printf("FAIL: masked bands are not the same as unmasked, or the others are not NaN\n"); failures++; }
+
+    /* A shorter mask: the bands beyond it are not computed */
+    int shortmask[2] = {1, 1};
+    opensps_context_set_mag_compute(h, 2, shortmask, &status);
+    opensps_context_compute_csp_batch(h, N_MOD, N_PAR, names, values, w, sel, NULL, mass, lbol,
+                                   NULL, NULL, NULL, NULL, &status);
+    ok = status == 0;
+    for (int m = 0; ok && m < N_MOD; m++)
+        for (int b = 0; b < nbands; b++) {
+            double v = sel[(size_t)m * nbands + b], a = all[(size_t)m * nbands + b];
+            if (b < 2) { if (!(v == a || (v != v && a != a))) ok = 0; } else if (v == v) ok = 0;
+        }
+    if (!ok) { printf("FAIL: a mask shorter than the bands\n"); failures++; }
+
+    /* NULL restores every band */
+    opensps_context_set_mag_compute(h, 0, NULL, &status);
+    opensps_context_compute_csp_batch(h, N_MOD, N_PAR, names, values, w, sel, NULL, mass, lbol,
+                                   NULL, NULL, NULL, NULL, &status);
+    ok = status == 0 && memcmp(sel, all, sizeof(double) * nbands * N_MOD) == 0;
+    if (!ok) { printf("FAIL: a NULL mask does not restore all bands\n"); failures++; }
+
+    opensps_context_set_mag_compute(-3, nbands, mask, &status);
+    if (status != 1) { printf("FAIL: bad handle gave status %d (expected 1)\n", status); failures++; }
+    opensps_context_set_mag_compute(h, nbands + 1, mask, &status);
+    if (status != 3) { printf("FAIL: n_bands too large gave status %d (expected 3)\n", status); failures++; }
+    opensps_context_set_mag_compute(h, 0, mask, &status);
+    if (status != 3) { printf("FAIL: n_bands = 0 gave status %d (expected 3)\n", status); failures++; }
+
+    free(w); free(all); free(sel); free(mask);
+    opensps_context_destroy(h, &status);
+    printf(failures ? "FAILED: %d\n" : "OK\n", failures);
+    return failures ? 1 : 0;
+}

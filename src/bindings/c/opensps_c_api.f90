@@ -1576,6 +1576,45 @@ contains
         end associate
     end subroutine opensps_context_set_sfh_tab_handle
 
+    !> The bands a context computes (photometry of the batch and of the scenarios): mask(1:n_bands), nonzero =
+    !> computed; bands beyond n_bands are not computed. The magnitudes of the others are NaN, and their
+    !> band integrals are skipped (the cost of the photometry is proportional to
+    !> the number of bands). A NULL mask computes all bands again. status 1 bad handle, 3 n_bands out of range
+    !> (1 to nbands).
+    subroutine opensps_context_set_mag_compute_handle(handle, n_bands, c_mask, status) &
+        bind(C, name="opensps_context_set_mag_compute")
+        integer(c_int), value :: handle, n_bands
+        type(c_ptr), value :: c_mask
+        integer(c_int), intent(OUT) :: status
+        integer(c_int), pointer :: f_mask(:)
+
+        status = 0
+        if (.not. handle_ok(handle)) then
+            status = 1
+            return
+        end if
+        associate(ctx => ctx_pool(handle)%c)
+        call opensps_prepare_pset(ctx)
+        if (.not. c_associated(c_mask)) then
+            ctx%pset%mag_compute = 1
+        else
+            if (n_bands < 1 .or. n_bands > ctx%state%nbands) then
+                status = 3
+                call opensps_set_error(3, 'opensps_context_set_mag_compute: n_bands out of range')
+                return
+            end if
+            call c_f_pointer(c_mask, f_mask, [n_bands])
+            ctx%pset%mag_compute = 0
+            ctx%pset%mag_compute(1:n_bands) = f_mask(1:n_bands)
+        end if
+#ifdef OMP_TARGET
+        if (ctx%on_device) then
+            !$omp target update to(ctx%pset%mag_compute)
+        end if
+#endif
+        end associate
+    end subroutine opensps_context_set_mag_compute_handle
+
     ! The instrumental line spread function of a context: sigma (km/s) over wavelength (Angstrom,
     ! strictly increasing). Applied to the SSPs with smooth_lsf = 1; n = 0 removes the table.
     subroutine opensps_context_set_lsf_handle(handle, n, c_lambda, c_sigma, status) &

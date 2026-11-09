@@ -139,6 +139,11 @@ void opensps_context_get_emlambda(int handle, double *emlambda, int *status);
 void opensps_context_get_filter_data(int handle, double *wave_eff, double *mag_vega,
                                   double *mag_sun, int *status);
 
+// The bands a context computes: mask[0..n_bands-1], nonzero = computed, bands beyond n_bands are not
+// (a NULL mask computes all). The photometry costs in proportion to the bands computed; the magnitudes of
+// the others are NaN. status 1 bad handle, 3 n_bands out of range (1 to nbands).
+void opensps_context_set_mag_compute(int handle, int n_bands, const int *mask, int *status);
+
 // Tabular SFH for sfh = 3: ntab points of age [Gyr], SFR [M_sun/yr] and metallicity Z (used
 // with zcontinuous = 3; met may be NULL). status 3 if ntab is out of range.
 void opensps_context_set_sfh_tab(int handle, int ntab, const double *age, const double *sfr,
