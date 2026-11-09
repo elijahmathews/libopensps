@@ -95,6 +95,64 @@ builds, `ddf2a2d`) and LLVM flang offload on the 780M (`2468916`). GPU vs CPU ov
 8.4e-7 (A100) on the stress cases. The IMF oracles against per-model `generate_ssp_grid` agree to
 ~1e-14 in FP64 on CPU.
 
+## Fitting-population batch: nebular, IGM, attenuation, photometry (2026-11-09)
+
+What a SED fit asks of `compute_csp_batch`: every parameter differs between the models (redshift, metallicity,
+gas, dust, AGN) and the SSP weights come from the sampler. `tests/benchmark_csp_batch ... full_z_fit` is that
+population (`full` plus per-model zred, logzsol, gas_logz, dust2, dust1, dust_index and fagn). Measured on the
+R9700 (ROCm 7.2.4 container, amdflang, FP32 kernels), N = 10^4, `rocprofv3` kernel trace, ms per call:
+
+| Kernel | before | after |
+|---|---|---|
+| nebular continuum | 69.8 | 10.4 (the same kernel now serves the lines) |
+| nebular lines (`nebular_kernels`, FP64 `10**x` per age) | 32.7 | in the kernel above |
+| IGM optical depth and transmission | 20.5 | < 1 |
+| observed-frame resampling (`observed_frame_z`) | 13.5 | 9.6 |
+| attenuation (`attenuate_batch`, `dl07_shape` at KP) | 10.5 | (FP32 template interpolation; see the note below) |
+| band integrals (159 bands; 29 with the band mask) | 10.4 | 12.1 (2 with the mask) |
+| age sums, library templates, dust emission, AGN | unchanged | unchanged |
+| **sum of kernels** | **190** | **92** |
+
+Cost per model (us, `tests/benchmark_csp_batch`, N = 10^4, median of three alternating rounds, same machine and
+toolchain; before = `main` at 3e2ac9):
+
+| config | before | after |
+|---|---|---|
+| `basic` | 6.5 | 6.4 |
+| `full` | 20.3 | 13.0 (1.55x) |
+| `full_z` | 21.9 | 14.7 (1.49x) |
+| `full_smooth` | 22.1 | 15.5 (1.43x) |
+| `full_z_fit` | 23.1 | 15.3 (1.51x) |
+
+Through Python, the fit path (N = 8192 models, all 19 parameters per model, SSP weights supplied, steady state):
+23.0 us per model before, 8.4 after, 7.6 with 29 of the 159 bands selected (`opensps_context_set_mag_compute`).
+
+- **Why FP64 was the cost.** The nebular continuum did ~400 FP64 operations per (pixel, model): the table
+  interpolation, the exponent reduction and the exponentials of about ten age intervals. The R9700's FP64 rate
+  is a small fraction of FP32; the kernel was nowhere near its FP32 throughput or its memory bandwidth (a
+  throwaway all-FP32 kernel, accuracy ignored, took the benchmark from 23.9 to 19.9 us; grouping by cell with the
+  FP64 table kept changed nothing). The FP64 work depends on the pixel, the cell and the interval, not on the model:
+  it is now done once for up to 8 models of a cell and the models share it (rule 8 of `MIXED_PRECISION.md`).
+  Errors: 6.3e-7 worst per pixel on synthetic tables with wide structure (one-thread-per-model kernel 2.8e-7),
+  unchanged on the matrix cases.
+- **IGM.** Madau's optical depth is a sum of powers of the observed wavelength: a table over the pixels below
+  Lyman-alpha plus six redshift factors per model (agrees with `igm_tau` to 2e-13); the pixels above it keep their
+  flux without an exponential.
+- **Host side.** The batch's parameter sets were built with a string-matching setter per parameter and model
+  (25 ms of 116 ms at N = 8192); each name is now resolved once (4 ms). The observed-frame resampling takes
+  consecutive pixels per thread, searching from the previous interval.
+- **A bug the work found** (#87): the GPU build crashes on the host with `OMP_NUM_THREADS=1` for batches under 16
+  models; no fit sends fewer.
+- **Not done, by size of what is left** (per call, after): age sums 14.5 ms (a GEMM-like tiled kernel would be the
+  gain; tile-size sweeps gave at most 6%), attenuation 13.7, band integrals 12.1 (2 with the mask), nebular 10.4,
+  observed frame 9.6 (an LDS-transposed kernel, or integrating the bands from the total directly), 10-17 ms per
+  call outside kernels (kernel launches ~0.3 ms each). A direct FP32 exponential for |x| < 16 in `exp_kp` would
+  take 3.5 ms off the attenuation at |x| eps / 2 of rounding of the argument; left out.
+- **Verified** (unit + regression: 48 of 48; the one `lib_mist_c3k` case is skipped without the C3K data):
+  CPU FP64 and FP32 (gfortran); the R9700 with the host's LLVM flang 22.1.8 / ROCm 7.1.1 (FP32) and with ROCm
+  7.2.4's amdflang (FP32 and FP64). `tools/compare_builds` over the matrix cases, GPU vs CPU FP64: FP64 2.9e-11
+  (spectra), 3.6e-10 (all pixels), FP32 4.2e-7 (spectra), 5.7e-7 (all pixels), 5.3e-7 mag.
+
 ## Accelerated BLAS: rocBLAS, hipBLAS, and cuBLAS (2026-11-04)
 
 Vendor-independent accelerated BLAS interface via `opensps_accel_blas` (`-Daccel_blas=rocblas|hipblas|cublas`).
