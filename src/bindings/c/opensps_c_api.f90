@@ -7,9 +7,10 @@ module opensps_c_api
     !> This module owns the legacy global state and handle-based context pool.
 
     use iso_c_binding
+    use, intrinsic :: iso_fortran_env, only: int64
     use opensps_precision, only: WP, KP
     use opensps_constants, only: NEMLINE, NM, BHB_SBS_TIME, GRAVITY_L_M_T_COEFF
-    use opensps_types, only: PARAMS, COMPSPOUT
+    use opensps_types, only: PARAMS, COMPSPOUT, PARAMS_CORE
     use opensps_api, only: opensps_create, opensps_setup, opensps_destroy, &
                         opensps_set_param_int, opensps_set_param_float, opensps_set_param_str, &
                         opensps_set_fast_mode, opensps_get_paths, opensps_prepare_pset, &
@@ -617,7 +618,10 @@ contains
         character(LEN=64), allocatable :: names(:)
         type(PARAMS) :: base
         type(PARAMS), allocatable :: psets(:)
-        integer :: i, m, st, nspec, nt, nbands
+        integer :: i, m, st, nspec, nt, nbands, k
+        integer, allocatable :: slot(:)
+        real(WP), allocatable :: vals(:, :)
+        integer(int64) :: wa((storage_size(PARAMS_CORE()) + 63) / 64), wb((storage_size(PARAMS_CORE()) + 63) / 64)
         logical :: zmode, dirty, has_ops
         real(WP), allocatable :: mass_l(:), lbol_l(:), mdust_l(:), sfr_l(:), eml_l(:, :)
         character(LEN=10), parameter :: NEB_PARAMS(3) = [character(LEN=10) :: 'gas_logu', 'gas_logz', 'frac_obrun']
@@ -685,13 +689,43 @@ contains
         ! batch do not change it
         dirty = ctx%state%ssp_basis_is_dirty
         allocate(psets(n))
-        do m = 1, n
+        ! Each named parameter is looked up once: if setting it changes exactly one 64-bit word of the plain-data
+        ! block of the parameter set, to the bits of the value (every real scalar parameter), the per-model
+        ! values are written to that word; the others (integers that change the context, such as sfh) go through
+        ! the setter per model. (The setter is a string match per call: 19 parameters x 10^4 models was
+        ! 25 ms, a fifth of a fitting batch.)
+        allocate(slot(n_params), vals(n_params, n))
+        ctx%pset = base
+        do i = 1, n_params
+            call c_f_pointer(value_ptrs(i), v, [n])
+            vals(i, 1:n) = v(1:n)
+            slot(i) = 0
             ctx%pset = base
+            call opensps_set_param_float(ctx, trim(names(i)), 1.25_wp, st)
+            if (st == 0) then
+                wa = transfer(ctx%pset%params_core, wa)
+                ctx%pset = base
+                call opensps_set_param_float(ctx, trim(names(i)), 2.5_wp, st)
+                wb = transfer(ctx%pset%params_core, wb)
+                if (st == 0 .and. count(wa /= wb) == 1) then
+                    k = maxloc(merge(1, 0, wa /= wb), dim=1)
+                    if (wa(k) == transfer(1.25_wp, 0_int64) .and. wb(k) == transfer(2.5_wp, 0_int64)) slot(i) = k
+                end if
+            else if (trim(names(i)) /= 'sfh') then
+                ctx%pset = base
+                ctx%state%ssp_basis_is_dirty = dirty
+                status = 3
+                call opensps_set_error(3, 'compute_csp_batch: unknown parameter '//trim(names(i)))
+                return
+            end if
+        end do
+        ctx%pset = base
+        do m = 1, n
             do i = 1, n_params
-                call c_f_pointer(value_ptrs(i), v, [n])
-                call opensps_set_param_float(ctx, trim(names(i)), real(v(m), WP), st)
+                if (slot(i) /= 0) cycle
+                call opensps_set_param_float(ctx, trim(names(i)), real(vals(i, m), WP), st)
                 if (st /= 0 .and. trim(names(i)) == 'sfh') then
-                    call opensps_set_param_int(ctx, 'sfh', nint(v(m)), st)
+                    call opensps_set_param_int(ctx, 'sfh', nint(vals(i, m)), st)
                 end if
                 if (st /= 0) then
                     ctx%pset = base
@@ -702,6 +736,13 @@ contains
                 end if
             end do
             psets(m) = ctx%pset
+            if (any(slot > 0)) then
+                wa = transfer(psets(m)%params_core, wa)
+                do i = 1, n_params
+                    if (slot(i) /= 0) wa(slot(i)) = transfer(real(vals(i, m), WP), 0_int64)
+                end do
+                psets(m)%params_core = transfer(wa, psets(m)%params_core)
+            end if
         end do
         ctx%pset = base
         ctx%state%ssp_basis_is_dirty = dirty

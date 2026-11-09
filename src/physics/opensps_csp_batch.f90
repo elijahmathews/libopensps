@@ -2536,13 +2536,6 @@ contains
             e = real(exp(x), KP)
             return
         end if
-        ! Moderate arguments (the attenuation's optical depths and power laws: |x| < 16, transmissions down
-        ! to 1e-7): the KP exponential of the rounded argument, whose rounding costs |x| eps / 2 <= 5e-7
-        ! (~1e-7 for the optical depths that matter, < 3); the reduction below is for the large exponents
-        if (abs(x) < 16.0_wp) then
-            e = exp(real(x, KP))
-            return
-        end if
         xc = max(-1.0e4_wp, min(1.0e4_wp, x))
         n = nint(xc * LOG2E)
         if (n < minexponent(1.0_KP)) then
