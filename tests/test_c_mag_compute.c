@@ -1,4 +1,4 @@
-/* opensps_context_set_mag_compute: the bands a context computes. A batch with a mask returns, for the
+/* opensps_context_set_mag_compute: the bands a context computes (and an integer parameter, sfh, per model in a batch). A batch with a mask returns, for the
  * bands in the mask, the same magnitudes as the batch without it (bit for bit: the band integrals do not
  * depend on the other bands), NaN for the others; a NULL mask restores all bands; a bad handle and an
  * out-of-range count are rejected. Also with the magnitudes at per-model redshifts (the fitting
@@ -94,6 +94,27 @@ int main(void) {
     if (status != 3) { printf("FAIL: n_bands too large gave status %d (expected 3)\n", status); failures++; }
     opensps_context_set_mag_compute(h, 0, mask, &status);
     if (status != 3) { printf("FAIL: n_bands = 0 gave status %d (expected 3)\n", status); failures++; }
+
+    /* sfh is an integer parameter: in a batch it goes through the setter per model, not the word-per-parameter
+     * path of the real scalars; the same models with sfh set on the context must agree bit for bit */
+    {
+        double sfh[N_MOD], tage[N_MOD];
+        for (int m = 0; m < N_MOD; m++) { sfh[m] = 1.0; tage[m] = 1.0 + 0.2 * m; }
+        const char *n3[3] = {"sfh", "tage", "dust2"};
+        const double *v3[3] = {sfh, tage, dust2};
+        const char *n2[2] = {"tage", "dust2"};
+        const double *v2[2] = {tage, dust2};
+        double *a = malloc(sizeof(double) * nbands * N_MOD), *b = malloc(sizeof(double) * nbands * N_MOD);
+        opensps_context_compute_csp_batch(h, N_MOD, 3, n3, v3, NULL, a, NULL, mass, lbol, NULL, NULL, NULL, NULL, &status);
+        if (status != 0) { printf("FAIL: batch with sfh as a parameter: status %d\n", status); failures++; }
+        opensps_context_set_int(h, "sfh", 1, &status);
+        opensps_context_compute_csp_batch(h, N_MOD, 2, n2, v2, NULL, b, NULL, mass, lbol, NULL, NULL, NULL, NULL, &status);
+        if (status != 0 || memcmp(a, b, sizeof(double) * nbands * N_MOD) != 0) {
+            printf("FAIL: sfh per model differs from sfh set on the context\n");
+            failures++;
+        }
+        free(a); free(b);
+    }
 
     free(w); free(all); free(sel); free(mask);
     opensps_context_destroy(h, &status);

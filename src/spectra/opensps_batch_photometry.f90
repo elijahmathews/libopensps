@@ -30,6 +30,7 @@ module opensps_batch_photometry
     public :: smoothing_on_device, prepare_smoothing_kernel, smooth_columns, smooth_columns_adjoint
     public :: distance_term_dz, smooth_sigma_adjoint, free_smooth_work
     public :: band_fluxes   ! (the test of the band integrals calls it directly)
+    public :: observed_frame_z   ! (likewise)
 
     real(WP), parameter :: AB_ZEROPOINT = 48.60_wp
     integer, parameter  :: IDX_V_BAND = 1
