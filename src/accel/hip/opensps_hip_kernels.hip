@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <hip/hip_runtime.h>
 #include <stdint.h>
 
@@ -1064,6 +1065,173 @@ __global__ void __launch_bounds__(256, 6) adj_imf_analytic_kernel(
     }
 }
 
+
+
+// Nebular continuum with the models grouped by (Z, U) cell (FP32 kernels). One thread serves up to NG models that share
+// a cell. Everything that depends only on (pixel, age interval, cell) is formed once per group, in FP64: the corner
+// values T00 of the log grid, their differences to the other three corners (D01, D10, D11, rounded to FP32), the
+// log-flux step between the interval's ends, and the range reduction x = n ln 2 + r of T00 ln 10. Per model there are only
+// FP32 operations on small numbers: the interpolation offset c01 D01 + c10 D10 + c11 D11 (the weights c sum to 1, so
+// T = T00 + sum_i c_i D_i), the model's own reduced scale ln(max_t C) = n_m ln 2 + l_m (once per model), and
+// the exponential of a small argument times 2**(n + n_m). FP32 enters only through numbers of order 1 (rule 7 of
+// doc/MIXED_PRECISION.md: the large exponent, ~100, is reduced in FP64): the error is a few 1e-8 of the offset (<~ 3 in
+// log10) in the exponent, i.e. below ~5e-7 relative in the continuum. The FP64 operations per (pixel, model) drop from
+// ~400 to ~400 / NG: on GPUs whose FP64 rate is 1/32-1/64 of FP32 (the R9700) they were the cost of this kernel.
+// d_order: the models sorted by cell; d_gstart: group g holds d_order[d_gstart[g] .. d_gstart[g+1]).
+template <int NG>
+__global__ void __launch_bounds__(256, 2) nebular_continuum_grouped_kernel(
+    int n_mod,
+    int nspec,
+    int ntab,
+    int nt_neb,
+    const double* __restrict__ d_tab,
+    const int* __restrict__ d_ia,
+    const double* __restrict__ d_wa,
+    const double* __restrict__ d_dwa,
+    const int* __restrict__ d_newr,
+    const float* __restrict__ d_cy,
+    const float* __restrict__ d_co,
+    const double* __restrict__ d_lns,
+    const int* __restrict__ d_iz,
+    const double* __restrict__ d_wz,
+    const int* __restrict__ d_iu,
+    const double* __restrict__ d_wu,
+    const int* __restrict__ d_order,
+    const int* __restrict__ d_gstart,
+    float* __restrict__ d_yo
+) {
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    int g = blockIdx.y;
+    if (j >= nspec) return;
+    const int g0 = d_gstart[g];
+    const int ng = d_gstart[g + 1] - g0;     // 1 .. NG, uniform over the block
+    const double LN10 = 2.30258509299404568402;
+    const double LN2 = 0.693147180559945309417232121458;
+    const double LOG2E = 1.442695040888963407359924681002;
+    const float LN10F = (float)LN10;
+
+    int mi[NG], nm[NG];
+    float c01[NG], c10[NG], c11[NG], lm[NG], dl[NG], f[NG], r[NG], y[NG], o[NG], sy[NG], so[NG];
+    #pragma unroll
+    for (int k = 0; k < NG; ++k) {
+        mi[k] = d_order[g0 + (k < ng ? k : 0)];
+        const double wz_m = d_wz[mi[k]], wu_m = d_wu[mi[k]];
+        c01[k] = (float)((1.0 - wz_m) * wu_m);
+        c10[k] = (float)(wz_m * (1.0 - wu_m));
+        c11[k] = (float)(wz_m * wu_m);
+        const double lsm = d_lns[mi[k]];
+        const double xc = fmax(-1.0e4, fmin(1.0e4, lsm));
+        nm[k] = (int)rint(xc * LOG2E);
+        lm[k] = (float)(xc - (double)nm[k] * LN2);
+        dl[k] = 0.f; f[k] = 0.f; r[k] = 1.f; y[k] = 0.f; o[k] = 0.f; sy[k] = 0.f; so[k] = 0.f;
+    }
+    const int jz = d_iz[mi[0]] - 1;          // the cell is common to the group
+    const int ju = d_iu[mi[0]] - 1;
+    const long long s_z = ntab, s_a = (long long)ntab * 11, s_u = (long long)ntab * 11 * 10;
+    int a_prev = -999;
+    // slab a_prev + 1 (the upper end of the last interval): its corner T00 and the differences to the other corners
+    double Tb00 = 0.0; float Db01 = 0.f, Db10 = 0.f, Db11 = 0.f;
+
+    for (int t = 0; t < nt_neb; ++t) {
+        const int a = d_ia[t] - 1;
+        if (a != a_prev) {
+            double Ta00; float Da01, Da10, Da11;
+            if (a == a_prev + 1) {
+                Ta00 = Tb00; Da01 = Db01; Da10 = Db10; Da11 = Db11;
+            } else {
+                const long long i0 = j + s_z * jz + s_a * a + s_u * ju;
+                const double A00 = d_tab[i0];
+                Ta00 = A00;
+                Da01 = (float)(d_tab[i0 + s_u] - A00);
+                Da10 = (float)(d_tab[i0 + s_z] - A00);
+                Da11 = (float)(d_tab[i0 + s_z + s_u] - A00);
+            }
+            const long long ib = j + s_z * jz + s_a * (a + 1) + s_u * ju;
+            const double B00 = d_tab[ib];
+            Db01 = (float)(d_tab[ib + s_u] - B00);
+            Db10 = (float)(d_tab[ib + s_z] - B00);
+            Db11 = (float)(d_tab[ib + s_z + s_u] - B00);
+            Tb00 = B00;
+            // shared FP64: the log step of the interval and the range reduction of the lower end
+            const float dbase = (float)((B00 - Ta00) * LN10);
+            const double X0 = Ta00 * LN10;
+            const int na = (int)rint(X0 * LOG2E);
+            const float ra_red = (float)(X0 - (double)na * LN2);
+            const float wat = (float)d_wa[t];
+            #pragma unroll
+            for (int k = 0; k < NG; ++k) {
+                if (k < ng) {
+                    y[k] += sy[k]; o[k] += so[k]; sy[k] = 0.f; so[k] = 0.f;
+                    const float offa = c01[k] * Da01 + c10[k] * Da10 + c11[k] * Da11;
+                    const float offb = c01[k] * Db01 + c10[k] * Db10 + c11[k] * Db11;
+                    dl[k] = dbase + (offb - offa) * LN10F;
+                    const float arg = ra_red + lm[k] + offa * LN10F + wat * dl[k];
+                    const int n = na + nm[k];
+                    f[k] = (n < -125) ? 0.f : (n >= 128 ? 3.402823466e+38f : ldexpf(expf(arg), n));
+                }
+            }
+            a_prev = a;
+        } else {
+            const bool nr = d_newr[t] != 0;
+            const float dwa = (float)d_dwa[t];
+            #pragma unroll
+            for (int k = 0; k < NG; ++k) {
+                if (k < ng) {
+                    if (nr) r[k] = expf(dwa * dl[k]);
+                    f[k] = f[k] * r[k];
+                }
+            }
+        }
+        #pragma unroll
+        for (int k = 0; k < NG; ++k) {
+            if (k < ng) {
+                sy[k] += d_cy[t + (long long)mi[k] * nt_neb] * f[k];
+                so[k] += d_co[t + (long long)mi[k] * nt_neb] * f[k];
+            }
+        }
+    }
+    #pragma unroll
+    for (int k = 0; k < NG; ++k) {
+        if (k < ng) {
+            y[k] += sy[k]; o[k] += so[k];
+            d_yo[j + (long long)mi[k] * nspec] += y[k];
+            d_yo[j + (long long)(n_mod + mi[k]) * nspec] += o[k];
+        }
+    }
+}
+
+// The groups (host side: a counting sort of the models by cell), persistent device scratch
+static int* g_d_order = nullptr; static int* g_d_gstart = nullptr; static int g_cap = 0;
+static int build_cell_groups(int n_mod, const int* d_iz, const int* d_iu, int ng_max) {
+    if (g_cap < n_mod) {
+        if (g_d_order) { (void)hipFree(g_d_order); (void)hipFree(g_d_gstart); }
+        (void)hipMalloc(&g_d_order, (size_t)n_mod * sizeof(int));
+        (void)hipMalloc(&g_d_gstart, ((size_t)n_mod + 1) * sizeof(int));
+        g_cap = n_mod;
+    }
+    int* hz = (int*)malloc((size_t)n_mod * 4 * sizeof(int) + 16);
+    int* hu = hz + n_mod; int* ord = hu + n_mod; int* gs = ord + n_mod;
+    (void)hipMemcpy(hz, d_iz, (size_t)n_mod * sizeof(int), hipMemcpyDeviceToHost);
+    (void)hipMemcpy(hu, d_iu, (size_t)n_mod * sizeof(int), hipMemcpyDeviceToHost);
+    int maxk = 0;
+    for (int m = 0; m < n_mod; ++m) { int k = hz[m] * 64 + hu[m]; if (k > maxk) maxk = k; }
+    int* cnt = (int*)calloc((size_t)maxk + 2, sizeof(int));
+    for (int m = 0; m < n_mod; ++m) cnt[hz[m] * 64 + hu[m] + 1]++;
+    for (int k = 0; k <= maxk; ++k) cnt[k + 1] += cnt[k];
+    int* pos = (int*)malloc(((size_t)maxk + 2) * sizeof(int));
+    for (int k = 0; k <= maxk + 1; ++k) pos[k] = cnt[k];
+    for (int m = 0; m < n_mod; ++m) ord[pos[hz[m] * 64 + hu[m]]++] = m;
+    int ngr = 0;
+    for (int k = 0; k <= maxk; ++k) {
+        for (int b = cnt[k]; b < cnt[k + 1]; b += ng_max) gs[ngr++] = b;
+    }
+    gs[ngr] = n_mod;
+    (void)hipMemcpy(g_d_order, ord, (size_t)n_mod * sizeof(int), hipMemcpyHostToDevice);
+    (void)hipMemcpy(g_d_gstart, gs, ((size_t)ngr + 1) * sizeof(int), hipMemcpyHostToDevice);
+    free(hz); free(cnt); free(pos);
+    return ngr;
+}
+
 extern "C" {
 
 void opensps_hip_nebular_continuum_sp(
@@ -1090,6 +1258,19 @@ void opensps_hip_nebular_continuum_sp(
     dim3 block(256);
     dim3 grid((nspec + 255) / 256, n_mod);
     hipStream_t s = (hipStream_t)stream;
+    const char* grp_env = getenv("OPENSPS_NEB_GROUP");
+    int gsz = grp_env ? atoi(grp_env) : 8;   // 0 or 1: the one-thread-per-model kernel (A/B timing)
+    if (gsz >= 2) {
+        const int G = gsz >= 8 ? 8 : (gsz >= 4 ? 4 : 2);
+        const int ngr = build_cell_groups(n_mod, d_iz, d_iu, G);
+        dim3 gg((nspec + 255) / 256, ngr);
+#define NEB_GROUPED(GG) nebular_continuum_grouped_kernel<GG><<<gg, block, 0, s>>>( \
+            n_mod, nspec, ntab, nt_neb, d_tab, d_ia, d_wa, d_dwa, d_newr, d_cy, d_co, d_lns, d_iz, d_wz, d_iu, d_wu, \
+            g_d_order, g_d_gstart, d_yo)
+        if (G == 8) { NEB_GROUPED(8); } else if (G == 4) { NEB_GROUPED(4); } else { NEB_GROUPED(2); }
+        (void)hipDeviceSynchronize();
+        return;
+    }
     nebular_continuum_tiled_kernel<float><<<grid, block, 0, s>>>(
         n_mod, nspec, ntab, nt_neb, d_tab, d_ia, d_wa, d_dwa, d_newr,
         d_cy, d_co, d_lns, d_iz, d_wz, d_iu, d_wu, d_yo

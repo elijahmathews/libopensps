@@ -114,6 +114,9 @@ module opensps_csp_batch
     private
 
     public :: compute_csp_batch, batch_spectra_device, batch_spectra_host
+#if defined(OMP_TARGET) && defined(__flang__)
+    public :: nebular_continuum_tiled   ! (the nebular kernel, for its unit test)
+#endif
     public :: BGRAD_FAGN, BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
               BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, &
               BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
@@ -2159,6 +2162,31 @@ contains
 
         ! 4. Line luminosities per (line, model), young and old: sum over ages of the weight times
         !    10**(log grid interpolated) * Q
+#if defined(OMP_TARGET) && defined(__flang__)
+        if (nb_cont) then
+            ! The same sum as the continuum's, with the line in place of the pixel: C(t) 10**lg(t) per
+            ! line, the weights C (young, old) and ln S as computed above for the continuum
+            !$omp target teams distribute parallel do collapse(2)
+            do m = 1, 2 * n_mod
+                do i = 1, NEMLINE
+                    nb_lum(i, m) = 0.0_KP
+                end do
+            end do
+            if (xrb) then
+                call nebular_continuum_tiled(n_mod, NEMLINE, NEMLINE, nt_neb, ctx%state%xnebem_line, nb_ia, nb_wa, &
+                                             nb_dwa, nb_newr, nb_cy, nb_co, nb_lns, nb_iz, nb_wz, nb_iu, nb_wu, nb_lum)
+            else
+                call nebular_continuum_tiled(n_mod, NEMLINE, NEMLINE, nt_neb, ctx%state%nebem_line, nb_ia, nb_wa, &
+                                             nb_dwa, nb_newr, nb_cy, nb_co, nb_lns, nb_iz, nb_wz, nb_iu, nb_wu, nb_lum)
+            end if
+            !$omp target teams distribute parallel do collapse(2)
+            do m = 1, n_mod
+                do i = 1, NEMLINE
+                    eml(i, m) = nb_lum(i, m) + nb_lum(i, n_mod + m)
+                end do
+            end do
+        else
+#endif
         associate (a_nebem_line => ctx%state%nebem_line, a_xnebem_line => ctx%state%xnebem_line)
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(y, o, wk, q, lg, ra, rb, a, t) &
@@ -2204,6 +2232,9 @@ contains
             end do
         end do
         end associate
+#if defined(OMP_TARGET) && defined(__flang__)
+        end if
+#endif
 
         ! 5. Line profiles: per pixel, the lines whose profile reaches it
         if (nb_lines_in_spec) then
