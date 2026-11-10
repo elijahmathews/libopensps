@@ -17,7 +17,7 @@ module opensps_batch_photometry
     use opensps_interpolation, only: find_interval, interpolate_linear
     use opensps_special_functions, only: mag_from_flux
     use opensps_smoothing, only: velocity_kernel_t, build_velocity_kernel
-    use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+    use opensps_ieee_compat
 #if defined(OPENSPS_ACCEL_BLAS)
     use opensps_accel_blas, only: accel_blas_init, accel_blas_gemm, ACCEL_BLAS_OP_T, ACCEL_BLAS_OP_N
     use, intrinsic :: iso_c_binding, only: c_loc

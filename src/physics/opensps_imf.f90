@@ -9,6 +9,13 @@ module opensps_imf
     
     use, intrinsic :: iso_fortran_env, only: error_unit
     use opensps_precision, only: WP, KP
+#if defined(OPENSPS_DEVICE_ERF)
+#define ERF_ erf_device
+#define ERFC_ erfc_device
+#else
+#define ERF_ erf
+#define ERFC_ erfc
+#endif
     use opensps_context_types, only: opensps_context_t
     implicit none
 
@@ -93,7 +100,7 @@ contains
         logical, intent(in)  :: mass_weighted
         real(WP) :: int_val
         int_val = imf_integral(imf_type, p(IMF_P_SALP), p(IMF_P_ALPHA:IMF_P_ALPHA + 2), p(IMF_P_VDMC), &
-                               p(IMF_P_MDAVE), nint(p(IMF_P_NUSER)), p(IMF_P_USER:IMF_NPAR), m1, m2, mass_weighted)
+                               p(IMF_P_MDAVE), int(p(IMF_P_NUSER) + sign(0.5_wp, p(IMF_P_NUSER))), p(IMF_P_USER:IMF_NPAR), m1, m2, mass_weighted)
     end function imf_integral_p
 
     !> @brief
@@ -593,7 +600,7 @@ contains
         integer :: n, k
 
         xc = max(-1.0e4_wp, min(1.0e4_wp, x))
-        n = nint(xc * LOG2E)
+        n = int(xc * LOG2E + sign(0.5_wp, xc))
         if (n < minexponent(1.0_KP)) then
             e = 0.0_KP
         else if (n >= maxexponent(1.0_KP)) then
@@ -712,14 +719,89 @@ contains
             ! Wide bins in the upper tail: erfc(z1) - erfc(z2), the same integral without the
             ! cancellation of erf near 1 (erf(z2) - erf(z1) loses 3e-5 of the bin at z ~ 5: it put
             ! a 1-ulp difference between device and host erf at 6.4e-10 of van Dokkum spectra)
-            val = scale * K * sig * sqrt(0.5_wp * acos(-1.0_wp)) * (erfc(z1) - erfc(z2))
+            val = scale * K * sig * sqrt(0.5_wp * acos(-1.0_wp)) * (ERFC_(z1) - ERFC_(z2))
         else if (z2 <= 0.0_wp) then
             ! (and in the lower tail, by symmetry)
-            val = scale * K * sig * sqrt(0.5_wp * acos(-1.0_wp)) * (erfc(-z2) - erfc(-z1))
+            val = scale * K * sig * sqrt(0.5_wp * acos(-1.0_wp)) * (ERFC_(-z2) - ERFC_(-z1))
         else
-            val = scale * K * sig * sqrt(0.5_wp * acos(-1.0_wp)) * (erf(z2) - erf(z1))
+            val = scale * K * sig * sqrt(0.5_wp * acos(-1.0_wp)) * (ERF_(z2) - ERF_(z1))
         end if
     end function integrate_lognormal
+
+#if defined(OPENSPS_DEVICE_ERF)
+    !> exp(-x^2) with the argument split, x = xh + xl, xh a multiple of 1/16: exp(-xh^2) exp(-xl (x + xh)); the
+    !> products x^2 are exact enough that the relative error stays at rounding (not |x|^2 eps)
+    pure function exp_neg_sq(x) result(r)
+        !$omp declare target
+        real(WP), intent(in) :: x
+        real(WP) :: r, xh
+        xh = floor(x * 16.0_wp + 0.5_wp) / 16.0_wp
+        r = exp(-xh * xh) * exp(-(x - xh) * (x + xh))
+    end function exp_neg_sq
+
+    !> erf and erfc for LLVM flang on NVIDIA GPUs, where neither the device libm (LLVM libc) nor the
+    !> Fortran runtime provides them. erf: the series exp(-x^2) 2/sqrt(pi) sum_n 2^n x^(2n+1) / (2n+1)!!
+    !> (positive terms, no cancellation) for |x| < 1; erfc for x >= 1 (and erf as 1 - erfc there): Laplace's
+    !> continued fraction exp(-x^2) / (sqrt(pi) (x + (1/2) / (x + 1 / (x + (3/2) / (x + ...))))) evaluated
+    !> backwards with a fixed number of terms (200 for x < 1.5, 100 below 2.5, 40 above). Relative error
+    !> against the host libm: erf 9e-16, erfc 3e-15 (0 <= x <= 27).
+    pure function erf_device(x) result(r)
+        !$omp declare target
+        real(WP), intent(in) :: x
+        real(WP) :: r, a
+        a = abs(x)
+        if (a < 1.0_wp) then
+            r = erf_series(a)
+        else
+            r = 1.0_wp - erfc_cf(a)
+        end if
+        if (x < 0.0_wp) r = -r
+    end function erf_device
+
+    pure function erfc_device(x) result(r)
+        !$omp declare target
+        real(WP), intent(in) :: x
+        real(WP) :: r
+        if (x < 0.0_wp) then
+            r = 2.0_wp - erfc_device(-x)
+        else if (x < 1.0_wp) then
+            r = 1.0_wp - erf_series(x)
+        else
+            r = erfc_cf(x)
+        end if
+    end function erfc_device
+
+    pure function erf_series(x) result(r)
+        !$omp declare target
+        real(WP), intent(in) :: x
+        real(WP) :: r, t, s, x2
+        integer :: n
+        t = x
+        s = x
+        x2 = 2.0_wp * x * x
+        do n = 1, 60
+            t = t * x2 / real(2 * n + 1, WP)
+            s = s + t
+            if (t <= 1.0e-18_wp * s) exit
+        end do
+        r = 1.1283791670955126_wp * exp_neg_sq(x) * s
+    end function erf_series
+
+    pure function erfc_cf(x) result(r)
+        !$omp declare target
+        real(WP), intent(in) :: x
+        real(WP) :: r, t
+        integer :: k, nterm
+        nterm = 40
+        if (x < 2.5_wp) nterm = 100
+        if (x < 1.5_wp) nterm = 200
+        t = x
+        do k = nterm, 1, -1
+            t = x + 0.5_wp * real(k, WP) / t
+        end do
+        r = 0.5641895835477563_wp * exp_neg_sq(x) / t
+    end function erfc_cf
+#endif
 
     !> @brief Integral of coeff * m^(-alpha) or coeff * m^(1-alpha) over [lo, hi].
     pure function integrate_powerlaw(lo, hi, alpha, mass_weighted, coeff) result(val)

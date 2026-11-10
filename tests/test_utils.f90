@@ -9,7 +9,7 @@ module test_utils_mod
     !>     Programs call tap_finish() at the end to print the plan line.
     use opensps_precision, only: WP
     use opensps_environment, only: opensps_find_data_root
-    use, intrinsic :: ieee_arithmetic, only: ieee_is_nan, ieee_class, ieee_negative_inf, ieee_class_type, operator(==)
+    use opensps_ieee_compat
     implicit none
 
     ! ANSI Color Codes

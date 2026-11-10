@@ -31,7 +31,7 @@ program test_runner
     !> - 0 on success (all comparisons within tolerance).
     !> - 1 on failure (setup/read errors or numerical mismatches).
 
-    use, intrinsic :: ieee_arithmetic
+    use opensps_ieee_compat
     use opensps_precision, only: WP
     use opensps_constants, only: NEMLINE
     use opensps_types, only: PARAMS, COMPSPOUT

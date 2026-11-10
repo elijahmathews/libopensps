@@ -7,7 +7,7 @@ module test_opensps_photometry_mod
     use opensps_special_functions, only: mag_from_flux
     use test_utils_mod, only: print_group, print_summary_line, print_minor_header, &
                               assert_float_equals, assert_true
-    use, intrinsic :: ieee_arithmetic, only: ieee_is_nan
+    use opensps_ieee_compat
     implicit none
 
     integer :: total_failures = 0

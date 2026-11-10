@@ -64,7 +64,7 @@ module test_opensps_integration_mod
     use test_utils_mod, only: print_group, print_summary_line, print_minor_header, &
                               assert_float_equals, assert_is_nan
     use integration_test_funcs ! Import the functions to test
-    use, intrinsic :: ieee_arithmetic, only: ieee_is_nan
+    use opensps_ieee_compat
     implicit none
 
     ! Global failure counter

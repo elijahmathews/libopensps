@@ -301,6 +301,7 @@ lib_sources = files(
     'src/core/opensps_initialization.f90',
     'src/core/opensps_strings.f90',
     'src/core/opensps_api.f90',
+    'src/core/opensps_ieee_compat.f90',
     'src/core/opensps_precision.f90',
     'src/core/opensps_types.f90',
 

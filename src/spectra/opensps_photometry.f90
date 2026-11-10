@@ -15,7 +15,7 @@ module opensps_photometry
     use opensps_context_types, only: opensps_context_t
     use opensps_interpolation, only: interpolate_linear, find_interval
     use opensps_special_functions, only: mag_from_flux
-    use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+    use opensps_ieee_compat
 
     implicit none
     private

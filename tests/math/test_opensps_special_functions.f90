@@ -4,9 +4,7 @@ module test_opensps_special_functions_mod
     use test_utils_mod, only: print_group, print_summary_line, print_minor_header, &
                               assert_is_nan, assert_is_neg_inf, assert_float_equals, &
                               assert_relative_error
-    use, intrinsic :: ieee_arithmetic, only: ieee_is_nan, ieee_class, &
-                                             ieee_negative_inf, ieee_class_type, &
-                                             operator(==)
+    use opensps_ieee_compat
     implicit none
 
     ! Global failure counter

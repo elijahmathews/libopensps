@@ -3,7 +3,7 @@ module opensps_special_functions
     !> Provides mathematical special functions needed for FSPS physics.
     
     use opensps_precision, only: WP
-    use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan, ieee_negative_inf
+    use opensps_ieee_compat
     implicit none
 
     private

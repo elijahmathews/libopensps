@@ -28,7 +28,7 @@ module opensps_sfh_tangent
     use opensps_special_functions, only: expi, gammainc
     use opensps_interpolation, only: find_interval
     use opensps_sfh, only: convert_sfhparams
-    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+    use opensps_ieee_compat
 
     implicit none
     private

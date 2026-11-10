@@ -3,7 +3,7 @@ module test_opensps_interpolation_mod
     use opensps_interpolation
     use test_utils_mod, only: print_group, print_summary_line, print_minor_header, &
                               assert_int_equals, assert_float_equals, assert_is_nan
-    use, intrinsic :: ieee_arithmetic, only: ieee_is_nan
+    use opensps_ieee_compat
     implicit none
 
     ! Global failure counter

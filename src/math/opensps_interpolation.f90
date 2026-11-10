@@ -307,7 +307,7 @@ contains
 #ifdef OMP_TARGET
         !$omp declare target
 #endif
-        use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+        use opensps_ieee_compat
         real(WP) :: res
         res = ieee_value(0.0_wp, ieee_quiet_nan)
     end function get_quiet_nan

@@ -7,7 +7,7 @@ module test_opensps_sfh_mod
     use opensps_interpolation, only: find_interval
     use test_utils_mod, only: print_group, print_summary_line, print_minor_header, &
                               assert_float_equals, assert_true, assert_relative_error
-    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+    use opensps_ieee_compat
     implicit none
 
     integer :: total_failures = 0

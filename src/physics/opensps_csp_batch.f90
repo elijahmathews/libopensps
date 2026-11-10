@@ -92,7 +92,7 @@ module opensps_csp_batch
     use opensps_dust, only: compute_attenuation_curve_point, one_minus_trans
     use opensps_interpolation, only: find_interval, find_interval_with_hint
     use opensps_cosmology, only: igm_tau, igm_tau_dz
-    use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+    use opensps_ieee_compat
     use opensps_gas, only: get_grid_indices_weights, prepare_line_gaussians
     use opensps_spectral_indices, only: compute_spectral_indices_columns
     use opensps_smoothing, only: apply_smoothing, apply_smoothing_adjoint
@@ -2497,7 +2497,7 @@ contains
             return
         end if
         xc = max(-1.0e4_wp, min(1.0e4_wp, x))
-        n = nint(xc * LOG2E)
+        n = int(xc * LOG2E + sign(0.5_wp, xc))
         if (n < minexponent(1.0_KP)) then
             e = 0.0_KP
         else if (n >= maxexponent(1.0_KP)) then

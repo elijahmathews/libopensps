@@ -10,7 +10,7 @@ program test_standard_library
     !>    load exactly like the axis-free library when the axis has one value or the default
     !>    (afe = 0) is taken, and 'name:afe=0.4' selects the other block.
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_null_char
-    use, intrinsic :: ieee_arithmetic, only: ieee_is_finite
+    use opensps_ieee_compat
     use opensps_precision, only: WP
     use opensps_types, only: PARAMS, COMPSPOUT
     use opensps_api, only: opensps_create, opensps_setup, opensps_destroy, opensps_set_param_int, opensps_set_param_float

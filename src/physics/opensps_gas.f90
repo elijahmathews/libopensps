@@ -22,7 +22,7 @@ module opensps_gas
     use opensps_context_types, only: opensps_context_t
     use opensps_integration, only: integrate_trapezoid_array
     use opensps_interpolation, only: find_interval
-    use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+    use opensps_ieee_compat
 
     implicit none
     private
