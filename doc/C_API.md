@@ -96,11 +96,17 @@ Any of the three filter pointers may be `NULL`. Status 1 for a bad handle, 301 b
 ```c
 void opensps_context_set_sfh_tab(int handle, int ntab, const double *age, const double *sfr,
                               const double *met, int *status);
+void opensps_context_set_mag_compute(int handle, int n_bands, const int *mask, int *status);
 void opensps_context_compute_csp(int handle, int zcontinuous, int *n_out, int *status);
 void opensps_context_get_csp(int handle, double *age, double *mass, double *lbol, double *sfr,
                           double *mdust, double *mformed, double *spec, double *mags,
                           double *emlines, double *indx, int *status);
 ```
+
+`opensps_context_set_mag_compute` chooses the bands the context computes (batches and scenarios): `mask[0..n_bands-1]`,
+nonzero = computed, bands beyond `n_bands` are not; a NULL mask computes all bands again. The photometry costs in
+proportion to the number of bands (R9700, 10^4 models: 12 ms for the 159 bands, about 2 ms for 29), and the
+magnitudes of the bands not computed are NaN. Status 1 for a bad handle, 3 for `n_bands` outside 1 to `nbands`.
 
 `opensps_context_compute_csp` runs `compute_csp_scenario` (one batch call, one model per output age) for the
 context's parameters. `zcontinuous` selects the SSPs: 0 the grid at `zmet`; 1 the grids

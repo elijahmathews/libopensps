@@ -6,3 +6,8 @@ typedef cudaStream_t hipStream_t;
 #define hipStreamSynchronize cudaStreamSynchronize
 #define hipDeviceSynchronize cudaDeviceSynchronize
 #define __shfl_down(v, o, w) __shfl_down_sync(0xffffffffu, (v), (o), (w))
+#define hipMalloc cudaMalloc
+#define hipFree cudaFree
+#define hipMemcpy cudaMemcpy
+#define hipMemcpyHostToDevice cudaMemcpyHostToDevice
+#define hipMemcpyDeviceToHost cudaMemcpyDeviceToHost

@@ -62,9 +62,13 @@ format, conversion, packing; format and workflows in `doc/DATA_FORMAT.md`).
   and its cause in the pull request. Publishing the new references is the user's step.
 - Physics changes are checked against legacy FSPS (`tools/legacy_parity/run_matrix.sh`); every
   deliberate difference is listed with its cause in `tools/legacy_parity/README.md`.
-- GPU builds match the CPU build: FP64 to ~1e-10 per pixel, FP32 to ~5e-7 (`tools/compare_builds`
-  over `tests/data/param_cases.psv`; up to ~9e-7 in pixels behind optical depths of several (A100 8.4e-7, R9700 6.9e-7), as in
-  `tools/compare_builds/stress_cases.psv`: `doc/MIXED_PRECISION.md`, Caveats).
+- GPU builds match the CPU build: FP64 to ~1e-10 per pixel; FP32 to **1e-5 on band magnitudes and
+  per-pixel fluxes (the requirement)**, with ~5e-7 as the level reached today and a tripwire: a change
+  that raises the measured error past it is reported and justified in the pull request (size, cause,
+  physics reason), not blocked (`tools/compare_builds` over `tests/data/param_cases.psv`; up to ~9e-7 in
+  pixels behind optical depths of several, as in `tools/compare_builds/stress_cases.psv`:
+  `doc/MIXED_PRECISION.md`, "What the FP32 results are gated on"). Overflow, underflow and cancellation
+  cases are gated explicitly: they are gross errors, not round-off.
 - Data format changes keep reading the previous format (a documented transition alias) and
   keep the parity suite bit-identical.
 - Never claim a test passed without having run it; report failures with their output, and

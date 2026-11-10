@@ -26,6 +26,7 @@ module opensps_cosmology
 
     ! Public Interface
     public :: air_to_vacuum
+    public :: igm_tau_pixel_terms, igm_tau_z_terms, IGM_NTERM
     public :: vacuum_to_air
     public :: get_universe_age
     public :: get_luminosity_distance
@@ -60,6 +61,8 @@ module opensps_cosmology
 
     ! --- IGM Absorption Constants (Madau 1995) ---
     integer, parameter  :: N_LYMAN_LINES = 17
+    !> Madau's optical depth as a sum of IGM_NTERM products a_k(wavelength) b_k(1 + z) (igm_tau_pixel_terms, igm_tau_z_terms)
+    integer, parameter  :: IGM_NTERM = 6
     real(WP), parameter :: LYMAN_LIMIT   = 911.75_wp
     real(WP), parameter :: A_METAL       = 0.0017_wp
     
@@ -402,6 +405,66 @@ contains
                 (MADAU_C4 * (one_plus_z**MADAU_P4 - lambda_ratio**MADAU_P4))
         end if
     end function igm_tau
+
+
+    !> The wavelength factors a_k of the Madau (1995) optical depth, tau(wavelength, 1 + z) = sum_k a_k b_k with the
+    !> redshift factors b_k of igm_tau_z_terms. Every term of the Lyman series, the metal blanketing and the Lyman
+    !> continuum is a power of the observed wavelength, i.e. (wavelength)**p (1 + z)**p: the sum over the series is
+    !> then a table over the wavelengths alone, and the optical depth of a pixel and a model costs IGM_NTERM
+    !> multiplications instead of ~20 powers (the batch has to form it for pixels x models). The same function as
+    !> igm_tau to rounding (the continuum differences opz**p - lr**p are factored as opz**p (1 - s**p), s the
+    !> wavelength over the Lyman limit, which is also better conditioned near the limit). All a_k vanish at
+    !> wavelengths above the Lyman-alpha line.
+    subroutine igm_tau_pixel_terms(wavelength, a)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(WP), intent(in)  :: wavelength
+        real(WP), intent(out) :: a(IGM_NTERM)
+        real(WP) :: s, ser
+        integer  :: i
+#ifdef OMP_TARGET
+        real(WP), parameter :: LYW(N_LYMAN_LINES) = LY_WAVE, LYC(N_LYMAN_LINES) = LY_COEFF
+#else
+#define LYW LY_WAVE
+#define LYC LY_COEFF
+#endif
+        a = 0.0_wp
+        if (wavelength < LYW(1)) then
+            ser = 0.0_wp
+            do i = 1, N_LYMAN_LINES
+                if (wavelength < LYW(i)) ser = ser + LYC(i) * LYW(i)**(-3.46_wp)
+            end do
+            a(1) = ser * wavelength**3.46_wp
+            a(2) = A_METAL * (wavelength / LYW(1))**1.68_wp
+        end if
+        if (wavelength < LYMAN_LIMIT) then
+            s = wavelength / LYMAN_LIMIT
+            a(3) = MADAU_C1 * s**3.0_wp * (1.0_wp - s**MADAU_P1)
+            a(4) = MADAU_C2 * s**1.5_wp * (1.0_wp - s**MADAU_P2)
+            a(5) = -MADAU_C3 * s**3.0_wp * (s**(-MADAU_P3) - 1.0_wp)
+            a(6) = -MADAU_C4 * (1.0_wp - s**MADAU_P4)
+        end if
+#ifndef OMP_TARGET
+#undef LYW
+#undef LYC
+#endif
+    end subroutine igm_tau_pixel_terms
+
+    !> The redshift factors b_k = (1 + z)**p_k of the terms of igm_tau_pixel_terms
+    subroutine igm_tau_z_terms(one_plus_z, b)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(WP), intent(in)  :: one_plus_z
+        real(WP), intent(out) :: b(IGM_NTERM)
+        b(1) = one_plus_z**3.46_wp
+        b(2) = one_plus_z**1.68_wp
+        b(3) = one_plus_z**(3.0_wp + MADAU_P1)
+        b(4) = one_plus_z**(1.5_wp + MADAU_P2)
+        b(5) = one_plus_z**(3.0_wp - MADAU_P3)
+        b(6) = one_plus_z**MADAU_P4
+    end subroutine igm_tau_z_terms
 
     !> d igm_tau / d(1 + z) at a rest-frame wavelength (the gradients of compute_csp_batch): the
     !> Lyman-series power laws and Madau's continuum terms differentiated term by term.

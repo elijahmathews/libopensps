@@ -94,6 +94,28 @@ errors up to 50% in old far-UV spectra, 0.5 mag in UV bands, and NaNs in the neb
 paths. The causes are in the cheap parts (isochrone handling and IMF weights, which difference
 nearly equal masses; constants that overflow), which is why they stay in WP.
 
+## What the FP32 results are gated on
+
+The requirement is set by what the output is used for, not by what the kernels happen to reach.
+
+| Quantity | Size |
+|---|---|
+| Photometric noise in fits (5%, 1%, 0.1% at best) | 54, 11, 1 mmag |
+| Known, intentional differences from legacy FSPS (`tools/legacy_parity/README.md`) | 0.2-2 mmag |
+| Systematic uncertainty of libraries, isochrones, IMF and dust law | at least 50 mmag |
+| **The requirement: band magnitudes and per-pixel fluxes, FP32 against FP64** | **1e-5 (0.011 mmag)** |
+| Reached by the kernels (`tools/compare_builds`, matrix cases) | 5.7e-7 per pixel, 5.3e-7 mag (the tripwire) |
+
+An error of 1e-5 is 2e-4 sigma at 5% noise and 0.01 sigma at 0.1%, 20 times below the smallest physics
+difference already accepted against legacy, and it is round-off: close to random across pixels and averaged
+over the hundreds of pixels of a band, not a coherent shift. The 5e-7 level stays as a tripwire: a change
+that moves the measured error past it is justified in the pull request (what, how much, why the physics
+allows it), not blocked. What the 1e-5 does **not** cover, and is gated explicitly instead, are the
+failures that are not round-off: overflow and underflow (rules 5-7), cancellation (rule 2: the dust
+luminosity at small dust2, differences of nearly equal integrals) and the large exponent of the nebular
+continuum. Gradients are the other consumer: reverse-mode gradients are fine at 1e-5, but finite
+differences of FP32 output with small steps are not (Caveats).
+
 ## Rules for FP32 kernels
 
 These came out of the measurements; a GPU port must follow them.
@@ -127,6 +149,18 @@ These came out of the measurements; a GPU port must follow them.
    exponential. Weights that leave the FP32 range (rule 5) are divided by their largest value
    per model, whose logarithm joins x. The result is still a KP exponential: where the argument
    itself is a large optical depth, e**(-tau) keeps a relative error of ~tau eps (see Caveats).
+
+8. **Share the FP64 part of a kernel among the models that need it.** On consumer and workstation GPUs
+   the FP64 operations that rules 3-4 and 7 leave in a per-(pixel, model) kernel are its cost (R9700: the
+   nebular continuum, 70 ms of a 190 ms batch at N = 10^4). They depend on the pixel, the CLOUDY cell and the
+   age interval, not on the model: the HIP nebular kernel groups the models by (Z, U) cell (up to 8 per
+   thread), forms the corner values, their differences, the interval's log step and the range reduction of
+   the large exponent once per group in FP64, and does the per-model work in FP32 on small numbers (the
+   interpolation offset, <~ 3 in log10; the model's own ln S, reduced once). Measured on 300-pixel
+   synthetic tables with deliberately wide structure: 6.3e-7 worst per pixel (the one-thread-per-model kernel:
+   2.8e-7); on the matrix cases the same as before. The emission lines use the same kernel, and the IGM
+   optical depth is a sum of six wavelength x redshift terms, a table over the pixels below Lyman-alpha and six
+   powers per model, instead of ~20 FP64 powers per (pixel, model) (agrees with `igm_tau` to 2e-13).
 
 ## What this means for a GPU port
 

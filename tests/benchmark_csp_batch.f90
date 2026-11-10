@@ -9,6 +9,7 @@ program benchmark_csp_batch
     !> IGM at zred = 0.5, AGN with fagn = 0.1, spectral indices; tau, age, U_min and gas_logu vary);
     !> "full_smooth": the same with velocity smoothing, sigma_smooth = 150 km/s; "full_z" and
     !> "full_smooth_z": with the bases of all metallicities resident and logzsol varying per model;
+    !> any config containing "_fit": a fitting population (zred, gas_logz, dust2, dust1, dust_index, fagn vary too);
     !> any config ending in "_imf": the IMF free per model (Kroupa, imf1-3 varied; the batch
     !> from the template operator, built once and timed); any config with "_grad": also the
     !> gradients (params_bar, with cotangents of the magnitudes, the spectra, mass and lbol).
@@ -38,7 +39,7 @@ program benchmark_csp_batch
     type(COMPSPOUT), allocatable :: results(:)
     real(WP), allocatable :: spec_ssp(:, :), mass_ssp(:), lbol_ssp(:), mags(:, :), spec(:, :)
     character(len=32) :: arg, config = 'basic'
-    logical :: full, zvar = .false., imf = .false., grad = .false.
+    logical :: full, zvar = .false., imf = .false., grad = .false., fit = .false.
     real(WP), allocatable :: mbar(:, :), sbar(:, :), pbar(:, :), massv(:), lbolv(:), massb(:), lbolb(:)
     type(ssp_operator_t), allocatable :: ops(:)
     type(ssp_opset_t) :: opset
@@ -64,6 +65,7 @@ program benchmark_csp_batch
     zvar = index(config, '_z') > 0
     imf = index(config, '_imf') > 0
     grad = index(config, '_grad') > 0
+    fit = index(config, '_fit') > 0
     call system_clock(count_rate=rate)
 
     allocate(ctx)
@@ -318,6 +320,15 @@ contains
             p%imf1 = 0.9_wp + 0.01_wp * mod(i, 61)
             p%imf2 = 1.8_wp + 0.01_wp * mod(i, 83)
             p%imf3 = 2.0_wp + 0.01_wp * mod(i, 79)
+        end if
+        if (fit) then
+            ! A fitting population: everything differs between models (redshift, gas, dust, AGN)
+            p%zred = 0.1_wp + 0.0235_wp * mod(i, 103)
+            p%gas_logz = -1.5_wp + 0.03_wp * mod(i, 67)
+            p%dust2 = 0.05_wp + 0.01_wp * mod(i, 89)
+            p%dust1 = 0.5_wp * p%dust2
+            p%dust_index = -1.0_wp + 0.01_wp * mod(i, 53)
+            p%fagn = 0.001_wp + 0.005_wp * mod(i, 37)
         end if
         if (full) then
             p%gas_logu = -3.5_wp + 0.05_wp * mod(i, 41)

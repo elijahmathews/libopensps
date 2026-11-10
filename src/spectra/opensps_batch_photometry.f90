@@ -14,7 +14,7 @@ module opensps_batch_photometry
     use opensps_constants, only: SAFE_FLOOR, C_LIGHT, ABS_MAG_ZEROPOINT_LOG
     use opensps_context_types, only: opensps_context_t, batch_grid_release
     use opensps_cosmology, only: compute_igm_transmission
-    use opensps_interpolation, only: find_interval, interpolate_linear
+    use opensps_interpolation, only: find_interval, find_interval_with_hint, interpolate_linear
     use opensps_special_functions, only: mag_from_flux
     use opensps_smoothing, only: velocity_kernel_t, build_velocity_kernel
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
@@ -30,6 +30,7 @@ module opensps_batch_photometry
     public :: smoothing_on_device, prepare_smoothing_kernel, smooth_columns, smooth_columns_adjoint
     public :: distance_term_dz, smooth_sigma_adjoint, free_smooth_work
     public :: band_fluxes   ! (the test of the band integrals calls it directly)
+    public :: observed_frame_z   ! (likewise)
 
     real(WP), parameter :: AB_ZEROPOINT = 48.60_wp
     integer, parameter  :: IDX_V_BAND = 1
@@ -705,38 +706,75 @@ contains
         real(KP), intent(in)    :: wl(:), total(:,:)
         real(KP), intent(out)   :: fobs(:,:)
 
-        integer  :: m, j, il
+        integer, parameter :: CH = 16   ! pixels per thread
+        integer  :: m, j, jc, il, nch
         real(WP) :: v, target, t
         real(KP) :: f
 
+        ! Consecutive pixels of a model fall in consecutive (or the same) rest-frame intervals, so each
+        ! thread takes CH of them and searches from the previous pixel's interval (find_interval_with_hint
+        ! gives the same index as the full bisection, which every (pixel, model) paid before). The model is
+        ! the fast thread index in the transposed layout so that its writes are contiguous.
+        nch = (npad + CH - 1) / CH
+        if (transposed) then
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(il, v, target, t, f) &
+        !$omp target teams distribute parallel do collapse(2) private(il, v, target, t, f, j) &
         !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda)
 #elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(il, v, target, t, f)
+        !$omp parallel do collapse(2) private(il, v, target, t, f, j)
 #endif
-        do m = 1, n_col
-            do j = 1, npad
-                f = 0.0_KP
-                if (j <= nspec) then
-                    if (abs(zc(m)) > SAFE_FLOOR) then
-                        target = ctx%state%spec_lambda(j) / (1.0_wp + zc(m))
-                        il = max(1, min(find_interval(ctx%state%spec_lambda, target), nspec - 1))
-                        t = (target - ctx%state%spec_lambda(il)) / (ctx%state%spec_lambda(il + 1) - ctx%state%spec_lambda(il))
-                        v = real(total(il, m), WP) + t * (real(total(il + 1, m), WP) - real(total(il, m), WP))
-                    else
-                        v = real(total(j, m), WP)
-                    end if
-                    if (v /= v) v = 0.0_wp
-                    f = real(max(v, 0.0_wp), KP) * wl(j)
-                end if
-                if (transposed) then
-                    if (j <= nspec) fobs(m, j) = f
-                else
-                    fobs(j, m) = f
-                end if
+            do jc = 1, nch
+                do m = 1, n_col
+                    il = 0
+                    do j = (jc - 1) * CH + 1, min(jc * CH, npad)
+                        f = 0.0_KP
+                        if (j <= nspec) then
+                            if (abs(zc(m)) > SAFE_FLOOR) then
+                                target = ctx%state%spec_lambda(j) / (1.0_wp + zc(m))
+                                il = max(1, min(find_interval_with_hint(ctx%state%spec_lambda, target, il), nspec - 1))
+                                t = (target - ctx%state%spec_lambda(il)) / &
+                                    (ctx%state%spec_lambda(il + 1) - ctx%state%spec_lambda(il))
+                                v = real(total(il, m), WP) + t * (real(total(il + 1, m), WP) - real(total(il, m), WP))
+                            else
+                                v = real(total(j, m), WP)
+                            end if
+                            if (v /= v) v = 0.0_wp
+                            f = real(max(v, 0.0_wp), KP) * wl(j)
+                            fobs(m, j) = f
+                        end if
+                    end do
+                end do
             end do
-        end do
+        else
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(il, v, target, t, f, j) &
+        !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(il, v, target, t, f, j)
+#endif
+            do m = 1, n_col
+                do jc = 1, nch
+                    il = 0
+                    do j = (jc - 1) * CH + 1, min(jc * CH, npad)
+                        f = 0.0_KP
+                        if (j <= nspec) then
+                            if (abs(zc(m)) > SAFE_FLOOR) then
+                                target = ctx%state%spec_lambda(j) / (1.0_wp + zc(m))
+                                il = max(1, min(find_interval_with_hint(ctx%state%spec_lambda, target, il), nspec - 1))
+                                t = (target - ctx%state%spec_lambda(il)) / &
+                                    (ctx%state%spec_lambda(il + 1) - ctx%state%spec_lambda(il))
+                                v = real(total(il, m), WP) + t * (real(total(il + 1, m), WP) - real(total(il, m), WP))
+                            else
+                                v = real(total(j, m), WP)
+                            end if
+                            if (v /= v) v = 0.0_wp
+                            f = real(max(v, 0.0_wp), KP) * wl(j)
+                        end if
+                        fobs(j, m) = f
+                    end do
+                end do
+            end do
+        end if
     end subroutine observed_frame_z
 
     !> Observed-frame spectrum / lambda (prepare_observed_spectrum), zero in the padding rows.
