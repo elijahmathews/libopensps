@@ -284,6 +284,14 @@ them, `test_csp_batch` still failed on the 780M. Remaining:
 
 ### Further items
 
+- **cue nebular emission** (done 2026-11-10, `nebular_model = 1`): cue's networks evaluated in the
+  batch, with the model's own ionizing spectrum (`tools/cue/README.md`). Open:
+  - gradients (backpropagation through the networks, the clamp-free closed-form fit and the spline);
+  - the IMF per model (the ionizing spectrum from the operator);
+  - non-stellar ionizing sources (offsets to the power-law parameters, as E-FSPS's `delta_ionspec_*`);
+  - nebular emission from old stars;
+  - shipping the converted weights with a data release.
+
 - **Likelihood on the device** (moved out of priority 2 on 2026-10-21: it rests on assumptions
   about the observables): given observed fluxes, uncertainties and a mask, return chi^2 (or
   log-likelihood) per model without copying spectra back. A sampler needs one number per model,

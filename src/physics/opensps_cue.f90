@@ -64,6 +64,9 @@ module opensps_cue
 
     !> Models per pass through the networks (bounds the scratch: 2 x 256 x 17 x CHUNK values)
     integer, parameter, public :: CUE_CHUNK = 4096
+    !> Models per pass of the batch's cue stage (opensps_csp_batch; the tests lower it to run several
+    !> passes with a remainder)
+    integer, public, save :: cue_batch_chunk = CUE_CHUNK
     !> Models per thread in the dense layers (register tile)
     integer, parameter :: TM = 4
 
@@ -438,7 +441,7 @@ contains
     !> and of the continuum [erg/s/Hz] cont_log(ncw, n) on cue's grid, for the network inputs
     !> theta(12, n), as cue's predict_lines / predict_cont before their normalization.
     !> fp64: the hidden layers in FP64 also in FP32 builds (the weights, FP32 as trained, are
-    !> converted exactly as read); else in the kernel precision.
+    !> converted exactly as read); else in the kernel precision (the same in FP64 builds).
     subroutine cue_forward(w, n, theta, line_log, cont_log, chunk, fp64)
         type(cue_weights_t), intent(in) :: w
         integer, intent(in)   :: n
@@ -456,8 +459,9 @@ contains
         if (present(chunk)) ch = max(1, chunk)
         ch = min(n, ch)
         if (ch < 1) return
+        ! (in FP64 builds both branches compute the same thing; fp64 selects the FP64 one there too)
         dbl = .false.
-        if (present(fp64)) dbl = fp64 .and. kind(1.0_KP) /= kind(1.0_WP)
+        if (present(fp64)) dbl = fp64
         if (dbl) then
             allocate(hd(CUE_NHID, ch, CUE_NNET), lpc(CUE_NPCA_LINE, ch, CUE_NGROUP), cpc(w%npc, ch), &
                      hd2(CUE_NHID, ch, CUE_NNET), x0d(CUE_NIN, ch, CUE_NNET), ha(1, 1, 1), hb(1, 1, 1), x0(1, 1, 1))
@@ -1377,7 +1381,7 @@ contains
 
     !> Splines n spectra onto the output grid: v(n, n_knots) (the spectra, model index first, so
     !> the threads of the solve read consecutive addresses), out(nout, n); mm (as v) is scratch for
-    !> the second derivatives. cue_spline_solve, then cue_spline_eval.
+    !> the second derivatives. cue_spline_solve, then the evaluation.
     subroutine cue_spline_apply(nk, nout, n, h, cp, rden, aa, m0c, mnc, k, t, hh6, v, mm, out)
         integer, intent(in)   :: nk, nout, n
         real(WP), intent(in)  :: h(nk - 1)
@@ -1390,7 +1394,7 @@ contains
         integer  :: m, j, kk
         real(KP) :: tt, u
 
-        call cue_spline_solve(nk, n, h, cp, rden, aa, m0c, mnc, v, mm)
+        call cue_spline_solve(nk, n, n, h, cp, rden, aa, m0c, mnc, v, mm)
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(kk, tt, u)
 #elif defined(_OPENMP)
@@ -1411,14 +1415,14 @@ contains
         end do
     end subroutine cue_spline_apply
 
-    !> The spline's second derivatives mm(n, nk) of n spectra v(n, nk) (one thread per spectrum: the
-    !> Thomas sweeps of the factored not-a-knot system).
-    subroutine cue_spline_solve(nk, n, h, cp, rden, aa, m0c, mnc, v, mm)
-        integer, intent(in)   :: nk, n
+    !> The spline's second derivatives mm(1:n, nk) of n spectra v(1:n, nk), both with leading
+    !> dimension ld (one thread per spectrum: the Thomas sweeps of the factored not-a-knot system).
+    subroutine cue_spline_solve(nk, n, ld, h, cp, rden, aa, m0c, mnc, v, mm)
+        integer, intent(in)   :: nk, n, ld
         real(WP), intent(in)  :: h(nk - 1)
         real(KP), intent(in)  :: cp(nk - 2), rden(nk - 2), aa(nk - 2), m0c(2), mnc(2)
-        real(KP), intent(in)  :: v(n, nk)
-        real(KP), intent(inout) :: mm(n, nk)
+        real(KP), intent(in)  :: v(ld, nk)
+        real(KP), intent(inout) :: mm(ld, nk)
         integer  :: m, j, i
         real(KP) :: r
 

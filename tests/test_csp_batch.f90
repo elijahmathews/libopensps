@@ -165,6 +165,7 @@ program test_csp_batch
     call build_basis()
     ! Per-model metallicity: all bases resident, logzsol varied
     call check_batch_z()
+    call check_cue_z()
     ! Weights over ages and metallicities (several metallicities; tabular SFHs with Z per bin)
     call check_weights_z()
     ! The IMF and the metallicity free per model (the blend of operators)
@@ -907,6 +908,81 @@ contains
         call assert_true(d_indx <= INDX_TOL, "spectral indices", total_tests, total_failures)
     end subroutine check_batch_z
 
+    !> cue with the metallicity per model (all bases resident): each model's lines equal those of
+    !> a batch of that model alone on the basis interpolated to its metallicity (the ionizing
+    !> spectrum and its photons are linear in the basis). Synthetic networks without
+    !> OPENSPS_CUE_DATA; hidden layers in FP64 (cue_fp64 = 1), so the comparison is not limited by
+    !> the networks' FP32 rounding.
+    subroutine check_cue_z()
+        use opensps_cue, only: cue_data_dir, cue_w, cue_load_dir, cue_unload, cue_weights_t
+        use cue_test_library, only: cue_synthetic, cue_write_library
+        real(WP), parameter :: logz(N_MOD) = [-1.6_wp, -1.2_wp, -0.9_wp, -0.55_wp, -0.3_wp, -0.1_wp, &
+                                              0.0_wp, 0.1_wp, 0.18_wp, -0.75_wp, -1.4_wp, -0.2_wp]
+        type(PARAMS) :: psets(N_MOD)
+        type(cue_weights_t) :: syn
+        real(WP), allocatable :: spec_z(:, :, :), mass_z(:, :), lbol_z(:, :), mags(:, :), eml(:, :), ref_eml(:, :)
+        real(WP), allocatable :: w(:, :)
+        real(WP) :: dz, d_line
+        integer  :: nz, nt, nspec, z, m, status, zlo
+        logical  :: real_data
+
+        call print_group("cue with the metallicity per model (all bases resident)")
+        nz = ctx%state%nz
+        nt = ctx%state%ntfull
+        nspec = ctx%state%nspec
+        real_data = len(cue_data_dir()) > 0
+        if (.not. real_data) then
+            call cue_synthetic(syn, ctx%state%nebem_line_pos(1:43))
+            call cue_write_library(syn, 'cue_batch_test_lib_z')
+            call cue_unload(syn)
+            call cue_load_dir(cue_w, 'cue_batch_test_lib_z')
+        end if
+        allocate(spec_z(nspec, nt, nz), mass_z(nt, nz), lbol_z(nt, nz), mags(ctx%state%nbands, N_MOD), &
+                 eml(NEMLINE, N_MOD), ref_eml(NEMLINE, N_MOD), w(nt, N_MOD))
+        do z = 1, nz
+            call set_int('zmet', z)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(1))
+            call opensps_context_set_pset(ctx, psets(1))
+            call generate_ssp_grid(ctx, psets(1), mass_z(:, z), lbol_z(:, z), spec_z(:, :, z))
+        end do
+        call set_int('zmet', 10)
+        call set_int('add_neb_emission', 1)
+        call set_int('nebular_model', 1)
+        call set_int('cue_fp64', 1)
+        do m = 1, N_MOD
+            w(:, m) = 1.0e-4_wp * merge(30.0_wp, 1.0_wp, [(z, z = 1, nt)] <= 20 + m)
+            call set_model(m, 0.0_wp)
+            call set_float('logzsol', logz(m))
+            call set_float('gas_logn', 1.0_wp + 0.25_wp * mod(m, 13))
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
+            zlo = max(1, min(find_interval(log10(ctx%state%zlegend(1:nz) / ctx%state%zsol), logz(m)), nz - 1))
+            dz = (logz(m) - log10(ctx%state%zlegend(zlo) / ctx%state%zsol)) / &
+                 (log10(ctx%state%zlegend(zlo + 1) / ctx%state%zsol) - log10(ctx%state%zlegend(zlo) / ctx%state%zsol))
+            ctx%state%ssp_basis_is_dirty = .true.
+            call opensps_context_update_ssp_basis(ctx, &
+                reshape((1.0_wp - dz) * spec_z(:, :, zlo) + dz * spec_z(:, :, zlo + 1), [nspec, nt, 1]), &
+                reshape((1.0_wp - dz) * mass_z(:, zlo) + dz * mass_z(:, zlo + 1), [nt, 1]), &
+                reshape((1.0_wp - dz) * lbol_z(:, zlo) + dz * lbol_z(:, zlo + 1), [nt, 1]), 1)
+            call compute_csp_batch(ctx, psets(m:m), mags(:, m:m), status, emlines=ref_eml(:, m:m), ssp_weights=w(:, m:m))
+            call assert_true(status == 0, "status 0 (one model, its basis)", total_tests, total_failures)
+        end do
+        ctx%state%ssp_basis_is_dirty = .true.
+        call opensps_context_update_ssp_basis(ctx, spec_z, mass_z, lbol_z, nz)
+        call compute_csp_batch(ctx, psets, mags, status, emlines=eml, ssp_weights=w)
+        call assert_true(status == 0, "status 0 (all models, all bases)", total_tests, total_failures)
+        d_line = maxval(abs(eml / ref_eml - 1.0_wp), mask=ref_eml > 1.0e-3_wp * maxval(ref_eml))
+        write (*, '(A,ES10.2)') '# worst relative line difference: ', d_line
+        ! FP32 builds: the bases are interpolated in FP32 on one side, FP64 on the other, and the
+        ! fit and networks see the difference
+        call assert_true(d_line <= merge(1.0e-9_wp, 1.0e-4_wp, KP == WP), "lines = the interpolated basis's", &
+                         total_tests, total_failures)
+        if (.not. real_data) call cue_unload(cue_w)
+        call set_int('nebular_model', 0)
+        call set_int('add_neb_emission', 0)
+    end subroutine check_cue_z
+
     !> A single-age CSP without dust, nebular emission, IGM, AGN or smoothing is the SFH-weighted
     !> sum of its SSP basis: spec = sum_t w_t spec_ssp(t), mass = sum_t w_t mass_ssp(t),
     !> L_bol = sum_t w_t L_ssp(t), with the weights of sfh_weights_core (models 1-6: sfh 1, 4, 5,
@@ -1328,7 +1404,8 @@ contains
     !> - gradients are not supported with cue (status 2), the option rejects other values.
     subroutine check_cue()
         use opensps_cue, only: cue_data_dir, cue_w, cue_line_map, cue_ionizing_params, cue_inputs, cue_forward, &
-                               cue_load_dir, cue_unload, cue_weights_t, CUE_EDGE_HI, CUE_NION, CUE_NIN, CUE_LOG_LSUN
+                               cue_load_dir, cue_unload, cue_weights_t, CUE_EDGE_HI, CUE_NION, CUE_NIN, CUE_LOG_LSUN, &
+                               cue_batch_chunk, CUE_CHUNK
         use cue_test_library, only: cue_synthetic, cue_write_library
         use opensps_constants, only: H_PLANCK, L_SOL, NEBNAGE
         use opensps_csp_batch, only: NBGRAD
@@ -1354,21 +1431,26 @@ contains
         ! (the networks' hidden layers in FP64, so the comparison with the test's own assembly is
         ! not limited by FP32 rounding in the networks; case 4 checks the default against it)
         call set_int('cue_fp64', 1)
-        allocate(w(nt, N_MOD), mags(ctx%state%nbands, N_MOD), spec(nspec, N_MOD, 4), eml(NEMLINE, N_MOD, 4))
+        allocate(w(nt, N_MOD), mags(ctx%state%nbands, N_MOD), spec(nspec, N_MOD, 5), eml(NEMLINE, N_MOD, 5))
         do m = 1, N_MOD
             do t = 1, nt
                 w(t, m) = 1.0e-4_wp * (1.0_wp + mod(t + 3 * m, 7)) * merge(30.0_wp, 1.0_wp, t <= 20 + m)
             end do
         end do
         real_data = len(cue_data_dir()) > 0
-        do case_ = 0, 4
+        do case_ = 0, 5
             ! 0: without data (status 4); 1: cue; 2: cue with frac_obrun = 0.5; 3: no nebular emission;
-            ! 4: cue with its hidden layers in the kernel precision (the default)
+            ! 4: cue with its hidden layers in the kernel precision; 5: case 1 in passes of 5 models
+            ! (three passes, the last of two)
             if (case_ == 0 .and. (real_data .or. cue_w%loaded)) cycle
             if (case_ == 3) call set_int('add_neb_emission', 0)
             if (case_ == 4) then
                 call set_int('add_neb_emission', 1)
                 call set_int('cue_fp64', 0)
+            end if
+            if (case_ == 5) then
+                call set_int('cue_fp64', 1)
+                cue_batch_chunk = 5
             end if
             do m = 1, N_MOD
                 call set_model(m, 0.0_wp)
@@ -1401,6 +1483,15 @@ contains
                                    ssp_weights=w)
             call assert_true(status == 0, "status 0", total_tests, total_failures)
         end do
+        cue_batch_chunk = CUE_CHUNK
+        ! (the passes change no model's sums, but a model's place in a register tile does: the compiler
+        ! vectorizes full tiles (FMA) and not the remainder, ~1 ulp, which the exponential of log L ~ 40
+        ! amplifies ~90-fold; a GPU BLAS may also choose other kernels for other sizes)
+        worst = max(maxval(abs(spec(:, :, 5) - spec(:, :, 1)) / max(abs(spec(:, :, 1)), tiny(1.0_wp))), &
+                    maxval(abs(eml(:, :, 5) - eml(:, :, 1)) / max(abs(eml(:, :, 1)), tiny(1.0_wp))))
+        write (*, '(A,ES10.2)') '# passes of 5 models against one: worst relative difference ', worst
+        call assert_true(worst <= merge(1.0e-12_wp, 100.0_wp * real(epsilon(1.0_KP), WP), KP == WP), &
+                         "the batch in passes of 5 models: the same to rounding", total_tests, total_failures)
         call set_int('add_neb_emission', 1)
 
         ! The test's own assembly of the lines
@@ -1469,8 +1560,9 @@ contains
         ! the rounded spectrum
         call assert_true(worst < merge(1.0e-9_wp, 1.0e-5_wp, KP == WP), "lines = cue on the model's ionizing spectrum", &
                          total_tests, total_failures)
-        ! The default (hidden layers in the kernel precision): identical in FP64 builds; in FP32 builds
-        ! within the networks' FP32 rounding (~2e-4 dex, amplified by the line networks' output scales)
+        ! Hidden layers in the kernel precision (cue_fp64 = 0): in FP64 builds the same to rounding (the
+        ! line output stage adds the PCA mean in another order); in FP32 builds within the networks'
+        ! FP32 rounding (~2e-4 dex, amplified by the line networks' output scales)
         worst = 0.0_wp
         do m = 1, N_MOD
             do i = 1, NEMLINE
@@ -1478,7 +1570,7 @@ contains
             end do
         end do
         write (*, '(A,ES10.2)') '# hidden layers in KP against FP64: worst relative line difference ', worst
-        call assert_true(worst <= merge(0.0_wp, 2.0e-3_wp, KP == WP), "the default precision against FP64 hidden layers", &
+        call assert_true(worst <= merge(1.0e-12_wp, 2.0e-3_wp, KP == WP), "cue_fp64 = 0 against FP64 hidden layers", &
                          total_tests, total_failures)
         call assert_true(all(abs(eml(:, :, 2) - 0.5_wp * eml(:, :, 1)) <= 100.0_wp * real(epsilon(1.0_KP), WP) * &
                              abs(eml(:, :, 1))), "frac_obrun = 0.5 halves every line (to rounding)", &

@@ -95,7 +95,7 @@ module opensps_csp_batch
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
     use opensps_gas, only: get_grid_indices_weights, prepare_line_gaussians
     use opensps_cue, only: cue_w, cue_sp, cue_load, cue_line_map, cue_spline_build, cue_spline_solve, &
-                           cue_ionizing_params, cue_inputs, cue_forward, CUE_EDGE_HI, CUE_CHUNK, CUE_NION, CUE_NIN, &
+                           cue_ionizing_params, cue_inputs, cue_forward, CUE_EDGE_HI, cue_batch_chunk, CUE_NION, CUE_NIN, &
                            CUE_LOG_LSUN
     use opensps_spectral_indices, only: compute_spectral_indices_columns
     use opensps_smoothing, only: apply_smoothing, apply_smoothing_adjoint
@@ -1937,7 +1937,7 @@ contains
         ncw = cue_w%ncw
         call cue_spline_build(cue_sp, ncw, cue_w%cont_lam, nspec, ctx%state%spec_lambda(1:nspec))
 
-        ch = min(n_mod, CUE_CHUNK)
+        ch = max(1, min(n_mod, cue_batch_chunk))
         allocate(sion(nion, ch), ion(CUE_NION, ch), theta(CUE_NIN, ch), logq(ch), qy(ch), qo(ch), &
                  line_log(cue_w%nlines, ch), cont_log(ncw, ch), v(ch, ncw), mm(ch, ncw))
 #ifdef OMP_TARGET
@@ -2034,7 +2034,7 @@ contains
                     end if
                 end do
             end do
-            call cue_spline_solve(ncw, nc, cue_sp%h, cue_sp%cp, cue_sp%rden, cue_sp%aa, cue_sp%m0c, cue_sp%mnc, v, mm)
+            call cue_spline_solve(ncw, nc, ch, cue_sp%h, cue_sp%cp, cue_sp%rden, cue_sp%aa, cue_sp%m0c, cue_sp%mnc, v, mm)
             ! The spline at each pixel, added to the young and old sums (in one pass)
             associate (sk => cue_sp%k, st => cue_sp%t, sh6 => cue_sp%hh6)
 #if defined(OMP_TARGET)
