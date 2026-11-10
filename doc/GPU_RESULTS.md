@@ -105,22 +105,24 @@ fit of the ionizing spectrum, the PCA bases and the spline of the continuum. Mea
 
 | | magnitudes | spectra on the device |
 |---|---|---|
-| CLOUDY grids (`full_fit`) | 14.5 | 12.5 |
-| cue, hidden layers FP32 (`cue_fp64 = 0`) | 15.3 | 12.0 |
-| cue, hidden layers FP64 (`cue_fp64 = 1`, the default) | 21.7 | 17.4 |
+| CLOUDY grids (`full_fit`) | 14.3 | 12.0 |
+| cue, hidden layers FP32 (`cue_fp64 = 0`) | 15.7 | 12.1 |
+| cue, hidden layers FP64 (`cue_fp64 = 1`, the default) | 22.4 | 17.1 |
 
 - **The hidden layers** are a tiled HIP kernel (64 x 64 outputs per block, 4 x 4 per thread,
   `cue_dense_act_kernel`), with the bias and the activation fused.
-  - FP32: TBD_FP32_MS ms per call at N = 10^4 (all 17 networks, 3 layers).
+  - FP32: 6 ms per call at N = 10^4 (all 17 networks, 3 layers).
   - FP64: 75 ms (~0.6 TFLOPS, near the R9700's FP64 rate). rocBLAS DGEMM (`-Daccel_blas=rocblas`)
     reaches 0.72 TFLOPS on the two 256 x 256 layers: its gfx1201 FP64 kernels are untuned
     (MT16x16x16). rocBLAS SGEMM gained nothing over the OpenMP kernel.
   - The FP64 default is the precision policy's (`doc/MIXED_PRECISION.md`, cue's networks). On
     GPUs with fast FP64 (A100: 9.7 TFLOPS, 19.5 with tensor cores) it costs little.
-- **The rest of cue**, about 20 ms per call:
-  - the continuum's FP64 output layer and PCA (3.8 ms) and the lines' (3.7 ms);
-  - the exponentials of the continuum (4.6 ms; FP64 exponent, `exp_kp`);
-  - the spline (per-model tridiagonal solve, then evaluated and added in one pass);
+- **The rest of cue**, about 24 ms per call:
+  - the continuum's FP64 output layer and PCA (4.5 ms) and the lines' (3.9 ms with FP64 hidden
+    layers, 1 ms in KP);
+  - the exponentials of the continuum (4.5 ms; FP64 exponent, `exp_kp`);
+  - the spline: a per-model tridiagonal solve (4.5 ms, bound by the latency of its recurrence),
+    then evaluated and added to the young and old sums in one pass (3.3 ms);
   - the power-law fit (2.3 ms; Newton, FP64).
 - **Accuracy** (R9700, CPU alike):
   - FP64 build against cue's FP64 algebra: 2.5e-13 dex in the lines, 1e-13 dex in the continuum.

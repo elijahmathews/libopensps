@@ -1379,8 +1379,7 @@ contains
         sp%nout = 0
     end subroutine spline_free
 
-    !> Splines n spectra onto the output grid: v(n, n_knots) (the spectra, model index first, so
-    !> the threads of the solve read consecutive addresses), out(nout, n); mm (as v) is scratch for
+    !> Splines n spectra v(n_knots, n) onto the output grid, out(nout, n); mm (as v) is scratch for
     !> the second derivatives. cue_spline_solve, then the evaluation.
     subroutine cue_spline_apply(nk, nout, n, h, cp, rden, aa, m0c, mnc, k, t, hh6, v, mm, out)
         integer, intent(in)   :: nk, nout, n
@@ -1388,13 +1387,13 @@ contains
         real(KP), intent(in)  :: cp(nk - 2), rden(nk - 2), aa(nk - 2), m0c(2), mnc(2)
         integer, intent(in)   :: k(nout)
         real(KP), intent(in)  :: t(nout), hh6(nout)
-        real(KP), intent(in)  :: v(n, nk)
-        real(KP), intent(inout) :: mm(n, nk)
+        real(KP), intent(in)  :: v(nk, n)
+        real(KP), intent(inout) :: mm(nk, n)
         real(KP), intent(out) :: out(nout, n)
         integer  :: m, j, kk
         real(KP) :: tt, u
 
-        call cue_spline_solve(nk, n, n, h, cp, rden, aa, m0c, mnc, v, mm)
+        call cue_spline_solve(nk, n, h, cp, rden, aa, m0c, mnc, v, mm)
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(kk, tt, u)
 #elif defined(_OPENMP)
@@ -1408,21 +1407,22 @@ contains
                 else
                     tt = t(j)
                     u = 1.0_KP - tt
-                    out(j, m) = u * v(m, kk) + tt * v(m, kk + 1) + &
-                                hh6(j) * ((u * u * u - u) * mm(m, kk) + (tt * tt * tt - tt) * mm(m, kk + 1))
+                    out(j, m) = u * v(kk, m) + tt * v(kk + 1, m) + &
+                                hh6(j) * ((u * u * u - u) * mm(kk, m) + (tt * tt * tt - tt) * mm(kk + 1, m))
                 end if
             end do
         end do
     end subroutine cue_spline_apply
 
-    !> The spline's second derivatives mm(1:n, nk) of n spectra v(1:n, nk), both with leading
-    !> dimension ld (one thread per spectrum: the Thomas sweeps of the factored not-a-knot system).
-    subroutine cue_spline_solve(nk, n, ld, h, cp, rden, aa, m0c, mnc, v, mm)
-        integer, intent(in)   :: nk, n, ld
+    !> The spline's second derivatives mm(nk, n) of n spectra v(nk, n) (one thread per spectrum: the
+    !> Thomas sweeps of the factored not-a-knot system; latency-bound by the recurrence, whatever the
+    !> layout, so the knots are the leading dimension, as the evaluation reads them).
+    subroutine cue_spline_solve(nk, n, h, cp, rden, aa, m0c, mnc, v, mm)
+        integer, intent(in)   :: nk, n
         real(WP), intent(in)  :: h(nk - 1)
         real(KP), intent(in)  :: cp(nk - 2), rden(nk - 2), aa(nk - 2), m0c(2), mnc(2)
-        real(KP), intent(in)  :: v(ld, nk)
-        real(KP), intent(inout) :: mm(ld, nk)
+        real(KP), intent(in)  :: v(nk, n)
+        real(KP), intent(inout) :: mm(nk, n)
         integer  :: m, j, i
         real(KP) :: r
 
@@ -1435,21 +1435,21 @@ contains
             ! Forward sweep on rows j = 1..nk-2 (knot i = j + 1)
             do j = 1, nk - 2
                 i = j + 1
-                r = real(6.0_wp * (real(v(m, i + 1) - v(m, i), WP) / h(i) - &
-                                   real(v(m, i) - v(m, i - 1), WP) / h(i - 1)), KP)
+                r = real(6.0_wp * (real(v(i + 1, m) - v(i, m), WP) / h(i) - &
+                                   real(v(i, m) - v(i - 1, m), WP) / h(i - 1)), KP)
                 if (j == 1) then
-                    mm(m, i) = r * rden(1)
+                    mm(i, m) = r * rden(1)
                 else
-                    mm(m, i) = (r - aa(j) * mm(m, i - 1)) * rden(j)
+                    mm(i, m) = (r - aa(j) * mm(i - 1, m)) * rden(j)
                 end if
             end do
             ! Back substitution
             do j = nk - 3, 1, -1
                 i = j + 1
-                mm(m, i) = mm(m, i) - cp(j) * mm(m, i + 1)
+                mm(i, m) = mm(i, m) - cp(j) * mm(i + 1, m)
             end do
-            mm(m, 1) = m0c(1) * mm(m, 2) + m0c(2) * mm(m, 3)
-            mm(m, nk) = mnc(1) * mm(m, nk - 1) + mnc(2) * mm(m, nk - 2)
+            mm(1, m) = m0c(1) * mm(2, m) + m0c(2) * mm(3, m)
+            mm(nk, m) = mnc(1) * mm(nk - 1, m) + mnc(2) * mm(nk - 2, m)
         end do
     end subroutine cue_spline_solve
 

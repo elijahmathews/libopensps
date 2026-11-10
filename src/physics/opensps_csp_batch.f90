@@ -1939,7 +1939,7 @@ contains
 
         ch = max(1, min(n_mod, cue_batch_chunk))
         allocate(sion(nion, ch), ion(CUE_NION, ch), theta(CUE_NIN, ch), logq(ch), qy(ch), qo(ch), &
-                 line_log(cue_w%nlines, ch), cont_log(ncw, ch), v(ch, ncw), mm(ch, ncw))
+                 line_log(cue_w%nlines, ch), cont_log(ncw, ch), v(ncw, ch), mm(ncw, ch))
 #ifdef OMP_TARGET
         !$omp target data map(to: lam_ion, map, gas) map(alloc: sion, ion, theta, logq, qy, qo, line_log, cont_log, &
         !$omp&  v, mm)
@@ -2024,17 +2024,16 @@ contains
 #elif defined(_OPENMP)
             !$omp parallel do collapse(2)
 #endif
-            ! (v: the model index first, for the per-model solve)
-            do i = 1, ncw
-                do m = 1, nc
+            do m = 1, nc
+                do i = 1, ncw
                     if (qy(m) + qo(m) > 0.0_wp) then
-                        v(m, i) = exp_kp((cont_log(i, m) - logq(m) - CUE_LOG_LSUN) * LN10 + log(qy(m) + qo(m)))
+                        v(i, m) = exp_kp((cont_log(i, m) - logq(m) - CUE_LOG_LSUN) * LN10 + log(qy(m) + qo(m)))
                     else
-                        v(m, i) = 0.0_KP
+                        v(i, m) = 0.0_KP
                     end if
                 end do
             end do
-            call cue_spline_solve(ncw, nc, ch, cue_sp%h, cue_sp%cp, cue_sp%rden, cue_sp%aa, cue_sp%m0c, cue_sp%mnc, v, mm)
+            call cue_spline_solve(ncw, nc, cue_sp%h, cue_sp%cp, cue_sp%rden, cue_sp%aa, cue_sp%m0c, cue_sp%mnc, v, mm)
             ! The spline at each pixel, added to the young and old sums (in one pass)
             associate (sk => cue_sp%k, st => cue_sp%t, sh6 => cue_sp%hh6)
 #if defined(OMP_TARGET)
@@ -2049,8 +2048,8 @@ contains
                     if (kk == 0) cycle
                     tt = st(j)
                     u = 1.0_KP - tt
-                    c = u * v(m, kk) + tt * v(m, kk + 1) + &
-                        sh6(j) * ((u * u * u - u) * mm(m, kk) + (tt * tt * tt - tt) * mm(m, kk + 1))
+                    c = u * v(kk, m) + tt * v(kk + 1, m) + &
+                        sh6(j) * ((u * u * u - u) * mm(kk, m) + (tt * tt * tt - tt) * mm(kk + 1, m))
                     fy = 0.0_KP
                     if (qy(m) + qo(m) > 0.0_wp) fy = real(qy(m) / (qy(m) + qo(m)), KP)
                     fo = 1.0_KP - fy

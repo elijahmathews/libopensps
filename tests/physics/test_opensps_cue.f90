@@ -233,7 +233,7 @@ contains
     subroutine test_spline()
         integer, parameter :: NK = 40, NO = 300, NS = 3
         real(WP) :: x(NK), xo(NO), p, worst, s
-        real(KP) :: v(NS, NK), mm(NS, NK), out(NO, NS)
+        real(KP) :: v(NK, NS), mm(NK, NS), out(NO, NS)
         integer :: i, j, m
         logical :: ok_zero
         call print_group("not-a-knot spline: exact for cubics, zero at and below 911.6 A")
@@ -246,7 +246,7 @@ contains
         end do
         do m = 1, NS
             do i = 1, NK
-                v(m, i) = real(cubic(x(i), m), KP)
+                v(i, m) = real(cubic(x(i), m), KP)
             end do
         end do
         call cue_spline_build(cue_sp, NK, x, NO, xo)
@@ -261,7 +261,7 @@ contains
                     ok_zero = ok_zero .and. out(j, m) == 0.0_KP
                 else
                     p = cubic(xo(j), m)
-                    s = maxval(abs(v(m, :)))
+                    s = maxval(abs(v(:, m)))
                     worst = max(worst, abs(real(out(j, m), WP) - p) / s)
                 end if
             end do
