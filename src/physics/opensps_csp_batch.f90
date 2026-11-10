@@ -1415,6 +1415,20 @@ contains
         type(c_ptr), intent(out) :: ptr
         integer, intent(out)     :: nspec, n, kp_bytes
         real(KP), pointer, contiguous :: sp(:,:)
+#if defined(OMP_TARGET) && defined(__flang__)
+        interface
+            function omp_get_mapped_ptr(host_ptr, device_num) bind(C, name="omp_get_mapped_ptr")
+                import :: c_ptr, c_int
+                type(c_ptr), value :: host_ptr
+                integer(c_int), value :: device_num
+                type(c_ptr) :: omp_get_mapped_ptr
+            end function omp_get_mapped_ptr
+            function omp_get_default_device() bind(C, name="omp_get_default_device")
+                import :: c_int
+                integer(c_int) :: omp_get_default_device
+            end function omp_get_default_device
+        end interface
+#endif
 
         ptr = c_null_ptr
         nspec = ctx%state%nspec
@@ -1423,7 +1437,12 @@ contains
         if (.not. allocated(ctx%state%batch_out%spec) .or. ctx%state%batch_out%n == 0) return
         n = ctx%state%batch_out%n
         sp => ctx%state%batch_out%spec
-#if defined(OMP_TARGET)
+#if defined(OMP_TARGET) && defined(__flang__)
+        ! (flang's use_device_addr of a pointer array loads through the translated address as if it were
+        ! the array's descriptor, on the host: a segmentation fault where device memory is not host
+        ! readable (NVIDIA). omp_get_mapped_ptr returns the device address of the host storage.)
+        ptr = omp_get_mapped_ptr(c_loc(sp), omp_get_default_device())
+#elif defined(OMP_TARGET)
         !$omp target data use_device_addr(sp)
         ptr = c_loc(sp)
         !$omp end target data
