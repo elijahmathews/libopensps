@@ -291,6 +291,8 @@ module opensps_context_types
         integer :: use_wr_spectra_val = 0
         integer :: add_neb_emission_val = 0
         integer :: add_neb_continuum_val = 0
+        integer :: nebular_model_val = 0   !< 0: CLOUDY grids (FSPS); 1: cue (batched CSP only)
+        integer :: cue_fp64_val = 1        !< cue's hidden layers: 1 FP64 (default), 0 kernel precision
         integer :: cloudy_dust_val = 0
         integer :: add_igm_absorption_val = 0
         integer :: nebemlineinspec_val = 0

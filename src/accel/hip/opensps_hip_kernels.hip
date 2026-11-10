@@ -2102,3 +2102,110 @@ void opensps_hip_band_fluxes_dp(
 }
 
 } // extern "C"
+
+
+// ------------------------------------------------------------------------------------------------
+// cue's hidden layers (opensps_cue): for the 17 networks g, Y(u, m, g) = act(b(u, g) + sum_k
+// W(u, k, g) X(k, m, g)), act(a) = (beta + (1 - beta) / (1 + exp(-alpha a))) a. Fortran (column-major)
+// arrays: W (256, K, 17), X (K, ld, 17), Y (256, ld, 17), b, alpha, beta (256, 17). TW: the weights'
+// type (FP32 as trained, or FP64 in FP64 builds), TA: the activations' and the accumulation's. A
+// 64 x 64 tile of (unit, model) per block of 256 threads, 4 x 4 outputs per thread, K in steps of 16
+// through shared memory (the weights converted exactly to TA as they are staged).
+// ------------------------------------------------------------------------------------------------
+#define CUE_BU 64
+#define CUE_BM 64
+#define CUE_BK 16
+#define CUE_NH 256
+
+template <typename TW, typename TA>
+__global__ void __launch_bounds__(256) cue_dense_act_kernel(
+    int K, int nc, int ld,
+    const TW* __restrict__ W, const TW* __restrict__ b, const TW* __restrict__ al, const TW* __restrict__ be,
+    const TA* __restrict__ X, TA* __restrict__ Y)
+{
+    __shared__ TA sw[CUE_BK][CUE_BU + 1];
+    __shared__ TA sx[CUE_BK][CUE_BM + 1];
+    const int g = blockIdx.z;
+    const int u0 = blockIdx.x * CUE_BU;
+    const int m0 = blockIdx.y * CUE_BM;
+    const int tid = threadIdx.x;
+    const int tu = tid % 16;     // 16 x 16 threads, each 4 x 4 outputs
+    const int tm = tid / 16;
+    const TW* Wg = W + (size_t)g * CUE_NH * K;
+    const TA* Xg = X + (size_t)g * K * ld;
+    TA acc[4][4];
+#pragma unroll
+    for (int i = 0; i < 4; i++)
+#pragma unroll
+        for (int j = 0; j < 4; j++) acc[i][j] = 0;
+
+    for (int k0 = 0; k0 < K; k0 += CUE_BK) {
+        // Stage W(u0:u0+63, k0:k0+15) and X(k0:k0+15, m0:m0+63): 1024 values each, 4 per thread
+#pragma unroll
+        for (int r = 0; r < 4; r++) {
+            int e = tid + 256 * r;
+            int uu = e % CUE_BU, kk = e / CUE_BU;              // W: u fastest (coalesced)
+            int k = k0 + kk;
+            sw[kk][uu] = (k < K) ? (TA)Wg[(size_t)k * CUE_NH + u0 + uu] : (TA)0;
+            int kx = e % CUE_BK, mm = e / CUE_BK;              // X: k fastest (coalesced)
+            int kk2 = k0 + kx, m = m0 + mm;
+            sx[kx][mm] = (kk2 < K && m < nc) ? Xg[(size_t)m * K + kk2] : (TA)0;
+        }
+        __syncthreads();
+#pragma unroll
+        for (int kk = 0; kk < CUE_BK; kk++) {
+            TA a[4], x[4];
+#pragma unroll
+            for (int i = 0; i < 4; i++) a[i] = sw[kk][tu + 16 * i];
+#pragma unroll
+            for (int j = 0; j < 4; j++) x[j] = sx[kk][tm + 16 * j];
+#pragma unroll
+            for (int i = 0; i < 4; i++)
+#pragma unroll
+                for (int j = 0; j < 4; j++) acc[i][j] += a[i] * x[j];
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        int u = u0 + tu + 16 * i;
+        TA bb = (TA)b[g * CUE_NH + u], aa = (TA)al[g * CUE_NH + u], ee = (TA)be[g * CUE_NH + u];
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            int m = m0 + tm + 16 * j;
+            if (m < nc) {
+                TA v = acc[i][j] + bb;
+                Y[((size_t)g * ld + m) * CUE_NH + u] = (ee + ((TA)1 - ee) / ((TA)1 + exp(-aa * v))) * v;
+            }
+        }
+    }
+}
+
+template <typename TW, typename TA>
+static void cue_dense_act_launch(int K, int nc, int ld, const void* W, const void* b, const void* al,
+                                 const void* be, const void* X, void* Y, void* stream)
+{
+    if (nc <= 0) return;
+    dim3 block(256);
+    dim3 grid(CUE_NH / CUE_BU, (nc + CUE_BM - 1) / CUE_BM, 17);
+    hipStream_t s = (hipStream_t)stream;
+    cue_dense_act_kernel<TW, TA><<<grid, block, 0, s>>>(K, nc, ld, (const TW*)W, (const TW*)b, (const TW*)al,
+                                                        (const TW*)be, (const TA*)X, (TA*)Y);
+    (void)hipDeviceSynchronize();
+}
+
+extern "C" {
+// Weights FP32 (as trained): activations FP32 (_ss) or FP64 (_sd); FP64 builds: _dd
+void opensps_hip_cue_dense_act_ss(int K, int nc, int ld, const void* W, const void* b, const void* al,
+                                  const void* be, const void* X, void* Y, void* stream) {
+    cue_dense_act_launch<float, float>(K, nc, ld, W, b, al, be, X, Y, stream);
+}
+void opensps_hip_cue_dense_act_sd(int K, int nc, int ld, const void* W, const void* b, const void* al,
+                                  const void* be, const void* X, void* Y, void* stream) {
+    cue_dense_act_launch<float, double>(K, nc, ld, W, b, al, be, X, Y, stream);
+}
+void opensps_hip_cue_dense_act_dd(int K, int nc, int ld, const void* W, const void* b, const void* al,
+                                  const void* be, const void* X, void* Y, void* stream) {
+    cue_dense_act_launch<double, double>(K, nc, ld, W, b, al, be, X, Y, stream);
+}
+} // extern "C"

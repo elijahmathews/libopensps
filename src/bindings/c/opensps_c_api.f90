@@ -2091,6 +2091,14 @@ contains
             opensps_default_ctx%add_neb_emission_val = val
         case ('add_neb_continuum')
             opensps_default_ctx%add_neb_continuum_val = val
+        case ('nebular_model')
+            if (val < 0 .or. val > 1) then
+                call opensps_set_error(104, "[OPENSPS-C] Error: nebular_model must be 0 (CLOUDY grids) or 1 (cue)")
+            else
+                opensps_default_ctx%nebular_model_val = val
+            end if
+        case ('cue_fp64')
+            opensps_default_ctx%cue_fp64_val = merge(1, 0, val /= 0)
         case ('cloudy_dust')
             opensps_default_ctx%cloudy_dust_val = val
         case ('add_igm_absorption')
@@ -2262,6 +2270,12 @@ contains
             global_pset%gas_logu = real(val, WP)
         case ('gas_logz')
             global_pset%gas_logz = real(val, WP)
+        case ('gas_logn')
+            global_pset%gas_logn = real(val, WP)
+        case ('gas_logno')
+            global_pset%gas_logno = real(val, WP)
+        case ('gas_logco')
+            global_pset%gas_logco = real(val, WP)
         case ('igm_factor')
             global_pset%igm_factor = real(val, WP)
         case ('fagn')

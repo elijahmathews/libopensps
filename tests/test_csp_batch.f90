@@ -9,6 +9,9 @@ program test_csp_batch
     !>   kernels and cuBLAS products);
     !> - the IMF free per model (the template operator, ssp_op) against the basis batch with each
     !>   model's own SSP basis, with full physics;
+    !> - cue's nebular emission (nebular_model = 1, OPENSPS_CUE_DATA): the lines against the
+    !>   networks evaluated on the test's own ionizing spectrum and photon rate, exact scaling
+    !>   with the absorbed photons, energy conservation, Case B hydrogen lines;
     !> - identities: without dust, nebular emission, IGM and AGN a CSP is the SFH-weighted sum of
     !>   its SSP basis; the all-ages output divided by the mass formed equals the single-age call at
     !>   that age (in every mode, redshifted colours included); weights over ages and metallicities
@@ -142,6 +145,8 @@ program test_csp_batch
     call check_fast_mode()
     ! Weights over ages and metallicities do not fill the nebular kernels' weights: rejected
     call check_weights_z_nebular()
+    ! cue (nebular_model = 1; with OPENSPS_CUE_DATA, else status 4)
+    call check_cue()
 
     ! The checks over metallicities need the isochrones and libraries of every metallicity (the context
     ! above was set up with zin = 10 and holds that metallicity only: the other bases would be empty
@@ -1306,6 +1311,214 @@ contains
         call assert_true(ok, "spectra on the host at kernel precision (batch_spectra_host)", total_tests, &
                          total_failures)
     end subroutine check_spectra_device
+
+    !> cue (nebular_model = 1). Without OPENSPS_CUE_DATA the batch returns status 4, and the checks
+    !> of the assembly below run on synthetic networks (cue_test_library) instead. With it, on
+    !> 12 models with given SFH weights, no dust, IGM or AGN, and gas parameters varied over cue's
+    !> training ranges:
+    !> - each line against cue's networks evaluated on the test's own assembly: the ionizing
+    !>   spectrum (the weighted SSPs of the nebular ages below 911.6 A), its photons Q (the
+    !>   trapezoid of nebular_kernels' step 1), cue's fit and inputs, L = 10**(log L - log Q(U, n_H)
+    !>   - log 3.839e33) Q;
+    !> - frac_obrun = 0.5 halves every line exactly and the nebular spectrum (the difference from
+    !>   add_neb_emission = 0 above 911.6 A) to rounding;
+    !> - energy: the nebular luminosity (continuum and lines) is below the absorbed ionizing
+    !>   luminosity and most of it;
+    !> - Case B (Osterbrock & Ferland 2006, T ~ 1e4 K): L(H beta) / Q ~ 4.8e-13 erg, H alpha / H beta ~ 2.86;
+    !> - gradients are not supported with cue (status 2), the option rejects other values.
+    subroutine check_cue()
+        use opensps_cue, only: cue_data_dir, cue_w, cue_line_map, cue_ionizing_params, cue_inputs, cue_forward, &
+                               cue_load_dir, cue_unload, cue_weights_t, CUE_EDGE_HI, CUE_NION, CUE_NIN, CUE_LOG_LSUN
+        use cue_test_library, only: cue_synthetic, cue_write_library
+        use opensps_constants, only: H_PLANCK, L_SOL, NEBNAGE
+        use opensps_csp_batch, only: NBGRAD
+        type(PARAMS) :: psets(N_MOD)
+        real(WP), allocatable :: w(:, :), mags(:, :), spec(:, :, :), eml(:, :, :), lam(:), sw(:), qt(:), ll(:, :), cl(:, :)
+        real(WP), allocatable :: pbar(:, :)
+        real(KP), allocatable :: sion(:, :)
+        real(WP) :: ion(CUE_NION, 1), th(CUE_NIN, 1), lq(1), gas(5, 1), e, worst, worst_h, lneb, lion, ratio, rmin, rmax
+        real(WP) :: hb_q(N_MOD), ha_hb(N_MOD), dnu, x
+        integer :: status, m, t, i, nt, nspec, ntn, nion, map(NEMLINE), k, ihb, iha, case_, nmap, st
+        logical :: real_data
+        type(cue_weights_t) :: syn
+        real(WP), parameter :: LOGU(N_MOD) = [-3.5_wp, -3.0_wp, -2.5_wp, -2.0_wp, -1.5_wp, -2.5_wp, &
+                                              -3.0_wp, -2.0_wp, -2.5_wp, -3.5_wp, -1.5_wp, -2.2_wp]
+
+        call print_group("cue nebular emission (nebular_model = 1)")
+        nt = ctx%state%ntfull
+        nspec = ctx%state%nspec
+        call opensps_context_set_param_int(ctx, 'nebular_model', 2, st)
+        call assert_true(st /= 0, "nebular_model accepts 0 and 1 only", total_tests, total_failures)
+        call set_int('add_neb_emission', 1)
+        call set_int('nebular_model', 1)
+        ! (the networks' hidden layers in FP64, so the comparison with the test's own assembly is
+        ! not limited by FP32 rounding in the networks; case 4 checks the default against it)
+        call set_int('cue_fp64', 1)
+        allocate(w(nt, N_MOD), mags(ctx%state%nbands, N_MOD), spec(nspec, N_MOD, 4), eml(NEMLINE, N_MOD, 4))
+        do m = 1, N_MOD
+            do t = 1, nt
+                w(t, m) = 1.0e-4_wp * (1.0_wp + mod(t + 3 * m, 7)) * merge(30.0_wp, 1.0_wp, t <= 20 + m)
+            end do
+        end do
+        real_data = len(cue_data_dir()) > 0
+        do case_ = 0, 4
+            ! 0: without data (status 4); 1: cue; 2: cue with frac_obrun = 0.5; 3: no nebular emission;
+            ! 4: cue with its hidden layers in the kernel precision (the default)
+            if (case_ == 0 .and. (real_data .or. cue_w%loaded)) cycle
+            if (case_ == 3) call set_int('add_neb_emission', 0)
+            if (case_ == 4) then
+                call set_int('add_neb_emission', 1)
+                call set_int('cue_fp64', 0)
+            end if
+            do m = 1, N_MOD
+                call set_model(m, 0.0_wp)
+                call set_float('dust1', 0.0_wp)
+                call set_float('dust2', 0.0_wp)
+                call set_float('fagn', 0.0_wp)
+                call set_float('frac_obrun', merge(0.5_wp, 0.0_wp, case_ == 2))
+                call set_float('gas_logu', LOGU(m))
+                call set_float('gas_logn', 1.0_wp + 0.25_wp * mod(m, 13))
+                call set_float('gas_logz', -1.5_wp + 0.15_wp * m)
+                call set_float('gas_logno', -0.8_wp + 0.12_wp * m)
+                call set_float('gas_logco', 0.6_wp - 0.13_wp * m)
+                call opensps_context_prepare_pset(ctx)
+                call opensps_context_get_pset(ctx, psets(m))
+            end do
+            if (case_ == 0) then
+                call compute_csp_batch(ctx, psets, mags, status, spec=spec(:, :, 1), ssp_weights=w)
+                call assert_true(status == 4, "without OPENSPS_CUE_DATA: status 4", total_tests, total_failures)
+                ! The rest on synthetic networks (cue_test_library), written and read as a library;
+                ! the lines are the context's first 43
+                write (*, '(A)') '# OPENSPS_CUE_DATA is not set: synthetic networks (the physics checks skipped)'
+                call cue_synthetic(syn, ctx%state%nebem_line_pos(1:43))
+                call cue_write_library(syn, 'cue_batch_test_lib')
+                call cue_unload(syn)
+                call cue_load_dir(cue_w, 'cue_batch_test_lib')
+                cycle
+            end if
+            eml(:, :, case_) = 0.0_wp
+            call compute_csp_batch(ctx, psets, mags, status, spec=spec(:, :, case_), emlines=eml(:, :, case_), &
+                                   ssp_weights=w)
+            call assert_true(status == 0, "status 0", total_tests, total_failures)
+        end do
+        call set_int('add_neb_emission', 1)
+
+        ! The test's own assembly of the lines
+        ntn = max(0, min(find_interval(ctx%state%time_full, ctx%state%nebem_age(NEBNAGE)), nt))
+        nion = 0
+        do i = 1, nspec
+            if (ctx%state%spec_lambda(i) <= CUE_EDGE_HI) nion = i
+        end do
+        nion = nion + 1
+        allocate(lam(nion), sion(nion, 1), sw(nion), qt(N_MOD), ll(cue_w%nlines, 1), cl(cue_w%ncw, 1))
+        lam = ctx%state%spec_lambda(1:nion)
+        call cue_line_map(cue_w, NEMLINE, ctx%state%nebem_line_pos, map)
+        nmap = count(map > 0)
+        write (*, '(A,I0,A,I0)') '# lines matched to cue: ', nmap, ' of ', NEMLINE
+        call assert_true(nmap >= merge(120, 40, real_data), "the context's lines come from cue", total_tests, total_failures)
+        ihb = minloc(abs(ctx%state%nebem_line_pos - 4862.7_wp), dim=1)
+        iha = minloc(abs(ctx%state%nebem_line_pos - 6564.6_wp), dim=1)
+        worst = 0.0_wp
+        rmin = huge(1.0_wp); rmax = 0.0_wp
+        do m = 1, N_MOD
+            sw = 0.0_wp
+            qt(m) = 0.0_wp
+            do t = 1, ntn
+                sw = sw + w(t, m) * real(ctx%state%ssp_basis_spec(1:nion, t, 1), WP)
+                e = 0.0_wp
+                do i = 1, ctx%state%whlylim - 1
+                    dnu = 0.5_wp * abs(ctx%state%spec_nu(i + 1) - ctx%state%spec_nu(i))
+                    e = e + dnu * (real(ctx%state%ssp_basis_spec(i, t, 1), WP) / ctx%state%spec_nu(i) + &
+                                   real(ctx%state%ssp_basis_spec(i + 1, t, 1), WP) / ctx%state%spec_nu(i + 1))
+                end do
+                qt(m) = qt(m) + w(t, m) * e / H_PLANCK * L_SOL
+            end do
+            sion(:, 1) = real(sw, KP)
+            call cue_ionizing_params(1, nion, lam, sion, ion)
+            gas(:, 1) = [psets(m)%gas_logu, psets(m)%gas_logn, psets(m)%gas_logz, psets(m)%gas_logno, psets(m)%gas_logco]
+            call cue_inputs(1, ion, gas, th, lq)
+            call cue_forward(cue_w, 1, th, ll, cl, fp64=.true.)
+            do i = 1, NEMLINE
+                if (map(i) == 0) then
+                    worst = max(worst, abs(eml(i, m, 1)))
+                    cycle
+                end if
+                e = 10.0_wp**(ll(map(i), 1) - lq(1) - CUE_LOG_LSUN) * qt(m)
+                worst = max(worst, abs(eml(i, m, 1) - e) / e)
+            end do
+            ! Energy: the nebular luminosity above 911.6 A against the absorbed ionizing luminosity
+            lneb = 0.0_wp
+            lion = 0.0_wp
+            do i = 1, nspec - 1
+                x = 0.5_wp * abs(ctx%state%spec_nu(i) - ctx%state%spec_nu(i + 1))
+                if (ctx%state%spec_lambda(i) > CUE_EDGE_HI) &
+                    lneb = lneb + x * ((spec(i, m, 1) - spec(i, m, 3)) + (spec(i + 1, m, 1) - spec(i + 1, m, 3)))
+                if (i < nion - 1) lion = lion + x * (sw(i) + sw(i + 1))
+            end do
+            ratio = lneb / lion
+            rmin = min(rmin, ratio); rmax = max(rmax, ratio)
+            hb_q(m) = eml(ihb, m, 1) * 3.839e33_wp / qt(m)
+            ha_hb(m) = 0.0_wp
+            if (eml(ihb, m, 1) > 0.0_wp) ha_hb(m) = eml(iha, m, 1) / eml(ihb, m, 1)
+        end do
+        write (*, '(A,ES10.2)') '# worst relative line difference from the test''s assembly: ', worst
+        write (*, '(A,2F7.3)') '# nebular / absorbed ionizing luminosity, min and max: ', rmin, rmax
+        write (*, '(A,2ES10.2,A,2F6.3)') '# L(Hb)/Q [erg], min and max: ', minval(hb_q), maxval(hb_q), &
+            '; Ha/Hb: ', minval(ha_hb), maxval(ha_hb)
+        ! FP32: the ionizing spectrum is summed in FP32 by the batch (FP64 here), and its fit sees
+        ! the rounded spectrum
+        call assert_true(worst < merge(1.0e-9_wp, 1.0e-5_wp, KP == WP), "lines = cue on the model's ionizing spectrum", &
+                         total_tests, total_failures)
+        ! The default (hidden layers in the kernel precision): identical in FP64 builds; in FP32 builds
+        ! within the networks' FP32 rounding (~2e-4 dex, amplified by the line networks' output scales)
+        worst = 0.0_wp
+        do m = 1, N_MOD
+            do i = 1, NEMLINE
+                if (eml(i, m, 1) > 0.0_wp) worst = max(worst, abs(eml(i, m, 4) - eml(i, m, 1)) / eml(i, m, 1))
+            end do
+        end do
+        write (*, '(A,ES10.2)') '# hidden layers in KP against FP64: worst relative line difference ', worst
+        call assert_true(worst <= merge(0.0_wp, 2.0e-3_wp, KP == WP), "the default precision against FP64 hidden layers", &
+                         total_tests, total_failures)
+        call assert_true(all(abs(eml(:, :, 2) - 0.5_wp * eml(:, :, 1)) <= 100.0_wp * real(epsilon(1.0_KP), WP) * &
+                             abs(eml(:, :, 1))), "frac_obrun = 0.5 halves every line (to rounding)", &
+                         total_tests, total_failures)
+        worst = 0.0_wp
+        do m = 1, N_MOD
+            ! (relative to the model's largest nebular value: the spline of the synthetic networks'
+            ! oscillating continuum cancels at some pixels)
+            x = 0.0_wp
+            do i = 1, nspec
+                if (ctx%state%spec_lambda(i) > CUE_EDGE_HI) x = max(x, abs(spec(i, m, 1) - spec(i, m, 3)))
+            end do
+            do i = 1, nspec
+                if (ctx%state%spec_lambda(i) <= CUE_EDGE_HI) cycle
+                e = spec(i, m, 1) - spec(i, m, 3)
+                worst = max(worst, abs(e - 2.0_wp * (spec(i, m, 2) - spec(i, m, 3))) / max(x, tiny(1.0_wp)))
+            end do
+        end do
+        write (*, '(A,ES10.2)') '# worst halving of the nebular spectrum: ', worst
+        call assert_true(worst < 100.0_wp * real(epsilon(1.0_KP), WP), "frac_obrun = 0.5 halves the nebular spectrum", &
+                         total_tests, total_failures)
+        if (real_data) then
+            call assert_true(rmax <= 1.02_wp .and. rmin > 0.3_wp, "nebular luminosity: most of the absorbed, not more", &
+                             total_tests, total_failures)
+            call assert_true(all(hb_q > 3.5e-13_wp .and. hb_q < 6.5e-13_wp), "Case B: L(Hb) / Q ~ 4.8e-13 erg", &
+                             total_tests, total_failures)
+            call assert_true(all(ha_hb > 2.6_wp .and. ha_hb < 3.3_wp), "Case B: Ha / Hb ~ 2.86", total_tests, &
+                             total_failures)
+        end if
+
+        ! Gradients: not with cue
+        allocate(pbar(NBGRAD, N_MOD))
+        call compute_csp_batch(ctx, psets, mags, status, ssp_weights=w, mags_bar=mags, params_bar=pbar)
+        call assert_true(status == 2, "gradients with cue: status 2", total_tests, total_failures)
+        if (.not. real_data) call cue_unload(cue_w)
+        call set_int('cue_fp64', 0)
+        call set_int('nebular_model', 0)
+        call set_int('add_neb_emission', 0)
+        call set_float('frac_obrun', 0.0_wp)
+    end subroutine check_cue
 
     subroutine set_int(key, value)
         character(len=*), intent(in) :: key

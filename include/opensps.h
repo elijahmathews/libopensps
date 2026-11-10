@@ -185,7 +185,8 @@ void opensps_context_get_csp(int handle, double *age, double *mass, double *lbol
 // varied per model, names[i] taking the n values values[i][0..n-1]; ssp_weights (ntfull x n) or
 // NULL replaces the SFH parameters. Outputs column-major (quantity x n); all but mags may be
 // NULL. status 0 on success, 1 bad handle, 2 unsupported (e.g. an SSP parameter varied),
-// 3 unknown parameter or bad shape.
+// 3 unknown parameter or bad shape, 4 data missing (nebular_model = 1 without cue's weights,
+// OPENSPS_CUE_DATA: tools/cue/README.md).
 void opensps_context_compute_csp_batch(int handle, int n, int n_params, const char *const *names,
                                     const double *const *values, const double *ssp_weights,
                                     double *mags, double *spec, double *mass, double *lbol,

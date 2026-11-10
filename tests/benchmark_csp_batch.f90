@@ -12,7 +12,9 @@ program benchmark_csp_batch
     !> any config containing "_fit": a fitting population (zred, gas_logz, dust2, dust1, dust_index, fagn vary too);
     !> any config ending in "_imf": the IMF free per model (Kroupa, imf1-3 varied; the batch
     !> from the template operator, built once and timed); any config with "_grad": also the
-    !> gradients (params_bar, with cotangents of the magnitudes, the spectra, mass and lbol).
+    !> gradients (params_bar, with cotangents of the magnitudes, the spectra, mass and lbol); any config
+    !> with "_cue": cue's nebular emission (nebular_model = 1, OPENSPS_CUE_DATA; gas_logn, gas_logno and
+    !> gas_logco vary too), "_cue64" with its hidden layers in FP64 (cue_fp64 = 1).
     !> Prints one line per metric: name, value: one compute_csp_scenario call per model, one
     !> all-ages call (tage = 0, every age of the grid) and, per batch size: magnitudes only; with spectra
     !> copied back to a host array (reused, as in a fitting loop); with spectra left on the device;
@@ -39,7 +41,7 @@ program benchmark_csp_batch
     type(COMPSPOUT), allocatable :: results(:)
     real(WP), allocatable :: spec_ssp(:, :), mass_ssp(:), lbol_ssp(:), mags(:, :), spec(:, :)
     character(len=32) :: arg, config = 'basic'
-    logical :: full, zvar = .false., imf = .false., grad = .false., fit = .false.
+    logical :: full, zvar = .false., imf = .false., grad = .false., fit = .false., cue = .false.
     real(WP), allocatable :: mbar(:, :), sbar(:, :), pbar(:, :), massv(:), lbolv(:), massb(:), lbolb(:)
     type(ssp_operator_t), allocatable :: ops(:)
     type(ssp_opset_t) :: opset
@@ -66,6 +68,7 @@ program benchmark_csp_batch
     imf = index(config, '_imf') > 0
     grad = index(config, '_grad') > 0
     fit = index(config, '_fit') > 0
+    cue = index(config, '_cue') > 0
     call system_clock(count_rate=rate)
 
     allocate(ctx)
@@ -89,6 +92,10 @@ program benchmark_csp_batch
         call set_float('zred', 0.5_wp)
         call set_int('add_agn_dust', 1)
         call set_float('fagn', 0.1_wp)
+    end if
+    if (cue) then
+        call set_int('nebular_model', 1)
+        call set_int('cue_fp64', merge(1, 0, index(config, '_cue64') > 0))
     end if
     if (index(config, 'full_smooth') == 1) then
         call set_int('smooth_velocity', 1)
@@ -329,6 +336,11 @@ contains
             p%dust1 = 0.5_wp * p%dust2
             p%dust_index = -1.0_wp + 0.01_wp * mod(i, 53)
             p%fagn = 0.001_wp + 0.005_wp * mod(i, 37)
+        end if
+        if (cue) then
+            p%gas_logn = 1.0_wp + 0.05_wp * mod(i, 59)
+            p%gas_logno = -0.9_wp + 0.03_wp * mod(i, 53)
+            p%gas_logco = -0.9_wp + 0.03_wp * mod(i, 47)
         end if
         if (full) then
             p%gas_logu = -3.5_wp + 0.05_wp * mod(i, 41)

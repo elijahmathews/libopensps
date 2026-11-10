@@ -210,6 +210,29 @@ integrals that give the IMF parameters' gradients use a relative step of 1e-3 in
 kernel precision (`test_opensps_imf`: 16 ulp of FP32 per bin; `test_csp_batch`: 1e-6 for mass and
 L_bol with the IMF per model).
 
+## cue's networks (`nebular_model = 1`)
+
+cue's networks (`src/physics/opensps_cue.f90`) were trained in FP32, and their own error against
+CLOUDY is 1-5% (Li et al. 2025). Evaluated in FP32, they reproduce their FP64 evaluation to
+~2e-4 dex in the lines: the line networks' PCA and output scales (up to 6 and 20) amplify the
+hidden layers' rounding. That is far below the emulator's accuracy, but 5e-4 relative is outside
+the 1e-5 requirement above, so by default (`cue_fp64 = 1`) FP32 builds run the hidden layers in
+FP64. The weights are FP32 as trained, so FP64 builds and the FP32 builds' default compute the
+same thing; the weights are converted exactly as read. The other parts:
+- **PCA means and output affine** (the means are ~50-100, the output scales up to 20): FP64.
+- **Exponentials:** formed and reduced in FP64, then taken in KP (`exp_kp`).
+- **The power-law fit:** FP64.
+
+Measured against cue's FP64 algebra:
+
+| | Lines | Continuum |
+|---|---|---|
+| FP64 build | 2.5e-13 dex | 1e-13 dex |
+| FP32 build, `cue_fp64 = 1` | 3e-13 dex | 1e-13 dex |
+| FP32 build, `cue_fp64 = 0` | 2e-4 dex | 3e-6 dex |
+
+`cue_fp64 = 0` is an explicit opt-in for speed (timings in `doc/GPU_RESULTS.md`).
+
 ## Caveats
 
 - **Finite differences.** FP32 output carries ~1e-7 relative noise. Fitters that estimate

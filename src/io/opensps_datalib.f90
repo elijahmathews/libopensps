@@ -29,7 +29,7 @@ module opensps_datalib
     public :: DATA_FORMAT_VERSION, DATA_ROOT_INDEX, DATA_ROOT_INDEX_OLD
     public :: DATA_FORMAT_AUTO, DATA_FORMAT_LEGACY, DATA_FORMAT_STANDARD
     public :: datalib_format_from_env, datalib_root_is_standard, datalib_available
-    public :: datalib_open, datalib_base_name
+    public :: datalib_open, datalib_open_dir, datalib_base_name
     public :: datalib_has_meta, datalib_meta_real, datalib_meta_string
     public :: datalib_has_axis, datalib_axis_len, datalib_axis_values
     public :: datalib_has_array, datalib_array_len, datalib_check_array
@@ -146,6 +146,22 @@ contains
         type(datalib_t), intent(out) :: lib
         character(len=*), intent(in) :: root, kind, spec
 
+        call open_library(lib, kind, spec, library_dir(root, kind, datalib_base_name(spec)), root)
+    end subroutine datalib_open
+
+    !> Opens the library whose manifest is `<dir>/manifest.json` (a library directory given
+    !> directly, e.g. by an environment variable, rather than found under a data root).
+    subroutine datalib_open_dir(lib, dir, kind, spec)
+        type(datalib_t), intent(out) :: lib
+        character(len=*), intent(in) :: dir, kind, spec
+
+        call open_library(lib, kind, spec, trim(dir), '')
+    end subroutine datalib_open_dir
+
+    subroutine open_library(lib, kind, spec, dir, root)
+        type(datalib_t), intent(out) :: lib
+        character(len=*), intent(in) :: kind, spec, dir, root
+
         logical :: ok
         character(len=512) :: msg
         integer :: node, k, kc, ke
@@ -153,13 +169,13 @@ contains
 
         lib%kind = trim(kind)
         lib%name = datalib_base_name(spec)
-        lib%dir = library_dir(root, kind, lib%name)
+        lib%dir = dir
 
         call json_parse_file(lib%doc, lib%dir // '/manifest.json', ok, msg)
         if (.not. ok) then
             write(error_unit, '(A)') '[OPENSPS_DATA] Error: cannot read the manifest of library ' // &
                 trim(kind) // '/' // lib%name // ': ' // trim(msg)
-            if (.not. datalib_root_is_standard(root)) write(error_unit, '(A)') &
+            if (len_trim(root) > 0 .and. .not. datalib_root_is_standard(root)) write(error_unit, '(A)') &
                 '           (' // trim(root) // ' has no ' // DATA_ROOT_INDEX // ': not a standard-format data root)'
             error stop 1
         end if
@@ -201,7 +217,7 @@ contains
                     call lib_error(lib, 'selection on unknown axis "' // trim(lib%sel_axis(lib%nsel)) // '"')
             end do
         end if
-    end subroutine datalib_open
+    end subroutine open_library
 
     subroutine lib_error(lib, msg)
         type(datalib_t), intent(in) :: lib

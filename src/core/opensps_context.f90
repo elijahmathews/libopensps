@@ -348,6 +348,18 @@ contains
         case ('add_neb_continuum')
             ctx%add_neb_continuum_val = value
             ctx%settings_dirty = .true.
+        case ('nebular_model')
+            ! 0: the CLOUDY grids of FSPS; 1: cue (opensps_cue; the batched CSP only)
+            if (value < 0 .or. value > 1) then
+                status = OPENSPS_ERR_UNSUPPORTED_PARAM
+            else
+                ctx%nebular_model_val = value
+            end if
+        case ('cue_fp64')
+            ! cue's hidden layers in FP64 also in FP32 builds (1, the default: FP32 builds then match FP64
+            ! builds to the 1e-5 of doc/MIXED_PRECISION.md); 0: the kernel precision (faster; lines
+            ! within ~5e-4 of FP64)
+            ctx%cue_fp64_val = merge(1, 0, value /= 0)
         case ('cloudy_dust')
             ctx%cloudy_dust_val = value
             ctx%settings_dirty = .true.
@@ -543,6 +555,12 @@ contains
             ctx%pset%gas_logu = value
         case ('gas_logz')
             ctx%pset%gas_logz = value
+        case ('gas_logn')
+            ctx%pset%gas_logn = value
+        case ('gas_logno')
+            ctx%pset%gas_logno = value
+        case ('gas_logco')
+            ctx%pset%gas_logco = value
         case ('igm_factor')
             ctx%pset%igm_factor = value
         case ('fagn')

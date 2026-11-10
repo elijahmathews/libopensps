@@ -281,6 +281,7 @@ shown. Units are those of the converted libraries; a new library must use the sa
 | `agb_spectra/<orich\|crich\|crich_aringer>` | `flux` [type, wavelength]; `teff` [type, logZ] (O-rich) or [type] (K) | `type`, `wavelength`, `logZ` (O-rich) | free wavelength; fixed: 9, 5, 9 types, 22 logZ |
 | `dusty_agb/<orich\|crich>` | `transfer` [teff, tau, wavelength] | `teff` (K), `tau`, `wavelength` | free wavelength; fixed: 6 Teff x 50 tau |
 | `xrb/xsp` | `flux` [feh, log_age, wavelength] (per M_sun, x L_sun on load) | `feh`, `log_age` (log yr), `wavelength` | fixed: 11 [Fe/H] x 10 ages x 15000 |
+| `nebular_emulator/cue` (found through `OPENSPS_CUE_DATA`, not in the data releases) | the 17 networks: `w1` [net, input, hidden], `w2`, `w3` [net, hidden_in, hidden], `b1`..`b3`, `alpha`, `beta`, `input_shift`, `input_scale`; line output layers and PCA bases `line_w4`, `line_b4`, `line_pca_shift`, `line_pca_scale`, `line_components` [line_group, pca_line, line_slot], `line_mean`, `line_out_shift`, `line_out_scale`, `line_npca`, `line_count` (int32); the continuum's `cont_w4`, `cont_b4`, `cont_pca_shift`, `cont_pca_scale`, `cont_components` [pca_cont, cont_wavelength], `cont_mean`, `cont_out_shift`, `cont_out_scale` | `net` (16 line groups, then the continuum), `line` (vacuum A, the networks' output order), `cont_wavelength` (A) | fixed: 17 networks of 12 inputs and 3 x 256 units, line PCA padded to 16; free: lines (138), continuum PCA (50) and wavelengths (1841). Written by `tools/cue/convert_cue.py` |
 
 What "a new library without code changes" covers today:
 

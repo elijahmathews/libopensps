@@ -319,6 +319,7 @@ lib_sources = files(
     'src/physics/opensps_cosmology.f90',
     'src/physics/opensps_csp.f90',
     'src/physics/opensps_csp_batch.f90',
+    'src/physics/opensps_cue.f90',
     'src/physics/opensps_scenario_batch.f90',
     'src/physics/opensps_dust.f90',
     'src/physics/opensps_gas.f90',
@@ -378,6 +379,7 @@ if get_option('tests')
 test_utils_lib = static_library(
     'test_utils', 
     'tests/test_utils.f90', 
+    'tests/cue_test_library.f90',
     dependencies : opensps_dep
 )
 
@@ -417,6 +419,7 @@ unit_test_sources = files(
     'tests/physics/test_opensps_dust.f90',
     'tests/physics/test_opensps_gas.f90',
     'tests/physics/test_opensps_nebular_kernel.f90',
+    'tests/physics/test_opensps_cue.f90',
     'tests/physics/test_opensps_imf.f90',
     'tests/physics/test_opensps_sfh.f90',
     'tests/physics/test_opensps_ssp.f90',
@@ -447,7 +450,7 @@ unit_env.set('FSPS_TEST_SOURCE_ROOT', meson.project_source_root())
 unit_modules = [
     'opensps_c_api', 'opensps_build_info', 'opensps_cache', 'opensps_context', 'opensps_context_types', 'opensps_strings', 'opensps_types', 'opensps_io',
     'opensps_integration', 'opensps_interpolation', 'opensps_special_functions', 'opensps_cosmology', 'opensps_csp',
-    'opensps_dust', 'opensps_gas', 'opensps_nebular_kernel', 'opensps_imf', 'opensps_sfh', 'opensps_ssp', 'opensps_stellar_modifications',
+    'opensps_dust', 'opensps_gas', 'opensps_nebular_kernel', 'opensps_cue', 'opensps_imf', 'opensps_sfh', 'opensps_ssp', 'opensps_stellar_modifications',
     'opensps_batch_photometry', 'opensps_photometry', 'opensps_smoothing', 'opensps_spectral_indices', 'opensps_spectral_library',
 ]
 foreach unit_module : unit_modules
@@ -760,6 +763,15 @@ test_c_mag_compute_exe = executable('test_c_mag_compute', 'tests/test_c_mag_comp
     include_directories : include_directories('include')
 )
 test('c_mag_compute', test_c_mag_compute_exe,
+    env : regression_env,
+    suite : 'regression',
+    timeout : 600
+)
+test_c_cue_exe = executable('test_c_cue', 'tests/test_c_cue.c',
+    dependencies : [opensps_dep, meson.get_compiler('c').find_library('m', required : false)],
+    include_directories : include_directories('include')
+)
+test('c_cue', test_c_cue_exe,
     env : regression_env,
     suite : 'regression',
     timeout : 600
