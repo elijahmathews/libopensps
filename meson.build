@@ -562,6 +562,19 @@ test('csp_batch', csp_batch_exe,
     timeout : 900
 )
 
+# The [alpha/Fe] axis on the real libraries (mist_afe + c3k_lr); runs only with OPENSPS_AFE_DATA set to a data
+# root that holds them (tools/opensps_data/convert_legacy.py --upstream-mist/--upstream-c3k), skipped otherwise
+afe_library_exe = executable('test_afe_library', 'tests/test_afe_library.f90',
+    dependencies : [opensps_dep, test_utils_dep],
+    link_language : 'fortran'
+)
+test('afe_library', afe_library_exe,
+    protocol : 'tap',
+    env : regression_env,
+    suite : 'regression',
+    timeout : 1800
+)
+
 # Integration test: the gradients of the batched CSP (reverse pass) against finite differences
 csp_batch_grad_exe = executable('test_csp_batch_grad', 'tests/test_csp_batch_grad.f90',
     dependencies : [opensps_dep, test_utils_dep],

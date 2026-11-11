@@ -3485,7 +3485,7 @@ contains
               end block
             end do
         end do
-#else
+#elif defined(OMP_TARGET)
         integer, parameter :: MT = 4
         integer  :: mq, i, k, l, mm(MT)
         real(KP) :: bk, y(MT), o(MT), d(MT)
@@ -3517,6 +3517,39 @@ contains
                     yo(i, mm(l)) = y(l)
                     yo(i, n_mod + mm(l)) = o(l)
                 end do
+            end do
+        end do
+#else
+        ! Host: per model and block of pixels, contiguous (vectorizable) passes over the ages (the same arithmetic per
+        ! element as the loops of the device branch)
+        integer, parameter :: PB = 256
+        integer  :: m, ib, i0, n, k, it, i
+        real(KP) :: y(PB), o(PB), d, wk
+
+        !$omp parallel do collapse(2) private(ib, i0, n, k, it, i, y, o, d, wk)
+        do m = 1, n_mod
+            do ib = 1, (nspec + PB - 1) / PB
+                i0 = (ib - 1) * PB + 1
+                n = min(PB, nspec - i0 + 1)
+                it = it_tesc(m)
+                d = real(dz(m), KP)
+                y(1:n) = 0.0_KP
+                o(1:n) = 0.0_KP
+                do k = 1, nt
+                    if (k <= it) then
+                        wk = w2(k, m)
+                        do i = 1, n
+                            y(i) = y(i) + wk * ((1.0_KP - d) * basis(i0 + i - 1, k, zlo(m)) + d * basis(i0 + i - 1, k, zhi(m)))
+                        end do
+                    else
+                        wk = w2(k, n_mod + m)
+                        do i = 1, n
+                            o(i) = o(i) + wk * ((1.0_KP - d) * basis(i0 + i - 1, k, zlo(m)) + d * basis(i0 + i - 1, k, zhi(m)))
+                        end do
+                    end if
+                end do
+                yo(i0:i0 + n - 1, m) = y(1:n)
+                yo(i0:i0 + n - 1, n_mod + m) = o(1:n)
             end do
         end do
 #endif
@@ -3641,16 +3674,12 @@ contains
               end block
             end do
         end do
-#else
+#elif defined(OMP_TARGET)
         integer, parameter :: MT = 4
         integer  :: mq, i, k, l, mm(MT), s0
         real(KP) :: bk, y(MT), o(MT), c0(MT), c1(MT), c2(MT), c3(MT)
 
-#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(k, l, bk, mm, y, o, c0, c1, c2, c3, s0)
-#elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(k, l, bk, mm, y, o, c0, c1, c2, c3, s0)
-#endif
         do mq = 1, (n_mod + MT - 1) / MT
             do i = 1, nspec
                 do l = 1, MT
@@ -3678,6 +3707,44 @@ contains
                     yo(i, mm(l)) = y(l)
                     yo(i, n_mod + mm(l)) = o(l)
                 end do
+            end do
+        end do
+#else
+        ! Host: per model and block of pixels, contiguous (vectorizable) passes over the ages
+        integer, parameter :: PB = 256
+        integer  :: m, ib, i0, n, k, s0, it, i
+        real(KP) :: y(PB), o(PB), c0, c1, c2, c3, wk
+
+        !$omp parallel do collapse(2) private(ib, i0, n, k, s0, it, i, y, o, c0, c1, c2, c3, wk)
+        do m = 1, n_mod
+            do ib = 1, (nspec + PB - 1) / PB
+                i0 = (ib - 1) * PB + 1
+                n = min(PB, nspec - i0 + 1)
+                s0 = zlo(m)
+                it = it_tesc(m)
+                c0 = real((1.0_wp - dz(m)) * (1.0_wp - da(m)), KP)
+                c1 = real(dz(m) * (1.0_wp - da(m)), KP)
+                c2 = real((1.0_wp - dz(m)) * da(m), KP)
+                c3 = real(dz(m) * da(m), KP)
+                y(1:n) = 0.0_KP
+                o(1:n) = 0.0_KP
+                do k = 1, nt
+                    if (k <= it) then
+                        wk = w2flat(k + (m - 1) * nt)
+                        do i = 1, n
+                            y(i) = y(i) + wk * (c0 * basis(i0 + i - 1, k, s0) + c1 * basis(i0 + i - 1, k, s0 + 1) + &
+                                                c2 * basis(i0 + i - 1, k, s0 + nzs) + c3 * basis(i0 + i - 1, k, s0 + nzs + 1))
+                        end do
+                    else
+                        wk = w2flat(k + (n_mod + m - 1) * nt)
+                        do i = 1, n
+                            o(i) = o(i) + wk * (c0 * basis(i0 + i - 1, k, s0) + c1 * basis(i0 + i - 1, k, s0 + 1) + &
+                                                c2 * basis(i0 + i - 1, k, s0 + nzs) + c3 * basis(i0 + i - 1, k, s0 + nzs + 1))
+                        end do
+                    end if
+                end do
+                yo(i0:i0 + n - 1, m) = y(1:n)
+                yo(i0:i0 + n - 1, n_mod + m) = o(1:n)
             end do
         end do
 #endif
