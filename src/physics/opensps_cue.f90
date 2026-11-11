@@ -140,6 +140,28 @@ module opensps_cue
             integer(c_int), value :: k, nc, ld
             type(c_ptr), value :: w, b, al, be, x, y, stream
         end subroutine hip_cue_dense_dd
+        !> The reverse pass: the activation (y; may be null) and the pre-activation (p) in FP64
+        subroutine hip_cue_pre_sd(k, nc, ld, w, b, al, be, x, y, p, stream) bind(C, name="opensps_hip_cue_dense_pre_sd")
+            import :: c_int, c_ptr
+            integer(c_int), value :: k, nc, ld
+            type(c_ptr), value :: w, b, al, be, x, y, p, stream
+        end subroutine hip_cue_pre_sd
+        subroutine hip_cue_pre_dd(k, nc, ld, w, b, al, be, x, y, p, stream) bind(C, name="opensps_hip_cue_dense_pre_dd")
+            import :: c_int, c_ptr
+            integer(c_int), value :: k, nc, ld
+            type(c_ptr), value :: w, b, al, be, x, y, p, stream
+        end subroutine hip_cue_pre_dd
+        !> din = W^T dout of a 256 x 256 layer in FP64
+        subroutine hip_cue_back_sd(nc, ld, w, d, o, stream) bind(C, name="opensps_hip_cue_dense_back_sd")
+            import :: c_int, c_ptr
+            integer(c_int), value :: nc, ld
+            type(c_ptr), value :: w, d, o, stream
+        end subroutine hip_cue_back_sd
+        subroutine hip_cue_back_dd(nc, ld, w, d, o, stream) bind(C, name="opensps_hip_cue_dense_back_dd")
+            import :: c_int, c_ptr
+            integer(c_int), value :: nc, ld
+            type(c_ptr), value :: w, d, o, stream
+        end subroutine hip_cue_back_dd
     end interface
 #endif
 
@@ -792,6 +814,42 @@ contains
         end if
         !$omp end target data
     end subroutine hip_dense_d
+
+    !> The reverse pass's layer: the pre-activation a = b + W x, and y = act(a) (FP64; y not formed
+    !> when with_act is false) by the HIP kernel
+    subroutine hip_dense_pre(nin, nc, ch, w, b, al, be, x, a, y, with_act)
+        integer, intent(in) :: nin, nc, ch
+        real(KP), intent(in), target :: w(CUE_NHID, nin, CUE_NNET), b(CUE_NHID, CUE_NNET)
+        real(KP), intent(in), target :: al(CUE_NHID, CUE_NNET), be(CUE_NHID, CUE_NNET)
+        real(WP), intent(in), target :: x(nin, ch, CUE_NNET)
+        real(WP), intent(inout), target :: a(CUE_NHID, ch, CUE_NNET), y(CUE_NHID, ch, CUE_NNET)
+        logical, intent(in) :: with_act
+        type(c_ptr) :: py
+        !$omp target data use_device_addr(w, b, al, be, x, a, y)
+        py = c_null_ptr
+        if (with_act) py = c_loc(y)
+        if (kind(1.0_KP) == kind(1.0_WP)) then
+            call hip_cue_pre_dd(nin, nc, ch, c_loc(w), c_loc(b), c_loc(al), c_loc(be), c_loc(x), py, c_loc(a), c_null_ptr)
+        else
+            call hip_cue_pre_sd(nin, nc, ch, c_loc(w), c_loc(b), c_loc(al), c_loc(be), c_loc(x), py, c_loc(a), c_null_ptr)
+        end if
+        !$omp end target data
+    end subroutine hip_dense_pre
+
+    !> din = W^T dout (256 x 256 layers) by the HIP kernel
+    subroutine hip_dense_back(nc, ch, w, dout, din)
+        integer, intent(in) :: nc, ch
+        real(KP), intent(in), target :: w(CUE_NHID, CUE_NHID, CUE_NNET)
+        real(WP), intent(in), target :: dout(CUE_NHID, ch, CUE_NNET)
+        real(WP), intent(inout), target :: din(CUE_NHID, ch, CUE_NNET)
+        !$omp target data use_device_addr(w, dout, din)
+        if (kind(1.0_KP) == kind(1.0_WP)) then
+            call hip_cue_back_dd(nc, ch, c_loc(w), c_loc(dout), c_loc(din), c_null_ptr)
+        else
+            call hip_cue_back_sd(nc, ch, c_loc(w), c_loc(dout), c_loc(din), c_null_ptr)
+        end if
+        !$omp end target data
+    end subroutine hip_dense_back
 #endif
 
     !> The line networks' output layer and PCA bases: per group g, the PCA coefficients
@@ -1550,11 +1608,9 @@ contains
             nc = min(ch, n - c0)
             ! Forward, keeping a1, a2, a3 (the pre-activations)
             call net_inputs_d(nc, theta(1, c0 + 1), w%in_shift, w%in_scale, x0, ch)
-            call rev_dense_pre(CUE_NIN, nc, ch, w%w1, w%bias(1, 1, 1), x0, a1)
-            call rev_act(nc, ch, w%alpha(1, 1, 1), w%beta(1, 1, 1), a1, yy)
-            call rev_dense_pre(CUE_NHID, nc, ch, w%w2, w%bias(1, 1, 2), yy, a2)
-            call rev_act(nc, ch, w%alpha(1, 1, 2), w%beta(1, 1, 2), a2, yy)
-            call rev_dense_pre(CUE_NHID, nc, ch, w%w3, w%bias(1, 1, 3), yy, a3)
+            call adj_layer(CUE_NIN, nc, ch, w%w1, w%bias(1, 1, 1), w%alpha(1, 1, 1), w%beta(1, 1, 1), x0, a1, yy, .true.)
+            call adj_layer(CUE_NHID, nc, ch, w%w2, w%bias(1, 1, 2), w%alpha(1, 1, 2), w%beta(1, 1, 2), yy, a2, d1, .true.)
+            call adj_layer(CUE_NHID, nc, ch, w%w3, w%bias(1, 1, 3), w%alpha(1, 1, 3), w%beta(1, 1, 3), d1, a3, d2, .false.)
             ! The output layers and PCA bases: the cotangents of the PCA coefficients, then of the
             ! last hidden layer's pre-activation (d1)
             call rev_head_coef(w%nlines, w%nlmax, w%ncw, w%npc, nc, ch, ncb, line_bar(1, c0 + 1), cont_bar(1, c0 + 1), &
@@ -1562,9 +1618,9 @@ contains
             call rev_head_back(w%npc, nc, ch, ncb, cb, w%lw4, w%lpsc, w%cw4, w%cpsc, w%npca, d1)
             call rev_act_scale(nc, ch, w%alpha(1, 1, 3), w%beta(1, 1, 3), a3, d1)
             ! The hidden layers, backwards
-            call rev_dense_back(CUE_NHID, nc, ch, w%w3, d1, d2)
+            call adj_back(nc, ch, w%w3, d1, d2)
             call rev_act_scale(nc, ch, w%alpha(1, 1, 2), w%beta(1, 1, 2), a2, d2)
-            call rev_dense_back(CUE_NHID, nc, ch, w%w2, d2, d1)
+            call adj_back(nc, ch, w%w2, d2, d1)
             call rev_act_scale(nc, ch, w%alpha(1, 1, 1), w%beta(1, 1, 1), a1, d1)
             call rev_inputs(nc, ch, w%w1, w%in_scale, d1, theta_bar(1, c0 + 1))
         end do
@@ -1572,6 +1628,36 @@ contains
         !$omp end target data
 #endif
     end subroutine cue_forward_adjoint
+
+    !> One layer of the reverse pass's recompute: the pre-activation a = b + W x and, with with_act,
+    !> y = act(a), in FP64 (one tiled kernel with HIP, loops otherwise)
+    subroutine adj_layer(nin, nc, ch, w, b, al, be, x, a, y, with_act)
+        integer, intent(in)   :: nin, nc, ch
+        real(KP), intent(in)  :: w(CUE_NHID, nin, CUE_NNET), b(CUE_NHID, CUE_NNET)
+        real(KP), intent(in)  :: al(CUE_NHID, CUE_NNET), be(CUE_NHID, CUE_NNET)
+        real(WP), intent(in)  :: x(nin, ch, CUE_NNET)
+        real(WP), intent(out) :: a(CUE_NHID, ch, CUE_NNET), y(CUE_NHID, ch, CUE_NNET)
+        logical, intent(in)   :: with_act
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET)
+        call hip_dense_pre(nin, nc, ch, w, b, al, be, x, a, y, with_act)
+#else
+        call rev_dense_pre(nin, nc, ch, w, b, x, a)
+        if (with_act) call rev_act(nc, ch, al, be, a, y)
+#endif
+    end subroutine adj_layer
+
+    !> din = W^T dout of a 256 x 256 layer, FP64 (HIP kernel or loops)
+    subroutine adj_back(nc, ch, w, dout, din)
+        integer, intent(in)   :: nc, ch
+        real(KP), intent(in)  :: w(CUE_NHID, CUE_NHID, CUE_NNET)
+        real(WP), intent(in)  :: dout(CUE_NHID, ch, CUE_NNET)
+        real(WP), intent(out) :: din(CUE_NHID, ch, CUE_NNET)
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET)
+        call hip_dense_back(nc, ch, w, dout, din)
+#else
+        call rev_dense_back(CUE_NHID, nc, ch, w, dout, din)
+#endif
+    end subroutine adj_back
 
     !> a(u, m, g) = b(u, g) + sum_k w(u, k, g) x(k, m, g), in FP64.
     subroutine rev_dense_pre(nin, nc, ch, w, b, x, a)

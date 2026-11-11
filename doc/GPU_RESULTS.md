@@ -149,7 +149,31 @@ gas parameters, magnitudes' cotangents.
 - **Cost** (HIP FP32 + cuBLAS build, N = 10^4, magnitudes' cotangents, us per model, forward and
   reverse together): CLOUDY grids 37; cue 60 (78 before the spline's transpose gathered over the
   knots' pixels). Profile before that change (nsys): the spline's transpose 30% of the GPU time,
-  the transposed dense layers (`rev_dense_back`, plain loops) 20%; not profiled again since.
+  the transposed dense layers (`rev_dense_back`, plain loops) 20%; the R9700 profile and the tiled kernels that
+  replaced those loops are below.
+
+### cue gradients on the R9700 (2026-11-11)
+
+ROCm 7.2.4 container, amdflang, gfx1201, N = 10^4, `full_fit` populations with gradients (`benchmark_csp_batch
+10000 0 <config>_grad 10000`), us per model, forward and reverse together, median of three runs:
+
+| | CLOUDY grids | cue, FP32 hidden layers (`cue_fp64 = 0`) | cue, FP64 hidden layers (default) |
+|---|---|---|---|
+| plain loops in the adjoint | 62.1 | 84.7 | 98.3 |
+| tiled HIP kernels in the adjoint | 62.6 | 70.8 | 85.9 |
+
+The FP32 + rocBLAS build is within 2% of these; the FP64 build costs 100 / 105 / 107. The suites
+(unit + regression, 50 tests) pass in FP32, FP64 and FP32 + rocBLAS, with cue's real weights.
+
+`rocprofv3` kernel trace before: the forward's tiled kernel 31% of the GPU time, the adjoint's recompute loops
+(`rev_dense_pre`) 9.2% (4.7 ms per call) and transposed loops (`rev_dense_back`) 7.5% (5.7 ms). The adjoint now
+uses the forward's kernel, which also writes the pre-activation (`cue_dense_act_kernel`, argument `P`), and a tiled
+transposed kernel (`cue_dense_back_kernel`, 2.8 ms per call): the two loop kernels are replaced. After: the tiled
+forward/recompute kernel 39% (5.2 ms per call, FP64-rate bound: ~0.6 TFLOPS on gfx1201), the transposed kernel
+4%, the rest the CSP's observed-frame, attenuation and band kernels (the same as with the grids). The cue
+networks are at the FP64 rate; storing the pre-activations in the forward instead of recomputing them would save
+about a third of the 39% for 1 GB per 10^4 models, and the FP32 hidden layers (`cue_fp64 = 0`) are the remaining
+lever, a precision decision (doc/MIXED_PRECISION.md).
 
 ## Fitting-population batch: nebular, IGM, attenuation, photometry (2026-11-09)
 

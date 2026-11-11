@@ -2121,7 +2121,7 @@ template <typename TW, typename TA>
 __global__ void __launch_bounds__(256) cue_dense_act_kernel(
     int K, int nc, int ld,
     const TW* __restrict__ W, const TW* __restrict__ b, const TW* __restrict__ al, const TW* __restrict__ be,
-    const TA* __restrict__ X, TA* __restrict__ Y)
+    const TA* __restrict__ X, TA* __restrict__ Y, TA* __restrict__ P)
 {
     __shared__ TA sw[CUE_BK][CUE_BU + 1];
     __shared__ TA sx[CUE_BK][CUE_BM + 1];
@@ -2175,7 +2175,9 @@ __global__ void __launch_bounds__(256) cue_dense_act_kernel(
             int m = m0 + tm + 16 * j;
             if (m < nc) {
                 TA v = acc[i][j] + bb;
-                Y[((size_t)g * ld + m) * CUE_NH + u] = (ee + ((TA)1 - ee) / ((TA)1 + exp(-aa * v))) * v;
+                // P: the pre-activation too (the reverse pass's recompute); Y: its activation (null: skipped)
+                if (P) P[((size_t)g * ld + m) * CUE_NH + u] = v;
+                if (Y) Y[((size_t)g * ld + m) * CUE_NH + u] = (ee + ((TA)1 - ee) / ((TA)1 + exp(-aa * v))) * v;
             }
         }
     }
@@ -2183,14 +2185,79 @@ __global__ void __launch_bounds__(256) cue_dense_act_kernel(
 
 template <typename TW, typename TA>
 static void cue_dense_act_launch(int K, int nc, int ld, const void* W, const void* b, const void* al,
-                                 const void* be, const void* X, void* Y, void* stream)
+                                 const void* be, const void* X, void* Y, void* P, void* stream)
 {
     if (nc <= 0) return;
     dim3 block(256);
     dim3 grid(CUE_NH / CUE_BU, (nc + CUE_BM - 1) / CUE_BM, 17);
     hipStream_t s = (hipStream_t)stream;
     cue_dense_act_kernel<TW, TA><<<grid, block, 0, s>>>(K, nc, ld, (const TW*)W, (const TW*)b, (const TW*)al,
-                                                        (const TW*)be, (const TA*)X, (TA*)Y);
+                                                        (const TW*)be, (const TA*)X, (TA*)Y, (TA*)P);
+    (void)hipDeviceSynchronize();
+}
+
+// din(k, m, g) = sum_u W(u, k, g) dout(u, m, g), k = 1..256 (the transpose of a 256 x 256 layer)
+template <typename TW, typename TA>
+__global__ void __launch_bounds__(256) cue_dense_back_kernel(
+    int nc, int ld, const TW* __restrict__ W, const TA* __restrict__ D, TA* __restrict__ O)
+{
+    __shared__ TA sw[CUE_BK][CUE_BU + 1];
+    __shared__ TA sd[CUE_BK][CUE_BM + 1];
+    const int g = blockIdx.z;
+    const int k0 = blockIdx.x * CUE_BU;
+    const int m0 = blockIdx.y * CUE_BM;
+    const int tid = threadIdx.x;
+    const int tk = tid % 16;
+    const int tm = tid / 16;
+    const TW* Wg = W + (size_t)g * CUE_NH * CUE_NH;
+    const TA* Dg = D + (size_t)g * ld * CUE_NH;
+    TA acc[4][4];
+#pragma unroll
+    for (int i = 0; i < 4; i++)
+#pragma unroll
+        for (int j = 0; j < 4; j++) acc[i][j] = 0;
+
+    for (int u0 = 0; u0 < CUE_NH; u0 += CUE_BK) {
+        // W(u0:u0+15, k0:k0+63) and dout(u0:u0+15, m0:m0+63): u fastest in both (16 contiguous values)
+#pragma unroll
+        for (int r = 0; r < 4; r++) {
+            int e = tid + 256 * r;
+            int uu = e % CUE_BK, q = e / CUE_BK;
+            sw[uu][q] = (TA)Wg[(size_t)(k0 + q) * CUE_NH + u0 + uu];
+            int m = m0 + q;
+            sd[uu][q] = (m < nc) ? Dg[(size_t)m * CUE_NH + u0 + uu] : (TA)0;
+        }
+        __syncthreads();
+#pragma unroll
+        for (int uu = 0; uu < CUE_BK; uu++) {
+            TA a[4], x[4];
+#pragma unroll
+            for (int i = 0; i < 4; i++) a[i] = sw[uu][tk + 16 * i];
+#pragma unroll
+            for (int j = 0; j < 4; j++) x[j] = sd[uu][tm + 16 * j];
+#pragma unroll
+            for (int i = 0; i < 4; i++)
+#pragma unroll
+                for (int j = 0; j < 4; j++) acc[i][j] += a[i] * x[j];
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int i = 0; i < 4; i++)
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            int m = m0 + tm + 16 * j;
+            if (m < nc) O[((size_t)g * ld + m) * CUE_NH + k0 + tk + 16 * i] = acc[i][j];
+        }
+}
+
+template <typename TW, typename TA>
+static void cue_dense_back_launch(int nc, int ld, const void* W, const void* D, void* O, void* stream)
+{
+    if (nc <= 0) return;
+    dim3 block(256);
+    dim3 grid(CUE_NH / CUE_BU, (nc + CUE_BM - 1) / CUE_BM, 17);
+    cue_dense_back_kernel<TW, TA><<<grid, block, 0, (hipStream_t)stream>>>(nc, ld, (const TW*)W, (const TA*)D, (TA*)O);
     (void)hipDeviceSynchronize();
 }
 
@@ -2198,14 +2265,29 @@ extern "C" {
 // Weights FP32 (as trained): activations FP32 (_ss) or FP64 (_sd); FP64 builds: _dd
 void opensps_hip_cue_dense_act_ss(int K, int nc, int ld, const void* W, const void* b, const void* al,
                                   const void* be, const void* X, void* Y, void* stream) {
-    cue_dense_act_launch<float, float>(K, nc, ld, W, b, al, be, X, Y, stream);
+    cue_dense_act_launch<float, float>(K, nc, ld, W, b, al, be, X, Y, nullptr, stream);
 }
 void opensps_hip_cue_dense_act_sd(int K, int nc, int ld, const void* W, const void* b, const void* al,
                                   const void* be, const void* X, void* Y, void* stream) {
-    cue_dense_act_launch<float, double>(K, nc, ld, W, b, al, be, X, Y, stream);
+    cue_dense_act_launch<float, double>(K, nc, ld, W, b, al, be, X, Y, nullptr, stream);
 }
 void opensps_hip_cue_dense_act_dd(int K, int nc, int ld, const void* W, const void* b, const void* al,
                                   const void* be, const void* X, void* Y, void* stream) {
-    cue_dense_act_launch<double, double>(K, nc, ld, W, b, al, be, X, Y, stream);
+    cue_dense_act_launch<double, double>(K, nc, ld, W, b, al, be, X, Y, nullptr, stream);
+}
+// The reverse pass: FP64 activations, with the pre-activation also written to P (Y may be null)
+void opensps_hip_cue_dense_pre_sd(int K, int nc, int ld, const void* W, const void* b, const void* al,
+                                  const void* be, const void* X, void* Y, void* P, void* stream) {
+    cue_dense_act_launch<float, double>(K, nc, ld, W, b, al, be, X, Y, P, stream);
+}
+void opensps_hip_cue_dense_pre_dd(int K, int nc, int ld, const void* W, const void* b, const void* al,
+                                  const void* be, const void* X, void* Y, void* P, void* stream) {
+    cue_dense_act_launch<double, double>(K, nc, ld, W, b, al, be, X, Y, P, stream);
+}
+void opensps_hip_cue_dense_back_sd(int nc, int ld, const void* W, const void* D, void* O, void* stream) {
+    cue_dense_back_launch<float, double>(nc, ld, W, D, O, stream);
+}
+void opensps_hip_cue_dense_back_dd(int nc, int ld, const void* W, const void* D, void* O, void* stream) {
+    cue_dense_back_launch<double, double>(nc, ld, W, D, O, stream);
 }
 } // extern "C"
