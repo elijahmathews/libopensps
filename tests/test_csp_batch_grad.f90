@@ -1006,28 +1006,26 @@ contains
                                                                           'gas_logco']
         type(PARAMS) :: pp(size(psets))
         real(WP) :: g_fd(NR, size(psets)), lp, lm, d1, h, x, worst(NR), gmax
+        logical :: five
         integer :: r, m
 
-        ! (FP64: the 5-point stencil (8 (f(h) - f(-h)) - (f(2h) - f(-2h))) / 12h at h = 2e-3, truncation
-        ! O(h^4) ~ 1e-10: the real networks' fit converges to ~1e-9 of L, which a step h turns into
-        ! ~1e-9/h of a small gradient, so the steps of 1e-4 of a plain central difference left 2e-5 on
-        ! gradients down to 1e-3 of the largest, over the 1e-5 bound, and larger steps trade it for truncation.
-        ! FP32 builds: central differences at 1e-2.)
-        h = merge(1.0e-2_wp, 2.0e-3_wp, LINEAR_ONLY)
+        ! (FP32 builds: central differences at 1e-2. FP64 with the synthetic networks (random weights, steep):
+        ! central differences at 1e-4, whose truncation is ~1e-8 there; at the 5-point stencil's larger step
+        ! they are truncation-limited (up to 3e-3). FP64 with cue's real weights: the 5-point stencil
+        ! (8 (f(h) - f(-h)) - (f(2h) - f(-2h))) / 12h at h = 2e-3, truncation O(h^4) ~ 1e-10: the real networks'
+        ! fit converges to ~1e-9 of L, which a step h turns into ~1e-9/h of a small gradient, so the plain
+        ! central difference at 1e-4 left 2e-5 on gradients down to 1e-3 of the largest, over the 1e-5 bound.)
+        five = .not. LINEAR_ONLY .and. len(cue_data_dir()) > 0
+        h = merge(1.0e-2_wp, merge(2.0e-3_wp, 1.0e-4_wp, five), LINEAR_ONLY)
         do m = 1, size(psets)
             do r = 1, NR
                 pp = psets
-                if (LINEAR_ONLY) then
-                    call set_cue_par(pp(m), r, get_cue_par(psets(m), r) + h)
-                    call loss(pp, w, given_w, lp)
-                    call set_cue_par(pp(m), r, get_cue_par(psets(m), r) - h)
-                    call loss(pp, w, given_w, lm)
-                    g_fd(r, m) = (lp - lm) / (2.0_wp * h)
-                else
-                    call set_cue_par(pp(m), r, get_cue_par(psets(m), r) + h)
-                    call loss(pp, w, given_w, lp)
-                    call set_cue_par(pp(m), r, get_cue_par(psets(m), r) - h)
-                    call loss(pp, w, given_w, lm)
+                call set_cue_par(pp(m), r, get_cue_par(psets(m), r) + h)
+                call loss(pp, w, given_w, lp)
+                call set_cue_par(pp(m), r, get_cue_par(psets(m), r) - h)
+                call loss(pp, w, given_w, lm)
+                g_fd(r, m) = (lp - lm) / (2.0_wp * h)
+                if (five) then
                     d1 = lp - lm
                     call set_cue_par(pp(m), r, get_cue_par(psets(m), r) + 2.0_wp * h)
                     call loss(pp, w, given_w, lp)
