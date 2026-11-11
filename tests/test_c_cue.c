@@ -66,10 +66,16 @@ int main(void) {
         if (status != 4) { printf("FAIL: without OPENSPS_CUE_DATA: status %d, expected 4\n", status); failures++; }
         else printf("# OPENSPS_CUE_DATA is not set: status 4 as expected; the cue checks are skipped\n");
         opensps_context_destroy(h, &status);
+        free(w); free(age); free(mags); free(eml); free(lam);
         printf(failures ? "FAILED\n" : "PASSED\n");
         return failures ? 1 : 0;
     }
-    if (status != 0) { printf("FAIL: batch status %d\n", status); return 1; }
+    if (status != 0) {
+        printf("FAIL: batch status %d\n", status);
+        opensps_context_destroy(h, &status);
+        free(w); free(age); free(mags); free(eml); free(lam);
+        return 1;
+    }
 
     int i3726 = nearest(lam, nline, 3727.1), i3729 = nearest(lam, nline, 3729.9), i6585 = nearest(lam, nline, 6585.3);
     double prev = 1e30;
@@ -93,6 +99,7 @@ int main(void) {
     }
 
     opensps_context_destroy(h, &status);
+    free(w); free(age); free(mags); free(eml); free(lam);
     printf(failures ? "FAILED\n" : "PASSED\n");
     return failures ? 1 : 0;
 }
