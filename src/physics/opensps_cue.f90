@@ -150,7 +150,7 @@ module opensps_cue
     public :: cue_forward, cue_fit_ionizing, cue_ionizing_params, cue_inputs
     public :: cue_spline_build, cue_spline_apply, cue_spline_solve, cue_line_map
     public :: cue_log_ratio_power, cue_ion_bound, fit_segment
-    public :: cue_forward_adjoint, cue_ionizing_params_adjoint, cue_spline_adjoint, CUE_BCHUNK
+    public :: cue_forward_adjoint, cue_ionizing_params_adjoint, cue_spline_adjoint
 
 contains
 
