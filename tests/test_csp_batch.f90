@@ -165,7 +165,9 @@ program test_csp_batch
     call build_basis()
     ! Per-model metallicity: all bases resident, logzsol varied
     call check_batch_z()
+    call check_batch_afe()
     call check_cue_z()
+    call check_cue_afe()
     ! Weights over ages and metallicities (several metallicities; tabular SFHs with Z per bin)
     call check_weights_z()
     ! The IMF and the metallicity free per model (the blend of operators)
@@ -908,6 +910,120 @@ contains
         call assert_true(d_indx <= INDX_TOL, "spectral indices", total_tests, total_failures)
     end subroutine check_batch_z
 
+    !> Per-model metallicity and [alpha/Fe]: each model equals a scenario on the SSP blended bilinearly by hand
+    !> (synthetic planes, so no [alpha/Fe] library is needed).
+    subroutine check_batch_afe()
+        real(WP), parameter :: logz(N_MOD) = [-1.6_wp, -1.2_wp, -0.9_wp, -0.55_wp, -0.3_wp, -0.1_wp, &
+                                              0.0_wp, 0.1_wp, 0.18_wp, -0.75_wp, -1.4_wp, -0.2_wp]
+        type(PARAMS) :: pset, psets(N_MOD)
+        type(COMPSPOUT), allocatable :: results(:)
+        real(WP), allocatable :: spec_z(:, :, :), mass_z(:, :), lbol_z(:, :)
+        real(WP), allocatable :: spec_a(:, :, :), mass_a(:, :), lbol_a(:, :)
+        real(WP), parameter :: afe_grid(3) = [-0.2_wp, 0.0_wp, 0.4_wp]
+        ! on nodes, inside the intervals (the two have different widths), and beyond the grid (clamped)
+        real(WP), parameter :: afev(N_MOD) = [-0.2_wp, -0.1_wp, 0.0_wp, 0.1_wp, 0.3_wp, 0.4_wp, 0.5_wp, -0.35_wp, &
+                                              0.05_wp, 0.2_wp, 0.35_wp, -0.15_wp]
+        real(WP) :: da, a_p, wlam
+        integer  :: ia, p, i
+        real(WP), allocatable :: spec(:, :), mags(:, :), ref_spec(:, :), ref_mags(:, :)
+        real(WP), allocatable :: eml(:, :), ref_eml(:, :), indx(:, :), ref_indx(:, :)
+        real(WP) :: mass(N_MOD), lbol(N_MOD), ref_mass(N_MOD), ref_lbol(N_MOD)
+        real(WP) :: d_spec, d_mag, d_scal, d_line, d_indx, dz
+        integer  :: nz, nt, nspec, nbands, z, m, status, zlo
+
+        call print_group("Batched CSP: per-model metallicity and [alpha/Fe] (z = 0.5, IGM, nebular, AGN)")
+        nz = ctx%state%nz
+        nt = ctx%state%ntfull
+        nspec = ctx%state%nspec
+        nbands = ctx%state%nbands
+        allocate(spec_z(nspec, nt, nz), mass_z(nt, nz), lbol_z(nt, nz))
+        do z = 1, nz
+            call set_int('zmet', z)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pset)
+            call opensps_context_set_pset(ctx, pset)
+            call generate_ssp_grid(ctx, pset, mass_z(:, z), lbol_z(:, z), spec_z(:, :, z))
+        end do
+        ! The [alpha/Fe] planes: the solar-scaled SSPs with a smooth (wavelength-, age- and plane-dependent)
+        ! modulation of the spectra, the masses and L_bol
+        allocate(spec_a(nspec, nt, nz * size(afe_grid)), mass_a(nt, nz * size(afe_grid)), lbol_a(nt, nz * size(afe_grid)))
+        do p = 1, size(afe_grid)
+            do z = 1, nz
+                do i = 1, nspec
+                    wlam = cos(0.013_wp * real(i, WP))
+                    spec_a(i, :, z + nz * (p - 1)) = spec_z(i, :, z) * (1.0_wp + 0.5_wp * afe_grid(p) * wlam)
+                end do
+                mass_a(:, z + nz * (p - 1)) = mass_z(:, z) * (1.0_wp + 0.05_wp * afe_grid(p))
+                lbol_a(:, z + nz * (p - 1)) = lbol_z(:, z) + 0.08_wp * afe_grid(p)
+            end do
+        end do
+        call set_int('zmet', 10)
+        call set_int('dust_type', 2)
+        call set_int('add_igm_absorption', 1)
+        call set_int('add_neb_emission', 1)
+        call set_int('add_agn_dust', 1)
+
+        allocate(spec(nspec, N_MOD), mags(nbands, N_MOD), ref_spec(nspec, N_MOD), ref_mags(nbands, N_MOD))
+        allocate(eml(NEMLINE, N_MOD), ref_eml(NEMLINE, N_MOD), indx(ctx%state%nindx, N_MOD), &
+                 ref_indx(ctx%state%nindx, N_MOD))
+        do m = 1, N_MOD
+            call set_model(m, 0.5_wp)
+            call set_float('logzsol', logz(m))
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
+            call set_float('afe', afev(m))
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
+            ! The bilinear SSP in (log Z, [alpha/Fe]) (the [alpha/Fe] clamped to the grid)
+            zlo = max(1, min(find_interval(log10(ctx%state%zlegend(1:nz) / ctx%state%zsol), logz(m)), nz - 1))
+            dz = (logz(m) - log10(ctx%state%zlegend(zlo) / ctx%state%zsol)) / &
+                 (log10(ctx%state%zlegend(zlo + 1) / ctx%state%zsol) - log10(ctx%state%zlegend(zlo) / ctx%state%zsol))
+            ia = max(1, min(find_interval(afe_grid, afev(m)), size(afe_grid) - 1))
+            da = max(0.0_wp, min((afev(m) - afe_grid(ia)) / (afe_grid(ia + 1) - afe_grid(ia)), 1.0_wp))
+            ctx%state%ssp_basis_is_dirty = .true.
+            call opensps_context_update_ssp_basis(ctx, &
+                reshape((1.0_wp - da) * ((1.0_wp - dz) * spec_a(:, :, zlo + nz * (ia - 1)) + &
+                                         dz * spec_a(:, :, zlo + 1 + nz * (ia - 1))) + &
+                        da * ((1.0_wp - dz) * spec_a(:, :, zlo + nz * ia) + dz * spec_a(:, :, zlo + 1 + nz * ia)), &
+                        [nspec, nt, 1]), &
+                reshape((1.0_wp - da) * ((1.0_wp - dz) * mass_a(:, zlo + nz * (ia - 1)) + &
+                                         dz * mass_a(:, zlo + 1 + nz * (ia - 1))) + &
+                        da * ((1.0_wp - dz) * mass_a(:, zlo + nz * ia) + dz * mass_a(:, zlo + 1 + nz * ia)), [nt, 1]), &
+                reshape((1.0_wp - da) * ((1.0_wp - dz) * lbol_a(:, zlo + nz * (ia - 1)) + &
+                                         dz * lbol_a(:, zlo + 1 + nz * (ia - 1))) + &
+                        da * ((1.0_wp - dz) * lbol_a(:, zlo + nz * ia) + dz * lbol_a(:, zlo + 1 + nz * ia)), [nt, 1]), 1)
+            call compute_csp_scenario(ctx, psets(m), 1, results, status)
+            if (status /= 0) then
+                write(*, *) 'ERROR: compute_csp_scenario returned status ', status
+                stop 1
+            end if
+            ref_spec(:, m) = results(1)%spec(1:nspec)
+            ref_mags(:, m) = results(1)%mags(1:nbands)
+            ref_eml(:, m) = results(1)%emlines(1:NEMLINE)
+            ref_indx(:, m) = results(1)%indx(1:ctx%state%nindx)
+            ref_mass(m) = results(1)%mass_csp
+            ref_lbol(m) = results(1)%lbol_csp
+        end do
+
+        ctx%state%ssp_basis_is_dirty = .true.
+        call opensps_context_update_ssp_basis(ctx, spec_a, mass_a, lbol_a, nz * size(afe_grid), afe_grid)
+        call compute_csp_batch(ctx, psets, mags, status, spec=spec, mass=mass, lbol=lbol, emlines=eml, indx=indx)
+        call assert_true(status == 0, "status 0", total_tests, total_failures)
+        if (status /= 0) return
+        call max_differences(spec, mags, ref_spec, ref_mags, d_spec, d_mag)
+        d_scal = max(maxval(abs(mass / ref_mass - 1.0_wp)), maxval(abs(lbol - ref_lbol)))
+        ! (lines of a model without ionizing stars are denormal-level noise: skipped below 1e-100)
+        d_line = maxval(abs(eml / ref_eml - 1.0_wp), mask=ref_eml > max(1.0e-3_wp * maxval(ref_eml), 1.0e-100_wp))
+        d_indx = maxval(abs(indx - ref_indx))
+        write(*, '(A,5ES10.2)') "# max difference (spectrum, mag, mass/lbol, lines, indices): ", &
+            d_spec, d_mag, d_scal, d_line, d_indx
+        call assert_true(d_spec <= SPEC_RTOL, "spectra", total_tests, total_failures)
+        call assert_true(d_mag <= MAG_TOL, "magnitudes", total_tests, total_failures)
+        call assert_true(d_scal <= 1.0e-12_wp, "mass, L_bol", total_tests, total_failures)
+        call assert_true(d_line <= SPEC_RTOL, "emission lines", total_tests, total_failures)
+        call assert_true(d_indx <= INDX_TOL, "spectral indices", total_tests, total_failures)
+    end subroutine check_batch_afe
+
     !> cue with the metallicity per model (all bases resident): each model's lines equal those of
     !> a batch of that model alone on the basis interpolated to its metallicity (the ionizing
     !> spectrum and its photons are linear in the basis). Synthetic networks without
@@ -982,6 +1098,102 @@ contains
         call set_int('nebular_model', 0)
         call set_int('add_neb_emission', 0)
     end subroutine check_cue_z
+
+    subroutine check_cue_afe()
+        use opensps_cue, only: cue_data_dir, cue_w, cue_load_dir, cue_unload, cue_weights_t
+        use cue_test_library, only: cue_synthetic, cue_write_library
+        real(WP), parameter :: logz(N_MOD) = [-1.6_wp, -1.2_wp, -0.9_wp, -0.55_wp, -0.3_wp, -0.1_wp, &
+                                              0.0_wp, 0.1_wp, 0.18_wp, -0.75_wp, -1.4_wp, -0.2_wp]
+        type(PARAMS) :: psets(N_MOD)
+        type(cue_weights_t) :: syn
+        real(WP), allocatable :: spec_z(:, :, :), mass_z(:, :), lbol_z(:, :), mags(:, :), eml(:, :), ref_eml(:, :)
+        real(WP), allocatable :: w(:, :)
+        real(WP), allocatable :: spec_a(:, :, :), mass_a(:, :), lbol_a(:, :)
+        real(WP), parameter :: afe_grid(3) = [-0.2_wp, 0.0_wp, 0.4_wp]
+        real(WP), parameter :: afev(N_MOD) = [-0.2_wp, -0.1_wp, 0.0_wp, 0.1_wp, 0.3_wp, 0.4_wp, 0.5_wp, -0.35_wp, &
+                                              0.05_wp, 0.2_wp, 0.35_wp, -0.15_wp]
+        real(WP) :: da
+        integer  :: ia, p, i
+        real(WP) :: dz, d_line
+        integer  :: nz, nt, nspec, z, m, status, zlo
+        logical  :: real_data
+
+        call print_group("cue with the metallicity and [alpha/Fe] per model (all bases resident)")
+        nz = ctx%state%nz
+        nt = ctx%state%ntfull
+        nspec = ctx%state%nspec
+        real_data = len(cue_data_dir()) > 0
+        if (.not. real_data) then
+            call cue_synthetic(syn, ctx%state%nebem_line_pos(1:43))
+            call cue_write_library(syn, 'cue_batch_test_lib_afe')
+            call cue_unload(syn)
+            call cue_load_dir(cue_w, 'cue_batch_test_lib_afe')
+        end if
+        allocate(spec_z(nspec, nt, nz), mass_z(nt, nz), lbol_z(nt, nz), mags(ctx%state%nbands, N_MOD), &
+                 eml(NEMLINE, N_MOD), ref_eml(NEMLINE, N_MOD), w(nt, N_MOD))
+        do z = 1, nz
+            call set_int('zmet', z)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(1))
+            call opensps_context_set_pset(ctx, psets(1))
+            call generate_ssp_grid(ctx, psets(1), mass_z(:, z), lbol_z(:, z), spec_z(:, :, z))
+        end do
+        allocate(spec_a(nspec, nt, nz * size(afe_grid)), mass_a(nt, nz * size(afe_grid)), lbol_a(nt, nz * size(afe_grid)))
+        do p = 1, size(afe_grid)
+            do z = 1, nz
+                do i = 1, nspec
+                    spec_a(i, :, z + nz * (p - 1)) = spec_z(i, :, z) * (1.0_wp + 0.5_wp * afe_grid(p) * cos(0.013_wp * real(i, WP)))
+                end do
+                mass_a(:, z + nz * (p - 1)) = mass_z(:, z) * (1.0_wp + 0.05_wp * afe_grid(p))
+                lbol_a(:, z + nz * (p - 1)) = lbol_z(:, z) + 0.08_wp * afe_grid(p)
+            end do
+        end do
+        call set_int('zmet', 10)
+        call set_int('add_neb_emission', 1)
+        call set_int('nebular_model', 1)
+        call set_int('cue_fp64', 1)
+        do m = 1, N_MOD
+            w(:, m) = 1.0e-4_wp * merge(30.0_wp, 1.0_wp, [(z, z = 1, nt)] <= 20 + m)
+            call set_model(m, 0.0_wp)
+            call set_float('logzsol', logz(m))
+            call set_float('afe', afev(m))
+            call set_float('gas_logn', 1.0_wp + 0.25_wp * mod(m, 13))
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
+            zlo = max(1, min(find_interval(log10(ctx%state%zlegend(1:nz) / ctx%state%zsol), logz(m)), nz - 1))
+            dz = (logz(m) - log10(ctx%state%zlegend(zlo) / ctx%state%zsol)) / &
+                 (log10(ctx%state%zlegend(zlo + 1) / ctx%state%zsol) - log10(ctx%state%zlegend(zlo) / ctx%state%zsol))
+            ia = max(1, min(find_interval(afe_grid, afev(m)), size(afe_grid) - 1))
+            da = max(0.0_wp, min((afev(m) - afe_grid(ia)) / (afe_grid(ia + 1) - afe_grid(ia)), 1.0_wp))
+            ctx%state%ssp_basis_is_dirty = .true.
+            call opensps_context_update_ssp_basis(ctx, &
+                reshape((1.0_wp - da) * ((1.0_wp - dz) * spec_a(:, :, zlo + nz * (ia - 1)) + &
+                                         dz * spec_a(:, :, zlo + 1 + nz * (ia - 1))) + &
+                        da * ((1.0_wp - dz) * spec_a(:, :, zlo + nz * ia) + dz * spec_a(:, :, zlo + 1 + nz * ia)), &
+                        [nspec, nt, 1]), &
+                reshape((1.0_wp - da) * ((1.0_wp - dz) * mass_a(:, zlo + nz * (ia - 1)) + &
+                                         dz * mass_a(:, zlo + 1 + nz * (ia - 1))) + &
+                        da * ((1.0_wp - dz) * mass_a(:, zlo + nz * ia) + dz * mass_a(:, zlo + 1 + nz * ia)), [nt, 1]), &
+                reshape((1.0_wp - da) * ((1.0_wp - dz) * lbol_a(:, zlo + nz * (ia - 1)) + &
+                                         dz * lbol_a(:, zlo + 1 + nz * (ia - 1))) + &
+                        da * ((1.0_wp - dz) * lbol_a(:, zlo + nz * ia) + dz * lbol_a(:, zlo + 1 + nz * ia)), [nt, 1]), 1)
+            call compute_csp_batch(ctx, psets(m:m), mags(:, m:m), status, emlines=ref_eml(:, m:m), ssp_weights=w(:, m:m))
+            call assert_true(status == 0, "status 0 (one model, its basis)", total_tests, total_failures)
+        end do
+        ctx%state%ssp_basis_is_dirty = .true.
+        call opensps_context_update_ssp_basis(ctx, spec_a, mass_a, lbol_a, nz * size(afe_grid), afe_grid)
+        call compute_csp_batch(ctx, psets, mags, status, emlines=eml, ssp_weights=w)
+        call assert_true(status == 0, "status 0 (all models, all bases)", total_tests, total_failures)
+        d_line = maxval(abs(eml / ref_eml - 1.0_wp), mask=ref_eml > 1.0e-3_wp * maxval(ref_eml))
+        write (*, '(A,ES10.2)') '# worst relative line difference: ', d_line
+        ! FP32 builds: the bases are interpolated in FP32 on one side, FP64 on the other, and the
+        ! fit and networks see the difference
+        call assert_true(d_line <= merge(1.0e-9_wp, 1.0e-4_wp, KP == WP), "lines = the bilinearly blended basis's", &
+                         total_tests, total_failures)
+        if (.not. real_data) call cue_unload(cue_w)
+        call set_int('nebular_model', 0)
+        call set_int('add_neb_emission', 0)
+    end subroutine check_cue_afe
 
     !> A single-age CSP without dust, nebular emission, IGM, AGN or smoothing is the SFH-weighted
     !> sum of its SSP basis: spec = sum_t w_t spec_ssp(t), mass = sum_t w_t mass_ssp(t),

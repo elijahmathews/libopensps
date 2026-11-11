@@ -233,6 +233,9 @@ module opensps_context_types
         real(KP), allocatable :: ssp_basis_spec_t(:, :, :)
         real(WP), allocatable :: ssp_basis_mass(:, :)
         real(WP), allocatable :: ssp_basis_lbol(:, :)
+        !> The [alpha/Fe] grid of the resident bases: ssp_basis_* hold nz * size(afe_basis) slabs, the
+        !> metallicity fastest (slab = iz + nz * (iafe - 1)); a basis without an [alpha/Fe] axis has one value.
+        real(WP), allocatable :: afe_basis(:)
         logical :: ssp_basis_is_dirty = .true.
 
         ! --- Replacements for csp_buffer_t ---
@@ -516,6 +519,7 @@ contains
         if (allocated(state%lbol_ssp_zz)) deallocate (state%lbol_ssp_zz)
         if (associated(state%time_full)) nullify (state%time_full)
         if (allocated(state%weight_ssp)) deallocate (state%weight_ssp)
+        if (allocated(state%afe_basis)) deallocate (state%afe_basis)
         if (allocated(state%ssp_temp_grid)) deallocate (state%ssp_temp_grid)
         if (allocated(state%ssp_active_idx)) deallocate (state%ssp_active_idx)
         if (allocated(state%ssp_active_w)) deallocate (state%ssp_active_w)

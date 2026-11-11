@@ -497,6 +497,8 @@ contains
             ctx%pset%frac_xrb = value
         case ('logzsol')
             ctx%pset%logzsol = value
+        case ('afe')
+            ctx%pset%afe = value
         case ('tau')
             ctx%pset%tau = value
         case ('const')
@@ -690,12 +692,15 @@ contains
     !> @param[in] mass_ssp SSP mass [nt, nz_in].
     !> @param[in] lbol_ssp SSP bolometric luminosity [nt, nz_in].
     !> @param[in] nzin Number of metallicity bins actively provided.
-    subroutine opensps_context_update_ssp_basis(ctx, spec_ssp, mass_ssp, lbol_ssp, nzin)
+    subroutine opensps_context_update_ssp_basis(ctx, spec_ssp, mass_ssp, lbol_ssp, nzin, afe_values)
         type(opensps_context_t), intent(inout) :: ctx
         real(WP), intent(in) :: spec_ssp(:, :, :)
         real(WP), intent(in) :: mass_ssp(:, :)
         real(WP), intent(in) :: lbol_ssp(:, :)
         integer, intent(in) :: nzin
+        !> [alpha/Fe] of the planes of the stack: the slabs are the context's metallicities (fastest) over
+        !> these values, in increasing order; absent: no [alpha/Fe] axis
+        real(WP), intent(in), optional :: afe_values(:)
         integer :: iz
         logical :: mapped_new, needs_realloc
 
@@ -703,6 +708,22 @@ contains
         needs_realloc = .false.
 
         if (nzin <= 0) return
+        if (present(afe_values)) then
+            if (size(afe_values) < 1 .or. mod(nzin, size(afe_values)) /= 0) return
+            if (.not. allocated(ctx%state%afe_basis)) then
+                ctx%state%afe_basis = afe_values
+                ctx%state%ssp_basis_is_dirty = .true.
+            else if (size(ctx%state%afe_basis) /= size(afe_values)) then
+                ctx%state%afe_basis = afe_values
+                ctx%state%ssp_basis_is_dirty = .true.
+            else if (any(ctx%state%afe_basis /= afe_values)) then
+                ctx%state%afe_basis = afe_values
+                ctx%state%ssp_basis_is_dirty = .true.
+            end if
+        else if (allocated(ctx%state%afe_basis)) then
+            deallocate (ctx%state%afe_basis)
+            ctx%state%ssp_basis_is_dirty = .true.
+        end if
         if (size(spec_ssp, 3) < nzin .or. size(mass_ssp, 2) < nzin .or. size(lbol_ssp, 2) < nzin) return
 
         if (.not. allocated(ctx%state%ssp_basis_spec) .or. &
