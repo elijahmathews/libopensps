@@ -39,7 +39,8 @@ module opensps_types
                     duste_gamma = 0.01_wp, duste_umin = 1.0_wp, duste_qpah = 3.5_wp, fcstar = 1.0_wp, &
                     masscut = 150.0_wp, sigma_smooth = 0.0_wp, agb_dust = 1.0_wp, min_wave_smooth = 1.0e3_wp, &
                     max_wave_smooth = 1.0e4_wp, gas_logu = -2.0_wp, gas_logz = 0.0_wp, igm_factor = 1.0_wp, &
-                    fagn = 0.0_wp, agn_tau = 10.0_wp, frac_xrb = 1.0_wp, dust3 = 0.0_wp
+                    fagn = 0.0_wp, agn_tau = 10.0_wp, frac_xrb = 1.0_wp, dust3 = 0.0_wp, &
+                    gas_logn = 2.0_wp, gas_logno = 0.0_wp, gas_logco = 0.0_wp
         integer :: zmet = 1, sfh = 0, wgp1 = 1, wgp2 = 1, wgp3 = 1, evtype = -1
         integer :: compute_mags = 1, compute_indices = 1
         character(50) :: imf_filename = '', sfh_filename = ''

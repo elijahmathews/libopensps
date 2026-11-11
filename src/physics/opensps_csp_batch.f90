@@ -94,6 +94,9 @@ module opensps_csp_batch
     use opensps_cosmology, only: igm_tau, igm_tau_dz, igm_tau_pixel_terms, igm_tau_z_terms, IGM_NTERM
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
     use opensps_gas, only: get_grid_indices_weights, prepare_line_gaussians
+    use opensps_cue, only: cue_w, cue_sp, cue_load, cue_line_map, cue_spline_build, cue_spline_solve, &
+                           cue_ionizing_params, cue_inputs, cue_forward, CUE_EDGE_HI, cue_batch_chunk, CUE_NION, CUE_NIN, &
+                           CUE_LOG_LSUN
     use opensps_spectral_indices, only: compute_spectral_indices_columns
     use opensps_smoothing, only: apply_smoothing, apply_smoothing_adjoint
     use opensps_batch_photometry, only: compute_magnitudes_columns, prepare_batch_grid, smoothing_on_device, &
@@ -291,7 +294,8 @@ contains
     !> @param[in]    psets   Parameter sets, one per model (prepared: opensps_context_prepare_pset).
     !> @param[out]   mags    Magnitudes (nbands, N); bands not requested in psets(1)%mag_compute
     !>                       are NaN, as in compute_magnitudes.
-    !> @param[out]   status  0 on success; 1 no setup or basis; 2 unsupported option; 3 bad shape.
+    !> @param[out]   status  0 on success; 1 no setup or basis; 2 unsupported option; 3 bad shape;
+    !>                       4 data missing (nebular_model = 1 without cue's weights: OPENSPS_CUE_DATA).
     !> @param[out]   spec    Optional spectra (nspec, N), L_sun/Hz per solar mass formed.
     !> @param[out]   mass, lbol, mdust, sfr  Optional per-model scalars as in compspout.
     !> @param[out]   emlines Optional emission-line luminosities (NEMLINE, N), as compspout%emlines
@@ -366,6 +370,9 @@ contains
         integer :: n_mod, nt, nspec, nbands, m, k
         real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk
         logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw, host_m, imf, dev, zimf, grad
+        logical  :: cue
+        integer  :: st_cue
+        real(WP), allocatable :: gas(:,:)
         ! Gradients: the band fluxes of the magnitudes, and each column's magnitude redshift
         real(WP), allocatable :: fbk(:,:), zcm(:), dchain(:,:)
         ! Gradients: dL / d(SSP weights) of every model, and the SFH weights' tangents (opensps_sfh_tangent)
@@ -553,6 +560,18 @@ contains
             end if
             given_w = .true.
             nzw = nzb
+        end if
+        ! cue (nebular_model = 1): with the resident bases, forward only (the IMF per model and the
+        ! gradients use the CLOUDY grids' kernels); its weights are read on first use
+        cue = ctx%add_neb_emission_val == 1 .and. ctx%nebular_model_val == 1
+        if (cue) then
+            if (imf .or. grad) then
+                status = 2; return
+            end if
+            call cue_load(st_cue)
+            if (st_cue /= 0) then
+                status = 4; return
+            end if
         end if
         zred = psets(1)%zred
         zvar = .false.
@@ -995,6 +1014,14 @@ contains
         if (neb .and. imf) then
             call add_nebular_batch(ctx, n_mod, nspec, nt, nzb, nobasis, w2, it_tesc, zlo, zhi, dz, nb, yo, eml, &
                                    q_model=.true.)
+        else if (neb .and. cue) then
+            allocate(gas(5, n_mod))
+            do m = 1, n_mod
+                gas(:, m) = [psets(m)%gas_logu, psets(m)%gas_logn, psets(m)%gas_logz, psets(m)%gas_logno, &
+                             psets(m)%gas_logco]
+            end do
+            call add_nebular_batch(ctx, n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, w2, it_tesc, &
+                                   zlo, zhi, dz, nb, yo, eml, q_model=.false., gas=gas)
         else if (neb) then
             call add_nebular_batch(ctx, n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, w2, it_tesc, &
                                    zlo, zhi, dz, nb, yo, eml, q_model=.false.)
@@ -1837,7 +1864,8 @@ contains
     !> q_model: the ionizing photons per age are per model (nb%q0(t, m), the IMF per model) and
     !> the EUV pixels of yo already have the escaping fraction (opensps_ssp_batch); basis is
     !> then not read.
-    subroutine add_nebular_batch(ctx, n_mod, nspec, nt, nzb, basis, w2, it_tesc, zlo, zhi, dz, nb, yo, eml, q_model)
+    subroutine add_nebular_batch(ctx, n_mod, nspec, nt, nzb, basis, w2, it_tesc, zlo, zhi, dz, nb, yo, eml, q_model, &
+                                 gas)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)              :: n_mod, nspec, nt, nzb, it_tesc(:), zlo(:), zhi(:)
         real(KP), intent(in), contiguous :: basis(:,:,:), w2(:,:)
@@ -1846,6 +1874,9 @@ contains
         real(KP), intent(inout)          :: yo(:,:)
         real(KP), intent(out)            :: eml(:,:)
         logical, intent(in)              :: q_model
+        !> With it, cue (nebular_model = 1) in place of the CLOUDY grids: per model (log U, log n_H,
+        !> log Z_gas, log N/O, log C/O)
+        real(WP), intent(in), optional   :: gas(:,:)
 
         ! The kernels take the components as plain arrays: device code never refers to the
         ! derived type itself, which is mapped only through its components (mapping it whole and
@@ -1856,14 +1887,188 @@ contains
                              size(nb%q0, 2), basis, w2, it_tesc, zlo, zhi, dz, &
                              nb%nt_neb, nb%whlylim, nb%cont, nb%lines_in_spec, nb%xrb, nb%ia, nb%wa, nb%dwa, &
                              nb%newr, nb%q0, nb%iz, nb%wz, nb%iu, nb%wu, nb%fesc, nb%fabs, nb%cy, nb%co, nb%lns, &
-                             nb%lum, nb%lptr, nb%lid, yo, eml, q_model)
+                             nb%lum, nb%lptr, nb%lid, yo, eml, q_model, .not. present(gas))
+        if (present(gas) .and. nb%nt_neb >= 1) then
+            call cue_nebular(ctx, n_mod, nspec, nt, nzb, size(basis, 1), size(basis, 2), size(basis, 3), basis, w2, &
+                             it_tesc, zlo, zhi, dz, nb%nt_neb, nb%cont, size(nb%q0, 2), nb%q0, nb%fabs, gas, &
+                             nb%lum, yo, eml)
+            if (nb%lines_in_spec) call line_profiles(ctx, n_mod, nspec, nb%lum, nb%lptr, nb%lid, yo)
+        end if
     end subroutine add_nebular_batch
+
+    !> Nebular emission by cue (opensps_cue; nebular_model = 1), in place of steps 3-5 of
+    !> nebular_kernels. The ionizing source of a model is its stars of the nebular ages (t <= nt_neb,
+    !> the ages the CLOUDY grids cover), one nebula of the gas parameters: their summed spectrum
+    !> below 911.6 A gives the power-law shape (cue's fit), the absorbed photons Q = sum_t w(t) Q(t)
+    !> (1 - frac_obrun) the normalization, as cue's use with a stellar ionizing source (Li et al.
+    !> 2024, Sec. 2). The emission is split between the young and old age sums in proportion to their
+    !> absorbed photons (it attenuates with the stars that ionize it, as with the grids). Lines go to
+    !> the context's line list (cue_line_map; unmatched lines 0); the continuum, on cue's grid, is
+    !> splined to the spectral grid as cue does (none at and below 911.6 A).
+    subroutine cue_nebular(ctx, n_mod, nspec, nt, nzb, nb1, nb2, nb3, basis, w2, it_tesc, zlo, zhi, dz, nt_neb, &
+                           cont, nq0, q0, fabs, gas, lum, yo, eml)
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)     :: n_mod, nspec, nt, nzb, nb1, nb2, nb3, nt_neb, nq0
+        integer, intent(in)     :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
+        real(KP), intent(in)    :: basis(nb1, nb2, nb3), w2(nt, 2 * n_mod)
+        real(WP), intent(in)    :: dz(n_mod), q0(nt_neb, nq0), fabs(n_mod), gas(5, n_mod)
+        logical, intent(in)     :: cont
+        real(KP), intent(inout) :: lum(NEMLINE, 2 * n_mod), yo(nspec, 2 * n_mod)
+        real(KP), intent(out)   :: eml(NEMLINE, n_mod)
+
+        integer  :: nion, ncw, ch, c0, nc, m, i, t, k, j, map(NEMLINE)
+        real(WP), allocatable :: lam_ion(:), ion(:,:), theta(:,:), logq(:), qy(:), qo(:), line_log(:,:), cont_log(:,:)
+        real(KP), allocatable :: sion(:,:), v(:,:), mm(:,:)
+        real(KP) :: s, bk, dzk, fy, fo, tt, u, c
+        integer  :: kk
+        real(WP) :: q, e
+        real(WP), parameter :: LN10 = log(10.0_wp)
+
+        ! Host set-up: the pixels of the fit (to the first beyond 911.6 A, cue's normalization),
+        ! the line matching, the spline from cue's grid (kept while the grid is unchanged)
+        nion = 0
+        do i = 1, nspec
+            if (ctx%state%spec_lambda(i) <= CUE_EDGE_HI) nion = i
+        end do
+        nion = min(nion + 1, nspec)
+        allocate(lam_ion(nion))
+        lam_ion = ctx%state%spec_lambda(1:nion)
+        call cue_line_map(cue_w, NEMLINE, ctx%state%nebem_line_pos, map)
+        ncw = cue_w%ncw
+        call cue_spline_build(cue_sp, ncw, cue_w%cont_lam, nspec, ctx%state%spec_lambda(1:nspec))
+
+        ch = max(1, min(n_mod, cue_batch_chunk))
+        allocate(sion(nion, ch), ion(CUE_NION, ch), theta(CUE_NIN, ch), logq(ch), qy(ch), qo(ch), &
+                 line_log(cue_w%nlines, ch), cont_log(ncw, ch), v(ncw, ch), mm(ncw, ch))
+#ifdef OMP_TARGET
+        !$omp target data map(to: lam_ion, map, gas) map(alloc: sion, ion, theta, logq, qy, qo, line_log, cont_log, &
+        !$omp&  v, mm)
+#endif
+        do c0 = 0, n_mod - 1, ch
+            nc = min(ch, n_mod - c0)
+            ! The ionizing spectrum of the nebular ages (escape not applied: it scales, not shapes)
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2) private(s, t, bk, dzk)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2) private(s, t, bk, dzk)
+#endif
+            do m = 1, nc
+                do i = 1, nion
+                    s = 0.0_KP
+                    dzk = real(dz(c0 + m), KP)
+                    do t = 1, nt_neb
+                        if (nzb > 1) then
+                            bk = (1.0_KP - dzk) * basis(i, t, zlo(c0 + m)) + dzk * basis(i, t, zhi(c0 + m))
+                        else
+                            bk = basis(i, t, 1)
+                        end if
+                        s = s + (w2(t, c0 + m) + w2(t, n_mod + c0 + m)) * bk
+                    end do
+                    sion(i, m) = s
+                end do
+            end do
+            ! Absorbed ionizing photons of the young and old nebular ages
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do private(t, q)
+#elif defined(_OPENMP)
+            !$omp parallel do private(t, q)
+#endif
+            do m = 1, nc
+                qy(m) = 0.0_wp
+                qo(m) = 0.0_wp
+                do t = 1, nt_neb
+                    if (nzb > 1) then
+                        q = abs(((1.0_wp - dz(c0 + m)) * q0(t, zlo(c0 + m)) + dz(c0 + m) * q0(t, zhi(c0 + m))) * &
+                                fabs(c0 + m))
+                    else
+                        q = abs(q0(t, 1) * fabs(c0 + m))
+                    end if
+                    if (t <= it_tesc(c0 + m)) then
+                        qy(m) = qy(m) + real(w2(t, c0 + m), WP) * q
+                    else
+                        qo(m) = qo(m) + real(w2(t, n_mod + c0 + m), WP) * q
+                    end if
+                end do
+            end do
+            call cue_ionizing_params(nc, nion, lam_ion, sion, ion)
+            call cue_inputs(nc, ion, gas(1, c0 + 1), theta, logq)
+            call cue_forward(cue_w, nc, theta, line_log, cont_log, fp64=ctx%cue_fp64_val == 1)
+            ! Lines: cue's L for its Q(U, n_H), scaled to the absorbed photons (FP64 exponent)
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2) private(k, e)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2) private(k, e)
+#endif
+            do m = 1, nc
+                do i = 1, NEMLINE
+                    k = map(i)
+                    if (k > 0) then
+                        ! (exponent in FP64, reduced before the exponential: exp_kp)
+                        e = (line_log(k, m) - logq(m) - CUE_LOG_LSUN) * LN10
+                        lum(i, c0 + m) = 0.0_KP
+                        lum(i, n_mod + c0 + m) = 0.0_KP
+                        if (qy(m) > 0.0_wp) lum(i, c0 + m) = exp_kp(e + log(qy(m)))
+                        if (qo(m) > 0.0_wp) lum(i, n_mod + c0 + m) = exp_kp(e + log(qo(m)))
+                    else
+                        lum(i, c0 + m) = 0.0_KP
+                        lum(i, n_mod + c0 + m) = 0.0_KP
+                    end if
+                    eml(i, c0 + m) = lum(i, c0 + m) + lum(i, n_mod + c0 + m)
+                end do
+            end do
+            if (.not. cont) cycle
+            ! Continuum: L_nu on cue's grid for the model's Q, splined to the spectral grid, split
+            ! between young and old as the photons
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2)
+#endif
+            do m = 1, nc
+                do i = 1, ncw
+                    if (qy(m) + qo(m) > 0.0_wp) then
+                        v(i, m) = exp_kp((cont_log(i, m) - logq(m) - CUE_LOG_LSUN) * LN10 + log(qy(m) + qo(m)))
+                    else
+                        v(i, m) = 0.0_KP
+                    end if
+                end do
+            end do
+            call cue_spline_solve(ncw, nc, cue_sp%h, cue_sp%cp, cue_sp%rden, cue_sp%aa, cue_sp%m0c, cue_sp%mnc, v, mm)
+            ! The spline at each pixel, added to the young and old sums (in one pass)
+            associate (sk => cue_sp%k, st => cue_sp%t, sh6 => cue_sp%hh6)
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2) private(fy, fo, kk, tt, u, c) &
+            !$omp map(OMP_MAP_PRESENT_ALLOC: sk, st, sh6)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2) private(fy, fo, kk, tt, u, c)
+#endif
+            do m = 1, nc
+                do j = 1, nspec
+                    kk = sk(j)
+                    if (kk == 0) cycle
+                    tt = st(j)
+                    u = 1.0_KP - tt
+                    c = u * v(kk, m) + tt * v(kk + 1, m) + &
+                        sh6(j) * ((u * u * u - u) * mm(kk, m) + (tt * tt * tt - tt) * mm(kk + 1, m))
+                    fy = 0.0_KP
+                    if (qy(m) + qo(m) > 0.0_wp) fy = real(qy(m) / (qy(m) + qo(m)), KP)
+                    fo = 1.0_KP - fy
+                    yo(j, c0 + m) = yo(j, c0 + m) + fy * c
+                    yo(j, n_mod + c0 + m) = yo(j, n_mod + c0 + m) + fo * c
+                end do
+            end do
+            end associate
+        end do
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine cue_nebular
 
     !> The kernels of add_nebular_batch, on the components of its nebular_setup_t.
     subroutine nebular_kernels(ctx, n_mod, nspec, nt, nzb, nb1, nb2, nb3, nq0, basis, w2, it_tesc, zlo, zhi, dz, &
                                nb_nt_neb, nb_whlylim, nb_cont, nb_lines_in_spec, nb_xrb, nb_ia, nb_wa, nb_dwa, &
                                nb_newr, nb_q0, nb_iz, nb_wz, nb_iu, nb_wu, nb_fesc, nb_fabs, nb_cy, nb_co, nb_lns, &
-                               nb_lum, nb_lptr, nb_lid, yo, eml, q_model)
+                               nb_lum, nb_lptr, nb_lid, yo, eml, q_model, grid)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)              :: n_mod, nspec, nt, nzb, nb_nt_neb, nb_whlylim
         ! The actual shapes of basis (nb1, nb2, nb3) and of nb_q0's second dimension (nq0): with the
@@ -1891,6 +2096,7 @@ contains
         real(KP), intent(inout)          :: yo(nspec, 2 * n_mod)
         real(KP), intent(out)            :: eml(NEMLINE, n_mod)
         logical, intent(in)              :: q_model
+        logical, intent(in)              :: grid    !< the CLOUDY grids (steps 3-5); else steps 1-2 only
 
         integer  :: m, i, j, k, t, nt_neb, whlylim, a, a_prev, p, iz, iu
         real(KP) :: s, c, wt, bk, y, o, wk, v, dzk, f, r, sy, so
@@ -2005,6 +2211,7 @@ contains
         end if
 
         end if
+        if (.not. grid) return
 
         ! 3. Continuum: per (pixel, model), sum over the nebular ages t of C(t) 10**lg(t), with
         !    C = SFH weight * Q (per model, young or old) and lg the log grid interpolated in Z, U
@@ -2237,27 +2444,39 @@ contains
 #endif
 
         ! 5. Line profiles: per pixel, the lines whose profile reaches it
-        if (nb_lines_in_spec) then
-            associate (a_gaussnebarr => ctx%state%gaussnebarr)
-#if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do collapse(2) private(s, p, i) &
-            !$omp map(OMP_MAP_PRESENT_ALLOC: a_gaussnebarr)
-#elif defined(_OPENMP)
-            !$omp parallel do collapse(2) private(s, p, i)
-#endif
-            do m = 1, 2 * n_mod
-                do j = 1, nspec
-                    s = 0.0_KP
-                    do p = nb_lptr(j), nb_lptr(j + 1) - 1
-                        i = nb_lid(p)
-                        s = s + a_gaussnebarr(j, i) * nb_lum(i, m)
-                    end do
-                    yo(j, m) = yo(j, m) + s
-                end do
-            end do
-            end associate
-        end if
+        if (nb_lines_in_spec) call line_profiles(ctx, n_mod, nspec, nb_lum, nb_lptr, nb_lid, yo)
     end subroutine nebular_kernels
+
+    !> The lines' profiles added to the young and old spectra: per pixel, the lines whose profile
+    !> reaches it (nebular_setup's lists), times their luminosities lum (young, old).
+    subroutine line_profiles(ctx, n_mod, nspec, lum, lptr, lid, yo)
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)              :: n_mod, nspec, lptr(nspec + 1)
+        integer, intent(in), contiguous  :: lid(:)
+        real(KP), intent(in)             :: lum(NEMLINE, 2 * n_mod)
+        real(KP), intent(inout)          :: yo(nspec, 2 * n_mod)
+        integer  :: m, j, p, i
+        real(KP) :: s
+
+        associate (a_gaussnebarr => ctx%state%gaussnebarr)
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(s, p, i) &
+        !$omp map(OMP_MAP_PRESENT_ALLOC: a_gaussnebarr)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(s, p, i)
+#endif
+        do m = 1, 2 * n_mod
+            do j = 1, nspec
+                s = 0.0_KP
+                do p = lptr(j), lptr(j + 1) - 1
+                    i = lid(p)
+                    s = s + a_gaussnebarr(j, i) * lum(i, m)
+                end do
+                yo(j, m) = yo(j, m) + s
+            end do
+        end do
+        end associate
+    end subroutine line_profiles
 
 #if defined(OMP_TARGET) && defined(__flang__)
     !> The continuum kernel of nebular_kernels for LLVM flang / AMD: explicit-shape arguments (no

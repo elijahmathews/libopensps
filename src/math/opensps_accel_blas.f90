@@ -16,7 +16,7 @@ module opensps_accel_blas
     private
 
     public :: accel_blas_init, accel_blas_sync, accel_blas_destroy
-    public :: accel_blas_gemm, accel_blas_gemm_strided_batched
+    public :: accel_blas_gemm, accel_blas_gemm_strided_batched, accel_blas_dgemm_strided_batched
     public :: accel_blas_ready
     public :: ACCEL_BLAS_OP_N, ACCEL_BLAS_OP_T
 
@@ -450,5 +450,44 @@ contains
         call accel_blas_sync()
 #endif
     end subroutine accel_blas_gemm_strided_batched
+
+    !> Strided batched GEMM in FP64 whatever the kernel precision (C[i] = alpha op(A[i]) op(B[i]) +
+    !> beta C[i], device pointers to FP64 arrays): for work that stays FP64 in FP32 builds.
+    subroutine accel_blas_dgemm_strided_batched(transa_in, transb_in, m, n, k, alpha, &
+                                                dev_a, lda, stride_a, dev_b, ldb, stride_b, &
+                                                beta, dev_c, ldc, stride_c, batch_count)
+        integer, intent(in) :: transa_in, transb_in, m, n, k, lda, ldb, ldc, batch_count
+        integer(c_long_long), intent(in) :: stride_a, stride_b, stride_c
+        real(WP), intent(in) :: alpha, beta
+        type(c_ptr), intent(in), value :: dev_a, dev_b, dev_c
+#if defined(OPENSPS_CUBLAS)
+        integer(c_int) :: istat, ta, tb
+        ta = merge(CUBLAS_OP_T, CUBLAS_OP_N, transa_in == ACCEL_BLAS_OP_T)
+        tb = merge(CUBLAS_OP_T, CUBLAS_OP_N, transb_in == ACCEL_BLAS_OP_T)
+        istat = c_dgemm_sb(blas_handle%handle, ta, tb, m, n, k, alpha, dev_a, lda, stride_a, dev_b, ldb, stride_b, &
+                           beta, dev_c, ldc, stride_c, batch_count)
+        if (istat /= 0) error stop 'accel_blas: cuBLAS batched DGEMM failed'
+#elif defined(OPENSPS_ROCBLAS)
+        integer(c_int) :: istat, ta, tb
+        ta = merge(ROCBLAS_OP_T, ROCBLAS_OP_N, transa_in == ACCEL_BLAS_OP_T)
+        tb = merge(ROCBLAS_OP_T, ROCBLAS_OP_N, transb_in == ACCEL_BLAS_OP_T)
+        istat = rocblas_dgemm_strided_batched(blas_handle, ta, tb, int(m, c_int), int(n, c_int), int(k, c_int), &
+                                              alpha, dev_a, int(lda, c_int), stride_a, &
+                                              dev_b, int(ldb, c_int), stride_b, beta, &
+                                              dev_c, int(ldc, c_int), stride_c, int(batch_count, c_int))
+        if (istat /= 0) error stop 'accel_blas: rocBLAS batched DGEMM failed'
+        call accel_blas_sync()
+#elif defined(OPENSPS_HIPBLAS)
+        integer(c_int) :: istat, ta, tb
+        ta = merge(HIPBLAS_OP_T, HIPBLAS_OP_N, transa_in == ACCEL_BLAS_OP_T)
+        tb = merge(HIPBLAS_OP_T, HIPBLAS_OP_N, transb_in == ACCEL_BLAS_OP_T)
+        istat = hipblasDgemmStridedBatched(blas_handle, ta, tb, int(m, c_int), int(n, c_int), int(k, c_int), &
+                                           alpha, dev_a, int(lda, c_int), stride_a, &
+                                           dev_b, int(ldb, c_int), stride_b, beta, &
+                                           dev_c, int(ldc, c_int), stride_c, int(batch_count, c_int))
+        if (istat /= 0) error stop 'accel_blas: hipBLAS batched DGEMM failed'
+        call accel_blas_sync()
+#endif
+    end subroutine accel_blas_dgemm_strided_batched
 
 end module opensps_accel_blas

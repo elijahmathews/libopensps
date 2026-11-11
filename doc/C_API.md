@@ -131,6 +131,33 @@ Status codes: 301 not set up, 302 no CSP computed yet, 304 `zmet` out of range, 
 computation failed (or `sfh = 3` without a table); 3 from `opensps_context_set_sfh_tab` for `ntab`
 outside 1 to `NTABMAX`.
 
+### Nebular emission from cue (`nebular_model = 1`)
+
+```c
+opensps_context_set_int(h, "add_neb_emission", 1, &status);
+opensps_context_set_int(h, "nebular_model", 1, &status);   /* 0: the CLOUDY grids (default) */
+```
+
+With `nebular_model = 1` the batch takes the nebular continuum and lines from cue (Li et al.
+2025, arXiv:2405.04598), evaluated in libopensps (`src/physics/opensps_cue.f90`), instead of
+the CLOUDY grids. The weights are converted once from a cue checkout and found through the
+environment variable `OPENSPS_CUE_DATA` (`tools/cue/README.md`). In addition to `gas_logu`
+and `gas_logz`, the float parameters `gas_logn` (log n_H / cm^-3, default 2), `gas_logno` and
+`gas_logco` (log N/O and C/O relative to solar, default 0) act, all free per model.
+- **The ionizing spectrum** is the model's own: the stars of the nebular ages (up to 20 Myr),
+  fitted with cue's 4-part power law.
+- **The normalization** is their ionizing photons times (1 - `frac_obrun`).
+- **Lines** go to the context's line list (130 of the 166).
+- **Precision:** `cue_fp64` (default 1) runs the networks' hidden layers in FP64 also in FP32
+  builds. With 0 they run in FP32: faster, with lines within ~5e-4 of FP64.
+- **Statuses:**
+  - 4 without the weights;
+  - 2 with the IMF per model (`ssp_ops`) or with gradients;
+  - 104 from `opensps_context_set_int` for a `nebular_model` other than 0 or 1.
+
+Tested in `tests/test_c_cue.c` (the [O II] density diagnostic, [N II] against N/O) and
+`tests/test_csp_batch.f90`.
+
 ### Young and old components of the batch
 
 ```c

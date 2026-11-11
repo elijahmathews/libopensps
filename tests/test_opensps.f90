@@ -49,6 +49,9 @@ program test_opensps
     use test_opensps_nebular_kernel_mod, only: run_opensps_nebular_kernel_tests, &
                                  failures_nebular_kernel => total_failures, &
                                  tests_nebular_kernel => total_tests
+    use test_opensps_cue_mod, only: run_opensps_cue_tests, &
+                                 failures_cue => total_failures, &
+                                 tests_cue => total_tests
     use test_opensps_stellar_modifications_mod, only: run_opensps_stellar_modifications_tests, &
                                  failures_stellar_modifications => total_failures, &
                                  tests_stellar_modifications => total_tests
@@ -116,6 +119,7 @@ program test_opensps
     if (selected('opensps_dust')) call run_opensps_dust_tests()
     if (selected('opensps_gas')) call run_opensps_gas_tests()
     if (selected('opensps_nebular_kernel')) call run_opensps_nebular_kernel_tests()
+    if (selected('opensps_cue')) call run_opensps_cue_tests()
     if (selected('opensps_imf')) call run_opensps_imf_tests()
     if (selected('opensps_sfh')) call run_opensps_sfh_tests()
     if (selected('opensps_ssp')) call run_opensps_ssp_tests()
@@ -214,6 +218,11 @@ program test_opensps
         tests_nebular_kernel &
     )
     call print_summary_line( &
+        "opensps_cue", &
+        (tests_cue - failures_cue), &
+        tests_cue &
+    )
+    call print_summary_line( &
         "opensps_imf", &
         (tests_imf - failures_imf), &
         tests_imf &
@@ -276,6 +285,7 @@ program test_opensps
                            failures_dust + &
                            failures_gas + &
                            failures_nebular_kernel + &
+                           failures_cue + &
                            failures_imf + &
                            failures_sfh + &
                            failures_ssp + &
@@ -302,6 +312,7 @@ program test_opensps
                         tests_dust + &
                         tests_gas + &
                         tests_nebular_kernel + &
+                        tests_cue + &
                         tests_imf + &
                         tests_sfh + &
                         tests_ssp + &

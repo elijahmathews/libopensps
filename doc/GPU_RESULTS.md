@@ -95,6 +95,41 @@ builds, `ddf2a2d`) and LLVM flang offload on the 780M (`2468916`). GPU vs CPU ov
 8.4e-7 (A100) on the stress cases. The IMF oracles against per-model `generate_ssp_grid` agree to
 ~1e-14 in FP64 on CPU.
 
+## cue nebular emission (`nebular_model = 1`, 2026-11-10)
+
+cue's networks (`src/physics/opensps_cue.f90`, `tools/cue/README.md`) in place of the CLOUDY grids:
+17 networks of 12 -> 256 -> 256 -> 256 units per model, about 2.3 million multiply-adds, plus the
+fit of the ionizing spectrum, the PCA bases and the spline of the continuum. Measured on the R9700
+(ROCm 7.2.4 container, amdflang, FP32 kernels, HIP kernels on), N = 10^4, `benchmark_csp_batch
+... full_fit[_cue|_cue64]`, us per model, median of four alternating rounds:
+
+| | magnitudes | spectra on the device |
+|---|---|---|
+| CLOUDY grids (`full_fit`) | 14.3 | 12.0 |
+| cue, hidden layers FP32 (`cue_fp64 = 0`) | 15.7 | 12.1 |
+| cue, hidden layers FP64 (`cue_fp64 = 1`, the default) | 22.4 | 17.1 |
+
+- **The hidden layers** are a tiled HIP kernel (64 x 64 outputs per block, 4 x 4 per thread,
+  `cue_dense_act_kernel`), with the bias and the activation fused.
+  - FP32: 6 ms per call at N = 10^4 (all 17 networks, 3 layers).
+  - FP64: 75 ms (~0.6 TFLOPS, near the R9700's FP64 rate). rocBLAS DGEMM (`-Daccel_blas=rocblas`)
+    reaches 0.72 TFLOPS on the two 256 x 256 layers: its gfx1201 FP64 kernels are untuned
+    (MT16x16x16). rocBLAS SGEMM gained nothing over the OpenMP kernel.
+  - The FP64 default is the precision policy's (`doc/MIXED_PRECISION.md`, cue's networks). On
+    GPUs with fast FP64 (A100: 9.7 TFLOPS, 19.5 with tensor cores) it costs little.
+- **The rest of cue**, about 24 ms per call:
+  - the continuum's FP64 output layer and PCA (4.5 ms) and the lines' (3.9 ms with FP64 hidden
+    layers, 1 ms in KP);
+  - the exponentials of the continuum (4.5 ms; FP64 exponent, `exp_kp`);
+  - the spline: a per-model tridiagonal solve (4.5 ms, bound by the latency of its recurrence),
+    then evaluated and added to the young and old sums in one pass (3.3 ms);
+  - the power-law fit (2.3 ms; Newton, FP64).
+- **Accuracy** (R9700, CPU alike):
+  - FP64 build against cue's FP64 algebra: 2.5e-13 dex in the lines, 1e-13 dex in the continuum.
+  - FP32 build, default: the same.
+  - FP32 build, `cue_fp64 = 0`: lines within 5.1e-4 relative of FP64, continuum within 3e-6 dex.
+  - Batch lines against the test's own assembly: 4.5e-13 (FP64 build) and 4.1e-7 (FP32 build).
+
 ## Fitting-population batch: nebular, IGM, attenuation, photometry (2026-11-09)
 
 What a SED fit asks of `compute_csp_batch`: every parameter differs between the models (redshift, metallicity,
