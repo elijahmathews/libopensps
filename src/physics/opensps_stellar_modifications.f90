@@ -14,7 +14,7 @@ module opensps_stellar_modifications
     use opensps_precision, only: WP
     use opensps_constants, only: NM, GRAVITY_L_M_T_COEFF, BHB_SBS_TIME
     use opensps_types, only: params
-    use opensps_context_types, only: opensps_context_t
+    use opensps_context_types, only: opensps_context_t, isoc_is_mist
     use opensps_imf, only: get_imf_value, integrate_imf_interval_analytic, imf_integral_p, imf_pack_params, &
                         IMF_NPAR, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT, IMF_P_MLIM_BH, IMF_P_MLIM_NS
     use opensps_interpolation, only: interpolate_linear, find_interval
@@ -607,7 +607,7 @@ contains
         ! --------------------------------------------------------------------
         ! Modern method: Explicit Phase 3 tags.
         else if (trim(ctx%state%isoc_type) == 'bsti' .or. &
-                 trim(ctx%state%isoc_type) == 'mist') then
+                 isoc_is_mist(ctx%state%isoc_type)) then
 
             ! 1. Pre-scan: Count HB stars and find the Red Clump (minimum Teff on HB)
             total_hb_stars = 0

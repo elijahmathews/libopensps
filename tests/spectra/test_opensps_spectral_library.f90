@@ -466,6 +466,14 @@ contains
         call assert_relative_error(300.0_wp * scale_factor, real(spec(1), WP), 1.0e-6_wp, &
                                    "Legacy corner order: (j+1,k+1) over (j,k)", total_tests, total_failures)
 
+        ! A corner at the 1e-70 filler of the converted libraries counts as missing (legacy tiny30 = 1e-30
+        ! on the 5000 A flux; legacy stores single precision, where the filler is zero), so the star
+        ! snaps back to the real corner instead of averaging with the filler
+        ctx%state%speclib(:, 1, 2, 2) = real(1.0e-70_wp, kind=kind(ctx%state%speclib))
+        call get_stellar_spectrum(ctx, pset, mact, logt, lbol, logg, phase, ffco, lmdot, spec)
+        call assert_relative_error(expected, real(spec(1), WP), 1.0e-6_wp, &
+                                   "Filler corner (1e-70) is missing, not valid", total_tests, total_failures)
+
         deallocate(spec)
         call teardown_context(ctx)
         deallocate(ctx)
@@ -502,6 +510,22 @@ contains
             call get_stellar_spectrum(ctx, pset, mact, logt, lbol, logg, phase, ffco, lmdot, spec)
         end do
         call assert_relative_error(expected, real(spec(1), WP), 1.0e-6_wp, "Repeated calls stable", total_tests, total_failures)
+
+        ! use_lw_tpagb = 0 (legacy v4's default): the O-rich TP-AGB star takes the main library
+        ctx%use_lw_tpagb_val = 0
+        ctx%state%speclib = real(100.0_wp, kind=kind(ctx%state%speclib))
+        call get_stellar_spectrum(ctx, pset, mact, logt, lbol, logg, phase, ffco, lmdot, spec)
+        call assert_relative_error(100.0_wp * compute_scale_factor_main(mact, lbol, logt, logg), real(spec(1), WP), &
+                                   1.0e-6_wp, "use_lw_tpagb = 0: O-rich TP-AGB from the main library", &
+                                   total_tests, total_failures)
+        ! ... and a C-rich one is unaffected by it
+        ffco = 1.2_wp
+        ctx%state%agb_spec_car = 2.0_wp
+        ctx%state%agb_spec_c = 2.0_wp
+        call get_stellar_spectrum(ctx, pset, mact, logt, lbol, logg, phase, ffco, lmdot, spec)
+        call assert_true(abs(real(spec(1), WP) - 100.0_wp * compute_scale_factor_main(mact, lbol, logt, logg)) &
+                         > 1.0e-3_wp * real(spec(1), WP), "use_lw_tpagb = 0 leaves C-rich TP-AGB on its library", &
+                         total_tests, total_failures)
 
         deallocate(spec)
         call teardown_context(ctx)
@@ -542,6 +566,10 @@ contains
         ctx%state%isoc_type = 'mist'
         call get_stellar_spectrum(ctx, pset, mact, logt, lbol, logg, phase, ffco, lmdot, spec)
         call assert_true(spec(1) < logt, "MIST wind temperature lower than photosphere", total_tests, total_failures)
+
+        ctx%state%isoc_type = 'mist_afe'
+        call get_stellar_spectrum(ctx, pset, mact, logt, lbol, logg, phase, ffco, lmdot, spec)
+        call assert_true(spec(1) < logt, "mist_afe takes the MIST wind temperature", total_tests, total_failures)
 
         ctx%state%isoc_type = 'padova'
         call get_stellar_spectrum(ctx, pset, mact, logt, lbol, logg, phase, ffco, lmdot, spec)
@@ -601,6 +629,13 @@ contains
 
         call assert_true(spec_dust(1) < spec_raw(1), "Short wavelength dimming", total_tests, total_failures)
         call assert_true(spec_dust(nlam) <= spec_raw(nlam), "Long wavelength not brighter", total_tests, total_failures)
+
+        ! An optical depth below legacy's tiny_number (1e-70) gets no screen (MIST's hot massive post-MS
+        ! stars tagged E-AGB have tau ~ 1e-60 and legacy dusts them only above the floor)
+        pset%agb_dust = 1.0e-100_wp
+        call get_stellar_spectrum(ctx, pset, mact, logt, lbol, logg, phase, ffco, lmdot, spec_dust)
+        call assert_relative_error(real(spec_raw(1), WP), real(spec_dust(1), WP), 1.0e-12_wp, &
+                                   "tau < 1e-70: no screen", total_tests, total_failures)
 
         deallocate(spec_raw, spec_dust)
         call teardown_context(ctx)

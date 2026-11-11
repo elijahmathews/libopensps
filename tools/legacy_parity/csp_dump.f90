@@ -132,6 +132,7 @@ CONTAINS
     CASE ('add_stellar_remnants'); add_stellar_remnants = n
     CASE ('smooth_velocity');      smooth_velocity = n
     CASE ('use_wr_spectra');       use_wr_spectra = n
+    CASE ('use_lw_tpagb');         use_lw_tpagb = n
     CASE ('dust_type');            dust_type = n
     ! PARAMS integers
     CASE ('zmet');                 pset%zmet = n

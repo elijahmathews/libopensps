@@ -22,6 +22,7 @@ module opensps_context_types
     public :: opensps_context_t
     public :: opensps_context_state_destroy
     public :: set_spectral_grid
+    public :: isoc_is_mist
     public :: opensps_context_sync_device_settings
     public :: batch_grid_t, batch_grid_release
     public :: batch_out_t, batch_out_reserve, batch_out_release
@@ -297,6 +298,9 @@ module opensps_context_types
         integer :: vactoair_flag_val = 0
         integer :: add_agn_dust_val = 0
         integer :: use_wr_spectra_val = 0
+        !> 1 (default): O-rich TP-AGB stars take the Lancon & Mouhcine empirical spectra; 0: the main library
+        !> (legacy v4's default; its older releases always used the LM02 spectra)
+        integer :: use_lw_tpagb_val = 1
         integer :: add_neb_emission_val = 0
         integer :: add_neb_continuum_val = 0
         integer :: nebular_model_val = 0   !< 0: CLOUDY grids (FSPS); 1: cue (batched CSP only)
@@ -316,6 +320,14 @@ module opensps_context_types
     end type opensps_context_t
 
 contains
+
+    !> True for the MIST isochrone families: `mist` and the [alpha/Fe] set `mist_afe`. Legacy FSPS
+    !> tests `isoc_type == 'mist'` for the WR wind radius and the HB tags; its [alpha/Fe] build
+    !> (AFE_FLAG) keeps isoc_type = 'mist', so a different name must take the same branches.
+    pure logical function isoc_is_mist(name)
+        character(len=*), intent(in) :: name
+        isoc_is_mist = (trim(name) == 'mist' .or. trim(name) == 'mist_afe')
+    end function isoc_is_mist
 
     !> @brief Sets the size of the main spectral library's (log T, log g) grid and (re)allocates its axes, zeroed.
     subroutine set_spectral_grid(state, nt, ng)

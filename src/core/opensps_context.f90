@@ -79,6 +79,7 @@ contains
         ctx%add_agn_dust_val = 1
         ctx%add_agb_dust_model_val = 1
         ctx%use_wr_spectra_val = 1
+        ctx%use_lw_tpagb_val = 1
         ctx%logt_wmb_hot_val = 0.0_wp
         ctx%add_neb_emission_val = 0
         ctx%add_neb_continuum_val = 1
@@ -341,6 +342,8 @@ contains
             ctx%settings_dirty = .true.
         case ('use_wr_spectra')
             ctx%use_wr_spectra_val = value
+        case ('use_lw_tpagb')
+            ctx%use_lw_tpagb_val = value
             ctx%settings_dirty = .true.
         case ('add_neb_emission')
             ctx%add_neb_emission_val = value
@@ -801,7 +804,7 @@ contains
         is_sensitive = .false.
         select case (trim(key))
         case ('zmet', 'wgp1', 'wgp2', 'wgp3', 'evtype', 'imf_type', 'tpagb_norm_type', &
-              'interpolation_type', 'use_wr_spectra', 'add_neb_emission', 'add_neb_continuum', &
+              'interpolation_type', 'use_wr_spectra', 'use_lw_tpagb', 'add_neb_emission', 'add_neb_continuum', &
               'add_xrb_emission', 'add_stellar_remnants', 'smooth_velocity', 'smooth_lsf', &
               'smoothspec_fast', 'vactoair_flag', 'use_isoc_mdot', 'add_agb_dust_model')
             is_sensitive = .true.

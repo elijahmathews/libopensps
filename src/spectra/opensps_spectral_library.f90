@@ -35,12 +35,12 @@ module opensps_spectral_library
     !> - For Normalized SEDs: Scaled by \f$ L_{\mathrm{bol}} \f$.
 
     use opensps_precision, only: WP, KP
-    use opensps_context_types, only: opensps_context_t
+    use opensps_context_types, only: opensps_context_t, isoc_is_mist
     use opensps_types, only: params
     use opensps_constants, only: SAFE_FLOOR, PI, YEAR_TO_SECOND, C_LIGHT, G_NEWTON, GRAVITY_L_M_T_COEFF, &
                               M_SOL, L_SOL, NDIM_WR, NDIM_PAGB, N_AGB_C, N_AGB_O, N_AGB_CAR, CSTAR_ARINGER
     use opensps_interpolation, only: find_interval
-    use opensps_dust, only: apply_agb_dust_screen, agb_circumstellar_tau
+    use opensps_dust, only: apply_agb_dust_screen, agb_circumstellar_tau, AGB_TAU_FLOOR
 
     implicit none
     private
@@ -123,7 +123,7 @@ contains
             smooth_ir = .false.
             if (dusty .and. associated(ctx%state%speclib_agb_smooth)) then
                 smooth_ir = agb_circumstellar_tau(ctx, pset%agb_dust, mact, logt, log10(lbol), logg, ffco, lmdot) &
-                            > SAFE_FLOOR
+                            > AGB_TAU_FLOOR
             end if
             call apply_stellar_terms(ctx, pset%zmet, src, i1, i2, coef, nterm, smooth_ir, spec)
         else
@@ -306,6 +306,7 @@ contains
         logical, intent(out), optional :: dusty
 
         integer  :: i_phase, library_source, jlo, klo, nz, nt, ng, k_z, n_grid
+        real(WP), parameter :: TINY30 = 1.0e-30_wp   ! legacy tiny30: a main-library corner below it is missing
         real(WP) :: logg_calc, gravity_cgs, r2_cm, scale_factor, logt_cut_wmb, t, u
         real(WP) :: mdot_cgs, r_phot, r_wr, twr
         logical  :: v1, v2, v3, v4
@@ -325,7 +326,9 @@ contains
             library_source = SRC_PAGB
         else if (i_phase == 9 .and. ctx%use_wr_spectra_val == 1) then
             library_source = SRC_WR
-        else if (i_phase == 5 .and. logt < LOGT_CUT_AGB_COOL) then
+        else if (i_phase == 5 .and. logt < LOGT_CUT_AGB_COOL .and. &
+                 (ffco > 1.0_wp .or. ctx%use_lw_tpagb_val == 1)) then
+            ! O-rich: the LM02 spectra only with use_lw_tpagb = 1, otherwise the main library
             if (ffco <= 1.0_wp) then
                 library_source = SRC_AGB_O
             else
@@ -376,7 +379,7 @@ contains
             nterm = 2; i1(1:2) = [jlo, jlo + 1]; i2(1:2) = k_z
             coef(1:2) = [(1.0_wp - t) * scale_factor, t * scale_factor]
         case (SRC_WR)
-            if (ctx%state%isoc_type == 'mist') then
+            if (isoc_is_mist(ctx%state%isoc_type)) then
                 mdot_cgs = (10.0_wp**lmdot) * M_SOL / YEAR_TO_SECOND
                 r_phot = sqrt(r2_cm)
                 r_wr   = r_phot + (3.0_wp * KAPPA_ES * abs(mdot_cgs)) / (8.0_wp * PI * V_INF_WR)
@@ -445,10 +448,10 @@ contains
             u = max(0.0_wp, min((logg_calc - ctx%state%speclib_logg(klo)) / &
                                 (ctx%state%speclib_logg(klo+1) - ctx%state%speclib_logg(klo)), 1.0_wp))
             ! Corner validity and the legacy snapping order, as in get_main_lib_spectrum
-            v1 = (ctx%state%speclib(ctx%state%whlam5000, nz, jlo,   klo)   > SAFE_FLOOR)
-            v2 = (ctx%state%speclib(ctx%state%whlam5000, nz, jlo+1, klo)   > SAFE_FLOOR)
-            v3 = (ctx%state%speclib(ctx%state%whlam5000, nz, jlo+1, klo+1) > SAFE_FLOOR)
-            v4 = (ctx%state%speclib(ctx%state%whlam5000, nz, jlo,   klo+1) > SAFE_FLOOR)
+            v1 = (ctx%state%speclib(ctx%state%whlam5000, nz, jlo,   klo)   > TINY30)
+            v2 = (ctx%state%speclib(ctx%state%whlam5000, nz, jlo+1, klo)   > TINY30)
+            v3 = (ctx%state%speclib(ctx%state%whlam5000, nz, jlo+1, klo+1) > TINY30)
+            v4 = (ctx%state%speclib(ctx%state%whlam5000, nz, jlo,   klo+1) > TINY30)
             i1 = [jlo, jlo + 1, jlo + 1, jlo]; i2 = [klo, klo, klo + 1, klo + 1]
             if (v1 .and. v2 .and. v3 .and. v4) then
                 nterm = 4

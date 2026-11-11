@@ -2128,6 +2128,8 @@ contains
             opensps_default_ctx%add_agn_dust_val = val
         case ('use_wr_spectra')
             opensps_default_ctx%use_wr_spectra_val = val
+        case ('use_lw_tpagb')
+            opensps_default_ctx%use_lw_tpagb_val = val
         case ('add_xrb_emission')
             opensps_default_ctx%add_xrb_emission_val = val
         case ('smooth_lsf')

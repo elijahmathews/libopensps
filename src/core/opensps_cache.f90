@@ -90,6 +90,7 @@ module opensps_cache
         integer :: add_xrb_emission = 0
         integer :: add_agb_dust_model = 0
         integer :: use_wr_spectra = 0
+        integer :: use_lw_tpagb = 1
 
         !> Per-context tables recorded by the populating context (see opensps_setup_tables_t).
         !> Allocatable so that an entry stays small: a 2 MB component made gfortran build the

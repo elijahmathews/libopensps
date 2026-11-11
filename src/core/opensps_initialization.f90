@@ -1276,6 +1276,7 @@ contains
         cache%add_xrb_emission = ctx%add_xrb_emission_val
         cache%add_agb_dust_model = ctx%add_agb_dust_model_val
         cache%use_wr_spectra = ctx%use_wr_spectra_val
+        cache%use_lw_tpagb = ctx%use_lw_tpagb_val
     end subroutine populate_cache_metadata
 
     subroutine initialize_cache_arrays(ctx)
