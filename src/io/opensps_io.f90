@@ -45,7 +45,7 @@ module opensps_io
                               NDIM_WR, BASEL_STR, N_AGB_C, N_AGB_O, N_AGB_CAR, &
                               NDIM_PAGB, NDIM_WMB_LOGT, NDIM_WMB_LOGG, &
                               NAGNDUST, NAGNDUST_SPEC, NEMLINE
-    use opensps_context_types, only: opensps_context_t
+    use opensps_context_types, only: opensps_context_t, set_spectral_grid
     use opensps_types, only: params, compspout
     use opensps_cosmology, only: vacuum_to_air
     use opensps_integration, only: integrate_trapezoid_array
@@ -331,7 +331,7 @@ contains
     !> @param[in]  ctx       The FSPS context (provides paths and dimensions).
     !> @param[in]  spec_type String identifier for the library (e.g., 'miles', 'basel').
     !> @param[in]  z_idx     The metallicity index to read (1..nzinit).
-    !> @param[out] array_out The output spectral cube with dimensions (nspec, NDIM_LOGT, NDIM_LOGG).
+    !> @param[out] array_out The output spectral cube with dimensions (nspec, nlogt, nlogg).
     subroutine read_spectral_binary(ctx, spec_type, z_idx, array_out)
         type(opensps_context_t), intent(in) :: ctx
         character(len=*), intent(in) :: spec_type
@@ -360,9 +360,9 @@ contains
         file_unit_size = file_storage_size / 8 
         
         ! Adjust record length calculation
-        rec_len = (ctx%state%nspec * NDIM_LOGT * NDIM_LOGG * 4) / file_unit_size
+        rec_len = (ctx%state%nspec * ctx%state%nlogt * ctx%state%nlogg * 4) / file_unit_size
 
-        allocate(buffer_32(ctx%state%nspec, NDIM_LOGT, NDIM_LOGG))
+        allocate(buffer_32(ctx%state%nspec, ctx%state%nlogt, ctx%state%nlogg))
 
         ! 2. Read Binary
         ! --------------
@@ -2823,7 +2823,7 @@ contains
         end if
 
         ! Allocate huge output buffer
-        allocate(spec_cube_32(ctx%state%nspec, NDIM_LOGT, NDIM_LOGG))
+        allocate(spec_cube_32(ctx%state%nspec, ctx%state%nlogt, ctx%state%nlogg))
         ! Allocate tiny read buffer
         allocate(temp_spec_row(ctx%state%nspec))
 
@@ -2843,8 +2843,8 @@ contains
         ! Header line: index, T, g, etc (read as dummy)
         ! Body: Spectrum array
         
-        do i_g = 1, NDIM_LOGG
-            do i_t = 1, NDIM_LOGT
+        do i_g = 1, ctx%state%nlogg
+            do i_t = 1, ctx%state%nlogt
                 
                 ! Skip metadata header
                 read(u_in, *, iostat=io_stat) 
@@ -2869,7 +2869,7 @@ contains
         ! usually 8 (bytes) or 32 (words)
         file_unit_size = file_storage_size / 8
         ! Adjust record length calculation
-        rec_len = (ctx%state%nspec * NDIM_LOGT * NDIM_LOGG * 4) / file_unit_size
+        rec_len = (ctx%state%nspec * ctx%state%nlogt * ctx%state%nlogg * 4) / file_unit_size
         
         open(newunit=u_out, file=trim(file_bin), status='replace', &
              access='direct', recl=rec_len, form='unformatted', &
@@ -3001,6 +3001,7 @@ contains
             return
         end if
 
+        call set_spectral_grid(ctx%state, NDIM_LOGT, NDIM_LOGG)
         open (newunit=u_file, file=trim(ctx%sps_home)//'/data/spectra/BaSeL3.1/basel_logt.dat', status='old', action='read')
         do i = 1, NDIM_LOGT
             read (u_file, *) ctx%state%speclib_logt(i)
@@ -3027,8 +3028,8 @@ contains
         call datalib_open(lib, ctx%sps_home, 'stellar_spectra', library_spec(ctx, 'stellar_spectra', spec_type))
         zax = metallicity_axis(lib)
         call datalib_check_array(lib, 'flux', [character(len=10) :: zax, 'logg', 'logT', 'wavelength'], &
-                                 [ctx%state%nzinit, NDIM_LOGG, NDIM_LOGT, ctx%state%nspec], off)
-        nblock = int(ctx%state%nspec, int64) * NDIM_LOGT * NDIM_LOGG
+                                 [ctx%state%nzinit, ctx%state%nlogg, ctx%state%nlogt, ctx%state%nspec], off)
+        nblock = int(ctx%state%nspec, int64) * ctx%state%nlogt * ctx%state%nlogg
         if (size(array_out, kind=int64) /= nblock) then
             write(error_unit, '(A)') '[OPENSPS_IO] Error: spectral slab of the wrong size for ' // trim(spec_type)
             error stop 1

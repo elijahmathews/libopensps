@@ -43,7 +43,7 @@ library with another size or name cannot be used without code changes:
 | Library | Sizes set in code | Other metadata set in code |
 |---|---|---|
 | Isochrones | `nt`, `nz` per name (`NT_MIST` = 107, `NZ_MIST` = 12, ...); `NM` = 2000 points per isochrone | solar metallicity per name (MIST 0.0142, Padova 0.019, PARSEC 0.01524, BaSTI/Geneva/BPASS 0.020) |
-| Spectral library | `nspec`, `nzinit` per name (MILES 5994 x 5, BaSeL 1963 x 6, C3K 11149 x 11) | solar metallicity per name (MILES 0.019, BaSeL 0.020, C3K 0.0134); the (log T, log g) grid is always read from the BaSeL files (`basel_logt.dat`, `basel_logg.dat`), `NDIM_LOGT` = 68, `NDIM_LOGG` = 19 |
+| Spectral library | `nspec`, `nzinit` per name (MILES 5994 x 5, BaSeL 1963 x 6, C3K 11149 x 11) | solar metallicity per name (MILES 0.019, BaSeL 0.020, C3K 0.0134); in the legacy layout the (log T, log g) grid is always read from the BaSeL files (`basel_logt.dat`, `basel_logg.dat`), `NDIM_LOGT` = 68, `NDIM_LOGG` = 19; a standard-format library brings its own `logT` and `logg` axes (any size: `state%nlogt`, `state%nlogg`, `set_spectral_grid`) |
 | Nebular | `NEBNZ` = 11, `NEBNAGE` = 10, `NEBNIP` = 7, `NLAM_NEBCONT` = 1963, `NEMLINE` = 166 | available only for `mist`, `pdva`, `prsc`, `bpss` |
 | Dust emission | `ndim_dustem`, `numin`, `nqpah` per name | the q_PAH and U_min grids are arrays in the code, not in the files |
 | Filters | `nbands` = 159 | the IR/MIPS calibration (indices and reference wavelengths) is hardcoded by filter index |
@@ -293,8 +293,8 @@ What "a new library without code changes" covers today:
   is used if `nebular/<isoc>_<dust|nodust>` exists.
 - A replacement of any other library under its fixed name (e.g. new filter curves, a finer
   nebular continuum, other Vega or solar spectra), within the fixed sizes of the table.
-- Limits: the (log T, log g) grid of the main spectral library is fixed at 68 x 19 (arrays in
-  the context and in the setup-cache tables have that size), and a dust-emission library must
+- Limits: the (log T, log g) grid of a legacy-layout spectral library is 68 x 19 (a standard-format
+  library may use any grid), and a dust-emission library must
   be named `DL07` or `THEMIS` (the name is a six-character field).
 
 ### 3.1 [alpha/Fe]
@@ -345,14 +345,14 @@ contain them):
   solar metallicity 0.0185. Note: upstream reads the [Fe/H] strings with format `F4.2` from a
   five-character field, which keeps only the first four characters (`-0.25` becomes -0.2); the
   converter stores the full values.
-- Upstream C3K is on its native 80 x 14 (log T, log g) grid, so loading it needs the fixed
-  68 x 19 grid of this code made allocatable (see below).
+- Upstream C3K is on its native 80 x 14 (log T, log g) grid, which the loader takes from the
+  library (the context's grid is allocatable; the legacy layout keeps 68 x 19).
 
 What SSP generation over [alpha/Fe] would need (not done here; the loaders read one slice):
 
 - Spectral library: `state%speclib(nspec, nz, nlogT, nlogg)` gains an afe dimension, as do
-  `speclib_agb_smooth`; `speclib_logt`/`speclib_logg` and the matching `opensps_setup_tables_t`
-  entries must become allocatable to accept native grids; `NDIM_LOGT`/`NDIM_LOGG` go.
+  `speclib_agb_smooth`; (`speclib_logt`/`speclib_logg` and the matching `opensps_setup_tables_t`
+  entries are allocatable now, so native grids load; `NDIM_LOGT`/`NDIM_LOGG` stay only as the legacy layout's size).
 - Isochrones: `mini_isoc`, `mact_isoc`, `logl_isoc`, `logt_isoc`, `logg_isoc`, `ffco_isoc`,
   `phase_isoc`, `lmdot_isoc` (nz, nt, NM), `nmass_isoc` and `timestep_isoc` (nz, nt) gain an afe
   dimension; `zlegend` stays one-dimensional if the [Fe/H] grid is common to all [alpha/Fe]

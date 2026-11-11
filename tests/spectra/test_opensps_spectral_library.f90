@@ -3,7 +3,7 @@ module test_opensps_spectral_library_mod
     use opensps_constants, only: SAFE_FLOOR, PI, C_LIGHT, L_SOL, M_SOL, G_NEWTON, GRAVITY_L_M_T_COEFF, &
                               NDIM_LOGT, NDIM_LOGG, NDIM_WMB_LOGT, NDIM_WMB_LOGG, NDIM_WR, NDIM_PAGB, &
                               N_AGB_O, N_AGB_C, N_AGB_CAR, NTEFF_DAGB, NTAU_DAGB
-    use opensps_context_types, only: opensps_context_t
+    use opensps_context_types, only: opensps_context_t, set_spectral_grid
     use opensps_types, only: params
     use opensps_spectral_library, only: get_stellar_spectrum
     use opensps_dust, only: compute_circumstellar_optical_depth
@@ -31,6 +31,7 @@ contains
         call test_zero_luminosity_safety()
 
         call test_bilinear_plane()
+        call test_bilinear_plane_native_grid()
         call test_partial_overlap_snap()
         call test_agb_o_stack_allocation()
 
@@ -355,6 +356,62 @@ contains
         deallocate(ctx)
     end subroutine test_bilinear_plane
 
+    !> The same plane on a library grid of another size (80 x 14, as C3K's native grid; not uniform in
+    !> log T): the lookup follows the context's own axes.
+    subroutine test_bilinear_plane_native_grid()
+        integer, parameter :: NT = 80, NG = 14
+        type(opensps_context_t), allocatable :: ctx
+        type(params) :: pset
+        real(KP), allocatable :: spec(:)
+        real(WP) :: mact, logt, lbol, logg, phase, ffco, lmdot
+        real(WP) :: scale_factor, expected, target_logg
+        integer :: nlam, j, k
+
+        call print_group("Bilinear Interpolation on a 80 x 14 library grid")
+
+        nlam = 4
+        allocate(ctx)
+        call setup_context(ctx, nlam)
+        allocate(spec(nlam))
+        deallocate(ctx%state%speclib)
+        call set_spectral_grid(ctx%state, NT, NG)
+        allocate(ctx%state%speclib(nlam, 1, NT, NG))
+        do j = 1, NT
+            ctx%state%speclib_logt(j) = 3.4_wp + 1.3_wp * (real(j - 1, WP) / real(NT - 1, WP))**1.5_wp   ! uneven spacing
+        end do
+        do k = 1, NG
+            ctx%state%speclib_logg(k) = -1.0_wp + 0.5_wp * real(k - 1, WP)
+        end do
+        do j = 1, NT
+            do k = 1, NG
+                ctx%state%speclib(:, 1, j, k) = real(ctx%state%speclib_logt(j) + ctx%state%speclib_logg(k), &
+                                                   kind=kind(ctx%state%speclib))
+            end do
+        end do
+        call assert_true(size(ctx%state%speclib_logt) == NT .and. size(ctx%state%speclib_logg) == NG .and. &
+                         ctx%state%nlogt == NT .and. ctx%state%nlogg == NG, "grid sizes follow set_spectral_grid", &
+                         total_tests, total_failures)
+
+        pset%zmet = 1
+        mact = 1.0_wp
+        logt = 3.9_wp
+        target_logg = 4.3_wp
+        lbol = compute_lbol_for_logg(mact, logt, target_logg)
+        logg = target_logg
+        phase = 0.0_wp
+        ffco = 0.0_wp
+        lmdot = -6.0_wp
+        call get_stellar_spectrum(ctx, pset, mact, logt, lbol, logg, phase, ffco, lmdot, spec)
+        scale_factor = compute_scale_factor_main(mact, lbol, logt, logg)
+        expected = logt + target_logg
+        call assert_relative_error(expected, spec(1) / scale_factor, 1.0e-6_wp, &
+                                   "Bilinear plane returns the exact value on an 80 x 14 grid", total_tests, total_failures)
+
+        deallocate(spec)
+        call teardown_context(ctx)
+        deallocate(ctx)
+    end subroutine test_bilinear_plane_native_grid
+
     subroutine test_partial_overlap_snap()
         type(opensps_context_t), allocatable :: ctx
         type(params) :: pset
@@ -606,6 +663,7 @@ contains
 
         allocate(ctx%state%spec_lambda(nlam))
         allocate(ctx%state%spec_nu(nlam))
+        call set_spectral_grid(ctx%state, NDIM_LOGT, NDIM_LOGG)
         allocate(ctx%state%speclib(nlam, 1, NDIM_LOGT, NDIM_LOGG))
         allocate(ctx%state%wmb_spec(nlam, 1, NDIM_WMB_LOGT, NDIM_WMB_LOGG))
         allocate(ctx%state%agb_spec_o(nlam, N_AGB_O))
