@@ -176,6 +176,31 @@ networks are at the FP64 rate; storing the pre-activations in the forward instea
 about a third of the 39% for 1 GB per 10^4 models, and the FP32 hidden layers (`cue_fp64 = 0`) are the remaining
 lever, a precision decision (doc/MIXED_PRECISION.md).
 
+## [alpha/Fe] as an axis of the SSP bases (2026-11-11)
+
+FSPS v4's alpha-enhanced libraries (MIST v2.5 and C3K-LR, 1936 pixels, five [alpha/Fe] planes of 13 metallicities;
+`feat/afe-axis`). R9700 (ROCm 7.2.4 container, amdflang, FP32 kernels), N = 10^4, `full_z_fit` population (per-model
+logzsol, dust, IGM, nebular, AGN), us per model, three alternating runs; `_lib` the same libraries at one
+[alpha/Fe] (the 2-slab blend), `_afe` with `afe` free per model over the five planes (four slabs):
+
+| | forward (mags) | forward + reverse | + cue |
+|---|---|---|---|
+| `_lib` (2 slabs) | 4.4 | 38 - 43 | 42 - 43 |
+| `_afe` (4 slabs) | 4.4 | 44 | 44 |
+
+- The four-slab age-sum kernel (AMD/flang, tiled, models sorted by their cell) alone: 1.26x of the two-slab kernel at
+  1936 pixels (7.5 against 6.0 ms per call), 1.41x at 5994 (22 against 15.6 ms; tile shape matters, up to 4x for
+  a bad one). The reverse pass's age sums read four slabs per (model, age) thread: ~2x of a kernel that is ~6% of
+  the gradient time.
+- C3K-LR itself is 3.5x cheaper per model than MILES (4.4 against 15.3 us), the pixel count.
+- CPU (gfortran, FP64, one core, N = 1000): the host age sums are blocked over pixels (contiguous passes over the
+  ages): the per-model-metallicity batch 209 -> 163 us/model, the [alpha/Fe] batch 211 (486 with the first,
+  scattered loops).
+- Tested on the R9700 in FP32 and FP64: `test_csp_batch` (the batch against scenarios on the hand-blended
+  basis: 3e-7 FP32, 7e-16 FP64), `test_csp_batch_grad` (the afe row against central differences, 132 checks) and
+  `test_afe_library` on the real libraries (a node equals a single-plane context: 7e-8 FP32, 0 FP64; the
+  gradient 1.6e-8).
+
 ## Fitting-population batch: nebular, IGM, attenuation, photometry (2026-11-09)
 
 What a SED fit asks of `compute_csp_batch`: every parameter differs between the models (redshift, metallicity,

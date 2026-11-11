@@ -196,6 +196,26 @@ the log10 stellar L_bol of the two parts (they add up to `mass` and `lbol`); the
 `NULL`, `young` and `old` may not (status 3). Tested in `tests/test_c_batch_parts.c`, which
 rebuilds the full spectrum from the parts.
 
+### [alpha/Fe] as an axis of the SSP bases
+
+`opensps_context_build_afe_basis(handle, isoc_name, spec_name, n_afe, afe, &status)` builds the resident SSP
+bases over [alpha/Fe] and every metallicity of an alpha-enhanced library pair (e.g. `mist_afe` and `c3k_lr`,
+FSPS v4's MIST v2.5 and C3K-LR, converted with `tools/opensps_data/convert_legacy.py --upstream-mist/--upstream-c3k`;
+`doc/DATA_FORMAT.md` 3.1): for each value of `afe` (increasing) the libraries `name:afe=value` are set up and the
+SSP of every metallicity generated, with the context's SSP parameters at the call. Afterwards `afe` is a per-model
+parameter of `opensps_context_compute_csp_batch` (with `logzsol`):
+
+- each model's SSP is the bilinear blend of four bases in (log Z, [alpha/Fe]), linear in the spectra, the masses
+  and log L_bol; [alpha/Fe] is clamped to the grid (no extrapolation; the gradient is zero outside it);
+- gradients: the row `OPENSPS_BGRAD_AFE` (`OPENSPS_NBGRAD` = 37); piecewise, with a kink at every plane of the grid;
+- a batch that names `afe` without the bases returns status 2; the IMF per model and weights over ages and
+  metallicities (`ssp_weights_z`) return status 2 with the axis; the nebular grids (CLOUDY) have no [alpha/Fe]
+  axis and use the model's [Fe/H] (cue uses the model's own ionizing spectrum);
+- cost on the R9700 (FP32, N = 10^4, C3K-LR, 1936 pixels, per-model logzsol): the forward pass about +2%, forward
+  with gradients about +5%, against the same libraries at one [alpha/Fe].
+
+The bases stay as built: change an SSP parameter (IMF, ...) and call it again.
+
 ### Batched CSP with Gradients (Adjoint Mode)
 
 Reverse-mode automatic differentiation / analytical adjoints of `compute_csp_batch`:

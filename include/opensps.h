@@ -113,6 +113,14 @@ void opensps_context_destroy(int handle, int *status);
 void opensps_context_setup(int zin, const char *isoc_type, const char *spec_type,
                         const char *dust_type, int handle, int *status);
 
+// The resident SSP bases over [alpha/Fe] and every metallicity of the libraries `isoc_name:afe=v` and
+// `spec_name:afe=v` (e.g. "mist_afe", "c3k_lr"; v from afe[0..n_afe-1], increasing, n_afe >= 2), with the
+// context's SSP parameters at the call. Afterwards `afe` is a per-model parameter of the batch calls (clamped
+// to the grid; gradient row OPENSPS_BGRAD_AFE) and the bases stay as built. status 0, 1 invalid handle or
+// arguments, 2 values not increasing. Without it, a batch that names `afe` returns status 2.
+void opensps_context_build_afe_basis(int handle, const char *isoc_name, const char *spec_name, int n_afe,
+                                    const double *afe, int *status);
+
 // Parameter Setters
 void opensps_context_set_int(int handle, const char *key, int value, int *status);
 void opensps_context_set_float(int handle, const char *key, double value, int *status);

@@ -789,6 +789,15 @@ test('c_cue', test_c_cue_exe,
     suite : 'regression',
     timeout : 600
 )
+test_c_afe_exe = executable('test_c_afe', 'tests/test_c_afe.c',
+    dependencies : [opensps_dep, meson.get_compiler('c').find_library('m', required : false)],
+    include_directories : include_directories('include')
+)
+test('c_afe', test_c_afe_exe,
+    env : regression_env,
+    suite : 'regression',
+    timeout : 600
+)
 test_c_two_contexts_exe = executable('test_c_two_contexts', 'tests/test_c_two_contexts.c',
     dependencies : opensps_dep,
     include_directories : include_directories('include')

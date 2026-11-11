@@ -348,23 +348,32 @@ contain them):
 - Upstream C3K is on its native 80 x 14 (log T, log g) grid, which the loader takes from the
   library (the context's grid is allocatable; the legacy layout keeps 68 x 19).
 
-What SSP generation over [alpha/Fe] would need (not done here; the loaders read one slice):
+SSP generation over [alpha/Fe] (the loaders read one slice of the library at a time):
 
-- Spectral library: `state%speclib(nspec, nz, nlogT, nlogg)` gains an afe dimension, as do
-  `speclib_agb_smooth`; (`speclib_logt`/`speclib_logg` and the matching `opensps_setup_tables_t`
-  entries are allocatable now, so native grids load; `NDIM_LOGT`/`NDIM_LOGG` stay only as the legacy layout's size).
-- Isochrones: `mini_isoc`, `mact_isoc`, `logl_isoc`, `logt_isoc`, `logg_isoc`, `ffco_isoc`,
-  `phase_isoc`, `lmdot_isoc` (nz, nt, NM), `nmass_isoc` and `timestep_isoc` (nz, nt) gain an afe
-  dimension; `zlegend` stays one-dimensional if the [Fe/H] grid is common to all [alpha/Fe]
-  (otherwise per afe, with `available`).
-- SSP outputs: `spec_ssp_zz(nspec, ntfull, nz)`, `mass_ssp_zz`, `lbol_ssp_zz` (and the
-  template-sum weights of `generate_ssp_grid`) gain an afe dimension; the loops over metallicity
-  in `opensps_initialization` (spectral library onto the isochrone metallicities) and in the SSP
-  driver gain an afe loop. The hot-star, AGB and post-AGB libraries have no [alpha/Fe] axis and
-  stay shared.
-- Batched CSP with per-model [alpha/Fe]: the SSP basis (`ssp_basis_spec`, `csp_ssp_grid`,
-  emission-line grids) over (Z, afe) and a bilinear weight per model in (log Z, afe), in
-  `compute_csp_scenario` and `compute_csp_batch` alike; the nebular grids have no [alpha/Fe] axis.
+- **The slice loop.** The context's isochrone and spectral-library arrays keep no [alpha/Fe] dimension: each
+  slice is set up on its own (`mist_afe:afe=0.4`, `c3k_lr:afe=0.4`: the setup cache keeps them), the SSP of every
+  metallicity is generated from it, and the SSPs of all slices form the resident stack of the batch.
+  `opensps_build_afe_basis` (C: `opensps_context_build_afe_basis`) does this loop for a list of [alpha/Fe]
+  values and hands the stack to `opensps_context_update_ssp_basis(..., afe_values)`.
+- **The stack.** `ssp_basis_spec`, `_mass`, `_lbol` hold `nz * naf` slabs, the metallicity fastest
+  (slab = iz + nz (iafe - 1)); `state%afe_basis` holds the [alpha/Fe] values.
+- **The blend.** `afe` is a per-model parameter of `compute_csp_batch` (and of the scenario calls through it);
+  each model's basis is the bilinear blend of four slabs in (log Z, [alpha/Fe]), linear in the spectra, the
+  masses and log L_bol, [alpha/Fe] clamped to the grid. Linear is the interpolation to use: on FSPS v4's five
+  planes (0.2 dex apart) higher orders did no better, because the SSPs differ from plane to plane by
+  noise-like features (isochrone phases, the C3K grid), which they amplify (leave-one-out over the interior
+  planes: cubic rms 1.95%, linear 1.26%, median |dmag| 0.007 - 0.01 in the optical and near-infrared for old
+  populations).
+- **Not covered.** The hot-star, AGB and post-AGB libraries have no [alpha/Fe] axis and are shared; the CLOUDY
+  nebular grids have none either (the model's [Fe/H] is used; cue's ionizing source is the model's own spectrum);
+  the IMF per model (`ssp_ops`) and weights over ages and metallicities (`ssp_weights_z`) return status 2 with
+  the axis.
+- **Against legacy FSPS v4** (`AFE_FLAG = 1`, MIST v2.5 + C3K-LR, 13 metallicities, five planes): M_* agrees to
+  1.5e-6 and log L_bol to 6e-7 dex at every plane, and the spectra do not yet: the median difference is 0.2 - 1%
+  in the optical (with the constants of `tools/legacy_parity/patches/constants.sed`) and more in the UV and
+  the infrared. Two causes are known: v4 defaults `use_lw_tpagb = 0` (library spectra for O-rich TP-AGB stars;
+  OpenSPS always uses the Lancon & Mouhcine ones) and `logt_wmb_hot = 10` (no WM-Basic hot-star library;
+  settable). The rest is under investigation (`tools/legacy_parity`, `doc/ROADMAP.md`).
 
 ## 4. Tools
 
