@@ -57,12 +57,13 @@ For each model of a batch:
 ## Precision
 
 - **FP64 builds:** everything is FP64, and the networks match cue's FP64 algebra to ~3e-13 dex.
-- **FP32 builds:** the networks' hidden layers are FP64 by default (`cue_fp64 = 1`), so FP32
-  builds match FP64 builds to the 1e-5 of `doc/MIXED_PRECISION.md`.
-- **`cue_fp64 = 0`** runs the hidden layers in FP32, at roughly half the networks' cost. The
+- **FP32 builds:** the networks' hidden layers are FP32 by default (`cue_fp64 = 0`); with
+  `cue_fp64 = 1` they are FP64 and FP32 builds match FP64 builds to the 1e-5 of `doc/MIXED_PRECISION.md`.
+- **The FP32 default** runs the hidden layers in FP32, at roughly half the networks' cost. The
   continuum then differs by ~3e-6 dex. The lines differ by up to ~2e-4 dex (5e-4 relative): the
   line networks' output scales (up to 20) amplify the hidden layers' FP32 rounding. That is far
-  below cue's own accuracy (1-5%), but outside the 1e-5 requirement, hence opt-in.
+  below cue's own accuracy (1-5%), but outside the 1e-5 requirement: an exception documented in
+  `doc/MIXED_PRECISION.md`; `cue_fp64 = 1` restores the match.
 
 ## Limits
 

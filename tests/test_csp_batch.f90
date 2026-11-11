@@ -1401,14 +1401,15 @@ contains
     !> - energy: the nebular luminosity (continuum and lines) is below the absorbed ionizing
     !>   luminosity and most of it;
     !> - Case B (Osterbrock & Ferland 2006, T ~ 1e4 K): L(H beta) / Q ~ 4.8e-13 erg, H alpha / H beta ~ 2.86;
-    !> - gradients are not supported with cue (status 2), the option rejects other values.
+    !> - gradients are supported (status 0; their values against finite differences: test_csp_batch_grad), and
+    !>   cue's gas rows are nonzero and finite; the option rejects other values.
     subroutine check_cue()
         use opensps_cue, only: cue_data_dir, cue_w, cue_line_map, cue_ionizing_params, cue_inputs, cue_forward, &
                                cue_load_dir, cue_unload, cue_weights_t, CUE_EDGE_HI, CUE_NION, CUE_NIN, CUE_LOG_LSUN, &
                                cue_batch_chunk, CUE_CHUNK
         use cue_test_library, only: cue_synthetic, cue_write_library
         use opensps_constants, only: H_PLANCK, L_SOL, NEBNAGE
-        use opensps_csp_batch, only: NBGRAD
+        use opensps_csp_batch, only: NBGRAD, BGRAD_GAS_LOGN, BGRAD_GAS_LOGU
         type(PARAMS) :: psets(N_MOD)
         real(WP), allocatable :: w(:, :), mags(:, :), spec(:, :, :), eml(:, :, :), lam(:), sw(:), qt(:), ll(:, :), cl(:, :)
         real(WP), allocatable :: pbar(:, :)
@@ -1560,6 +1561,11 @@ contains
         ! the rounded spectrum
         call assert_true(worst < merge(1.0e-9_wp, 1.0e-5_wp, KP == WP), "lines = cue on the model's ionizing spectrum", &
                          total_tests, total_failures)
+        block
+            type(opensps_context_t), allocatable :: fresh
+            allocate(fresh)
+            call assert_true(fresh%cue_fp64_val == 0, "cue_fp64 defaults to the kernel precision", total_tests, total_failures)
+        end block
         ! Hidden layers in the kernel precision (cue_fp64 = 0): in FP64 builds the same to rounding (the
         ! line output stage adds the PCA mean in another order); in FP32 builds within the networks'
         ! FP32 rounding (~2e-4 dex, amplified by the line networks' output scales)
@@ -1601,10 +1607,14 @@ contains
                              total_failures)
         end if
 
-        ! Gradients: not with cue
+        ! Gradients: supported with cue (values: test_csp_batch_grad); the gas rows act and are finite
         allocate(pbar(NBGRAD, N_MOD))
+        pbar = 0.0_wp
         call compute_csp_batch(ctx, psets, mags, status, ssp_weights=w, mags_bar=mags, params_bar=pbar)
-        call assert_true(status == 2, "gradients with cue: status 2", total_tests, total_failures)
+        call assert_true(status == 0, "gradients with cue: status 0", total_tests, total_failures)
+        call assert_true(all(pbar == pbar) .and. all(abs(pbar(BGRAD_GAS_LOGN, :)) > 0.0_wp) .and. &
+                         all(abs(pbar(BGRAD_GAS_LOGU, :)) > 0.0_wp), "gradients with cue: gas rows finite and nonzero", &
+                         total_tests, total_failures)
         if (.not. real_data) call cue_unload(cue_w)
         call set_int('cue_fp64', 0)
         call set_int('nebular_model', 0)

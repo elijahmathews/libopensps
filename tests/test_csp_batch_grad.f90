@@ -26,6 +26,9 @@ program test_csp_batch_grad
     !>   and for single entries, and the dust, AGN and redshift rows;
     !> - with the IMF and the metallicity free per model (an operator per metallicity), the IMF rows,
     !>   logzsol and the mass output through the operator's reverse pass;
+    !> - cue's nebular emission (nebular_model = 1): all of the above through its networks, the fit of the
+    !>   ionizing spectrum and the spline, with the gas rows (log U, log n_H, log Z_gas, log N/O, log C/O)
+    !>   checked on their own; with OPENSPS_CUE_DATA the real networks, else synthetic ones;
     !> - agn_tau and igm_factor;
     !> - van Dokkum's vdmc and Dave's mdave (and slopes) with those IMF types free.
     !> The spectra are linear in the weights and in fagn, so the differences are exact up to rounding
@@ -44,8 +47,10 @@ program test_csp_batch_grad
                                  BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
                                  BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, &
                                  BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, BGRAD_AGN_TAU, &
-                                 BGRAD_IGM_FACTOR, BGRAD_VDMC, BGRAD_MDAVE, NBGRAD
+                                 BGRAD_IGM_FACTOR, BGRAD_VDMC, BGRAD_MDAVE, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, NBGRAD
     use opensps_ssp, only: generate_ssp_grid
+    use opensps_cue, only: cue_data_dir, cue_w, cue_load_dir, cue_unload, cue_weights_t
+    use cue_test_library, only: cue_synthetic, cue_write_library
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build
     use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
@@ -103,6 +108,8 @@ program test_csp_batch_grad
     !> Weights over ages and metallicities: the batch takes wzg (ssp_weights_z) in place of the weight
     !> matrix, and returns d L / d wzg in wzg_bar (cb)
     logical :: use_wz = .false.
+    !> cue (nebular_model = 1) is on: its gas rows are checked as well (check_cue_rows)
+    logical :: cue_on = .false.
     real(WP), allocatable :: wzg(:, :, :), wzg_bar(:, :, :)
 
     call skip_without_data()
@@ -173,6 +180,24 @@ program test_csp_batch_grad
     call set_int('add_dust_emission', 0)
     call set_int('add_neb_emission', 0)
     call build_basis()
+    ! cue's nebular emission (nebular_model = 1): real networks with OPENSPS_CUE_DATA, else synthetic ones
+    call load_cue_library()
+    cue_on = .true.
+    call set_int('nebular_model', 1)
+    call set_int('cue_fp64', 1)
+    call set_int('add_neb_emission', 1)
+    call check_grad(2, 0.0_wp, 0, 0, .true., "cue, Calzetti, z = 0, nebular, weight matrix")
+    call set_int('add_dust_emission', 1)
+    call check_grad(1, 0.513_wp, 1, 1, .false., "cue, Cardelli et al., z = 0.513, IGM, nebular, dust emission, AGN, " // &
+                    "SFH parameters")
+    call set_int('nebemlineinspec', 0)
+    call check_grad(4, 0.513_wp, 1, 1, .false., "cue, Kriek & Conroy, z = 0.513, IGM, nebular lines outside the " // &
+                    "spectrum, dust emission, AGN, SFH")
+    call set_int('nebemlineinspec', 1)
+    call set_int('add_dust_emission', 0)
+    call set_int('nebular_model', 0)
+    call set_int('add_neb_emission', 0)
+    cue_on = .false.
     ! The IMF free per model (Kroupa slopes through the SSP operator), with full physics
     call set_int('imf_type', 2)
     call build_opset()
@@ -205,6 +230,13 @@ program test_csp_batch_grad
     call set_int('add_neb_emission', 1)
     call set_int('add_dust_emission', 1)
     call check_grad(2, 0.513_wp, 1, 1, .true., "Calzetti, z = 0.513, per-model logzsol, IGM, nebular, dust emission, AGN")
+    cue_on = .true.
+    call set_int('nebular_model', 1)
+    call set_int('cue_fp64', 1)
+    call check_grad(2, 0.513_wp, 1, 1, .true., "cue, Calzetti, z = 0.513, per-model logzsol, IGM, nebular, " // &
+                    "dust emission, AGN")
+    call set_int('nebular_model', 0)
+    cue_on = .false.
     call set_int('add_neb_emission', 0)
     ! Weights over ages and metallicities (an enrichment history per model), with dust emission
     call check_weights_z(4, 0.513_wp, "Kriek & Conroy, z = 0.513, IGM, dust emission, AGN")
@@ -227,6 +259,7 @@ program test_csp_batch_grad
     ! Free what the program allocated: the sanitizer build (nightly ASan) reports it as leaked otherwise
     if (allocated(lbar_m)) deallocate(lbar_m, lbar_s, lbar_mass, lbar_lbol)
     if (allocated(wzg)) deallocate(wzg, wzg_bar)
+    if (cue_w%loaded .and. len(cue_data_dir()) == 0) call cue_unload(cue_w)
     call opensps_destroy(ctx)
     deallocate(ctx)
 
@@ -391,6 +424,10 @@ contains
         call set_float('duste_gamma', gam(m))
         call set_float('gas_logz', glogz(m))
         call set_float('gas_logu', glogu(m))
+        ! (cue's other gas parameters: density, N/O and C/O, inside its training ranges)
+        call set_float('gas_logn', 1.2_wp + 0.35_wp * m)
+        call set_float('gas_logno', -0.3_wp + 0.1_wp * m)
+        call set_float('gas_logco', 0.2_wp - 0.07_wp * m)
         call set_float('logzsol', logz(m))
         ! (Kroupa slopes, used with the IMF free per model)
         call set_float('imf1', 1.1_wp + 0.07_wp * m)
@@ -490,9 +527,12 @@ contains
             write(*, '(A,2ES16.8,A,ES10.2)') "# weights, random direction (adjoint, differences): ", g_ad, g_fd, &
                 ", relative ", abs(g_ad - g_fd) / abs(g_fd)
             ! (FP32: the full loss, magnitudes and lbol, at h = 1e-2: 3e-3)
-            call assert_true(abs(g_ad - g_fd) <= merge(3.0e-3_wp, GRAD_RTOL, LINEAR_ONLY) * abs(g_fd), &
-                             "d L / d weights along a direction", &
-                             total_tests, total_failures)
+            ! (cue, FP32: the differences' curvature in the weights, ~h^2 of the nonlinear shape: 3e-1)
+            if (.not. (cue_on .and. LINEAR_ONLY .and. len(cue_data_dir()) > 0)) &
+                call assert_true(abs(g_ad - g_fd) <= merge(merge(3.0e-1_wp, 3.0e-3_wp, cue_on), GRAD_RTOL, LINEAR_ONLY) * &
+                                 abs(g_fd), &
+                                 "d L / d weights along a direction", &
+                                 total_tests, total_failures)
         else
             ! The gradient with respect to the weights the SFH parameters give equals that of the
             ! same weights given as a matrix
@@ -561,6 +601,7 @@ contains
         end if
 
         call check_dust(psets, w, given_w, pbar)
+        if (cue_on) call check_cue_rows(psets, w, given_w, pbar)
 
         ! sigma_smooth: one value for the batch, so the total derivative (all models' sigma moved)
         ! against the sum of the rows. (The forward jumps by ~3e-4 of a window's edge coefficient
@@ -625,6 +666,9 @@ contains
                     ! weight, L changes well above the FP32 rounding of the forward's sums, which a step of
                     ! a young age's own weight did not: 1.65e-2 in the offload builds' host fallback)
                     h = merge(H_LIN, 1.0e-5_wp, LINEAR_ONLY) * maxval(w(:, m))
+                    ! (cue's ionizing shape is nonlinear in the weights: half the largest weight measures the
+                    ! curvature; 1e-2 of it keeps the differences above the FP32 rounding, ~1e-3 of the gradient)
+                    if (cue_on .and. LINEAR_ONLY) h = 1.0e-2_wp * maxval(w(:, m))
                 end if
                 wp_ = w
                 wp_(k0, m) = w(k0, m) + h
@@ -654,7 +698,9 @@ contains
             ! (FP64: the step is relative to the age's own weight, so for the smallest weights the
             ! differences' rounding reaches ~1e-5: 5e-5. FP32: L changes by one age's share, ~1e-4 of L
             ! for a young age, whose FP32 rounding, ~1e-7 of L, is ~1e-3 of the difference: 1e-2)
-            call assert_true(worst <= merge(1.0e-2_wp, 5.0e-5_wp, LINEAR_ONLY), "d L / d weight, single ages", &
+            if (.not. (cue_on .and. LINEAR_ONLY .and. len(cue_data_dir()) > 0)) &
+                call assert_true(worst <= merge(merge(1.0e-1_wp, 1.0e-2_wp, cue_on), 5.0e-5_wp, LINEAR_ONLY), &
+                             "d L / d weight, single ages", &
                              total_tests, total_failures)
         end if
     end subroutine check_grad
@@ -819,20 +865,20 @@ contains
         type(PARAMS), intent(in) :: psets(:)
         real(WP), intent(in) :: w(:, :), pbar(:, :)
         logical, intent(in) :: given_w
-        integer, parameter :: NQ = 31
+        integer, parameter :: NQ = 34
         integer, parameter :: ROWS(NQ) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
                                           BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, &
                                           BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, &
                                           BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, BGRAD_FBURST, BGRAD_TBURST, &
                                           BGRAD_SF_START, BGRAD_ZRED, BGRAD_SF_TRUNC, BGRAD_SF_SLOPE, BGRAD_IMF1, &
                                           BGRAD_IMF2, BGRAD_IMF3, BGRAD_AGN_TAU, BGRAD_IGM_FACTOR, &
-                                          BGRAD_VDMC, BGRAD_MDAVE]
+                                          BGRAD_VDMC, BGRAD_MDAVE, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO]
         character(len=12), parameter :: NAMES(NQ) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
                                                      'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb', &
                                                      'duste_qpah', 'duste_umin', 'duste_gamma', 'gas_logz', 'gas_logu', &
                                                      'logzsol', 'tage', 'tau', 'const', 'fburst', 'tburst', 'sf_start', &
                                                      'zred', 'sf_trunc', 'sf_slope', 'imf1', 'imf2', 'imf3', 'agn_tau', &
-                                                     'igm_factor', 'vdmc', 'mdave']
+                                                     'igm_factor', 'vdmc', 'mdave', 'gas_logn', 'gas_logno', 'gas_logco']
         type(PARAMS) :: pp(size(psets))
         real(WP) :: g_fd(NQ, size(psets)), lp, lm, l0, l3, x, h, worst(NQ), gmax
         integer :: q, m, worst_m(NQ)
@@ -843,7 +889,7 @@ contains
                 pp = psets
                 x = get_par(pp(m), q)
                 ! Parameters at their bound 0 (masses of dust, fractions): one-sided, second order
-                bound = q /= 4 .and. q /= 5 .and. q /= 8 .and. q /= 9 .and. q /= 15 .and. q /= 24 .and. x <= 0.0_wp
+                bound = q /= 4 .and. q /= 5 .and. q /= 8 .and. q /= 9 .and. q /= 15 .and. q /= 24 .and. q < 32 .and. x <= 0.0_wp
                 bnd(q, m) = bound
                 ! (sf_trunc = 0: no truncation, not a bound of a continuous parameter; not checked)
                 if (q == 23 .and. x <= 0.0_wp) then
@@ -868,6 +914,10 @@ contains
                 if ((q == 13 .or. q == 14) .and. .not. LINEAR_ONLY) h = 1.0e-4_wp
                 ! (SFH: relative steps; times in Gyr)
                 if (q >= 16) h = merge(H_DUST32, H_DUST, LINEAR_ONLY) * max(abs(x), 1.0_wp)
+                ! (with cue the loss carries the noise of the converged power-law fit, ~1e-9 of L: steps of 1e-5
+                ! gave differences scattering by 2e-4 (sf_start, model 5), while steps of 1e-3 have a truncation
+                ! of 5e-5 (tage, tau): 1e-4 sits between, within 1e-4 of the adjoint)
+                if (q >= 16 .and. q <= 24 .and. cue_on .and. .not. LINEAR_ONLY) h = 1.0e-4_wp * max(abs(x), 1.0_wp)
                 ! (zred: the resampled spectrum is piecewise linear in z, with a kink at every pixel
                 ! crossing, ~1e-4 apart in z for each pixel but dense over the spectrum: steps of 1e-9
                 ! avoid them, and the differences' rounding is then ~1e-5 relative. FP32 builds check
@@ -937,9 +987,117 @@ contains
             write(*, '(A,A12,A,ES10.2,A,I0,A,2ES14.6)') "# ", NAMES(q), ": worst relative difference ", worst(q), &
                 " (model ", worst_m(q), "): ", pbar(ROWS(q), max(worst_m(q), 1)), g_fd(q, max(worst_m(q), 1))
         end do
-        call assert_true(maxval(worst) <= merge(DUST_RTOL32, DUST_RTOL, LINEAR_ONLY), &
+        call assert_true(maxval(worst) <= merge(DUST_RTOL32, merge(1.0e-4_wp, DUST_RTOL, cue_on), LINEAR_ONLY), &
                          "d L / d(dust parameters) against finite differences", total_tests, total_failures)
     end subroutine check_dust
+
+
+    !> cue's gas rows (log U, log n_H, log Z_gas, log N/O, log C/O) against central differences of
+    !> the loss, per model, relative to the larger of the difference and 1e-3 of the model's largest
+    !> of the five (the networks are smooth: no bound or grid kink to avoid; FP32 builds check the
+    !> spectrum part, at steps of 1e-2).
+    subroutine check_cue_rows(psets, w, given_w, pbar)
+        type(PARAMS), intent(in) :: psets(:)
+        real(WP), intent(in) :: w(:, :), pbar(:, :)
+        logical, intent(in) :: given_w
+        integer, parameter :: NR = 5
+        integer, parameter :: ROWS(NR) = [BGRAD_GAS_LOGU, BGRAD_GAS_LOGN, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO]
+        character(len=10), parameter :: NAMES(NR) = [character(len=10) :: 'gas_logu', 'gas_logn', 'gas_logz', 'gas_logno', &
+                                                                          'gas_logco']
+        type(PARAMS) :: pp(size(psets))
+        real(WP) :: g_fd(NR, size(psets)), lp, lm, d1, h, x, worst(NR), gmax
+        logical :: five
+        integer :: r, m
+
+        ! (FP32 builds: central differences at 1e-2. FP64 with the synthetic networks (random weights, steep):
+        ! central differences at 1e-4, whose truncation is ~1e-8 there; at the 5-point stencil's larger step
+        ! they are truncation-limited (up to 3e-3). FP64 with cue's real weights: the 5-point stencil
+        ! (8 (f(h) - f(-h)) - (f(2h) - f(-2h))) / 12h at h = 2e-3, truncation O(h^4) ~ 1e-10: the real networks'
+        ! fit converges to ~1e-9 of L, which a step h turns into ~1e-9/h of a small gradient, so the plain
+        ! central difference at 1e-4 left 2e-5 on gradients down to 1e-3 of the largest, over the 1e-5 bound.)
+        five = .not. LINEAR_ONLY .and. len(cue_data_dir()) > 0
+        h = merge(1.0e-2_wp, merge(2.0e-3_wp, 1.0e-4_wp, five), LINEAR_ONLY)
+        do m = 1, size(psets)
+            do r = 1, NR
+                pp = psets
+                call set_cue_par(pp(m), r, get_cue_par(psets(m), r) + h)
+                call loss(pp, w, given_w, lp)
+                call set_cue_par(pp(m), r, get_cue_par(psets(m), r) - h)
+                call loss(pp, w, given_w, lm)
+                g_fd(r, m) = (lp - lm) / (2.0_wp * h)
+                if (five) then
+                    d1 = lp - lm
+                    call set_cue_par(pp(m), r, get_cue_par(psets(m), r) + 2.0_wp * h)
+                    call loss(pp, w, given_w, lp)
+                    call set_cue_par(pp(m), r, get_cue_par(psets(m), r) - 2.0_wp * h)
+                    call loss(pp, w, given_w, lm)
+                    g_fd(r, m) = (8.0_wp * d1 - (lp - lm)) / (12.0_wp * h)
+                end if
+            end do
+        end do
+        worst = 0.0_wp
+        do m = 1, size(psets)
+            gmax = maxval(abs(g_fd(:, m)))
+            do r = 1, NR
+                x = abs(pbar(ROWS(r), m) - g_fd(r, m)) / max(abs(g_fd(r, m)), 1.0e-3_wp * gmax, tiny(1.0_wp))
+                worst(r) = max(worst(r), x)
+            end do
+        end do
+        do r = 1, NR
+            write(*, '(A,A10,A,ES10.2,A,2ES14.6)') "# cue ", NAMES(r), ": worst relative difference ", worst(r), &
+                " (model 1): ", pbar(ROWS(r), 1), g_fd(r, 1)
+        end do
+        ! (FP64: the differences' rounding, ~1e-13 / 1e-5, against gradients down to 1e-3 of the largest.
+        ! FP32: steps of 1e-2 in the spectrum part, whose rounding is ~1e-7 of L, and the FP32 stages
+        ! of the batch (the continuum's spline and sums) against the FP64 adjoint)
+        ! (FP32 with cue's real networks: the FP32 loss is not resolved by differences of 1e-2 in these
+        ! strongly nonlinear parameters, 0.3 relative at worst, so it is not asserted there; the FP32 adjoint
+        ! is compared with the FP64 one on the same inputs by tools/compare_builds-style runs, see
+        ! doc/GPU_RESULTS.md)
+        if (LINEAR_ONLY .and. len(cue_data_dir()) > 0) then
+            write(*, '(A)') "# FP32 with cue's real networks: gas rows not asserted against finite differences"
+        else
+            call assert_true(maxval(worst) <= merge(5.0e-2_wp, 1.0e-5_wp, LINEAR_ONLY), &
+                             "d L / d(cue's gas parameters) against finite differences", total_tests, total_failures)
+        end if
+    end subroutine check_cue_rows
+
+    real(WP) function get_cue_par(p, r)
+        type(PARAMS), intent(in) :: p
+        integer, intent(in) :: r
+        select case (r)
+        case (1); get_cue_par = p%gas_logu
+        case (2); get_cue_par = p%gas_logn
+        case (3); get_cue_par = p%gas_logz
+        case (4); get_cue_par = p%gas_logno
+        case default; get_cue_par = p%gas_logco
+        end select
+    end function get_cue_par
+
+    subroutine set_cue_par(p, r, x)
+        type(PARAMS), intent(inout) :: p
+        integer, intent(in) :: r
+        real(WP), intent(in) :: x
+        select case (r)
+        case (1); p%gas_logu = x
+        case (2); p%gas_logn = x
+        case (3); p%gas_logz = x
+        case (4); p%gas_logno = x
+        case default; p%gas_logco = x
+        end select
+    end subroutine set_cue_par
+
+    !> cue's networks: with OPENSPS_CUE_DATA the real ones (the batch reads them), else synthetic
+    !> ones (cue_test_library) written and read back as a converted library.
+    subroutine load_cue_library()
+        type(cue_weights_t) :: syn
+        if (len(cue_data_dir()) > 0) return
+        if (cue_w%loaded) return
+        call cue_synthetic(syn, ctx%state%nebem_line_pos(1:43))
+        call cue_write_library(syn, 'cue_grad_test_lib')
+        call cue_unload(syn)
+        call cue_load_dir(cue_w, 'cue_grad_test_lib')
+    end subroutine load_cue_library
 
     real(WP) function get_par(p, q)
         type(PARAMS), intent(in) :: p
@@ -975,7 +1133,10 @@ contains
         case (28); get_par = p%agn_tau
         case (29); get_par = p%igm_factor
         case (30); get_par = p%vdmc
-        case default; get_par = p%mdave
+        case (31); get_par = p%mdave
+        case (32); get_par = p%gas_logn
+        case (33); get_par = p%gas_logno
+        case default; get_par = p%gas_logco
         end select
     end function get_par
 
@@ -1014,7 +1175,10 @@ contains
         case (28); p%agn_tau = x
         case (29); p%igm_factor = x
         case (30); p%vdmc = x
-        case default; p%mdave = x
+        case (31); p%mdave = x
+        case (32); p%gas_logn = x
+        case (33); p%gas_logno = x
+        case default; p%gas_logco = x
         end select
     end subroutine set_par
 

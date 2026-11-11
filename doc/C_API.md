@@ -148,15 +148,22 @@ and `gas_logz`, the float parameters `gas_logn` (log n_H / cm^-3, default 2), `g
   fitted with cue's 4-part power law.
 - **The normalization** is their ionizing photons times (1 - `frac_obrun`).
 - **Lines** go to the context's line list (130 of the 166).
-- **Precision:** `cue_fp64` (default 1) runs the networks' hidden layers in FP64 also in FP32
-  builds. With 0 they run in FP32: faster, with lines within ~5e-4 of FP64.
+- **Precision:** `cue_fp64` (default 0) runs the networks' hidden layers in the kernel precision
+  (FP32 in FP32 builds: lines within ~5e-4 dex of FP64, a documented exception, `doc/MIXED_PRECISION.md`).
+  With 1 they run in FP64 also in FP32 builds.
 - **Statuses:**
   - 4 without the weights;
-  - 2 with the IMF per model (`ssp_ops`) or with gradients;
+  - 2 with the IMF per model (`ssp_ops`);
   - 104 from `opensps_context_set_int` for a `nebular_model` other than 0 or 1.
 
-Tested in `tests/test_c_cue.c` (the [O II] density diagnostic, [N II] against N/O) and
-`tests/test_csp_batch.f90`.
+- **Gradients** (`compute_csp_batch_grad`) are supported: the networks, the fit of the ionizing
+  spectrum and the spline are differentiated in reverse. With cue, the rows `gas_logu` and `gas_logz`
+  are cue's derivatives (not the CLOUDY grids' interpolation) and `gas_logn`, `gas_logno` and
+  `gas_logco` have rows of their own (`OPENSPS_BGRAD_GAS_LOGN`, `_LOGNO`, `_LOGCO`; zero with the
+  CLOUDY grids). The reverse pass runs the hidden layers in FP64 whatever `cue_fp64`.
+
+Tested in `tests/test_c_cue.c` (the [O II] density diagnostic, [N II] against N/O),
+`tests/test_csp_batch.f90` and, for the gradients, `tests/test_csp_batch_grad.f90`.
 
 ### Young and old components of the batch
 
@@ -211,7 +218,7 @@ void opensps_context_compute_csp_batch_grad(
 * `weights_z_bar`: `[ntfull, nz, n]` receiving $dL / d(weights\_z)$ when `ssp_weights_z` is used.
 * `mags_bar`, `spec_bar`, `mass_bar`, `lbol_bar`: incoming cotangents (derivatives of loss with respect to outputs). Any may be `NULL`.
 * Metadata:
-  * `opensps_get_nbgrad(int *nbgrad);` returns 33.
+  * `opensps_get_nbgrad(int *nbgrad);` returns 36.
   * `opensps_get_grad_param_name(int grad_idx, char *name, int max_len, int *status);` returns the parameter name for each row.
 
 A struct-based entry point `opensps_context_compute_csp_batch_ext` is also provided for clean C/C++ usage:

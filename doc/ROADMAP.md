@@ -211,6 +211,7 @@ tables and interpolation weights:
 | `dust1`, `dust2`, `dust3`, `dust_index`, `dust1_index`, `frac_obrun`, `frac_nodust`, `mwr`, `uvb` | the three transmissions (the curve tables' derivatives), AGN's diffuse transmission |
 | `duste_qpah`, `duste_umin`, `duste_gamma` | the energy balance (absorbed light, escaping fraction) and the Draine & Li interpolation |
 | `gas_logz`, `gas_logu` (and `frac_obrun`) | the nebular continuum and lines (CLOUDY grids in log space), the EUV rows |
+| `gas_logu`, `gas_logn`, `gas_logz`, `gas_logno`, `gas_logco` (and the weights, `frac_obrun`, `logzsol`) with `nebular_model = 1` | cue (`cue_nebular_backward`): the networks backpropagated (`cue_forward_adjoint`), the 4-part power-law fit by the implicit function theorem at its minimum (`cue_ionizing_params_adjoint`), the spline transposed (`cue_spline_adjoint`), through the absorbed photons and the ionizing spectrum of the nebular ages |
 | `logzsol` | the bases (and L_bol, Q) interpolated in log Z, with every metallicity resident |
 | `tage`, `tau`, `const`, `fburst`, `tburst`, `sf_start`, `sf_trunc`, `sf_slope` | the SFH weights' tangents (`opensps_sfh_tangent`; sfh = 0, 1, 4, 5) |
 | `zred` | the resampling, the distance term, the IGM (`igm_tau_dz`) |
@@ -285,8 +286,10 @@ them, `test_csp_batch` still failed on the 780M. Remaining:
 ### Further items
 
 - **cue nebular emission** (done 2026-11-10, `nebular_model = 1`): cue's networks evaluated in the
-  batch, with the model's own ionizing spectrum (`tools/cue/README.md`). Open:
-  - gradients (backpropagation through the networks, the clamp-free closed-form fit and the spline);
+  batch, with the model's own ionizing spectrum (`tools/cue/README.md`); gradients through all of
+  it (`BGRAD_GAS_LOGN`, `_LOGNO`, `_LOGCO` rows; the others are cue's own derivatives). Open:
+  - the reverse pass's speed: the transposed dense layers are plain loops, 20% of the GPU time of the
+    gradient on an A100 before the spline's transpose was tuned (a batched DGEMM with the transposed FP64 weights, as the forward's, would do);
   - the IMF per model (the ionizing spectrum from the operator);
   - non-stellar ionizing sources (offsets to the power-law parameters, as E-FSPS's `delta_ionspec_*`);
   - nebular emission from old stars;

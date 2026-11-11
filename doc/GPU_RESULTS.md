@@ -106,8 +106,8 @@ fit of the ionizing spectrum, the PCA bases and the spline of the continuum. Mea
 | | magnitudes | spectra on the device |
 |---|---|---|
 | CLOUDY grids (`full_fit`) | 14.3 | 12.0 |
-| cue, hidden layers FP32 (`cue_fp64 = 0`) | 15.7 | 12.1 |
-| cue, hidden layers FP64 (`cue_fp64 = 1`, the default) | 22.4 | 17.1 |
+| cue, hidden layers FP32 (`cue_fp64 = 0`, the default from 2026-11-11) | 15.7 | 12.1 |
+| cue, hidden layers FP64 (`cue_fp64 = 1`; the default until then) | 22.4 | 17.1 |
 
 - **The hidden layers** are a tiled HIP kernel (64 x 64 outputs per block, 4 x 4 per thread,
   `cue_dense_act_kernel`), with the bias and the activation fused.
@@ -115,8 +115,9 @@ fit of the ionizing spectrum, the PCA bases and the spline of the continuum. Mea
   - FP64: 75 ms (~0.6 TFLOPS, near the R9700's FP64 rate). rocBLAS DGEMM (`-Daccel_blas=rocblas`)
     reaches 0.72 TFLOPS on the two 256 x 256 layers: its gfx1201 FP64 kernels are untuned
     (MT16x16x16). rocBLAS SGEMM gained nothing over the OpenMP kernel.
-  - The FP64 default is the precision policy's (`doc/MIXED_PRECISION.md`, cue's networks). On
-    GPUs with fast FP64 (A100: 9.7 TFLOPS, 19.5 with tensor cores) it costs little.
+  - FP32 is the default, a documented exception to the precision policy (`doc/MIXED_PRECISION.md`, cue's
+    networks); `cue_fp64 = 1` keeps FP64, which on GPUs with fast FP64 (A100: 9.7 TFLOPS, 19.5 with
+    tensor cores) costs little.
 - **The rest of cue**, about 24 ms per call:
   - the continuum's FP64 output layer and PCA (4.5 ms) and the lines' (3.9 ms with FP64 hidden
     layers, 1 ms in KP);
@@ -129,6 +130,51 @@ fit of the ionizing spectrum, the PCA bases and the spline of the continuum. Mea
   - FP32 build, default: the same.
   - FP32 build, `cue_fp64 = 0`: lines within 5.1e-4 relative of FP64, continuum within 3e-6 dex.
   - Batch lines against the test's own assembly: 4.5e-13 (FP64 build) and 4.1e-7 (FP32 build).
+
+### Gradients through cue (A100-40GB, nvfortran 25.1, 2026-11-10)
+
+`compute_csp_batch_grad` with `nebular_model = 1`: networks backpropagated, the ionizing-spectrum
+fit differentiated at its minimum, the spline transposed. Real cue weights, 500 models with random
+gas parameters, magnitudes' cotangents.
+- **Against finite differences** (`tests/test_csp_batch_grad`, 118 checks in each of the FP64
+  builds, CPU and A100 with HIP and cuBLAS, with synthetic and with cue's real weights): the gas
+  rows 1e-8 - 1e-6 relative, the other rows through cue (weights, `frac_obrun`, `logzsol`, SFH
+  parameters, dust) as without it. FP32 builds with synthetic weights pass the same 118. With the
+  real weights the FP32 finite differences (steps of 1e-2 in strongly nonlinear parameters) do not
+  resolve the adjoint (0.3 relative at worst), so those eight assertions are skipped there; the
+  FP32 adjoint is compared with the FP64 one on the same inputs instead:
+- **FP32 against FP64 gradients**, 500 models, worst difference as a fraction of the model's largest
+  gradient (median in parentheses): `gas_logu` 1.8e-9 (7e-12), `gas_logn` 1.2e-9, `gas_logno`
+  1.8e-9, `gas_logco` 2.5e-9, `gas_logz` 4.2e-9, `logzsol` 1.8e-8, `tage` 2.5e-7, `zred` 7e-6
+  (an observed-frame row, unrelated to cue). GPU FP64 against CPU FP64: 1e-10 (gas rows).
+- **Cost** (HIP FP32 + cuBLAS build, N = 10^4, magnitudes' cotangents, us per model, forward and
+  reverse together): CLOUDY grids 37; cue 60 (78 before the spline's transpose gathered over the
+  knots' pixels). Profile before that change (nsys): the spline's transpose 30% of the GPU time,
+  the transposed dense layers (`rev_dense_back`, plain loops) 20%; the R9700 profile and the tiled kernels that
+  replaced those loops are below.
+
+### cue gradients on the R9700 (2026-11-11)
+
+ROCm 7.2.4 container, amdflang, gfx1201, N = 10^4, `full_fit` populations with gradients (`benchmark_csp_batch
+10000 0 <config>_grad 10000`), us per model, forward and reverse together, median of three runs:
+
+| | CLOUDY grids | cue, FP32 hidden layers (`cue_fp64 = 0`, the default) | cue, FP64 hidden layers (`cue_fp64 = 1`) |
+|---|---|---|---|
+| plain loops in the adjoint | 62.1 | 84.7 | 98.3 |
+| tiled HIP kernels in the adjoint | 62.6 | 70.8 | 85.9 |
+
+The FP32 + rocBLAS build is within 2% of these; the FP64 build costs 100 / 105 / 107. The suites
+(unit + regression, 50 tests) pass in FP32, FP64 and FP32 + rocBLAS, with cue's real weights.
+
+`rocprofv3` kernel trace before: the forward's tiled kernel 31% of the GPU time, the adjoint's recompute loops
+(`rev_dense_pre`) 9.2% (4.7 ms per call) and transposed loops (`rev_dense_back`) 7.5% (5.7 ms). The adjoint now
+uses the forward's kernel, which also writes the pre-activation (`cue_dense_act_kernel`, argument `P`), and a tiled
+transposed kernel (`cue_dense_back_kernel`, 2.8 ms per call): the two loop kernels are replaced. After: the tiled
+forward/recompute kernel 39% (5.2 ms per call, FP64-rate bound: ~0.6 TFLOPS on gfx1201), the transposed kernel
+4%, the rest the CSP's observed-frame, attenuation and band kernels (the same as with the grids). The cue
+networks are at the FP64 rate; storing the pre-activations in the forward instead of recomputing them would save
+about a third of the 39% for 1 GB per 10^4 models, and the FP32 hidden layers (`cue_fp64 = 0`) are the remaining
+lever, a precision decision (doc/MIXED_PRECISION.md).
 
 ## Fitting-population batch: nebular, IGM, attenuation, photometry (2026-11-09)
 

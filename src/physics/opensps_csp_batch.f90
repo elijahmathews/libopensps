@@ -96,7 +96,7 @@ module opensps_csp_batch
     use opensps_gas, only: get_grid_indices_weights, prepare_line_gaussians
     use opensps_cue, only: cue_w, cue_sp, cue_load, cue_line_map, cue_spline_build, cue_spline_solve, &
                            cue_ionizing_params, cue_inputs, cue_forward, CUE_EDGE_HI, cue_batch_chunk, CUE_NION, CUE_NIN, &
-                           CUE_LOG_LSUN
+                           CUE_LOG_LSUN, cue_forward_adjoint, cue_ionizing_params_adjoint, cue_spline_adjoint, CUE_BCHUNK
     use opensps_spectral_indices, only: compute_spectral_indices_columns
     use opensps_smoothing, only: apply_smoothing, apply_smoothing_adjoint
     use opensps_batch_photometry, only: compute_magnitudes_columns, prepare_batch_grid, smoothing_on_device, &
@@ -125,7 +125,7 @@ module opensps_csp_batch
               BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
               BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, &
               BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, BGRAD_VDMC, BGRAD_MDAVE, BGRAD_AGN_TAU, &
-              BGRAD_IGM_FACTOR, NBGRAD
+              BGRAD_IGM_FACTOR, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, NBGRAD
 
     !> Rows of params_bar (compute_csp_batch's gradients): the derivative of the caller's loss with
     !> respect to each parameter of the model. The list grows as the adjoints of more stages are
@@ -167,7 +167,11 @@ module opensps_csp_batch
     !> The IGM optical depth's factor (igm_factor), per model as sigma_smooth (zero at z = 0 or
     !> without IGM absorption)
     integer, parameter :: BGRAD_IGM_FACTOR = 33
-    integer, parameter :: NBGRAD = 33
+    !> Nebular emission by cue (nebular_model = 1): with it, rows 14 and 15 (gas_logz, gas_logu) are
+    !> the derivatives of cue's networks (not the CLOUDY grids' interpolation), and these rows are
+    !> the gas density log n_H, N/O and C/O (zero with the CLOUDY grids, where they do not act)
+    integer, parameter :: BGRAD_GAS_LOGN = 34, BGRAD_GAS_LOGNO = 35, BGRAD_GAS_LOGCO = 36
+    integer, parameter :: NBGRAD = 36
     !> The rows of the SFH tangents' parameters (opensps_sfh_tangent: SFHT_TAGE .. SFHT_SF_SLOPE)
     integer, parameter :: SFHT_ROWS(8) = [17, 18, 19, 20, 21, 22, 25, 26]
     !> Rows BGRAD_DUST1 .. BGRAD_DUSTE_GAMMA, summed per model by the attenuation adjoint (10-12 as
@@ -561,11 +565,11 @@ contains
             given_w = .true.
             nzw = nzb
         end if
-        ! cue (nebular_model = 1): with the resident bases, forward only (the IMF per model and the
-        ! gradients use the CLOUDY grids' kernels); its weights are read on first use
+        ! cue (nebular_model = 1): with the resident bases, with gradients (cue_nebular_backward), not
+        ! the IMF per model (which uses the CLOUDY grids' kernels); its weights are read on first use
         cue = ctx%add_neb_emission_val == 1 .and. ctx%nebular_model_val == 1
         if (cue) then
-            if (imf .or. grad) then
+            if (imf) then
                 status = 2; return
             end if
             call cue_load(st_cue)
@@ -1188,7 +1192,7 @@ contains
                                     neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
                                     psets(1)%min_wave_smooth, psets(1)%max_wave_smooth, &
                                     imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzbl, &
-                                    mags_bar, spec_bar, params_bar, wbl)
+                                    mags_bar, spec_bar, params_bar, wbl, gas)
             else
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
                                     it_tesc, zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
@@ -1196,7 +1200,7 @@ contains
                                     neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
                                     psets(1)%min_wave_smooth, psets(1)%max_wave_smooth, &
                                     imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzbl, &
-                                    mags_bar, spec_bar, params_bar, wbl)
+                                    mags_bar, spec_bar, params_bar, wbl, gas)
             end if
             ! The mass output's cotangent: mass = sum over ages of w_k M_k (M interpolated in log Z with
             ! per-model metallicity, which then adds to logzsol's row)
@@ -1916,12 +1920,12 @@ contains
         real(KP), intent(inout) :: lum(NEMLINE, 2 * n_mod), yo(nspec, 2 * n_mod)
         real(KP), intent(out)   :: eml(NEMLINE, n_mod)
 
-        integer  :: nion, ncw, ch, c0, nc, m, i, t, k, j, map(NEMLINE)
+        integer  :: nion, ncw, ch, c0, nc, m, i, k, j, map(NEMLINE)
         real(WP), allocatable :: lam_ion(:), ion(:,:), theta(:,:), logq(:), qy(:), qo(:), line_log(:,:), cont_log(:,:)
         real(KP), allocatable :: sion(:,:), v(:,:), mm(:,:)
-        real(KP) :: s, bk, dzk, fy, fo, tt, u, c
+        real(KP) :: fy, fo, tt, u, c
         integer  :: kk
-        real(WP) :: q, e
+        real(WP) :: e
         real(WP), parameter :: LN10 = log(10.0_wp)
 
         ! Host set-up: the pixels of the fit (to the first beyond 911.6 A, cue's normalization),
@@ -1946,50 +1950,10 @@ contains
 #endif
         do c0 = 0, n_mod - 1, ch
             nc = min(ch, n_mod - c0)
-            ! The ionizing spectrum of the nebular ages (escape not applied: it scales, not shapes)
-#if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do collapse(2) private(s, t, bk, dzk)
-#elif defined(_OPENMP)
-            !$omp parallel do collapse(2) private(s, t, bk, dzk)
-#endif
-            do m = 1, nc
-                do i = 1, nion
-                    s = 0.0_KP
-                    dzk = real(dz(c0 + m), KP)
-                    do t = 1, nt_neb
-                        if (nzb > 1) then
-                            bk = (1.0_KP - dzk) * basis(i, t, zlo(c0 + m)) + dzk * basis(i, t, zhi(c0 + m))
-                        else
-                            bk = basis(i, t, 1)
-                        end if
-                        s = s + (w2(t, c0 + m) + w2(t, n_mod + c0 + m)) * bk
-                    end do
-                    sion(i, m) = s
-                end do
-            end do
-            ! Absorbed ionizing photons of the young and old nebular ages
-#if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do private(t, q)
-#elif defined(_OPENMP)
-            !$omp parallel do private(t, q)
-#endif
-            do m = 1, nc
-                qy(m) = 0.0_wp
-                qo(m) = 0.0_wp
-                do t = 1, nt_neb
-                    if (nzb > 1) then
-                        q = abs(((1.0_wp - dz(c0 + m)) * q0(t, zlo(c0 + m)) + dz(c0 + m) * q0(t, zhi(c0 + m))) * &
-                                fabs(c0 + m))
-                    else
-                        q = abs(q0(t, 1) * fabs(c0 + m))
-                    end if
-                    if (t <= it_tesc(c0 + m)) then
-                        qy(m) = qy(m) + real(w2(t, c0 + m), WP) * q
-                    else
-                        qo(m) = qo(m) + real(w2(t, n_mod + c0 + m), WP) * q
-                    end if
-                end do
-            end do
+            ! The ionizing spectrum of the nebular ages (escape not applied: it scales, not shapes) and
+            ! the absorbed ionizing photons of the young and old nebular ages
+            call cue_chunk_sources(c0, nc, n_mod, nion, nt, nt_neb, nzb, nb1, nb2, nb3, nq0, basis, w2, it_tesc, &
+                                   zlo, zhi, dz, q0, fabs, sion, qy, qo)
             call cue_ionizing_params(nc, nion, lam_ion, sion, ion)
             call cue_inputs(nc, ion, gas(1, c0 + 1), theta, logq)
             call cue_forward(cue_w, nc, theta, line_log, cont_log, fp64=ctx%cue_fp64_val == 1)
@@ -2063,6 +2027,313 @@ contains
         !$omp end target data
 #endif
     end subroutine cue_nebular
+
+    !> The ionizing source of the models c0 + 1 .. c0 + nc of cue_nebular (and its reverse pass): the
+    !> summed spectrum sion(pixel, m) of the stars of the nebular ages (t <= nt_neb; the weights
+    !> w2 of the young and old columns, the basis interpolated in log Z with the models' dz) over the
+    !> first nion pixels, and the absorbed ionizing photons of the young and old ages, qy, qo.
+    subroutine cue_chunk_sources(c0, nc, n_mod, nion, nt, nt_neb, nzb, nb1, nb2, nb3, nq0, basis, w2, it_tesc, zlo, zhi, &
+                                 dz, q0, fabs, sion, qy, qo)
+        integer, intent(in)   :: c0, nc, n_mod, nion, nt, nt_neb, nzb, nb1, nb2, nb3, nq0
+        real(KP), intent(in)  :: basis(nb1, nb2, nb3), w2(nt, 2 * n_mod)
+        integer, intent(in)   :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
+        real(WP), intent(in)  :: dz(n_mod), q0(nt_neb, nq0), fabs(n_mod)
+        real(KP), intent(out) :: sion(nion, nc)
+        real(WP), intent(out) :: qy(nc), qo(nc)
+        integer  :: m, i, t
+        real(KP) :: s, bk, dzk
+        real(WP) :: q
+
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(s, t, bk, dzk)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(s, t, bk, dzk)
+#endif
+        do m = 1, nc
+            do i = 1, nion
+                s = 0.0_KP
+                dzk = real(dz(c0 + m), KP)
+                do t = 1, nt_neb
+                    if (nzb > 1) then
+                        bk = (1.0_KP - dzk) * basis(i, t, zlo(c0 + m)) + dzk * basis(i, t, zhi(c0 + m))
+                    else
+                        bk = basis(i, t, 1)
+                    end if
+                    s = s + (w2(t, c0 + m) + w2(t, n_mod + c0 + m)) * bk
+                end do
+                sion(i, m) = s
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(t, q)
+#elif defined(_OPENMP)
+        !$omp parallel do private(t, q)
+#endif
+        do m = 1, nc
+            qy(m) = 0.0_wp
+            qo(m) = 0.0_wp
+            do t = 1, nt_neb
+                if (nzb > 1) then
+                    q = abs(((1.0_wp - dz(c0 + m)) * q0(t, zlo(c0 + m)) + dz(c0 + m) * q0(t, zhi(c0 + m))) * &
+                            fabs(c0 + m))
+                else
+                    q = abs(q0(t, 1) * fabs(c0 + m))
+                end if
+                if (t <= it_tesc(c0 + m)) then
+                    qy(m) = qy(m) + real(w2(t, c0 + m), WP) * q
+                else
+                    qo(m) = qo(m) + real(w2(t, n_mod + c0 + m), WP) * q
+                end if
+            end do
+        end do
+    end subroutine cue_chunk_sources
+
+    !> The reverse pass of cue_nebular (nebular_model = 1), in place of backward_nebular: from the
+    !> cotangents of the young and old spectra (gw) and of the lines (lbar, as backward_nebular's:
+    !> d L / d the lines' luminosities of the young and old stars, present when `lines`) it forms
+    !>   nwb(t, m)   d L / d w_t, the SFH weight of the nebular age t (through the absorbed photons
+    !>               Q = sum_t w_t q_t, q_t = |Q0(t) (1 - frac_obrun)|, and through the shape of the
+    !>               ionizing spectrum, sum_t w_t basis(:, t)),
+    !>   gneb(3, m)  d L / d (1 - frac_obrun) (the absorbed fraction of the photons),
+    !>   gneb(5, m)  d L / d dz (the metallicity interpolation: the basis and Q0 of the nebular ages),
+    !>   gcue(:, m)  d L / d (log U, log n_H, log Z_gas, log N/O, log C/O), cue's inputs from the gas.
+    !> The chain is the forward's, a chunk of models at a time with the forward recomputed (the
+    !> ionizing source, its fit, the networks: no intermediate is stored between the passes):
+    !>   lines    L_i = Q_y/o 10^(log L_k - log Q(U, n_H) - log L_sun), young and old
+    !>   continuum  v_i = Q 10^(...), the spline S v onto the pixels, split by f_y = Q_y / Q;
+    !> the networks' reverse pass (cue_forward_adjoint) gives the cotangents of the 12 inputs, of which
+    !> 7 are the fit's shape parameters (cue_ionizing_params_adjoint: the cotangent of the ionizing
+    !> spectrum, whose scaling it is invariant under), log Q(U, n_H) = log U + log n_H + const,
+    !> n_H = 10^log n_H, and the three abundances. At Q_y = 0 (or Q_o) the derivative with respect to
+    !> that photon rate is that of the linear form, as for the CLOUDY grids' weights.
+    !> Differences from the forward at FP32 kernel precision: the cotangents are formed in FP64, the
+    !> networks' reverse pass is that of the FP64 hidden layers (cue_forward_adjoint).
+    subroutine cue_nebular_backward(ctx, n_mod, nspec, nt, nzb, nb1, nb2, nb3, basis, w2, it_tesc, zlo, zhi, dz, nt_neb, &
+                                    cont, lines, nq0, q0, fabs, gas, gw, lbar, nwb, gneb, gcue)
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)     :: n_mod, nspec, nt, nzb, nb1, nb2, nb3, nt_neb, nq0
+        integer, intent(in)     :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
+        real(KP), intent(in)    :: basis(nb1, nb2, nb3), w2(nt, 2 * n_mod), gw(nspec, 2 * n_mod)
+        real(KP), intent(in)    :: lbar(:,:)
+        real(WP), intent(in)    :: dz(n_mod), q0(nt_neb, nq0), fabs(n_mod), gas(5, n_mod)
+        logical, intent(in)     :: cont, lines
+        real(WP), intent(out)   :: nwb(max(1, nt_neb), n_mod), gcue(5, n_mod)
+        real(WP), intent(inout) :: gneb(5, n_mod)
+
+        integer  :: nion, ncw, nl, ch, c0, nc, m, i, t, k, map(NEMLINE)
+        real(WP), allocatable :: lam_ion(:), ion(:,:), theta(:,:), logq(:), qy(:), qo(:), line_log(:,:), cont_log(:,:)
+        real(WP), allocatable :: line_bar(:,:), cont_bar(:,:), theta_bar(:,:), ion_bar(:,:), sbar(:,:)
+        real(WP), allocatable :: uy(:,:), uo(:,:), mb(:,:,:), el(:,:), lqb(:), qyb(:), qob(:)
+        real(WP), allocatable :: tsb(:,:), tdz(:,:), tfa(:,:)
+        real(KP), allocatable :: sion(:,:)
+        real(WP) :: e, ex, by, bo, gl, qt, fy, fyb, ssum, qtb, lin, sg, wq, sb, dbk, totlq, bk0, bk1
+        real(WP), parameter :: LN10 = log(10.0_wp)
+
+        if (nt_neb < 1) then
+            ! (no nebular ages: the forward adds nothing)
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do private(i)
+#elif defined(_OPENMP)
+            !$omp parallel do private(i)
+#endif
+            do m = 1, n_mod
+                do i = 1, 5
+                    gcue(i, m) = 0.0_wp
+                end do
+                gneb(1, m) = 0.0_wp
+                gneb(2, m) = 0.0_wp
+                gneb(3, m) = 0.0_wp
+                gneb(5, m) = 0.0_wp
+                nwb(1, m) = 0.0_wp
+            end do
+            return
+        end if
+        nion = 0
+        do i = 1, nspec
+            if (ctx%state%spec_lambda(i) <= CUE_EDGE_HI) nion = i
+        end do
+        nion = min(nion + 1, nspec)
+        allocate(lam_ion(nion))
+        lam_ion = ctx%state%spec_lambda(1:nion)
+        call cue_line_map(cue_w, NEMLINE, ctx%state%nebem_line_pos, map)
+        ncw = cue_w%ncw
+        nl = cue_w%nlines
+        call cue_spline_build(cue_sp, ncw, cue_w%cont_lam, nspec, ctx%state%spec_lambda(1:nspec))
+
+        ch = max(1, min(n_mod, cue_batch_chunk, CUE_BCHUNK))
+        allocate(sion(nion, ch), ion(CUE_NION, ch), theta(CUE_NIN, ch), logq(ch), qy(ch), qo(ch), &
+                 line_log(nl, ch), cont_log(ncw, ch), line_bar(nl, ch), cont_bar(ncw, ch), theta_bar(CUE_NIN, ch), &
+                 ion_bar(CUE_NION, ch), sbar(nion, ch), uy(ncw, ch), uo(ncw, ch), mb(ncw, ch, 2), el(ncw, ch), &
+                 lqb(ch), qyb(ch), qob(ch), tsb(max(1, nt_neb), ch), tdz(max(1, nt_neb), ch), tfa(max(1, nt_neb), ch))
+#ifdef OMP_TARGET
+        !$omp target data map(to: lam_ion, map, gas) map(alloc: sion, ion, theta, logq, qy, qo, line_log, cont_log, &
+        !$omp&  line_bar, cont_bar, theta_bar, ion_bar, sbar, uy, uo, mb, el, lqb, qyb, qob, tsb, tdz, tfa)
+#endif
+        do c0 = 0, n_mod - 1, ch
+            nc = min(ch, n_mod - c0)
+            ! The forward: the source, the fit, the networks
+            call cue_chunk_sources(c0, nc, n_mod, nion, nt, nt_neb, nzb, nb1, nb2, nb3, nq0, basis, w2, it_tesc, &
+                                   zlo, zhi, dz, q0, fabs, sion, qy, qo)
+            call cue_ionizing_params(nc, nion, lam_ion, sion, ion)
+            call cue_inputs(nc, ion, gas(1, c0 + 1), theta, logq)
+            call cue_forward(cue_w, nc, theta, line_log, cont_log, fp64=ctx%cue_fp64_val == 1)
+            ! The cotangents of the lines' log luminosities (and of log Q(U, n_H), Q_y, Q_o)
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do private(i, k, e, ex, by, bo, gl)
+#elif defined(_OPENMP)
+            !$omp parallel do private(i, k, e, ex, by, bo, gl)
+#endif
+            do m = 1, nc
+                lqb(m) = 0.0_wp
+                qyb(m) = 0.0_wp
+                qob(m) = 0.0_wp
+                do k = 1, nl
+                    line_bar(k, m) = 0.0_wp
+                end do
+                if (lines) then
+                    do i = 1, NEMLINE
+                        k = map(i)
+                        if (k > 0) then
+                            e = (line_log(k, m) - logq(m) - CUE_LOG_LSUN) * LN10
+                            ex = exp(e)
+                            by = real(lbar(i, c0 + m), WP)
+                            bo = real(lbar(i, n_mod + c0 + m), WP)
+                            gl = (by * qy(m) + bo * qo(m)) * ex
+                            line_bar(k, m) = LN10 * gl
+                            lqb(m) = lqb(m) - LN10 * gl
+                            qyb(m) = qyb(m) + by * ex
+                            qob(m) = qob(m) + bo * ex
+                        end if
+                    end do
+                end if
+            end do
+            ! The continuum: its cotangent through the spline's transpose (young and old at once)
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2)
+#endif
+            do m = 1, nc
+                do i = 1, ncw
+                    cont_bar(i, m) = 0.0_wp
+                    el(i, m) = exp((cont_log(i, m) - logq(m) - CUE_LOG_LSUN) * LN10)
+                end do
+            end do
+            if (cont) then
+                call cue_spline_adjoint(ncw, nspec, nc, cue_sp%h, cue_sp%cp, cue_sp%rden, cue_sp%aa, cue_sp%m0c, &
+                                        cue_sp%mnc, cue_sp%kst, cue_sp%ken, cue_sp%t, cue_sp%hh6, gw(1, c0 + 1), &
+                                        gw(1, n_mod + c0 + 1), uy, uo, mb)
+#if defined(OMP_TARGET)
+                !$omp target teams distribute parallel do private(i, qt, fy, fyb, ssum, qtb, e)
+#elif defined(_OPENMP)
+                !$omp parallel do private(i, qt, fy, fyb, ssum, qtb, e)
+#endif
+                do m = 1, nc
+                    qt = qy(m) + qo(m)
+                    fy = 0.0_wp
+                    if (qt > 0.0_wp) fy = qy(m) / qt
+                    fyb = 0.0_wp
+                    ssum = 0.0_wp      ! sum v_bar_i el_i: d L / d Q
+                    qtb = 0.0_wp       ! sum v_bar_i v_i
+                    do i = 1, ncw
+                        e = fy * uy(i, m) + (1.0_wp - fy) * uo(i, m)
+                        cont_bar(i, m) = LN10 * el(i, m) * qt * e
+                        qtb = qtb + el(i, m) * qt * e
+                        ssum = ssum + el(i, m) * e
+                        fyb = fyb + el(i, m) * qt * (uy(i, m) - uo(i, m))
+                    end do
+                    lqb(m) = lqb(m) - LN10 * qtb
+                    qyb(m) = qyb(m) + ssum
+                    qob(m) = qob(m) + ssum
+                    if (qt > 0.0_wp) then
+                        qyb(m) = qyb(m) + fyb * qo(m) / (qt * qt)
+                        qob(m) = qob(m) - fyb * qy(m) / (qt * qt)
+                    end if
+                end do
+            end if
+            ! The networks' reverse pass and cue's inputs
+            call cue_forward_adjoint(cue_w, nc, theta, line_bar, cont_bar, theta_bar)
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do private(i, totlq)
+#elif defined(_OPENMP)
+            !$omp parallel do private(i, totlq)
+#endif
+            do m = 1, nc
+                totlq = lqb(m) + theta_bar(8, m)
+                gcue(1, c0 + m) = totlq
+                gcue(2, c0 + m) = totlq + theta_bar(9, m) * LN10 * 10.0_wp**gas(2, c0 + m)
+                gcue(3, c0 + m) = theta_bar(10, m)
+                gcue(4, c0 + m) = theta_bar(11, m)
+                gcue(5, c0 + m) = theta_bar(12, m)
+                do i = 1, CUE_NION
+                    ion_bar(i, m) = theta_bar(i, m)
+                end do
+            end do
+            ! The fit's reverse pass: the cotangent of the ionizing spectrum
+            call cue_ionizing_params_adjoint(nc, nion, lam_ion, sion, ion_bar, sbar)
+            ! The sources' reverse pass: per (model, nebular age) the weights' cotangent, and the
+            ! metallicity interpolation's and the absorbed fraction's
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2) private(i, lin, qt, sg, wq, sb, dbk, bk0, bk1, e)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2) private(i, lin, qt, sg, wq, sb, dbk, bk0, bk1, e)
+#endif
+            do m = 1, nc
+                do t = 1, nt_neb
+                    if (nzb > 1) then
+                        lin = (1.0_wp - dz(c0 + m)) * q0(t, zlo(c0 + m)) + dz(c0 + m) * q0(t, zhi(c0 + m))
+                    else
+                        lin = q0(t, 1)
+                    end if
+                    qt = abs(lin * fabs(c0 + m))
+                    sg = sign(1.0_wp, lin * fabs(c0 + m))
+                    ! (the weight of the age: in the young column up to it_tesc, else in the old)
+                    if (t <= it_tesc(c0 + m)) then
+                        wq = real(w2(t, c0 + m), WP)
+                        e = qyb(m)
+                    else
+                        wq = real(w2(t, n_mod + c0 + m), WP)
+                        e = qob(m)
+                    end if
+                    sb = 0.0_wp
+                    dbk = 0.0_wp
+                    do i = 1, nion
+                        if (nzb > 1) then
+                            bk0 = real(basis(i, t, zlo(c0 + m)), WP)
+                            bk1 = real(basis(i, t, zhi(c0 + m)), WP)
+                            sb = sb + sbar(i, m) * ((1.0_wp - dz(c0 + m)) * bk0 + dz(c0 + m) * bk1)
+                            dbk = dbk + sbar(i, m) * (bk1 - bk0)
+                        else
+                            sb = sb + sbar(i, m) * real(basis(i, t, 1), WP)
+                        end if
+                    end do
+                    nwb(t, c0 + m) = e * qt + sb
+                    tfa(t, m) = e * wq * sg * lin
+                    tdz(t, m) = (real(w2(t, c0 + m), WP) + real(w2(t, n_mod + c0 + m), WP)) * dbk
+                    if (nzb > 1) tdz(t, m) = tdz(t, m) + &
+                                             e * wq * sg * fabs(c0 + m) * (q0(t, zhi(c0 + m)) - q0(t, zlo(c0 + m)))
+                end do
+            end do
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do private(t)
+#elif defined(_OPENMP)
+            !$omp parallel do private(t)
+#endif
+            do m = 1, nc
+                gneb(1, c0 + m) = 0.0_wp
+                gneb(2, c0 + m) = 0.0_wp
+                gneb(3, c0 + m) = 0.0_wp
+                gneb(5, c0 + m) = 0.0_wp
+                do t = 1, nt_neb
+                    gneb(3, c0 + m) = gneb(3, c0 + m) + tfa(t, m)
+                    gneb(5, c0 + m) = gneb(5, c0 + m) + tdz(t, m)
+                end do
+            end do
+        end do
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine cue_nebular_backward
 
     !> The kernels of add_nebular_batch, on the components of its nebular_setup_t.
     subroutine nebular_kernels(ctx, n_mod, nspec, nt, nzb, nb1, nb2, nb3, nq0, basis, w2, it_tesc, zlo, zhi, dz, &
@@ -3767,7 +4038,7 @@ contains
                               zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, yo, total, &
                               emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, neb, nb, w2, lzm, tsave, &
                               sigma, minl, maxl, imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzb_out, mags_bar, &
-                              spec_bar, params_bar, weights_bar)
+                              spec_bar, params_bar, weights_bar, gas)
         type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in)              :: n_mod, nspec, nt, nbands
 #if !defined(__flang__)
@@ -3810,12 +4081,15 @@ contains
         real(WP), intent(out), contiguous :: wzb_out(:,:,:)
         real(WP), intent(in), optional   :: mags_bar(:,:), spec_bar(:,:)
         real(WP), intent(out), optional  :: params_bar(:,:), weights_bar(:,:)
+        !> With cue (nebular_model = 1): the models' gas parameters, as the forward's (5 x N)
+        real(WP), intent(in), optional   :: gas(:,:)
 
         real(WP), allocatable :: fb_bar(:,:), fagn_bar(:), lsum_bar(:), w_bar(:,:), cscale(:), dpar(:,:), eb(:,:), tmbar(:)
         ! Nebular: per age and model the weights' cotangent, and per model gas_logz, gas_logu, the
         ! absorbed and escaping fractions' cotangents and the metallicity weight dz's (gneb: 5 x N)
-        real(WP), allocatable :: nwb(:,:), gneb(:,:)
+        real(WP), allocatable :: nwb(:,:), gneb(:,:), gcue(:,:)
         real(KP), allocatable :: lbar(:,:)
+        logical :: cue
         integer  :: ntn
         ! The redshift: the observed frame's part (dzo), the distance's (host), the IGM's pixel cap
         real(WP), allocatable :: dzo(:), dzd(:), dsg(:)
@@ -3854,6 +4128,9 @@ contains
         if (neb) ntn = nb%nt_neb
         allocate(nwb(max(1, ntn), n_mod), gneb(5, n_mod), qb(max(1, ntn), n_mod), wbi(nt, n_mod), imfb(NIMFG, n_mod), &
                  fescb(n_mod), zbi(n_mod))
+        cue = neb .and. present(gas)
+        allocate(gcue(5, n_mod))
+        gcue = 0.0_wp
         qb = 0.0_wp
         imfb = 0.0_wp
         ! (the lines' cotangents: from their profiles in the spectrum, or from their absorbed part in the
@@ -3930,7 +4207,7 @@ contains
 #ifdef OMP_TARGET
         !$omp target data map(to: fb_bar, sbar, zcm, noagn, qb) &
         !$omp& map(alloc: fagn_bar, lsum_bar, tmbar, gw, part, eb, nwb, lbar, jmx) &
-        !$omp& map(from: w_bar, dpar, gneb, dzo)
+        !$omp& map(from: w_bar, dpar, gneb, dzo, gcue)
 #endif
         associate (g => ctx%state%batch)
         call backward_observed_frame(n_mod, nspec, nbands, fb_bar, g%bands_t, g%j_lo, g%j_hi, g%wtl, g%wl, &
@@ -3985,7 +4262,19 @@ contains
         if (lgiven) call backward_line_absorption(ctx, pbuf, n_mod, nspec, nb%lum, nb%llo, emis, eb, lbar, dpar)
         ! Nebular emission: the continuum and the lines (the weights, gas_logz, gas_logu and the
         ! absorbed fraction), before the age sums' adjoint, which takes the escaping EUV fraction
-        if (neb) then
+        if (cue) then
+            ! cue: its own reverse pass (the CLOUDY grids' tables are not read)
+            if (nb%lines_in_spec) call line_profiles_adjoint(n_mod, nspec, nb%lj_lo, nb%lj_hi, ctx%state%gaussnebarr, gw, lbar)
+            call cue_nebular_backward(ctx, n_mod, nspec, nt, nzb, size(ctx%state%ssp_basis_spec, 1), &
+                                      size(ctx%state%ssp_basis_spec, 2), size(ctx%state%ssp_basis_spec, 3), &
+                                      ctx%state%ssp_basis_spec, w2, it_tesc, zlo, zhi, dz, nb%nt_neb, nb%cont, &
+                                      nb%lines_in_spec .or. lgiven, size(nb%q0, 2), nb%q0, nb%fabs, gas, gw, lbar, &
+                                      nwb, gneb, gcue)
+            call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, &
+                                   ctx%state%ssp_basis_spec_t, &
+                                   ctx%state%ssp_basis_lbol, zmode, it_tesc, zlo, zhi, dz, lum_linear, &
+                                   lsum_bar, gw, w_bar, ntn, nb%whlylim, nb%fesc, w2, nwb, gneb)
+        else if (neb) then
             ! (the line profiles exist only with the lines in the spectrum; lbar stands in otherwise)
             if (nb%xrb .and. nb%lines_in_spec) then
                 call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, .true., it_tesc, zlo, zhi, dz, &
@@ -4077,6 +4366,14 @@ contains
                 ! fraction of the ionizing photons, 1 - frac_obrun (gneb(3))
                 params_bar(BGRAD_GAS_LOGZ, m) = gneb(1, m) * dchain(4, m) * cscale(m)
                 params_bar(BGRAD_GAS_LOGU, m) = gneb(2, m) * dchain(5, m) * cscale(m)
+                if (cue) then
+                    ! cue: the networks' derivatives with respect to the gas parameters themselves
+                    params_bar(BGRAD_GAS_LOGU, m) = gcue(1, m) * cscale(m)
+                    params_bar(BGRAD_GAS_LOGN, m) = gcue(2, m) * cscale(m)
+                    params_bar(BGRAD_GAS_LOGZ, m) = gcue(3, m) * cscale(m)
+                    params_bar(BGRAD_GAS_LOGNO, m) = gcue(4, m) * cscale(m)
+                    params_bar(BGRAD_GAS_LOGCO, m) = gcue(5, m) * cscale(m)
+                end if
                 params_bar(BGRAD_FRAC_OBRUN, m) = params_bar(BGRAD_FRAC_OBRUN, m) + &
                                                   (gneb(4, m) * dchain(6, m) - gneb(3, m)) * cscale(m)
                 params_bar(BGRAD_LOGZSOL, m) = gneb(5, m) * dchain(7, m) * cscale(m)
@@ -5338,22 +5635,7 @@ contains
         ! The lines' cotangents (profiles transposed): one thread per (line, young / old column), over
         ! the pixels whose profile lists include the line (lj_lo(i) to lj_hi(i)), in
         ! pixel order as a pass over the pixels would add them
-        if (lines .and. .not. lgiven) then
-#if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do collapse(2) private(j, val)
-#elif defined(_OPENMP)
-            !$omp parallel do collapse(2) private(j, val)
-#endif
-            do c = 1, 2 * n_mod
-                do i = 1, NEMLINE
-                    val = 0.0_KP
-                    do j = lj_lo(i), lj_hi(i)
-                        val = val + gauss(j, i) * gw(j, c)
-                    end do
-                    lbar(i, c) = val
-                end do
-            end do
-        end if
+        if (lines .and. .not. lgiven) call line_profiles_adjoint(n_mod, nspec, lj_lo, lj_hi, gauss, gw, lbar)
 
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(col, a, z0, u0, sw, sz, su, cw, cz, cu, term, &
@@ -5467,6 +5749,35 @@ contains
         !$omp end target data
 #endif
     end subroutine backward_nebular
+
+    !> The lines' cotangents, the transpose of line_profiles: lbar(i, c) = sum over the pixels whose
+    !> profile lists include line i (lj_lo(i) to lj_hi(i)) of profile(j, i) gw(j, c), for the young and
+    !> old columns c: one thread per (line, column), in pixel order as a pass over the pixels would
+    !> add them.
+    subroutine line_profiles_adjoint(n_mod, nspec, lj_lo, lj_hi, gauss, gw, lbar)
+        integer, intent(in)     :: n_mod, nspec
+        integer, intent(in)     :: lj_lo(NEMLINE), lj_hi(NEMLINE)
+        real(KP), intent(in)    :: gauss(:,:)
+        real(KP), intent(in)    :: gw(nspec, 2 * n_mod)
+        real(KP), intent(inout) :: lbar(:,:)
+        integer  :: c, i, j
+        real(KP) :: val
+
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(j, val)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(j, val)
+#endif
+        do c = 1, 2 * n_mod
+            do i = 1, NEMLINE
+                val = 0.0_KP
+                do j = lj_lo(i), lj_hi(i)
+                    val = val + gauss(j, i) * gw(j, c)
+                end do
+                lbar(i, c) = val
+            end do
+        end do
+    end subroutine line_profiles_adjoint
 
     !> The nebular continuum's adjoint for one (model, run of ages, block of pixels): over the block's
     !> pixels, per age t of the run (at most NEB_RUN = 4), the sums of g = S_bar(young or old column)
