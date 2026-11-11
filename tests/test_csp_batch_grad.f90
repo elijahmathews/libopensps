@@ -44,7 +44,7 @@ program test_csp_batch_grad
     use opensps_csp_batch, only: compute_csp_batch, BGRAD_FAGN, BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, &
                                  BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, &
                                  BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, &
-                                 BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
+                                 BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_AFE, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
                                  BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, &
                                  BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, BGRAD_AGN_TAU, &
                                  BGRAD_IGM_FACTOR, BGRAD_VDMC, BGRAD_MDAVE, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, NBGRAD
@@ -237,6 +237,20 @@ program test_csp_batch_grad
                     "dust emission, AGN")
     call set_int('nebular_model', 0)
     cue_on = .false.
+    ! Per-model metallicity and [alpha/Fe]: a stack of synthetic [alpha/Fe] planes over the bases of every metallicity
+    call build_basis_afe()
+    call check_grad(2, 0.513_wp, 1, 1, .true., "Calzetti, z = 0.513, per-model logzsol and [alpha/Fe], IGM, nebular, " // &
+                    "dust emission, AGN")
+    call check_grad(1, 0.513_wp, 1, 0, .false., "Cardelli et al., z = 0.513, per-model logzsol and [alpha/Fe], IGM, " // &
+                    "nebular, dust emission, SFH parameters")
+    cue_on = .true.
+    call set_int('nebular_model', 1)
+    call set_int('cue_fp64', 1)
+    call check_grad(2, 0.513_wp, 1, 1, .true., "cue, Calzetti, z = 0.513, per-model logzsol and [alpha/Fe], IGM, " // &
+                    "nebular, dust emission, AGN")
+    call set_int('nebular_model', 0)
+    cue_on = .false.
+    call build_basis_all()
     call set_int('add_neb_emission', 0)
     ! Weights over ages and metallicities (an enrichment history per model), with dust emission
     call check_weights_z(4, 0.513_wp, "Kriek & Conroy, z = 0.513, IGM, dust emission, AGN")
@@ -373,6 +387,45 @@ contains
         call opensps_context_update_ssp_basis(ctx, spec_z, mass_z, lbol_z, nz)
     end subroutine build_basis_all
 
+    !> The bases of every metallicity over three synthetic [alpha/Fe] planes (-0.2, 0, 0.4: unequal intervals):
+    !> the solar-scaled SSPs with a smooth wavelength-, plane- dependent modulation of the spectra, masses
+    !> and L_bol (per-model logzsol and [alpha/Fe]).
+    subroutine build_basis_afe()
+        real(WP), parameter :: afe_grid(3) = [-0.2_wp, 0.0_wp, 0.4_wp]
+        type(PARAMS) :: pset
+        real(WP), allocatable :: spec_a(:, :, :), mass_a(:, :), lbol_a(:, :)
+        integer :: z, nz, p, i, na
+
+        nz = ctx%state%nz
+        na = size(afe_grid)
+        allocate(spec_a(ctx%state%nspec, ctx%state%ntfull, nz * na), mass_a(ctx%state%ntfull, nz * na), &
+                 lbol_a(ctx%state%ntfull, nz * na))
+        do z = 1, nz
+            call set_int('zmet', z)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pset)
+            call opensps_context_set_pset(ctx, pset)
+            call generate_ssp_grid(ctx, pset, mass_a(:, z), lbol_a(:, z), spec_a(:, :, z))
+        end do
+        ! (the solar-scaled SSPs sit in plane 1's slabs: the planes are formed from them in place, last first)
+        do p = na, 1, -1
+            do z = 1, nz
+                do i = 1, ctx%state%nspec
+                    spec_a(i, :, z + nz * (p - 1)) = spec_a(i, :, z) * (1.0_wp + 0.5_wp * afe_grid(p) * cos(0.013_wp * real(i, WP)))
+                end do
+            end do
+        end do
+        do p = na, 1, -1
+            do z = 1, nz
+                mass_a(:, z + nz * (p - 1)) = mass_a(:, z) * (1.0_wp + 0.05_wp * afe_grid(p))
+                lbol_a(:, z + nz * (p - 1)) = lbol_a(:, z) + 0.08_wp * afe_grid(p)
+            end do
+        end do
+        call set_int('zmet', 10)
+        ctx%state%ssp_basis_is_dirty = .true.
+        call opensps_context_update_ssp_basis(ctx, spec_a, mass_a, lbol_a, nz * na, afe_grid)
+    end subroutine build_basis_afe
+
     !> Model m: SFH, dust and AGN parameters over their usual ranges (fagn = 0 for model 6).
     subroutine set_model(m, zred)
         integer, intent(in) :: m
@@ -397,6 +450,7 @@ contains
         real(WP), parameter :: glogu(N_MOD) = [-2.3_wp, -3.15_wp, -1.7_wp, -3.6_wp, -2.6_wp, -1.35_wp]
         ! Inside the metallicity grid's intervals
         real(WP), parameter :: logz(N_MOD) = [-1.37_wp, -0.62_wp, 0.13_wp, -0.29_wp, -1.81_wp, 0.07_wp]
+        real(WP), parameter :: afev(N_MOD) = [-0.13_wp, 0.07_wp, 0.15_wp, -0.06_wp, 0.31_wp, 0.22_wp]
 
         call set_int('sfh', sfh(m))
         call set_float('tage', tage(m))
@@ -429,6 +483,8 @@ contains
         call set_float('gas_logno', -0.3_wp + 0.1_wp * m)
         call set_float('gas_logco', 0.2_wp - 0.07_wp * m)
         call set_float('logzsol', logz(m))
+        ! ([alpha/Fe]: inside the intervals of the synthetic planes of build_basis_afe, away from their nodes)
+        call set_float('afe', afev(m))
         ! (Kroupa slopes, used with the IMF free per model)
         call set_float('imf1', 1.1_wp + 0.07_wp * m)
         call set_float('imf2', 2.1_wp + 0.05_wp * m)
@@ -865,20 +921,20 @@ contains
         type(PARAMS), intent(in) :: psets(:)
         real(WP), intent(in) :: w(:, :), pbar(:, :)
         logical, intent(in) :: given_w
-        integer, parameter :: NQ = 34
+        integer, parameter :: NQ = 35
         integer, parameter :: ROWS(NQ) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
                                           BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, &
                                           BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, &
                                           BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, BGRAD_FBURST, BGRAD_TBURST, &
                                           BGRAD_SF_START, BGRAD_ZRED, BGRAD_SF_TRUNC, BGRAD_SF_SLOPE, BGRAD_IMF1, &
                                           BGRAD_IMF2, BGRAD_IMF3, BGRAD_AGN_TAU, BGRAD_IGM_FACTOR, &
-                                          BGRAD_VDMC, BGRAD_MDAVE, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO]
+                                          BGRAD_VDMC, BGRAD_MDAVE, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, BGRAD_AFE]
         character(len=12), parameter :: NAMES(NQ) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
                                                      'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb', &
                                                      'duste_qpah', 'duste_umin', 'duste_gamma', 'gas_logz', 'gas_logu', &
                                                      'logzsol', 'tage', 'tau', 'const', 'fburst', 'tburst', 'sf_start', &
                                                      'zred', 'sf_trunc', 'sf_slope', 'imf1', 'imf2', 'imf3', 'agn_tau', &
-                                                     'igm_factor', 'vdmc', 'mdave', 'gas_logn', 'gas_logno', 'gas_logco']
+                                                     'igm_factor', 'vdmc', 'mdave', 'gas_logn', 'gas_logno', 'gas_logco', 'afe']
         type(PARAMS) :: pp(size(psets))
         real(WP) :: g_fd(NQ, size(psets)), lp, lm, l0, l3, x, h, worst(NQ), gmax
         integer :: q, m, worst_m(NQ)
@@ -1136,7 +1192,8 @@ contains
         case (31); get_par = p%mdave
         case (32); get_par = p%gas_logn
         case (33); get_par = p%gas_logno
-        case default; get_par = p%gas_logco
+        case (34); get_par = p%gas_logco
+        case default; get_par = p%afe
         end select
     end function get_par
 
@@ -1178,7 +1235,8 @@ contains
         case (31); p%mdave = x
         case (32); p%gas_logn = x
         case (33); p%gas_logno = x
-        case default; p%gas_logco = x
+        case (34); p%gas_logco = x
+        case default; p%afe = x
         end select
     end subroutine set_par
 

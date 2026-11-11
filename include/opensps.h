@@ -11,7 +11,7 @@ extern "C" {
 // Batch Gradient Parameter Indices (params_bar rows, 0-indexed in C)
 // Corresponds to BGRAD_* in opensps_csp_batch.f90
 // ----------------------------------------------------------------------------
-#define OPENSPS_NBGRAD 36
+#define OPENSPS_NBGRAD 37
 
 typedef enum {
     OPENSPS_BGRAD_FAGN = 0,
@@ -49,7 +49,8 @@ typedef enum {
     OPENSPS_BGRAD_IGM_FACTOR = 32,
     OPENSPS_BGRAD_GAS_LOGN = 33,
     OPENSPS_BGRAD_GAS_LOGNO = 34,
-    OPENSPS_BGRAD_GAS_LOGCO = 35
+    OPENSPS_BGRAD_GAS_LOGCO = 35,
+    OPENSPS_BGRAD_AFE = 36
 } opensps_bgrad_param_t;
 
 // ----------------------------------------------------------------------------

@@ -15,7 +15,7 @@ int main(void) {
 
     /* 1. Test metadata queries */
     opensps_get_nbgrad(&nbgrad);
-    if (nbgrad != OPENSPS_NBGRAD || nbgrad != 36) {
+    if (nbgrad != OPENSPS_NBGRAD || nbgrad != 37) {
         printf("FAIL: opensps_get_nbgrad=%d expected 33\n", nbgrad);
         failures++;
     }

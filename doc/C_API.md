@@ -218,7 +218,7 @@ void opensps_context_compute_csp_batch_grad(
 * `weights_z_bar`: `[ntfull, nz, n]` receiving $dL / d(weights\_z)$ when `ssp_weights_z` is used.
 * `mags_bar`, `spec_bar`, `mass_bar`, `lbol_bar`: incoming cotangents (derivatives of loss with respect to outputs). Any may be `NULL`.
 * Metadata:
-  * `opensps_get_nbgrad(int *nbgrad);` returns 36.
+  * `opensps_get_nbgrad(int *nbgrad);` returns 37.
   * `opensps_get_grad_param_name(int grad_idx, char *name, int max_len, int *status);` returns the parameter name for each row.
 
 A struct-based entry point `opensps_context_compute_csp_batch_ext` is also provided for clean C/C++ usage:
