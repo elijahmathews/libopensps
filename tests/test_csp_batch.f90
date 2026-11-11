@@ -1561,6 +1561,11 @@ contains
         ! the rounded spectrum
         call assert_true(worst < merge(1.0e-9_wp, 1.0e-5_wp, KP == WP), "lines = cue on the model's ionizing spectrum", &
                          total_tests, total_failures)
+        block
+            type(opensps_context_t), allocatable :: fresh
+            allocate(fresh)
+            call assert_true(fresh%cue_fp64_val == 0, "cue_fp64 defaults to the kernel precision", total_tests, total_failures)
+        end block
         ! Hidden layers in the kernel precision (cue_fp64 = 0): in FP64 builds the same to rounding (the
         ! line output stage adds the PCA mean in another order); in FP32 builds within the networks'
         ! FP32 rounding (~2e-4 dex, amplified by the line networks' output scales)

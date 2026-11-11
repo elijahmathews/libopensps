@@ -14,7 +14,7 @@ program benchmark_csp_batch
     !> from the template operator, built once and timed); any config with "_grad": also the
     !> gradients (params_bar, with cotangents of the magnitudes, the spectra, mass and lbol); any config
     !> with "_cue": cue's nebular emission (nebular_model = 1, OPENSPS_CUE_DATA; gas_logn, gas_logno and
-    !> gas_logco vary too), "_cue64" with its hidden layers in FP64 (cue_fp64 = 1).
+    !> gas_logco vary too), "_cue64" with its hidden layers in FP64 (cue_fp64 = 1; the default is the kernel precision).
     !> Prints one line per metric: name, value: one compute_csp_scenario call per model, one
     !> all-ages call (tage = 0, every age of the grid) and, per batch size: magnitudes only; with spectra
     !> copied back to a host array (reused, as in a fitting loop); with spectra left on the device;

@@ -106,8 +106,8 @@ fit of the ionizing spectrum, the PCA bases and the spline of the continuum. Mea
 | | magnitudes | spectra on the device |
 |---|---|---|
 | CLOUDY grids (`full_fit`) | 14.3 | 12.0 |
-| cue, hidden layers FP32 (`cue_fp64 = 0`) | 15.7 | 12.1 |
-| cue, hidden layers FP64 (`cue_fp64 = 1`, the default) | 22.4 | 17.1 |
+| cue, hidden layers FP32 (`cue_fp64 = 0`, the default from 2026-11-11) | 15.7 | 12.1 |
+| cue, hidden layers FP64 (`cue_fp64 = 1`; the default until then) | 22.4 | 17.1 |
 
 - **The hidden layers** are a tiled HIP kernel (64 x 64 outputs per block, 4 x 4 per thread,
   `cue_dense_act_kernel`), with the bias and the activation fused.
@@ -115,8 +115,9 @@ fit of the ionizing spectrum, the PCA bases and the spline of the continuum. Mea
   - FP64: 75 ms (~0.6 TFLOPS, near the R9700's FP64 rate). rocBLAS DGEMM (`-Daccel_blas=rocblas`)
     reaches 0.72 TFLOPS on the two 256 x 256 layers: its gfx1201 FP64 kernels are untuned
     (MT16x16x16). rocBLAS SGEMM gained nothing over the OpenMP kernel.
-  - The FP64 default is the precision policy's (`doc/MIXED_PRECISION.md`, cue's networks). On
-    GPUs with fast FP64 (A100: 9.7 TFLOPS, 19.5 with tensor cores) it costs little.
+  - FP32 is the default, a documented exception to the precision policy (`doc/MIXED_PRECISION.md`, cue's
+    networks); `cue_fp64 = 1` keeps FP64, which on GPUs with fast FP64 (A100: 9.7 TFLOPS, 19.5 with
+    tensor cores) costs little.
 - **The rest of cue**, about 24 ms per call:
   - the continuum's FP64 output layer and PCA (4.5 ms) and the lines' (3.9 ms with FP64 hidden
     layers, 1 ms in KP);
@@ -157,7 +158,7 @@ gas parameters, magnitudes' cotangents.
 ROCm 7.2.4 container, amdflang, gfx1201, N = 10^4, `full_fit` populations with gradients (`benchmark_csp_batch
 10000 0 <config>_grad 10000`), us per model, forward and reverse together, median of three runs:
 
-| | CLOUDY grids | cue, FP32 hidden layers (`cue_fp64 = 0`) | cue, FP64 hidden layers (default) |
+| | CLOUDY grids | cue, FP32 hidden layers (`cue_fp64 = 0`, the default) | cue, FP64 hidden layers (`cue_fp64 = 1`) |
 |---|---|---|---|
 | plain loops in the adjoint | 62.1 | 84.7 | 98.3 |
 | tiled HIP kernels in the adjoint | 62.6 | 70.8 | 85.9 |

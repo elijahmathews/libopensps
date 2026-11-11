@@ -148,8 +148,9 @@ and `gas_logz`, the float parameters `gas_logn` (log n_H / cm^-3, default 2), `g
   fitted with cue's 4-part power law.
 - **The normalization** is their ionizing photons times (1 - `frac_obrun`).
 - **Lines** go to the context's line list (130 of the 166).
-- **Precision:** `cue_fp64` (default 1) runs the networks' hidden layers in FP64 also in FP32
-  builds. With 0 they run in FP32: faster, with lines within ~5e-4 of FP64.
+- **Precision:** `cue_fp64` (default 0) runs the networks' hidden layers in the kernel precision
+  (FP32 in FP32 builds: lines within ~5e-4 dex of FP64, a documented exception, `doc/MIXED_PRECISION.md`).
+  With 1 they run in FP64 also in FP32 builds.
 - **Statuses:**
   - 4 without the weights;
   - 2 with the IMF per model (`ssp_ops`);
