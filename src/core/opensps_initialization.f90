@@ -22,7 +22,7 @@ module opensps_initialization
                               NT_MIST, NZ_MIST, NT_PADOVA, NZ_PADOVA, NT_PARSEC, NZ_PARSEC, &
                               NT_BASTI, NZ_BASTI, NT_GENEVA, NZ_GENEVA
     use opensps_strings, only: to_lower
-    use opensps_context_types, only: opensps_context_t
+    use opensps_context_types, only: opensps_context_t, set_spectral_grid
     use opensps_cache, only: opensps_setup_cache_t, opensps_setup_tables_t, opensps_cache_get_setup, &
                           opensps_setup_lock, opensps_setup_unlock
     use opensps_environment, only: opensps_resolve_paths, opensps_cleanup
@@ -446,12 +446,8 @@ contains
         ctx%state%zsol_spec = datalib_meta_real(lib, 'solar_metallicity')
         ctx%state%nzinit = datalib_axis_len(lib, metallicity_axis(lib))
         ctx%state%nspec = datalib_axis_len(lib, 'wavelength')
-        ! The (log T, log g) grid sizes are fixed by the context's lookup tables
-        if (datalib_axis_len(lib, 'logT') /= NDIM_LOGT .or. datalib_axis_len(lib, 'logg') /= NDIM_LOGG) then
-            write (error_unit, '(A,I0,A,I0,A)') '[OPENSPS_INIT] Error: spectral library ' // trim(ctx%state%spec_type) // &
-                ' must be on the ', NDIM_LOGT, ' x ', NDIM_LOGG, ' (log T, log g) grid of this version'
-            error stop 1
-        end if
+        ! The library's own (log T, log g) grid (the legacy layout's is NDIM_LOGT x NDIM_LOGG)
+        call set_spectral_grid(ctx%state, datalib_axis_len(lib, 'logT'), datalib_axis_len(lib, 'logg'))
     end subroutine spectral_dimensions_from_manifest
 
     !> @brief Allocates the massive shared arrays within the cache object.
@@ -498,7 +494,7 @@ contains
         allocate (cache%vega_spec(nspec), cache%sun_spec(nspec))
         allocate (cache%spec_lambda(nspec), cache%spec_nu(nspec))
         allocate (cache%spec_res(nspec))
-        allocate (cache%speclib(nspec, nz, NDIM_LOGT, NDIM_LOGG))
+        allocate (cache%speclib(nspec, nz, ctx%state%nlogt, ctx%state%nlogg))
         allocate (cache%wmb_spec(nspec, nz, NDIM_WMB_LOGT, NDIM_WMB_LOGG))
         allocate (cache%agb_spec_o(nspec, N_AGB_O))
         allocate (cache%agb_logt_o(nz, N_AGB_O))
@@ -578,8 +574,8 @@ contains
         call load_spectral_grid_axes(ctx, ctx%state%spec_type)
 
         nzinit = ctx%state%nzinit
-        allocate (speclibinit(ctx%state%nspec, nzinit, NDIM_LOGT, NDIM_LOGG))
-        allocate (speclib_slice(ctx%state%nspec, NDIM_LOGT, NDIM_LOGG))
+        allocate (speclibinit(ctx%state%nspec, nzinit, ctx%state%nlogt, ctx%state%nlogg))
+        allocate (speclib_slice(ctx%state%nspec, ctx%state%nlogt, ctx%state%nlogg))
         speclibinit = 0.0_wp
 
         do z = 1, nzinit
@@ -599,8 +595,8 @@ contains
             ! Interpolate log flux in metallicity with legacy FSPS's 1e-70 floor (tiny_number), so that
             ! a template present at only one library metallicity becomes ~1e-68 here, not ~1e-150 as
             ! with a 1e-308 floor (which also sends pow into its slow underflow path).
-            do k = 1, NDIM_LOGG
-                do j = 1, NDIM_LOGT
+            do k = 1, ctx%state%nlogg
+                do j = 1, ctx%state%nlogt
                     do i = 1, ctx%state%nspec
                         if (dz <= 0.0_wp) then
                             ctx%state%speclib(i, z, j, k) = speclibinit(i, i1, j, k)
@@ -917,8 +913,7 @@ contains
         call allocate_line_tables(ctx)
         ! Assigned field by field: a temporary opensps_setup_tables_t (~2 MB) could overflow a
         ! thread stack
-        ctx%state%speclib_logt = 0.0_wp
-        ctx%state%speclib_logg = 0.0_wp
+        call set_spectral_grid(ctx%state, ctx%state%nlogt, ctx%state%nlogg)
         ctx%state%wmb_logt = 0.0_wp
         ctx%state%wmb_logg = 0.0_wp
         ctx%state%agb_logt_car = 0.0_wp
@@ -964,6 +959,8 @@ contains
         type(opensps_setup_cache_t), intent(inout) :: cache
 
         if (.not. allocated(cache%tables)) allocate (cache%tables)
+        cache%tables%nlogt = ctx%state%nlogt
+        cache%tables%nlogg = ctx%state%nlogg
         cache%tables%speclib_logt = ctx%state%speclib_logt
         cache%tables%speclib_logg = ctx%state%speclib_logg
         cache%tables%wmb_logt = ctx%state%wmb_logt
@@ -996,6 +993,8 @@ contains
         tables => cache%tables
 
         call allocate_line_tables(ctx)
+        ctx%state%nlogt = tables%nlogt
+        ctx%state%nlogg = tables%nlogg
         ctx%state%speclib_logt = tables%speclib_logt
         ctx%state%speclib_logg = tables%speclib_logg
         ctx%state%wmb_logt = tables%wmb_logt

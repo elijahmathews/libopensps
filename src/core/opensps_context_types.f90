@@ -21,6 +21,7 @@ module opensps_context_types
     public :: opensps_context_state_t
     public :: opensps_context_t
     public :: opensps_context_state_destroy
+    public :: set_spectral_grid
     public :: opensps_context_sync_device_settings
     public :: batch_grid_t, batch_grid_release
     public :: batch_out_t, batch_out_reserve, batch_out_release
@@ -126,8 +127,12 @@ module opensps_context_types
         real(WP), pointer, contiguous :: spec_lambda(:) => null()
         real(WP), pointer, contiguous :: spec_nu(:) => null()
         real(WP), pointer, contiguous :: spec_res(:) => null()
-        real(WP), dimension(NDIM_LOGT) :: speclib_logt = 0.0_wp
-        real(WP), dimension(NDIM_LOGG) :: speclib_logg = 0.0_wp
+        !> The (log T, log g) grid of the main spectral library: NDIM_LOGT x NDIM_LOGG for the legacy layout,
+        !> the library's own axes for a standard-format library (C3K is 80 x 14). The axes are allocated
+        !> by `set_spectral_grid` before they are read or copied.
+        integer :: nlogt = NDIM_LOGT, nlogg = NDIM_LOGG
+        real(WP), allocatable :: speclib_logt(:)
+        real(WP), allocatable :: speclib_logg(:)
         real(kind(1.0)), pointer, contiguous :: speclib(:, :, :, :) => null()
         real(WP), dimension(NDIM_WMB_LOGT) :: wmb_logt = 0.0_wp
         real(WP), dimension(NDIM_WMB_LOGG) :: wmb_logg = 0.0_wp
@@ -308,6 +313,20 @@ module opensps_context_types
     end type opensps_context_t
 
 contains
+
+    !> @brief Sets the size of the main spectral library's (log T, log g) grid and (re)allocates its axes, zeroed.
+    subroutine set_spectral_grid(state, nt, ng)
+        type(opensps_context_state_t), intent(inout) :: state
+        integer, intent(in) :: nt, ng
+
+        state%nlogt = nt
+        state%nlogg = ng
+        if (allocated(state%speclib_logt)) deallocate (state%speclib_logt)
+        if (allocated(state%speclib_logg)) deallocate (state%speclib_logg)
+        allocate (state%speclib_logt(nt), state%speclib_logg(ng))
+        state%speclib_logt = 0.0_wp
+        state%speclib_logg = 0.0_wp
+    end subroutine set_spectral_grid
 
     !> @brief Copies the scalar settings of a device-resident context to its device copy, if any
     !> changed on the host since the last copy (settings_dirty). Called by the compute entry points.
