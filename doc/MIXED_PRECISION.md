@@ -233,6 +233,15 @@ Measured against cue's FP64 algebra:
 
 `cue_fp64 = 0` is an explicit opt-in for speed (timings in `doc/GPU_RESULTS.md`).
 
+The gradients (`cue_nebular_backward`) run the networks' reverse pass in FP64 whatever `cue_fp64`:
+the forward is recomputed in FP64 with the pre-activations kept (no activations stored between the
+passes), and the cotangents, the power-law fit's adjoint and the spline's transpose are FP64 too. The
+fit's adjoint is the implicit-function-theorem derivative at the Newton minimum, so it is as exact as
+the converged fit (~1e-9 of the loss; finite differences of the loss with steps below ~1e-4 are noisier
+than the adjoint is inexact, `tests/test_csp_batch_grad.f90`). In FP32 builds the gradient differs
+from the FP64 build's by at most 4e-9 of a model's largest gradient (the gas rows; 7e-6 for `zred`),
+measured on 500 models with cue's real weights (A100, `doc/GPU_RESULTS.md`).
+
 ## Caveats
 
 - **Finite differences.** FP32 output carries ~1e-7 relative noise. Fitters that estimate

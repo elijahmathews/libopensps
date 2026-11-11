@@ -130,6 +130,27 @@ fit of the ionizing spectrum, the PCA bases and the spline of the continuum. Mea
   - FP32 build, `cue_fp64 = 0`: lines within 5.1e-4 relative of FP64, continuum within 3e-6 dex.
   - Batch lines against the test's own assembly: 4.5e-13 (FP64 build) and 4.1e-7 (FP32 build).
 
+### Gradients through cue (A100-40GB, nvfortran 25.1, 2026-11-10)
+
+`compute_csp_batch_grad` with `nebular_model = 1`: networks backpropagated, the ionizing-spectrum
+fit differentiated at its minimum, the spline transposed. Real cue weights, 500 models with random
+gas parameters, magnitudes' cotangents.
+- **Against finite differences** (`tests/test_csp_batch_grad`, 118 checks in each of the FP64
+  builds, CPU and A100 with HIP and cuBLAS, with synthetic and with cue's real weights): the gas
+  rows 1e-8 - 1e-6 relative, the other rows through cue (weights, `frac_obrun`, `logzsol`, SFH
+  parameters, dust) as without it. FP32 builds with synthetic weights pass the same 118. With the
+  real weights the FP32 finite differences (steps of 1e-2 in strongly nonlinear parameters) do not
+  resolve the adjoint (0.3 relative at worst), so those eight assertions are skipped there; the
+  FP32 adjoint is compared with the FP64 one on the same inputs instead:
+- **FP32 against FP64 gradients**, 500 models, worst difference as a fraction of the model's largest
+  gradient (median in parentheses): `gas_logu` 1.8e-9 (7e-12), `gas_logn` 1.2e-9, `gas_logno`
+  1.8e-9, `gas_logco` 2.5e-9, `gas_logz` 4.2e-9, `logzsol` 1.8e-8, `tage` 2.5e-7, `zred` 7e-6
+  (an observed-frame row, unrelated to cue). GPU FP64 against CPU FP64: 1e-10 (gas rows).
+- **Cost** (HIP FP32 + cuBLAS build, N = 10^4, magnitudes' cotangents, us per model, forward and
+  reverse together): CLOUDY grids 37; cue 60 (78 before the spline's transpose gathered over the
+  knots' pixels). Profile before that change (nsys): the spline's transpose 30% of the GPU time,
+  the transposed dense layers (`rev_dense_back`, plain loops) 20%; not profiled again since.
+
 ## Fitting-population batch: nebular, IGM, attenuation, photometry (2026-11-09)
 
 What a SED fit asks of `compute_csp_batch`: every parameter differs between the models (redshift, metallicity,

@@ -43,6 +43,9 @@ contains
         call test_spline()
         call test_line_map()
         call test_forward_synthetic()
+        call test_adjoint_network()
+        call test_adjoint_fit()
+        call test_adjoint_spline()
         call test_loader()
         call test_with_data()
         call print_summary_line("Module Summary", total_tests - total_failures, total_tests)
@@ -348,6 +351,171 @@ contains
         call cue_forward(w, 0, theta, ll, cl)     ! (no models: returns)
         call cue_unload(w)
     end subroutine test_forward_synthetic
+
+    !> The reverse pass of the networks against central finite differences of the FP64 forward, on
+    !> synthetic weights: the derivative of L = sum line_bar log L_lines + sum cont_bar log L_cont
+    !> with respect to each of the 12 inputs of each model, in passes of a few models (a remainder).
+    subroutine test_adjoint_network()
+        type(cue_weights_t) :: w
+        integer, parameter :: N = 7
+        real(WP) :: theta(CUE_NIN, N), tb(CUE_NIN, N), tb2(CUE_NIN, N), fd, worst, scale, h, lp, lm
+        real(WP), allocatable :: lb(:,:), cb(:,:), ll(:,:), cl(:,:), thp(:,:)
+        integer :: m, k
+        call print_group("networks: the reverse pass against finite differences")
+        call cue_synthetic(w)
+        do m = 1, N
+            do k = 1, CUE_NIN
+                theta(k, m) = 2.0_wp * urand() - 1.0_wp + 2.0_wp
+            end do
+        end do
+        allocate(lb(w%nlines, N), cb(w%ncw, N), ll(w%nlines, N), cl(w%ncw, N), thp(CUE_NIN, N))
+        do m = 1, N
+            do k = 1, w%nlines
+                lb(k, m) = 2.0_wp * urand() - 1.0_wp
+            end do
+            do k = 1, w%ncw
+                cb(k, m) = 2.0_wp * urand() - 1.0_wp
+            end do
+        end do
+        call cue_forward_adjoint(w, N, theta, lb, cb, tb)
+        call cue_forward_adjoint(w, N, theta, lb, cb, tb2, chunk=3)    ! three passes, the last of one model
+        worst = 0.0_wp
+        scale = maxval(abs(tb))
+        h = 1.0e-5_wp
+        do m = 1, N
+            do k = 1, CUE_NIN
+                thp = theta
+                thp(k, m) = theta(k, m) + h
+                call cue_forward(w, N, thp, ll, cl, fp64=.true.)
+                lp = sum(lb(:, m) * ll(:, m)) + sum(cb(:, m) * cl(:, m))
+                thp(k, m) = theta(k, m) - h
+                call cue_forward(w, N, thp, ll, cl, fp64=.true.)
+                lm = sum(lb(:, m) * ll(:, m)) + sum(cb(:, m) * cl(:, m))
+                fd = (lp - lm) / (2.0_wp * h)
+                worst = max(worst, abs(fd - tb(k, m)))
+            end do
+        end do
+        write (*, '(A,ES10.2,A,ES10.2)') '# worst |adjoint - finite difference|: ', worst, '  (largest gradient ', scale
+        call assert_true(worst < 1.0e-6_wp * scale, "network gradients match finite differences", total_tests, total_failures)
+        call assert_true(maxval(abs(tb2 - tb)) < 1.0e-12_wp * scale, "the split into chunks changes nothing", &
+                         total_tests, total_failures)
+        call cue_unload(w)
+    end subroutine test_adjoint_network
+
+    !> The reverse pass of cue's fit against central finite differences of the forward fit, per
+    !> pixel of irregular spectra (all four segments filled), and the invariance of the fit under a
+    !> scaling of the spectrum, sum_i spec_i spec_bar_i = 0. Also with empty pixels (zero flux), whose
+    !> derivative is zero.
+    subroutine test_adjoint_fit()
+        integer, parameter :: NW = 160
+        real(WP) :: lam(NW), llam(NW), ion(CUE_NION, 1), ionp(CUE_NION, 1), ionm(CUE_NION, 1), ib(CUE_NION, 1)
+        real(WP) :: sb(NW, 1), fd, err, scale, inv, sp, sm, h, tot, tota
+        real(KP) :: spec(NW, 1), sps(NW, 1)
+        integer :: cs, i, k, nion
+        call print_group("power-law fit: the reverse pass against finite differences")
+        call fit_grid(NW, lam)
+        nion = 0
+        do i = 1, NW
+            if (lam(i) <= CUE_EDGE_HI) nion = i
+        end do
+        nion = nion + 1
+        err = 0.0_wp
+        scale = 0.0_wp
+        inv = 0.0_wp
+        do cs = 1, 6
+            do i = 1, nion
+                spec(i, 1) = real(1.0e-12_wp * (lam(i) / 500.0_wp)**(1.0_wp + 0.3_wp * cs) * &
+                                  exp(-200.0_wp / lam(i)) * (1.0_wp + 0.1_wp * (urand() - 0.5_wp)), KP)
+                if (lam(i) < 300.0_wp) spec(i, 1) = spec(i, 1) * 0.1_KP
+            end do
+            if (cs == 6) then
+                ! zero flux in a few pixels of the second and third segments
+                spec(60, 1) = 0.0_KP
+                spec(75, 1) = 0.0_KP
+            end if
+            do k = 1, CUE_NION
+                ib(k, 1) = 2.0_wp * urand() - 1.0_wp
+            end do
+            call cue_ionizing_params(1, nion, lam(1:nion), spec, ion)
+            call cue_ionizing_params_adjoint(1, nion, lam(1:nion), spec, ib, sb)
+            tot = 0.0_wp
+            tota = 0.0_wp
+            do i = 1, nion - 1       ! (the reference pixel beyond 911.6 A only normalizes)
+                if (spec(i, 1) <= 0.0_KP) then
+                    err = max(err, abs(sb(i, 1)))
+                    cycle
+                end if
+                h = 1.0e-4_wp
+                sps = spec
+                sps(i, 1) = real(real(spec(i, 1), WP) * (1.0_wp + h), KP)
+                call cue_ionizing_params(1, nion, lam(1:nion), sps, ionp)
+                sp = real(sps(i, 1), WP)
+                sps(i, 1) = real(real(spec(i, 1), WP) * (1.0_wp - h), KP)
+                call cue_ionizing_params(1, nion, lam(1:nion), sps, ionm)
+                sm = real(sps(i, 1), WP)
+                ! (the realized step: the spectrum is stored at KP)
+                fd = sum(ib(:, 1) * (ionp(:, 1) - ionm(:, 1))) / (sp - sm)
+                err = max(err, abs(real(spec(i, 1), WP) * (fd - sb(i, 1))))
+                scale = max(scale, abs(real(spec(i, 1), WP) * sb(i, 1)))
+                tot = tot + real(spec(i, 1), WP) * sb(i, 1)
+                tota = tota + abs(real(spec(i, 1), WP) * sb(i, 1))
+            end do
+            ! (with zero-flux pixels, whose floor does not scale with the spectrum, the sum is not zero)
+            if (cs < 6) inv = max(inv, abs(tot) / max(tota, tiny(1.0_wp)))
+            ! (the pixel after 911.6 A carries no derivative)
+            err = max(err, abs(sb(nion, 1)))
+        end do
+        write (*, '(A,ES10.2,A,ES10.2)') '# worst |spec_i (adjoint - finite difference)|: ', err, '  (largest ', scale
+        write (*, '(A,ES10.2)') '# worst |sum spec_i spec_bar_i| / sum |spec_i spec_bar_i|: ', inv
+        call assert_true(err < 1.0e-5_wp * scale, "fit gradients match finite differences", total_tests, total_failures)
+        call assert_true(inv < 1.0e-8_wp, "the fit is invariant under a scaling of the spectrum", &
+                         total_tests, total_failures)
+    end subroutine test_adjoint_fit
+
+    !> The spline's transpose by the dot-product identity: sum_j out_bar_j (S v)_j = sum_i v_i (S^T
+    !> out_bar)_i, for the young and old cotangents (cotangents of pixels at and below 911.6 A
+    !> are unused: the spline gives none there).
+    subroutine test_adjoint_spline()
+        integer, parameter :: NK = 40, NO = 300, NS = 3
+        real(WP) :: x(NK), xo(NO), uy(NK, NS), uo(NK, NS), mb(NK, NS, 2), a, b, worst, vv(NK, NS)
+        real(KP) :: v(NK, NS), mm(NK, NS), out(NO, NS), gy(NO, NS), go(NO, NS)
+        integer :: i, j, m
+        call print_group("not-a-knot spline: the transpose")
+        x(1) = 1000.0_wp
+        do i = 2, NK
+            x(i) = x(i - 1) + 50.0_wp + 150.0_wp * urand()
+        end do
+        do j = 1, NO
+            xo(j) = 800.0_wp + (x(NK) + 300.0_wp - 800.0_wp) * real(j - 1, WP) / real(NO - 1, WP)
+        end do
+        do m = 1, NS
+            do i = 1, NK
+                v(i, m) = real(1.0_wp + urand(), KP)
+                vv(i, m) = real(v(i, m), WP)
+            end do
+            do j = 1, NO
+                gy(j, m) = real(urand() - 0.5_wp, KP)
+                go(j, m) = real(urand() - 0.5_wp, KP)
+            end do
+        end do
+        call cue_spline_build(cue_sp, NK, x, NO, xo)
+        call cue_spline_apply(NK, NO, NS, cue_sp%h, cue_sp%cp, cue_sp%rden, cue_sp%aa, cue_sp%m0c, cue_sp%mnc, &
+                              cue_sp%k, cue_sp%t, cue_sp%hh6, v, mm, out)
+        call cue_spline_adjoint(NK, NO, NS, cue_sp%h, cue_sp%cp, cue_sp%rden, cue_sp%aa, cue_sp%m0c, cue_sp%mnc, &
+                                cue_sp%kst, cue_sp%ken, cue_sp%t, cue_sp%hh6, gy, go, uy, uo, mb)
+        worst = 0.0_wp
+        do m = 1, NS
+            a = sum(real(gy(:, m), WP) * real(out(:, m), WP))
+            b = sum(vv(:, m) * uy(:, m))
+            worst = max(worst, abs(a - b) / max(abs(a), 1.0e-3_wp))
+            a = sum(real(go(:, m), WP) * real(out(:, m), WP))
+            b = sum(vv(:, m) * uo(:, m))
+            worst = max(worst, abs(a - b) / max(abs(a), 1.0e-3_wp))
+        end do
+        write (*, '(A,ES10.2)') '# worst relative |<out_bar, S v> - <v, S^T out_bar>|: ', worst
+        call assert_true(worst < merge(1.0e-11_wp, 2.0e-4_wp, KP == WP), "the spline's transpose (dot-product identity)", &
+                         total_tests, total_failures)
+    end subroutine test_adjoint_spline
 
     !> The loader: a synthetic library written as tools/cue/convert_cue.py lays it out reads back
     !> exactly (the forward pass bit-identical), and OPENSPS_CUE_DATA is found as the library

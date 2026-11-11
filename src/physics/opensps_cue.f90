@@ -67,6 +67,9 @@ module opensps_cue
     !> Models per pass of the batch's cue stage (opensps_csp_batch; the tests lower it to run several
     !> passes with a remainder)
     integer, public, save :: cue_batch_chunk = CUE_CHUNK
+    !> Models per pass through the networks' reverse pass (cue_forward_adjoint), which keeps the
+    !> pre-activations of the three layers and a work array in FP64: 8 x 256 x 17 x CHUNK values
+    integer, parameter, public :: CUE_BCHUNK = 1024
     !> Models per thread in the dense layers (register tile)
     integer, parameter :: TM = 4
 
@@ -114,6 +117,9 @@ module opensps_cue
         real(KP), allocatable :: m0c(:), mnc(:) !< M_1 = m0c(1) M_2 + m0c(2) M_3; likewise at the end
         integer, allocatable  :: k(:)
         real(KP), allocatable :: t(:), hh6(:)
+        !> The pixels of each knot interval (first and last; none: kst = nout + 1, ken = 0): the
+        !> transpose gathers over them (cue_spline_adjoint)
+        integer, allocatable  :: kst(:), ken(:)
     end type cue_spline_t
 
 #if defined(OPENSPS_HIP) && defined(OMP_TARGET)
@@ -144,6 +150,7 @@ module opensps_cue
     public :: cue_forward, cue_fit_ionizing, cue_ionizing_params, cue_inputs
     public :: cue_spline_build, cue_spline_apply, cue_spline_solve, cue_line_map
     public :: cue_log_ratio_power, cue_ion_bound, fit_segment
+    public :: cue_forward_adjoint, cue_ionizing_params_adjoint, cue_spline_adjoint, CUE_BCHUNK
 
 contains
 
@@ -1342,7 +1349,9 @@ contains
         sp%mnc(1) = real((ha + hb) / ha, KP)
         sp%mnc(2) = real(-hb / ha, KP)
 
-        allocate(sp%k(nout), sp%t(nout), sp%hh6(nout))
+        allocate(sp%k(nout), sp%t(nout), sp%hh6(nout), sp%kst(n - 1), sp%ken(n - 1))
+        sp%kst = nout + 1
+        sp%ken = 0
         k = 1
         do j = 1, nout
             sp%k(j) = 0
@@ -1357,9 +1366,11 @@ contains
             sp%k(j) = k
             sp%t(j) = real((xout(j) - x(k)) / sp%h(k), KP)
             sp%hh6(j) = real(sp%h(k) * sp%h(k) / 6.0_wp, KP)
+            sp%kst(k) = min(sp%kst(k), j)
+            sp%ken(k) = max(sp%ken(k), j)
         end do
 #ifdef OMP_TARGET
-        !$omp target enter data map(to: sp%h, sp%cp, sp%rden, sp%aa, sp%m0c, sp%mnc, sp%k, sp%t, sp%hh6)
+        !$omp target enter data map(to: sp%h, sp%cp, sp%rden, sp%aa, sp%m0c, sp%mnc, sp%k, sp%t, sp%hh6, sp%kst, sp%ken)
         sp%on_device = .true.
 #endif
     end subroutine cue_spline_build
@@ -1368,13 +1379,13 @@ contains
         type(cue_spline_t), intent(inout) :: sp
 #ifdef OMP_TARGET
         if (sp%on_device) then
-            !$omp target exit data map(delete: sp%h, sp%cp, sp%rden, sp%aa, sp%m0c, sp%mnc, sp%k, sp%t, sp%hh6)
+            !$omp target exit data map(delete: sp%h, sp%cp, sp%rden, sp%aa, sp%m0c, sp%mnc, sp%k, sp%t, sp%hh6, sp%kst, sp%ken)
         end if
 #endif
         sp%on_device = .false.
         if (allocated(sp%xout)) deallocate(sp%xout, sp%h)
         if (allocated(sp%cp)) deallocate(sp%cp, sp%rden, sp%aa, sp%m0c, sp%mnc)
-        if (allocated(sp%k)) deallocate(sp%k, sp%t, sp%hh6)
+        if (allocated(sp%k)) deallocate(sp%k, sp%t, sp%hh6, sp%kst, sp%ken)
         sp%n = 0
         sp%nout = 0
     end subroutine spline_free
@@ -1489,5 +1500,635 @@ contains
             end if
         end do
     end subroutine cue_line_map
+
+    ! ==========================================================================================
+    ! Reverse pass (gradients)
+    ! ==========================================================================================
+
+    !> d act / d a of the hidden layers' activation act(a) = (beta + (1 - beta) sigma(alpha a)) a,
+    !> sigma(x) = 1 / (1 + exp(-x)): beta + (1 - beta) sigma (1 + alpha a (1 - sigma)).
+    pure real(WP) function act_deriv(a, al, be) result(d)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(WP), intent(in) :: a, al, be
+        real(WP) :: s
+        s = 1.0_wp / (1.0_wp + exp(-al * a))
+        d = be + (1.0_wp - be) * s * (1.0_wp + al * a * (1.0_wp - s))
+    end function act_deriv
+
+    !> The reverse pass of cue_forward: the derivatives of the caller's loss with respect to the
+    !> network inputs theta(12, n), given those with respect to the outputs, line_bar(nlines, n) (of
+    !> the log10 line luminosities) and cont_bar(ncw, n) (of log10 of the continuum). The forward is
+    !> recomputed in FP64 (the weights, FP32 as trained, converted exactly) with the pre-activations
+    !> kept, so no activations are stored between the passes: the reverse pass is exact for the
+    !> FP64 network (cue_fp64 = 1) and differs from the derivative of the FP32 hidden layers by their
+    !> rounding (~1e-6 relative). Models in passes of CUE_BCHUNK (chunk).
+    !> The weights' own derivatives are not formed: cue's weights are not parameters.
+    subroutine cue_forward_adjoint(w, n, theta, line_bar, cont_bar, theta_bar, chunk)
+        type(cue_weights_t), intent(in) :: w
+        integer, intent(in)   :: n
+        real(WP), intent(in)  :: theta(CUE_NIN, n), line_bar(w%nlines, n), cont_bar(w%ncw, n)
+        real(WP), intent(out) :: theta_bar(CUE_NIN, n)
+        integer, intent(in), optional :: chunk
+
+        real(WP), allocatable :: x0(:,:,:), a1(:,:,:), a2(:,:,:), a3(:,:,:), yy(:,:,:), d1(:,:,:), d2(:,:,:), cb(:,:,:)
+        integer :: c0, nc, ch, ncb
+
+        ch = CUE_BCHUNK
+        if (present(chunk)) ch = max(1, chunk)
+        ch = min(n, ch)
+        if (ch < 1) return
+        ncb = max(CUE_NPCA_LINE, w%npc)
+        allocate(x0(CUE_NIN, ch, CUE_NNET), a1(CUE_NHID, ch, CUE_NNET), a2(CUE_NHID, ch, CUE_NNET), &
+                 a3(CUE_NHID, ch, CUE_NNET), yy(CUE_NHID, ch, CUE_NNET), d1(CUE_NHID, ch, CUE_NNET), &
+                 d2(CUE_NHID, ch, CUE_NNET), cb(ncb, ch, CUE_NNET))
+#ifdef OMP_TARGET
+        !$omp target data map(alloc: x0, a1, a2, a3, yy, d1, d2, cb)
+#endif
+        do c0 = 0, n - 1, ch
+            nc = min(ch, n - c0)
+            ! Forward, keeping a1, a2, a3 (the pre-activations)
+            call net_inputs_d(nc, theta(1, c0 + 1), w%in_shift, w%in_scale, x0, ch)
+            call rev_dense_pre(CUE_NIN, nc, ch, w%w1, w%bias(1, 1, 1), x0, a1)
+            call rev_act(nc, ch, w%alpha(1, 1, 1), w%beta(1, 1, 1), a1, yy)
+            call rev_dense_pre(CUE_NHID, nc, ch, w%w2, w%bias(1, 1, 2), yy, a2)
+            call rev_act(nc, ch, w%alpha(1, 1, 2), w%beta(1, 1, 2), a2, yy)
+            call rev_dense_pre(CUE_NHID, nc, ch, w%w3, w%bias(1, 1, 3), yy, a3)
+            ! The output layers and PCA bases: the cotangents of the PCA coefficients, then of the
+            ! last hidden layer's pre-activation (d1)
+            call rev_head_coef(w%nlines, w%nlmax, w%ncw, w%npc, nc, ch, ncb, line_bar(1, c0 + 1), cont_bar(1, c0 + 1), &
+                               w%lcmp, w%lout_sc, w%ccmp, w%cout_sc, w%npca, w%ncount, w%loff, cb)
+            call rev_head_back(w%npc, nc, ch, ncb, cb, w%lw4, w%lpsc, w%cw4, w%cpsc, w%npca, d1)
+            call rev_act_scale(nc, ch, w%alpha(1, 1, 3), w%beta(1, 1, 3), a3, d1)
+            ! The hidden layers, backwards
+            call rev_dense_back(CUE_NHID, nc, ch, w%w3, d1, d2)
+            call rev_act_scale(nc, ch, w%alpha(1, 1, 2), w%beta(1, 1, 2), a2, d2)
+            call rev_dense_back(CUE_NHID, nc, ch, w%w2, d2, d1)
+            call rev_act_scale(nc, ch, w%alpha(1, 1, 1), w%beta(1, 1, 1), a1, d1)
+            call rev_inputs(nc, ch, w%w1, w%in_scale, d1, theta_bar(1, c0 + 1))
+        end do
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine cue_forward_adjoint
+
+    !> a(u, m, g) = b(u, g) + sum_k w(u, k, g) x(k, m, g), in FP64.
+    subroutine rev_dense_pre(nin, nc, ch, w, b, x, a)
+        integer, intent(in)   :: nin, nc, ch
+        real(KP), intent(in)  :: w(CUE_NHID, nin, CUE_NNET), b(CUE_NHID, CUE_NNET)
+        real(WP), intent(in)  :: x(nin, ch, CUE_NNET)
+        real(WP), intent(out) :: a(CUE_NHID, ch, CUE_NNET)
+        integer  :: g, m, u, k
+        real(WP) :: s
+
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(3) private(s, k)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(s, k)
+#endif
+        do g = 1, CUE_NNET
+            do m = 1, nc
+                do u = 1, CUE_NHID
+                    s = real(b(u, g), WP)
+                    do k = 1, nin
+                        s = s + real(w(u, k, g), WP) * x(k, m, g)
+                    end do
+                    a(u, m, g) = s
+                end do
+            end do
+        end do
+    end subroutine rev_dense_pre
+
+    !> y = act(a) in FP64.
+    subroutine rev_act(nc, ch, al, be, a, y)
+        integer, intent(in)   :: nc, ch
+        real(KP), intent(in)  :: al(CUE_NHID, CUE_NNET), be(CUE_NHID, CUE_NNET)
+        real(WP), intent(in)  :: a(CUE_NHID, ch, CUE_NNET)
+        real(WP), intent(out) :: y(CUE_NHID, ch, CUE_NNET)
+        integer  :: g, m, u
+        real(WP) :: bb
+
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(3) private(bb)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(bb)
+#endif
+        do g = 1, CUE_NNET
+            do m = 1, nc
+                do u = 1, CUE_NHID
+                    bb = real(be(u, g), WP)
+                    y(u, m, g) = (bb + (1.0_wp - bb) / (1.0_wp + exp(-real(al(u, g), WP) * a(u, m, g)))) * a(u, m, g)
+                end do
+            end do
+        end do
+    end subroutine rev_act
+
+    !> d(u, m, g) *= act'(a(u, m, g)).
+    subroutine rev_act_scale(nc, ch, al, be, a, d)
+        integer, intent(in)     :: nc, ch
+        real(KP), intent(in)    :: al(CUE_NHID, CUE_NNET), be(CUE_NHID, CUE_NNET)
+        real(WP), intent(in)    :: a(CUE_NHID, ch, CUE_NNET)
+        real(WP), intent(inout) :: d(CUE_NHID, ch, CUE_NNET)
+        integer :: g, m, u
+
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(3)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2)
+#endif
+        do g = 1, CUE_NNET
+            do m = 1, nc
+                do u = 1, CUE_NHID
+                    d(u, m, g) = d(u, m, g) * act_deriv(a(u, m, g), real(al(u, g), WP), real(be(u, g), WP))
+                end do
+            end do
+        end do
+    end subroutine rev_act_scale
+
+    !> din(k, m, g) = sum_u w(u, k, g) dout(u, m, g): the transpose of a layer.
+    subroutine rev_dense_back(nin, nc, ch, w, dout, din)
+        integer, intent(in)   :: nin, nc, ch
+        real(KP), intent(in)  :: w(CUE_NHID, nin, CUE_NNET)
+        real(WP), intent(in)  :: dout(CUE_NHID, ch, CUE_NNET)
+        real(WP), intent(out) :: din(nin, ch, CUE_NNET)
+        integer  :: g, m, k, u
+        real(WP) :: s
+
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(3) private(s, u)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(s, u)
+#endif
+        do g = 1, CUE_NNET
+            do m = 1, nc
+                do k = 1, nin
+                    s = 0.0_wp
+                    do u = 1, CUE_NHID
+                        s = s + real(w(u, k, g), WP) * dout(u, m, g)
+                    end do
+                    din(k, m, g) = s
+                end do
+            end do
+        end do
+    end subroutine rev_dense_back
+
+    !> The cotangents of the PCA coefficients of every network: the lines' (cb(p, m, g), g = 1 ..
+    !> CUE_NGROUP: line_log(s) = (lmean + sum_p c_p lcmp(s, p)) osc + osh) and the continuum's
+    !> (cb(p, m, CUE_NNET)).
+    subroutine rev_head_coef(nlines, nlmax, ncw, npc, nc, ch, ncb, line_bar, cont_bar, lcmp, osc, ccmp, cosc, npca, &
+                             ncount, loff, cb)
+        integer, intent(in)   :: nlines, nlmax, ncw, npc, nc, ch, ncb
+        real(WP), intent(in)  :: line_bar(nlines, nc), cont_bar(ncw, nc)
+        real(WP), intent(in)  :: lcmp(nlmax, CUE_NPCA_LINE, CUE_NGROUP), osc(nlmax, CUE_NGROUP)
+        real(WP), intent(in)  :: ccmp(ncw, npc), cosc(ncw)
+        integer, intent(in)   :: npca(CUE_NGROUP), ncount(CUE_NGROUP), loff(CUE_NGROUP)
+        real(WP), intent(out) :: cb(ncb, ch, CUE_NNET)
+        integer  :: g, m, p, s, i
+        real(WP) :: a
+
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(3) private(a, s)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(a, s)
+#endif
+        do g = 1, CUE_NGROUP
+            do m = 1, nc
+                do p = 1, ncb
+                    a = 0.0_wp
+                    if (p <= npca(g)) then
+                        do s = 1, ncount(g)
+                            a = a + line_bar(loff(g) + s, m) * osc(s, g) * lcmp(s, p, g)
+                        end do
+                    end if
+                    cb(p, m, g) = a
+                end do
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(a, i)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(a, i)
+#endif
+        do m = 1, nc
+            do p = 1, ncb
+                a = 0.0_wp
+                if (p <= npc) then
+                    do i = 1, ncw
+                        a = a + cont_bar(i, m) * cosc(i) * ccmp(i, p)
+                    end do
+                end if
+                cb(p, m, CUE_NNET) = a
+            end do
+        end do
+    end subroutine rev_head_coef
+
+    !> The cotangent of each network's last hidden layer h (units u) from those of its PCA
+    !> coefficients: d(u, m, g) = sum_p cb(p, m, g) psc(p) w4(p, u).
+    subroutine rev_head_back(npc, nc, ch, ncb, cb, lw4, lpsc, cw4, cpsc, npca, d)
+        integer, intent(in)   :: npc, nc, ch, ncb
+        real(WP), intent(in)  :: cb(ncb, ch, CUE_NNET)
+        real(KP), intent(in)  :: lw4(CUE_NPCA_LINE, CUE_NHID, CUE_NGROUP), cw4(npc, CUE_NHID)
+        real(WP), intent(in)  :: lpsc(CUE_NPCA_LINE, CUE_NGROUP), cpsc(npc)
+        integer, intent(in)   :: npca(CUE_NGROUP)
+        real(WP), intent(out) :: d(CUE_NHID, ch, CUE_NNET)
+        integer  :: g, m, u, p
+        real(WP) :: s
+
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(3) private(s, p)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(s, p)
+#endif
+        do g = 1, CUE_NNET
+            do m = 1, nc
+                do u = 1, CUE_NHID
+                    s = 0.0_wp
+                    if (g <= CUE_NGROUP) then
+                        do p = 1, npca(g)
+                            s = s + cb(p, m, g) * lpsc(p, g) * real(lw4(p, u, g), WP)
+                        end do
+                    else
+                        do p = 1, npc
+                            s = s + cb(p, m, g) * cpsc(p) * real(cw4(p, u), WP)
+                        end do
+                    end if
+                    d(u, m, g) = s
+                end do
+            end do
+        end do
+    end subroutine rev_head_back
+
+    !> theta_bar(k, m) = sum_g sum_u w1(u, k, g) d(u, m, g) / scale(k, g): through the first layer
+    !> and the inputs' normalization (theta - shift) / scale.
+    subroutine rev_inputs(nc, ch, w1, sc, d, theta_bar)
+        integer, intent(in)   :: nc, ch
+        real(KP), intent(in)  :: w1(CUE_NHID, CUE_NIN, CUE_NNET), sc(CUE_NIN, CUE_NNET)
+        real(WP), intent(in)  :: d(CUE_NHID, ch, CUE_NNET)
+        real(WP), intent(out) :: theta_bar(CUE_NIN, nc)
+        integer  :: g, m, k, u
+        real(WP) :: s, sg
+
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(s, sg, g, u)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(s, sg, g, u)
+#endif
+        do m = 1, nc
+            do k = 1, CUE_NIN
+                s = 0.0_wp
+                do g = 1, CUE_NNET
+                    sg = 0.0_wp
+                    do u = 1, CUE_NHID
+                        sg = sg + real(w1(u, k, g), WP) * d(u, m, g)
+                    end do
+                    s = s + sg / real(sc(k, g), WP)
+                end do
+                theta_bar(k, m) = s
+            end do
+        end do
+    end subroutine rev_inputs
+
+    ! ------------------------------------------------------------------------------------------
+    ! The ionizing spectrum's fit
+    ! ------------------------------------------------------------------------------------------
+
+    !> The reverse pass of cue_ionizing_params: spec_bar(nw, n), the derivatives of the caller's
+    !> loss with respect to the spectra, from ion_bar(7, n), those with respect to the shape
+    !> parameters. One thread per spectrum (cue_fit_ionizing_adjoint).
+    subroutine cue_ionizing_params_adjoint(n, nw, lam, spec, ion_bar, spec_bar)
+        integer, intent(in)   :: n, nw
+        real(WP), intent(in)  :: lam(nw), ion_bar(CUE_NION, n)
+        real(KP), intent(in)  :: spec(nw, n)
+        real(WP), intent(out) :: spec_bar(nw, n)
+        real(WP) :: llam(nw)
+        integer :: m
+
+        llam = log10(lam)
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do map(to: llam)
+#elif defined(_OPENMP)
+        !$omp parallel do
+#endif
+        do m = 1, n
+            call cue_fit_ionizing_adjoint(nw, lam, spec(1, m), ion_bar(1, m), spec_bar(1, m), llam)
+        end do
+    end subroutine cue_ionizing_params_adjoint
+
+    !> The reverse pass of cue_fit_ionizing for one spectrum. cue's shape parameters are the slopes
+    !> alpha_s of the four segments' power laws A_s lambda^alpha_s, fitted by minimizing cue's loss
+    !> l(alpha_s, log A_s; spec), and the log ratios of the segments' integrated luminosities,
+    !> log L_s = log A_s + log10 |(b^(alpha_s - 1) - a^(alpha_s - 1)) / (alpha_s - 1)|, over the
+    !> segment [a, b] (times the constant c L_sun, which cancels in the ratios), all clipped to cue's
+    !> training ranges (where a parameter is clipped, its derivative is zero, as the forward's).
+    !> The fit is a minimum, g(x*; spec) = dl / dx = 0, so by the implicit function theorem
+    !> dx* / d spec_i = -H^-1 dg / d spec_i with the Hessian H of the loss at the minimum
+    !> (fit_segment's Newton Hessian): the adjoint solves H lambda = -x_bar once per segment and
+    !> contracts it with dg / d spec_i for every pixel.
+    !> The normalization by the first pixel beyond 911.6 A has no derivative: it rescales every
+    !> normalized pixel, the floored ones too (the floor is 1e-70 of the normalized spectrum), which
+    !> shifts log A of the normalized fit and leaves alpha and the unnormalized log A unchanged. The
+    !> floor of a pixel without flux has no derivative either, a segment at a bound of the
+    !> Newton iteration (alpha_s in [-40, 100], log A_s in [-200, 100]) or without a positive
+    !> definite Hessian (zero), and the segments the forward sets by convention (empty ones, the
+    !> one-pixel segment's mean).
+    !> Because the fit is invariant under a scaling of the spectrum, sum_i spec_i spec_bar_i = 0,
+    !> unless a pixel has no flux: the floor does not scale with it.
+    subroutine cue_fit_ionizing_adjoint(nw, lam, spec, ion_bar, spec_bar, llam)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        integer, intent(in)   :: nw
+        real(WP), intent(in)  :: lam(nw), llam(nw)
+        real(KP), intent(in)  :: spec(nw)
+        real(WP), intent(in)  :: ion_bar(CUE_NION)
+        real(WP), intent(out) :: spec_bar(nw)
+
+        real(WP) :: edge(5), alpha(4), loga(4), logl(4), abar(4), bbar(4), lbar(4), fnorm, floor_, ref, lo, hi, rb
+        real(WP) :: p, dp, d2p
+        logical  :: empty(4)
+        integer  :: s, i0(4), i1(4), i, ilim, k
+
+        spec_bar(1:nw) = 0.0_wp
+        edge(1) = 1.0_wp
+        edge(2) = CUE_EDGE_HEII
+        edge(3) = CUE_EDGE_OII
+        edge(4) = CUE_EDGE_HEI
+        edge(5) = CUE_EDGE_HI
+        ilim = 0
+        do i = 1, nw
+            if (lam(i) <= CUE_EDGE_HI) ilim = i
+        end do
+        ref = 0.0_wp
+        if (ilim < nw) ref = real(spec(ilim + 1), WP)
+        if (ref <= 0.0_wp) then
+            do i = 1, nw
+                ref = max(ref, real(spec(i), WP))
+            end do
+        end if
+        if (ref <= 0.0_wp) return   ! (the forward returns the bounds)
+        fnorm = 1.0e-18_wp / ref
+        floor_ = 1.0e-70_wp * fnorm
+
+        ! The segments' fits again (the forward's: the same minimum)
+        k = 0
+        do s = 1, 4
+            i0(s) = k + 1
+            k = 0
+            do i = 1, nw
+                if (lam(i) <= edge(s + 1)) k = i
+            end do
+            i1(s) = k
+            empty(s) = .true.
+            do i = i0(s), i1(s)
+                if (spec(i) > 0.0_KP) empty(s) = .false.
+            end do
+            alpha(s) = 0.0_wp
+            loga(s) = 0.0_wp
+            if (.not. empty(s)) then
+                call fit_segment(nw, lam, spec, i0(s), i1(s), fnorm, floor_, alpha(s), loga(s), llam)
+                loga(s) = loga(s) - log10(fnorm)
+            end if
+        end do
+        do s = 1, 4
+            if (empty(s)) cycle
+            logl(s) = loga(s) + cue_log_ratio_power(alpha(s) - 1.0_wp, edge(s), edge(s + 1))
+        end do
+
+        ! Through the clipping and the ratios: the cotangents of alpha_s, log A_s (normalized units:
+        ! the same derivative as of the unnormalized, which differs by a constant) and log L_s
+        abar = 0.0_wp
+        bbar = 0.0_wp
+        lbar = 0.0_wp
+        do s = 1, 4
+            if (empty(s)) cycle
+            if (alpha(s) > cue_ion_bound(s, .false.) .and. alpha(s) < cue_ion_bound(s, .true.)) abar(s) = ion_bar(s)
+        end do
+        do s = 1, 3
+            if (empty(s) .or. empty(s + 1)) cycle
+            rb = logl(s + 1) - logl(s)
+            lo = cue_ion_bound(4 + s, .false.)
+            hi = cue_ion_bound(4 + s, .true.)
+            if (rb > lo .and. rb < hi) then
+                lbar(s + 1) = lbar(s + 1) + ion_bar(4 + s)
+                lbar(s) = lbar(s) - ion_bar(4 + s)
+            end if
+        end do
+        do s = 1, 4
+            if (empty(s)) cycle
+            ! d log L_s = d log A_s + (d P / d beta) d alpha_s, beta = alpha_s - 1
+            call seg_p(alpha(s) - 1.0_wp, edge(s), log(edge(s + 1) / edge(s)), p, dp, d2p)
+            bbar(s) = lbar(s)
+            abar(s) = abar(s) + lbar(s) * dp
+        end do
+        do s = 1, 4
+            if (empty(s)) cycle
+            if (abar(s) == 0.0_wp .and. bbar(s) == 0.0_wp) cycle
+            call fit_segment_adjoint(nw, lam, spec, i0(s), i1(s), fnorm, floor_, alpha(s), loga(s) + log10(fnorm), &
+                                     abar(s), bbar(s), llam, spec_bar)
+        end do
+    end subroutine cue_fit_ionizing_adjoint
+
+    !> One segment's contribution to cue_fit_ionizing_adjoint: spec_bar(i0:i1) += abar d alpha / d
+    !> spec_i + bbar d log A / d spec_i at the minimum (alpha, loga: log A in the normalized units).
+    subroutine fit_segment_adjoint(nw, lam, spec, i0, i1, fnorm, floor_, alpha, loga, abar, bbar, llam, spec_bar)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        integer, intent(in)     :: nw, i0, i1
+        real(WP), intent(in)    :: lam(nw), llam(nw), fnorm, floor_, alpha, loga, abar, bbar
+        real(KP), intent(in)    :: spec(nw)
+        real(WP), intent(inout) :: spec_bar(nw)
+
+        real(WP), parameter :: LN10 = log(10.0_wp)
+        real(WP) :: x0, x1, lr, sm(6), q, qraw, logq, p, dp, d2p, t, xa, xb, fa, fb
+        real(WP) :: haa, hab, hbb, det, la, lb, dq, dt, ga, gb, yp, sgn
+        integer  :: i
+
+        x0 = lam(i0)
+        x1 = lam(i1)
+        sm(1) = real(i1 - i0 + 1, WP)
+        sm(2:6) = 0.0_wp
+        do i = i0, i1
+            sm(2) = sm(2) + llam(i)
+            sm(3) = sm(3) + log10(max(real(spec(i), WP) * fnorm, floor_))
+        end do
+        sm(2) = sm(2) / sm(1)
+        sm(3) = sm(3) / sm(1)
+        do i = i0, i1
+            xa = llam(i) - sm(2)
+            fa = log10(max(real(spec(i), WP) * fnorm, floor_)) - sm(3)
+            sm(4) = sm(4) + xa * xa
+            sm(5) = sm(5) + xa * fa
+            sm(6) = sm(6) + fa * fa
+        end do
+        qraw = 0.0_wp
+        do i = i0, i1 - 1
+            xa = lam(i); xb = lam(i + 1)
+            fa = max(real(spec(i), WP) * fnorm, floor_) * xa / (CUE_H * CUE_C)
+            fb = max(real(spec(i + 1), WP) * fnorm, floor_) * xb / (CUE_H * CUE_C)
+            qraw = qraw + 0.5_wp * (fa + fb) * (CUE_C / xa - CUE_C / xb)
+        end do
+        q = abs(qraw)
+
+        if (i1 == i0 .or. q <= 0.0_wp) then
+            ! The forward's convention: alpha = 0, log A = the mean of the normalized log spectrum
+            do i = i0, i1
+                if (real(spec(i), WP) * fnorm > floor_) &
+                    spec_bar(i) = spec_bar(i) + bbar / (sm(1) * LN10 * real(spec(i), WP))
+            end do
+            return
+        end if
+        ! (a segment at a bound of the iteration: zero)
+        if (alpha <= -40.0_wp .or. alpha >= 100.0_wp .or. loga <= -200.0_wp .or. loga >= 100.0_wp) return
+
+        logq = log10(q)
+        lr = log(x1 / x0)
+        call seg_p(alpha, x0, lr, p, dp, d2p)
+        t = loga - log10(CUE_H) + p - logq
+        haa = sm(4) + sm(1) * sm(2) * sm(2) + sm(1) * (dp * dp + t * d2p)
+        hab = sm(1) * sm(2) + sm(1) * dp
+        hbb = 2.0_wp * sm(1)
+        det = haa * hbb - hab * hab
+        if (.not. (haa > 0.0_wp .and. det > 0.0_wp)) return
+        ! lambda = -H^-1 (abar, bbar), in the order (alpha, log A)
+        la = -(hbb * abar - hab * bbar) / det
+        lb = -(haa * bbar - hab * abar) / det
+        sgn = sign(1.0_wp, qraw)
+        do i = i0, i1
+            if (real(spec(i), WP) * fnorm <= floor_) cycle
+            yp = 1.0_wp / (LN10 * real(spec(i), WP))   ! d log10(spec_i fnorm) / d spec_i
+            ! d q / d spec_i: the pixel enters the trapezoids on both its sides
+            dq = 0.0_wp
+            if (i < i1) dq = dq + 0.5_wp * lam(i) / (CUE_H * CUE_C) * (CUE_C / lam(i) - CUE_C / lam(i + 1))
+            if (i > i0) dq = dq + 0.5_wp * lam(i) / (CUE_H * CUE_C) * (CUE_C / lam(i - 1) - CUE_C / lam(i))
+            dq = sgn * dq * fnorm
+            dt = -dq / (LN10 * q)       ! d t / d spec_i, t = log A - log h + P - log q
+            ! dg / d spec_i: g_A = sum r + N t, g_alpha = sum r X + N t P', r = A + alpha X - Y
+            gb = -yp + sm(1) * dt
+            ga = -llam(i) * yp + sm(1) * dp * dt
+            spec_bar(i) = spec_bar(i) + la * ga + lb * gb
+        end do
+    end subroutine fit_segment_adjoint
+
+    ! ------------------------------------------------------------------------------------------
+    ! The spline
+    ! ------------------------------------------------------------------------------------------
+
+    !> The transpose of the spline of cue_spline_apply, for the young and old cotangents of the
+    !> continuum at once (columns gy, go of gw, KP: the cotangents of the pixels the spline gives):
+    !> uy(nk, n) = S^T gy, uo = S^T go, with S the (linear) map from the knot values v to the
+    !> output pixels: the evaluation on the knot interval (gathered per knot over the pixels of its
+    !> two intervals, kst, ken: one thread per model, column and knot), its second derivatives mm from
+    !> the factored not-a-knot system (the transposed solve: U^T z = r, then L^T x = z, with the
+    !> forward's own factors, per model and column), and the two end rows folded in.
+    subroutine cue_spline_adjoint(nk, nout, n, h, cp, rden, aa, m0c, mnc, kst, ken, t, hh6, gy, go, uy, uo, mb)
+        integer, intent(in)   :: nk, nout, n
+        real(WP), intent(in)  :: h(nk - 1)
+        real(KP), intent(in)  :: cp(nk - 2), rden(nk - 2), aa(nk - 2), m0c(2), mnc(2)
+        integer, intent(in)   :: kst(nk - 1), ken(nk - 1)
+        real(KP), intent(in)  :: t(nout), hh6(nout), gy(nout, n), go(nout, n)
+        real(WP), intent(out) :: uy(nk, n), uo(nk, n)
+        real(WP), intent(inout) :: mb(nk, n, 2)   !< scratch
+        integer  :: m, c, i, j
+        real(WP) :: sv, sm, tt, u, cj
+
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(3) private(sv, sm, tt, u, cj, j)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(3) private(sv, sm, tt, u, cj, j)
+#endif
+        do c = 1, 2
+            do m = 1, n
+                do i = 1, nk
+                    sv = 0.0_wp
+                    sm = 0.0_wp
+                    ! (pixels in the interval i start at knot i: weights u = 1 - t)
+                    if (i < nk) then
+                        do j = kst(i), ken(i)
+                            tt = real(t(j), WP)
+                            u = 1.0_wp - tt
+                            if (c == 1) then
+                                cj = real(gy(j, m), WP)
+                            else
+                                cj = real(go(j, m), WP)
+                            end if
+                            sv = sv + u * cj
+                            sm = sm + real(hh6(j), WP) * (u * u * u - u) * cj
+                        end do
+                    end if
+                    ! (pixels in the interval i - 1 end at knot i: weights t)
+                    if (i > 1) then
+                        do j = kst(i - 1), ken(i - 1)
+                            tt = real(t(j), WP)
+                            if (c == 1) then
+                                cj = real(gy(j, m), WP)
+                            else
+                                cj = real(go(j, m), WP)
+                            end if
+                            sv = sv + tt * cj
+                            sm = sm + real(hh6(j), WP) * (tt * tt * tt - tt) * cj
+                        end do
+                    end if
+                    if (c == 1) then
+                        uy(i, m) = sv
+                    else
+                        uo(i, m) = sv
+                    end if
+                    mb(i, m, c) = sm
+                end do
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2)
+#endif
+        do c = 1, 2
+            do m = 1, n
+                if (c == 1) then
+                    call spline_adjoint_solve(nk, h, cp, rden, aa, m0c, mnc, uy(1, m), mb(1, m, c))
+                else
+                    call spline_adjoint_solve(nk, h, cp, rden, aa, m0c, mnc, uo(1, m), mb(1, m, c))
+                end if
+            end do
+        end do
+    end subroutine cue_spline_adjoint
+
+    !> The second half of the spline's transpose for one spectrum: from the cotangent mb of the
+    !> second derivatives (nk values; overwritten) to their contribution to the knot values' vb.
+    subroutine spline_adjoint_solve(nk, h, cp, rden, aa, m0c, mnc, vb, mb)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        integer, intent(in)     :: nk
+        real(WP), intent(in)    :: h(nk - 1)
+        real(KP), intent(in)    :: cp(nk - 2), rden(nk - 2), aa(nk - 2), m0c(2), mnc(2)
+        real(WP), intent(inout) :: vb(nk), mb(nk)
+        integer  :: j, i
+        real(WP) :: x
+
+        ! The end rows (M_1, M_n from their neighbours)
+        mb(2) = mb(2) + real(m0c(1), WP) * mb(1)
+        mb(3) = mb(3) + real(m0c(2), WP) * mb(1)
+        mb(nk - 1) = mb(nk - 1) + real(mnc(1), WP) * mb(nk)
+        mb(nk - 2) = mb(nk - 2) + real(mnc(2), WP) * mb(nk)
+        ! A^T x = mb(2:nk-1), A = L U: U^T z = r forward (z over mb), then L^T x = z backward
+        do j = 2, nk - 2
+            mb(j + 1) = mb(j + 1) - real(cp(j - 1), WP) * mb(j)
+        end do
+        mb(nk - 1) = mb(nk - 1) * real(rden(nk - 2), WP)
+        do j = nk - 3, 1, -1
+            mb(j + 1) = (mb(j + 1) - real(aa(j + 1), WP) * mb(j + 2)) * real(rden(j), WP)
+        end do
+        ! r_i = 6 ((v_{i+1} - v_i) / h_i - (v_i - v_{i-1}) / h_{i-1}), i = j + 1
+        do j = 1, nk - 2
+            i = j + 1
+            x = mb(i)
+            vb(i + 1) = vb(i + 1) + 6.0_wp * x / h(i)
+            vb(i) = vb(i) - 6.0_wp * x * (1.0_wp / h(i) + 1.0_wp / h(i - 1))
+            vb(i - 1) = vb(i - 1) + 6.0_wp * x / h(i - 1)
+        end do
+    end subroutine spline_adjoint_solve
 
 end module opensps_cue

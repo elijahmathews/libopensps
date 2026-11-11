@@ -15,7 +15,7 @@ int main(void) {
 
     /* 1. Test metadata queries */
     opensps_get_nbgrad(&nbgrad);
-    if (nbgrad != OPENSPS_NBGRAD || nbgrad != 33) {
+    if (nbgrad != OPENSPS_NBGRAD || nbgrad != 36) {
         printf("FAIL: opensps_get_nbgrad=%d expected 33\n", nbgrad);
         failures++;
     }
@@ -37,7 +37,7 @@ int main(void) {
         failures++;
     }
 
-    /* Test all 33 parameter names */
+    /* Test all parameter names */
     for (int idx = 0; idx < OPENSPS_NBGRAD; idx++) {
         name_buf[0] = '\0';
         opensps_get_grad_param_name(idx, name_buf, 64, &status);

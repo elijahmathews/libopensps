@@ -41,7 +41,8 @@ module opensps_c_api
                                  BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
                                  BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, &
                                  BGRAD_SF_TRUNC, BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, &
-                                 BGRAD_VDMC, BGRAD_MDAVE, BGRAD_AGN_TAU, BGRAD_IGM_FACTOR, NBGRAD
+                                 BGRAD_VDMC, BGRAD_MDAVE, BGRAD_AGN_TAU, BGRAD_IGM_FACTOR, &
+                                 BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, NBGRAD
     use opensps_context_types, only: opensps_context_t
 
     implicit none
@@ -1033,6 +1034,9 @@ contains
         case (BGRAD_MDAVE);          p_name = 'mdave'
         case (BGRAD_AGN_TAU);        p_name = 'agn_tau'
         case (BGRAD_IGM_FACTOR);     p_name = 'igm_factor'
+        case (BGRAD_GAS_LOGN);       p_name = 'gas_logn'
+        case (BGRAD_GAS_LOGNO);      p_name = 'gas_logno'
+        case (BGRAD_GAS_LOGCO);      p_name = 'gas_logco'
         case default
             status = 1
             call opensps_set_error(1, 'opensps_get_grad_param_name: unknown index')
