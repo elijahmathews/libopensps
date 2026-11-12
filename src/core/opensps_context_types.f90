@@ -325,8 +325,12 @@ contains
     !> tests `isoc_type == 'mist'` for the WR wind radius and the HB tags; its [alpha/Fe] build
     !> (AFE_FLAG) keeps isoc_type = 'mist', so a different name must take the same branches.
     pure logical function isoc_is_mist(name)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
         character(len=*), intent(in) :: name
-        isoc_is_mist = (trim(name) == 'mist' .or. trim(name) == 'mist_afe')
+        ! (no trim: it is a runtime call, which the device link of LLVM flang does not resolve; == pads with blanks)
+        isoc_is_mist = (name == 'mist' .or. name == 'mist_afe')
     end function isoc_is_mist
 
     !> @brief Sets the size of the main spectral library's (log T, log g) grid and (re)allocates its axes, zeroed.

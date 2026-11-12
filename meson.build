@@ -562,6 +562,23 @@ test('csp_batch', csp_batch_exe,
     timeout : 900
 )
 
+# Batches below HOST_SFH_MAX models at one OpenMP thread, against the same models in a larger batch (#87: the
+# host path of the offload builds crashed in libomp at one thread); the small test library, no other data
+csp_small_batch_exe = executable('test_csp_small_batch', 'tests/test_csp_small_batch.f90',
+    dependencies : [opensps_dep, test_utils_dep],
+    link_language : 'fortran'
+)
+csp_small_batch_env = environment()
+csp_small_batch_env.set('FSPS_TEST_TAP', '1')
+csp_small_batch_env.set('FSPS_TEST_LIBRARY', join_paths(meson.project_source_root(), 'tests/data/opensps-test-data'))
+csp_small_batch_env.set('OMP_NUM_THREADS', '1')
+test('unit_csp_small_batch', csp_small_batch_exe,
+    protocol : 'tap',
+    env : csp_small_batch_env,
+    suite : 'unit',
+    timeout : 300
+)
+
 # The [alpha/Fe] axis on the real libraries (mist_afe + c3k_lr); runs only with OPENSPS_AFE_DATA set to a data
 # root that holds them (tools/opensps_data/convert_legacy.py --upstream-mist/--upstream-c3k), skipped otherwise
 afe_library_exe = executable('test_afe_library', 'tests/test_afe_library.f90',
