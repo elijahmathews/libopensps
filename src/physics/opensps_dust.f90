@@ -17,7 +17,7 @@ module opensps_dust
     use opensps_precision, only: WP, KP, kahan_add
     use opensps_constants, only: NTEFF_DAGB, NTAU_DAGB, C_LIGHT, NEMLINE, GRAVITY_L_M_T_COEFF, &
                               M_SOL, G_NEWTON, R_SOL, YEAR_TO_SECOND, &
-                              SAFE_FLOOR, PI
+                              PI
     use opensps_types, only: params, params_core
     use opensps_context_types, only: opensps_context_t
     use opensps_integration, only: integrate_trapezoid_array
@@ -36,7 +36,7 @@ module opensps_dust
         module procedure compute_attenuation_curve_point_pc, compute_attenuation_curve_point_pp
     end interface
     public :: apply_agb_dust_screen, get_agb_dust_terms
-    public :: agb_circumstellar_tau
+    public :: agb_circumstellar_tau, AGB_TAU_FLOOR
     public :: AGB_SMOOTH_SIGMA, AGB_SMOOTH_LAMBDA_MIN, AGB_SMOOTH_LAMBDA_MAX
     public :: compute_circumstellar_optical_depth
     public :: one_minus_trans   ! used by the batched CSP (opensps_csp_batch)
@@ -200,6 +200,9 @@ module opensps_dust
     real(WP), parameter :: AGB_DTG_LUM_EXP     = -0.6_wp
 
     ! Smoothing Constants
+    !> A star whose 1 um optical depth is not above this gets no circumstellar screen (legacy FSPS's
+    !> tiny_number; MIST's hot massive post-MS stars tagged E-AGB have tau ~ 1e-60 and still get one)
+    real(WP), parameter :: AGB_TAU_FLOOR         = 1.0e-70_wp
     real(WP), parameter :: AGB_SMOOTH_SIGMA      = 1.0e4_wp
     real(WP), parameter :: AGB_SMOOTH_LAMBDA_MIN = 3.0e4_wp
     real(WP), parameter :: AGB_SMOOTH_LAMBDA_MAX = 1.0e8_wp
@@ -290,7 +293,7 @@ contains
         end if
         idx_teff = 1; idx_tau = 1; c = 0.0_wp
         tau_1um = agb_circumstellar_tau(ctx, weight, mass_act, log_t, log_l, log_g, c_o_ratio, log_mdot)
-        active = tau_1um > SAFE_FLOOR
+        active = tau_1um > AGB_TAU_FLOOR
         if (.not. active) return
 
         n_teff_grid = size(ctx%state%teff_dagb, 2)
@@ -375,7 +378,7 @@ contains
     !> Optical depth at 1 micron of the circumstellar dust shell of an AGB star.
     !>
     !> @details
-    !> Scaled by the user weight (agb_dust). A star whose optical depth is not above SAFE_FLOOR
+    !> Scaled by the user weight (agb_dust). A star whose optical depth is not above AGB_TAU_FLOOR
     !> receives no dust screen, and (as in legacy FSPS) its spectrum is not smoothed either:
     !> get_stellar_spectrum uses this to choose between the raw and the pre-smoothed templates.
     !>

@@ -31,6 +31,7 @@ program benchmark_csp_batch
                             opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
                             opensps_context_set_param_int, opensps_context_set_param_float
     use opensps_context_types, only: opensps_context_t
+    use opensps_api, only: opensps_build_afe_basis
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build
     use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build
     implicit none
@@ -41,12 +42,14 @@ program benchmark_csp_batch
     type(COMPSPOUT), allocatable :: results(:)
     real(WP), allocatable :: spec_ssp(:, :), mass_ssp(:), lbol_ssp(:), mags(:, :), spec(:, :)
     character(len=32) :: arg, config = 'basic'
-    logical :: full, zvar = .false., imf = .false., grad = .false., fit = .false., cue = .false.
+    logical :: afe = .false., lib = .false., full, zvar = .false., imf = .false., grad = .false., fit = .false., cue = .false.
     real(WP), allocatable :: mbar(:, :), sbar(:, :), pbar(:, :), massv(:), lbolv(:), massb(:), lbolb(:)
     type(ssp_operator_t), allocatable :: ops(:)
     type(ssp_opset_t) :: opset
     real(WP), allocatable :: spec_z(:, :, :), mass_z(:, :), lbol_z(:, :)
     integer :: z
+    character(len=64) :: bench_isoc = '', bench_spec = ''
+    real(WP), parameter :: afe_grid(5) = [-0.2_wp, 0.0_wp, 0.2_wp, 0.4_wp, 0.6_wp]
     real(WP), allocatable :: indx(:, :)
     integer(8) :: t0, t1, rate
     integer :: n_max = 10000, n_single = 200, n_min = 1, status, nspec, ntfull, i, n, rep, n_rep, k
@@ -64,7 +67,9 @@ program benchmark_csp_batch
     call get_command_argument(4, arg)
     if (len_trim(arg) > 0) read(arg, *) n_min
     full =index(config, 'full') == 1
-    zvar = index(config, '_z') > 0
+    afe = index(config, '_afe') > 0
+    lib = index(config, '_lib') > 0     ! the [alpha/Fe] libraries at [alpha/Fe] = 0 only (the 2-slab path), for comparison
+    zvar = index(config, '_z') > 0 .or. afe .or. lib
     imf = index(config, '_imf') > 0
     grad = index(config, '_grad') > 0
     fit = index(config, '_fit') > 0
@@ -76,7 +81,28 @@ program benchmark_csp_batch
     ctx%pset%zmet = 10
     ! (zin = 0: the isochrones and libraries of every metallicity, for the configs that vary it;
     ! with zin = 10 the other metallicities would be empty)
-    call opensps_setup(ctx, merge(0, 10, zvar), isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
+    if (afe) then
+        ! The [alpha/Fe] stack of the real libraries (the names from OPENSPS_BENCH_ISOC and _SPEC, default mist_afe and
+        ! c3k_lr), built on the host and moved to the device with the context
+        call get_environment_variable('OPENSPS_BENCH_ISOC', bench_isoc)
+        call get_environment_variable('OPENSPS_BENCH_SPEC', bench_spec)
+        if (len_trim(bench_isoc) == 0) bench_isoc = 'mist_afe'
+        if (len_trim(bench_spec) == 0) bench_spec = 'c3k_lr'
+        call opensps_setup(ctx, 0, isoc_type_in=trim(bench_isoc)//':afe=0.0', spec_type_in=trim(bench_spec)//':afe=0.0', &
+                           dust_type_in='DL07')
+        call set_int('imf_type', 1)
+        call opensps_build_afe_basis(ctx, trim(bench_isoc), trim(bench_spec), afe_grid, status)
+        if (status /= 0) stop 1
+    else if (lib) then
+        call get_environment_variable('OPENSPS_BENCH_ISOC', bench_isoc)
+        call get_environment_variable('OPENSPS_BENCH_SPEC', bench_spec)
+        if (len_trim(bench_isoc) == 0) bench_isoc = 'mist_afe'
+        if (len_trim(bench_spec) == 0) bench_spec = 'c3k_lr'
+        call opensps_setup(ctx, 0, isoc_type_in=trim(bench_isoc)//':afe=0.0', spec_type_in=trim(bench_spec)//':afe=0.0', &
+                           dust_type_in='DL07')
+    else
+        call opensps_setup(ctx, merge(0, 10, zvar), isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
+    end if
     call opensps_context_move_to_device(ctx)
     call set_int('imf_type', merge(2, 1, imf))
     call set_int('zmet', 10)
@@ -109,10 +135,12 @@ program benchmark_csp_batch
     allocate(spec_ssp(nspec, ntfull), mass_ssp(ntfull), lbol_ssp(ntfull))
     call opensps_context_set_pset(ctx, pset)
     write(*, '(A,A)') 'config ', trim(config)
-    call generate_ssp_grid(ctx, pset, mass_ssp, lbol_ssp, spec_ssp)
-    call opensps_context_update_ssp_basis(ctx, reshape(spec_ssp, [nspec, ntfull, 1]), &
-                                       reshape(mass_ssp, [ntfull, 1]), reshape(lbol_ssp, [ntfull, 1]), 1)
-    if (zvar .and. .not. imf) then
+    if (.not. afe) then
+        call generate_ssp_grid(ctx, pset, mass_ssp, lbol_ssp, spec_ssp)
+        call opensps_context_update_ssp_basis(ctx, reshape(spec_ssp, [nspec, ntfull, 1]), &
+                                           reshape(mass_ssp, [ntfull, 1]), reshape(lbol_ssp, [ntfull, 1]), 1)
+    end if
+    if (zvar .and. .not. imf .and. .not. afe) then
         ! The bases of all metallicities (the single call keeps the zmet = 10 basis)
         allocate(spec_z(nspec, ntfull, ctx%state%nz), mass_z(ntfull, ctx%state%nz), lbol_z(ntfull, ctx%state%nz))
         do z = 1, ctx%state%nz
@@ -183,7 +211,7 @@ program benchmark_csp_batch
     end if
 
     ! Batched, magnitudes only and with spectra
-    if (zvar .and. .not. imf) then
+    if (zvar .and. .not. imf .and. .not. afe) then
         ctx%state%ssp_basis_is_dirty = .true.
         call opensps_context_update_ssp_basis(ctx, spec_z, mass_z, lbol_z, ctx%state%nz)
     end if
@@ -323,6 +351,7 @@ contains
         p%tage = 1.0_wp + 0.1_wp * mod(i, 113)
         p%duste_umin = 1.0_wp + 0.2_wp * mod(i, 71)
         if (zvar) p%logzsol = -1.5_wp + 0.017_wp * mod(i, 97)
+        if (afe) p%afe = -0.2_wp + 0.8_wp * real(mod(i, 89), WP) / 88.0_wp
         if (imf) then
             p%imf1 = 0.9_wp + 0.01_wp * mod(i, 61)
             p%imf2 = 1.8_wp + 0.01_wp * mod(i, 83)

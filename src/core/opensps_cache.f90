@@ -44,8 +44,9 @@ module opensps_cache
     type :: opensps_setup_tables_t
         ! No default initialization: save_setup_tables writes every component, and initializing
         ! the 2 MB type makes gfortran build a stack temporary on allocation
-        real(WP) :: speclib_logt(ndim_logt)
-        real(WP) :: speclib_logg(ndim_logg)
+        integer :: nlogt = ndim_logt, nlogg = ndim_logg
+        real(WP), allocatable :: speclib_logt(:)
+        real(WP), allocatable :: speclib_logg(:)
         real(WP) :: wmb_logt(ndim_wmb_logt)
         real(WP) :: wmb_logg(ndim_wmb_logg)
         real(WP) :: agb_logt_car(n_agb_car)
@@ -89,6 +90,7 @@ module opensps_cache
         integer :: add_xrb_emission = 0
         integer :: add_agb_dust_model = 0
         integer :: use_wr_spectra = 0
+        integer :: use_lw_tpagb = 1
 
         !> Per-context tables recorded by the populating context (see opensps_setup_tables_t).
         !> Allocatable so that an entry stays small: a 2 MB component made gfortran build the

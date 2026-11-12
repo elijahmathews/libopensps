@@ -562,6 +562,19 @@ test('csp_batch', csp_batch_exe,
     timeout : 900
 )
 
+# The [alpha/Fe] axis on the real libraries (mist_afe + c3k_lr); runs only with OPENSPS_AFE_DATA set to a data
+# root that holds them (tools/opensps_data/convert_legacy.py --upstream-mist/--upstream-c3k), skipped otherwise
+afe_library_exe = executable('test_afe_library', 'tests/test_afe_library.f90',
+    dependencies : [opensps_dep, test_utils_dep],
+    link_language : 'fortran'
+)
+test('afe_library', afe_library_exe,
+    protocol : 'tap',
+    env : regression_env,
+    suite : 'regression',
+    timeout : 1800
+)
+
 # Integration test: the gradients of the batched CSP (reverse pass) against finite differences
 csp_batch_grad_exe = executable('test_csp_batch_grad', 'tests/test_csp_batch_grad.f90',
     dependencies : [opensps_dep, test_utils_dep],
@@ -736,6 +749,17 @@ if python3.found()
         suite : 'unit',
         timeout : 300
     )
+    # The [alpha/Fe] stack (opensps_build_afe_basis, the batch with the axis, its gradient) on five-node variants
+    # of the small test library: no external data (the same checks as afe_library, which uses the real libraries);
+    # through the C API, unit_c_afe_derived (below)
+    test('unit_afe_derived', python3,
+        args : [join_paths(meson.project_source_root(), 'tests/run_afe_derived_test.py'), afe_library_exe,
+                join_paths(meson.project_source_root(), 'tests/data/opensps-test-data'), meson.current_build_dir(), 'tap'],
+        env : unit_env,
+        protocol : 'tap',
+        suite : 'unit',
+        timeout : 300
+    )
     # The Python data tools (format round trip, converters of the upstream [alpha/Fe] layouts)
     test('unit_data_tools', python3,
         args : [join_paths(meson.project_source_root(), 'tools/opensps_data/test_opensps_data.py')],
@@ -776,6 +800,24 @@ test('c_cue', test_c_cue_exe,
     suite : 'regression',
     timeout : 600
 )
+test_c_afe_exe = executable('test_c_afe', 'tests/test_c_afe.c',
+    dependencies : [opensps_dep, meson.get_compiler('c').find_library('m', required : false)],
+    include_directories : include_directories('include')
+)
+test('c_afe', test_c_afe_exe,
+    env : regression_env,
+    suite : 'regression',
+    timeout : 600
+)
+if python3.found()
+    test('unit_c_afe_derived', python3,
+        args : [join_paths(meson.project_source_root(), 'tests/run_afe_derived_test.py'), test_c_afe_exe,
+                join_paths(meson.project_source_root(), 'tests/data/opensps-test-data'), meson.current_build_dir()],
+        env : unit_env,
+        suite : 'unit',
+        timeout : 300
+    )
+endif
 test_c_two_contexts_exe = executable('test_c_two_contexts', 'tests/test_c_two_contexts.c',
     dependencies : opensps_dep,
     include_directories : include_directories('include')

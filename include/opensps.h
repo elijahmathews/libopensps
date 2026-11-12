@@ -11,7 +11,7 @@ extern "C" {
 // Batch Gradient Parameter Indices (params_bar rows, 0-indexed in C)
 // Corresponds to BGRAD_* in opensps_csp_batch.f90
 // ----------------------------------------------------------------------------
-#define OPENSPS_NBGRAD 36
+#define OPENSPS_NBGRAD 37
 
 typedef enum {
     OPENSPS_BGRAD_FAGN = 0,
@@ -49,7 +49,8 @@ typedef enum {
     OPENSPS_BGRAD_IGM_FACTOR = 32,
     OPENSPS_BGRAD_GAS_LOGN = 33,
     OPENSPS_BGRAD_GAS_LOGNO = 34,
-    OPENSPS_BGRAD_GAS_LOGCO = 35
+    OPENSPS_BGRAD_GAS_LOGCO = 35,
+    OPENSPS_BGRAD_AFE = 36
 } opensps_bgrad_param_t;
 
 // ----------------------------------------------------------------------------
@@ -111,6 +112,14 @@ void opensps_context_create(int *handle, int *status);
 void opensps_context_destroy(int handle, int *status);
 void opensps_context_setup(int zin, const char *isoc_type, const char *spec_type,
                         const char *dust_type, int handle, int *status);
+
+// The resident SSP bases over [alpha/Fe] and every metallicity of the libraries `isoc_name:afe=v` and
+// `spec_name:afe=v` (e.g. "mist_afe", "c3k_lr"; v from afe[0..n_afe-1], increasing, n_afe >= 2), with the
+// context's SSP parameters at the call. Afterwards `afe` is a per-model parameter of the batch calls (clamped
+// to the grid; gradient row OPENSPS_BGRAD_AFE) and the bases stay as built. status 0, 1 invalid handle or
+// arguments, 2 values not increasing. Without it, a batch that names `afe` returns status 2.
+void opensps_context_build_afe_basis(int handle, const char *isoc_name, const char *spec_name, int n_afe,
+                                    const double *afe, int *status);
 
 // Parameter Setters
 void opensps_context_set_int(int handle, const char *key, int value, int *status);

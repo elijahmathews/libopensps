@@ -107,6 +107,39 @@ The residuals are those of the constants: 3.6e-5 median and 2.9e-4 at the 99th p
 log t >= 7, and up to 7e-3 per pixel for log t < 7 (Wolf-Rayet winds), all well inside the
 tolerances in `compare_legacy.py`.
 
+## [alpha/Fe] against legacy FSPS v4
+
+`afe/run_afe.sh LEGACY_V4_SRC LEGACY_V4_SPS_HOME AFE_DATA_ROOT [OUTDIR]` compares the SSP of legacy FSPS v4
+(cconroy20/fsps master, built with `-DAFE_FLAG=1`: MIST v2.5 + C3K_LR, 13 Z x 5 [alpha/Fe]) with this fork's, at the
+five [alpha/Fe] nodes of one metallicity (`ZMET`, default 11 = solar; `EVTYPE` selects one evolutionary phase;
+`AGB_DUST=0` turns the AGB dust off in both). Legacy has no [alpha/Fe] interpolation, so only the nodes can be compared;
+the interpolation (bilinear in log Z and [alpha/Fe]) is checked by `tests/test_afe_library.f90` and the oracles of
+`test_csp_batch`. The legacy copy is built in `OUTDIR` with `patches/constants.sed` and the label fix below.
+
+Result (Chabrier, solar; all ages 0.1 Myr - 20 Gyr, 100 A - 1 mm), with the fork's options set to legacy v4's defaults
+(`use_lw_tpagb = 0`, `logt_wmb_hot = 10`):
+
+| | Maximum difference |
+|---|---|
+| Mass, L_bol | 2e-6 (IMF integrals) |
+| Spectrum, AGB dust off | 2.5e-6 of the age's peak flux per pixel, every node, Z = 2 and 11 |
+| Spectrum, AGB dust on | 2.6e-4 of the peak (1e-3 of the local flux), all of it beyond 1 um in the AGB phases |
+
+Differences found, and where they went:
+
+| Difference | Effect against legacy v4 | Status |
+|---|---|---|
+| Main-library corner validity: legacy tests the 5000 A flux against `tiny30` = 1e-30 and stores the library in single precision, where the converted libraries' 1e-70 filler is zero; the fork tested against `tiny(1.0_wp)` | C3K_LR has fillers at the hot, low-gravity edge: stars hotter than the grid averaged with the filler instead of snapping to the real corner (spectra of log t < 6.6 down 15-30%, post-AGB UV down 70%) | Fixed (the fork now uses 1e-30, as its HIP kernels already did) |
+| `isoc_type == 'mist'` tests (WR wind radius, horizontal-branch tags) did not cover `mist_afe` | WR stars' spectra 14% low | Fixed (`isoc_is_mist`) |
+| `use_lw_tpagb` (legacy v4 default 0): O-rich TP-AGB stars from the main library, not Lancon & Mouhcine (2002) | TP-AGB optical 8-15% low, UV zero (the LM02 spectra have none); up to 0.3% of the total optical | New option `use_lw_tpagb`, default 1 (what the fork did until now and what legacy at 82a8735 does); legacy v4 parity needs 0 |
+| AGB dust threshold: legacy skips stars with tau1 <= tiny_number (1e-70); the fork's was 2e-308 | Hot massive E-AGB-tagged stars of MIST (tau ~ 1e-60) got the extrapolated screen of a cool star: one log t = 6.65 isochrone off by 6% in the UV, 16% in the IR | Fixed (`AGB_TAU_FLOOR`) |
+| **Legacy bug:** `sps_setup` reads the C3K [Fe/H] labels with `F4.2`, so "-2.25" becomes -2.2, "-1.75" -1.7, "-0.25" -0.2, "+0.25" +0.2 (every label that is not a multiple of 0.5) | Legacy's Z grid for the library is off by 0.05 dex at six of the 13 metallicities; its spectra there are blends with the neighbouring metallicity: up to 0.3-0.8% of the peak (3% locally in the UV) at Z index 2 and 8 | Not reproduced; the parity run patches legacy to `F5.2`. To be reported upstream |
+| AGB dust: the circumstellar screen's smoothing beyond 3 um (`smoothspec`, sigma = 1e4 km/s) | Legacy's kernel is symmetric in pixel index, not in velocity, on a non-uniform grid (C3K_LR is); with `smoothspec_fast = 0`, which resamples, the 10 um - 1 mm residual drops from 1e-3 to 1e-4 but the 1-10 um one grows (4e-3); the fork's is the exact kernel | Same intentional difference as the velocity smoothing kernel above; the IR beyond 2.5 um is not gated |
+
+The first four are bugs or missing options of the fork that the afe libraries exposed: the main-library corner test and
+the AGB dust floor also apply to every other library, and the regression references are unchanged by them.
+Not compared: the [alpha/Fe]-dependent nebular grids (legacy has none: its CLOUDY grids use [Fe/H] only), and CSPs.
+
 ## python-fsps
 
 python-fsps is a fixed, unpatched legacy build, so it cannot be used for this check. As a smoke

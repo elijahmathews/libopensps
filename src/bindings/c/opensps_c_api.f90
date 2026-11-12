@@ -11,7 +11,7 @@ module opensps_c_api
     use opensps_precision, only: WP, KP
     use opensps_constants, only: NEMLINE, NM, BHB_SBS_TIME, GRAVITY_L_M_T_COEFF
     use opensps_types, only: PARAMS, COMPSPOUT, PARAMS_CORE
-    use opensps_api, only: opensps_create, opensps_setup, opensps_destroy, &
+    use opensps_api, only: opensps_create, opensps_setup, opensps_destroy, opensps_build_afe_basis, &
                         opensps_set_param_int, opensps_set_param_float, opensps_set_param_str, &
                         opensps_set_fast_mode, opensps_get_paths, opensps_prepare_pset, &
                         api_compute_ssp => opensps_compute_ssp, api_compute_csp => opensps_compute_csp
@@ -42,7 +42,7 @@ module opensps_c_api
                                  BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, &
                                  BGRAD_SF_TRUNC, BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, &
                                  BGRAD_VDMC, BGRAD_MDAVE, BGRAD_AGN_TAU, BGRAD_IGM_FACTOR, &
-                                 BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, NBGRAD
+                                 BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, BGRAD_AFE, NBGRAD
     use opensps_context_types, only: opensps_context_t
 
     implicit none
@@ -399,6 +399,45 @@ contains
         end associate
     end subroutine opensps_context_setup_handle
 
+    !> The resident SSP bases over [alpha/Fe] and every metallicity (opensps_build_afe_basis): the libraries
+    !> `isoc:afe=v` and `spec:afe=v` for each v of afe (increasing, n_afe >= 2), with the context's SSP parameters.
+    !> Afterwards `afe` is a per-model parameter of the batch calls; status 0, 1 invalid handle, 2 invalid values.
+    subroutine opensps_context_build_afe_basis_handle(handle, c_isoc, c_spec, n_afe, c_afe, status) &
+        bind(C, name="opensps_context_build_afe_basis")
+        integer(c_int), value :: handle
+        character(KIND=c_char), dimension(*), intent(IN) :: c_isoc
+        character(KIND=c_char), dimension(*), intent(IN) :: c_spec
+        integer(c_int), value :: n_afe
+        type(c_ptr), value :: c_afe
+        integer(c_int), intent(OUT) :: status
+        real(c_double), pointer :: afe(:)
+        character(LEN=64) :: isoc_name, spec_name
+        integer :: st
+
+        status = 0
+        if (.not. ALLOCATED(ctx_pool)) then
+            status = 1
+            return
+        end if
+        if (handle < 1 .or. handle > SIZE(ctx_pool)) then
+            status = 1
+            return
+        end if
+        if (.not. ctx_inuse(handle) .or. n_afe < 2 .or. .not. c_associated(c_afe)) then
+            status = 1
+            return
+        end if
+        call c_f_pointer(c_afe, afe, [n_afe])
+        call c_to_f_string(c_isoc, isoc_name)
+        call c_to_f_string(c_spec, spec_name)
+        call reset_store(ctx_store(handle))
+        call opensps_build_afe_basis(ctx_pool(handle)%c, trim(isoc_name), trim(spec_name), real(afe(1:n_afe), WP), st)
+        if (st /= 0) then
+            status = 2
+            call opensps_set_error(2, 'opensps_context_build_afe_basis: the [alpha/Fe] values must be increasing')
+        end if
+    end subroutine opensps_context_build_afe_basis_handle
+
     subroutine opensps_context_set_int_handle(handle, c_key, value, status) &
         bind(C, name="opensps_context_set_int")
         integer(c_int), value :: handle
@@ -680,6 +719,11 @@ contains
                     return
                 end if
                 if (trim(names(i)) == 'logzsol') zmode = .true.
+                if (trim(names(i)) == 'afe' .and. .not. allocated(ctx%state%afe_basis)) then
+                    status = 2
+                    call opensps_set_error(2, 'compute_csp_batch: afe needs the bases of opensps_context_build_afe_basis')
+                    return
+                end if
             end do
         end if
 
@@ -1037,6 +1081,7 @@ contains
         case (BGRAD_GAS_LOGN);       p_name = 'gas_logn'
         case (BGRAD_GAS_LOGNO);      p_name = 'gas_logno'
         case (BGRAD_GAS_LOGCO);      p_name = 'gas_logco'
+        case (BGRAD_AFE);            p_name = 'afe'
         case default
             status = 1
             call opensps_set_error(1, 'opensps_get_grad_param_name: unknown index')
@@ -1191,6 +1236,8 @@ contains
 #if defined(OMP_TARGET)
         if (.not. ctx%on_device) call opensps_context_move_to_device(ctx)
 #endif
+        ! The [alpha/Fe] stack of opensps_context_build_afe_basis stays as it is (built for the SSP parameters of that call)
+        if (allocated(ctx%state%afe_basis) .and. allocated(ctx%state%ssp_basis_spec)) return
         nz = merge(ctx%state%nz, 1, zmode)
         if (allocated(ctx%state%ssp_basis_spec) .and. .not. ctx%state%ssp_basis_is_dirty) then
             if (size(ctx%state%ssp_basis_spec, 3) == nz) return
@@ -2081,6 +2128,8 @@ contains
             opensps_default_ctx%add_agn_dust_val = val
         case ('use_wr_spectra')
             opensps_default_ctx%use_wr_spectra_val = val
+        case ('use_lw_tpagb')
+            opensps_default_ctx%use_lw_tpagb_val = val
         case ('add_xrb_emission')
             opensps_default_ctx%add_xrb_emission_val = val
         case ('smooth_lsf')

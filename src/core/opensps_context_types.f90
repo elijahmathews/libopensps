@@ -21,6 +21,8 @@ module opensps_context_types
     public :: opensps_context_state_t
     public :: opensps_context_t
     public :: opensps_context_state_destroy
+    public :: set_spectral_grid
+    public :: isoc_is_mist
     public :: opensps_context_sync_device_settings
     public :: batch_grid_t, batch_grid_release
     public :: batch_out_t, batch_out_reserve, batch_out_release
@@ -126,8 +128,12 @@ module opensps_context_types
         real(WP), pointer, contiguous :: spec_lambda(:) => null()
         real(WP), pointer, contiguous :: spec_nu(:) => null()
         real(WP), pointer, contiguous :: spec_res(:) => null()
-        real(WP), dimension(NDIM_LOGT) :: speclib_logt = 0.0_wp
-        real(WP), dimension(NDIM_LOGG) :: speclib_logg = 0.0_wp
+        !> The (log T, log g) grid of the main spectral library: NDIM_LOGT x NDIM_LOGG for the legacy layout,
+        !> the library's own axes for a standard-format library (C3K is 80 x 14). The axes are allocated
+        !> by `set_spectral_grid` before they are read or copied.
+        integer :: nlogt = NDIM_LOGT, nlogg = NDIM_LOGG
+        real(WP), allocatable :: speclib_logt(:)
+        real(WP), allocatable :: speclib_logg(:)
         real(kind(1.0)), pointer, contiguous :: speclib(:, :, :, :) => null()
         real(WP), dimension(NDIM_WMB_LOGT) :: wmb_logt = 0.0_wp
         real(WP), dimension(NDIM_WMB_LOGG) :: wmb_logg = 0.0_wp
@@ -228,6 +234,9 @@ module opensps_context_types
         real(KP), allocatable :: ssp_basis_spec_t(:, :, :)
         real(WP), allocatable :: ssp_basis_mass(:, :)
         real(WP), allocatable :: ssp_basis_lbol(:, :)
+        !> The [alpha/Fe] grid of the resident bases: ssp_basis_* hold nz * size(afe_basis) slabs, the
+        !> metallicity fastest (slab = iz + nz * (iafe - 1)); a basis without an [alpha/Fe] axis has one value.
+        real(WP), allocatable :: afe_basis(:)
         logical :: ssp_basis_is_dirty = .true.
 
         ! --- Replacements for csp_buffer_t ---
@@ -289,6 +298,9 @@ module opensps_context_types
         integer :: vactoair_flag_val = 0
         integer :: add_agn_dust_val = 0
         integer :: use_wr_spectra_val = 0
+        !> 1 (default): O-rich TP-AGB stars take the Lancon & Mouhcine empirical spectra; 0: the main library
+        !> (legacy v4's default; its older releases always used the LM02 spectra)
+        integer :: use_lw_tpagb_val = 1
         integer :: add_neb_emission_val = 0
         integer :: add_neb_continuum_val = 0
         integer :: nebular_model_val = 0   !< 0: CLOUDY grids (FSPS); 1: cue (batched CSP only)
@@ -308,6 +320,28 @@ module opensps_context_types
     end type opensps_context_t
 
 contains
+
+    !> True for the MIST isochrone families: `mist` and the [alpha/Fe] set `mist_afe`. Legacy FSPS
+    !> tests `isoc_type == 'mist'` for the WR wind radius and the HB tags; its [alpha/Fe] build
+    !> (AFE_FLAG) keeps isoc_type = 'mist', so a different name must take the same branches.
+    pure logical function isoc_is_mist(name)
+        character(len=*), intent(in) :: name
+        isoc_is_mist = (trim(name) == 'mist' .or. trim(name) == 'mist_afe')
+    end function isoc_is_mist
+
+    !> @brief Sets the size of the main spectral library's (log T, log g) grid and (re)allocates its axes, zeroed.
+    subroutine set_spectral_grid(state, nt, ng)
+        type(opensps_context_state_t), intent(inout) :: state
+        integer, intent(in) :: nt, ng
+
+        state%nlogt = nt
+        state%nlogg = ng
+        if (allocated(state%speclib_logt)) deallocate (state%speclib_logt)
+        if (allocated(state%speclib_logg)) deallocate (state%speclib_logg)
+        allocate (state%speclib_logt(nt), state%speclib_logg(ng))
+        state%speclib_logt = 0.0_wp
+        state%speclib_logg = 0.0_wp
+    end subroutine set_spectral_grid
 
     !> @brief Copies the scalar settings of a device-resident context to its device copy, if any
     !> changed on the host since the last copy (settings_dirty). Called by the compute entry points.
@@ -497,6 +531,7 @@ contains
         if (allocated(state%lbol_ssp_zz)) deallocate (state%lbol_ssp_zz)
         if (associated(state%time_full)) nullify (state%time_full)
         if (allocated(state%weight_ssp)) deallocate (state%weight_ssp)
+        if (allocated(state%afe_basis)) deallocate (state%afe_basis)
         if (allocated(state%ssp_temp_grid)) deallocate (state%ssp_temp_grid)
         if (allocated(state%ssp_active_idx)) deallocate (state%ssp_active_idx)
         if (allocated(state%ssp_active_w)) deallocate (state%ssp_active_w)

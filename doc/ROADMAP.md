@@ -142,24 +142,24 @@ Alongside, two input generalisations that reuse the same machinery:
   histories) and MDF sums become a special case (one of the blockers of priority 2).
 - **[alpha/Fe] as a grid axis** (see priority 3b).
 
-### 3b. [alpha/Fe] as an SSP axis (near term)
+### 3b. [alpha/Fe] as an SSP axis
 
-Alpha-enhanced isochrones and spectral libraries (MIST with an [Fe/H] x [alpha/Fe] layout, C3K
-per [alpha/Fe]) make [alpha/Fe] a fit parameter. The priority-1 format carries it as a named
-axis from the start (a library without it is [alpha/Fe] = 0), and its converter reads the
-alpha-enhanced layouts. Then:
+Done on `feat/afe-axis`: the library grids of any size load (C3K-LR, 80 x 14); the resident stack of bases over
+[alpha/Fe] and metallicity (`opensps_build_afe_basis`); `afe` per model with four-slab blends, in the forward and
+the reverse pass (row `BGRAD_AFE`), for the CLOUDY grids and cue; the C API (`doc/C_API.md`). Costs, on the R9700
+(FP32, N = 10^4, C3K-LR, 1936 pixels): forward +2%, with gradients +5% (`doc/GPU_RESULTS.md`).
 
-- SSP generation over (metallicity, [alpha/Fe]): the context's library and isochrone arrays
-  and the metallicity legend gain an [alpha/Fe] dimension (the list of what changes is in
-  `doc/DATA_FORMAT.md`);
-- the batch interpolates per model in ([Fe/H], [alpha/Fe]) between resident bases, as it does
-  in metallicity today (bilinear: four bases instead of two);
-- nebular emission: no alpha-enhanced photoionization grids exist yet, so alpha-enhanced fits
-  either use the solar-scaled nebular grids at the model's [Fe/H] (documented approximation)
-  or omit nebular emission, until such grids are computed;
-- gradients (priority 4) treat [alpha/Fe] like `logzsol` (kinked at grid values).
+Left:
 
-This can go before or alongside priority 3; it needs only priority 1.
+- **Parity with legacy FSPS v4's [alpha/Fe]** (spectra at the planes: `doc/DATA_FORMAT.md` 3.1): the options
+  `use_lw_tpagb` and the unexplained UV and optical differences.
+- Nebular emission with [alpha/Fe]: no CLOUDY grids exist for it (the model's [Fe/H] is used);
+- the IMF per model and weights over ages and metallicities with the axis (status 2 today);
+- a data release with the converted `mist_afe` and `c3k_lr` (MIST v2.5, solar 0.0185: its own nebular and
+  dust tables follow the other libraries' solar scale);
+- single-element abundances as linear response functions about the base SSP (one extra load per element in the
+  age sums), if response-function libraries are released;
+- the [alpha/Fe] gradient is piecewise (kinked at every plane of the grid).
 
 ### 4. Gradients
 

@@ -125,7 +125,7 @@ module opensps_csp_batch
               BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
               BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, &
               BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, BGRAD_VDMC, BGRAD_MDAVE, BGRAD_AGN_TAU, &
-              BGRAD_IGM_FACTOR, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, NBGRAD
+              BGRAD_IGM_FACTOR, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, BGRAD_AFE, NBGRAD
 
     !> Rows of params_bar (compute_csp_batch's gradients): the derivative of the caller's loss with
     !> respect to each parameter of the model. The list grows as the adjoints of more stages are
@@ -170,8 +170,8 @@ module opensps_csp_batch
     !> Nebular emission by cue (nebular_model = 1): with it, rows 14 and 15 (gas_logz, gas_logu) are
     !> the derivatives of cue's networks (not the CLOUDY grids' interpolation), and these rows are
     !> the gas density log n_H, N/O and C/O (zero with the CLOUDY grids, where they do not act)
-    integer, parameter :: BGRAD_GAS_LOGN = 34, BGRAD_GAS_LOGNO = 35, BGRAD_GAS_LOGCO = 36
-    integer, parameter :: NBGRAD = 36
+    integer, parameter :: BGRAD_GAS_LOGN = 34, BGRAD_GAS_LOGNO = 35, BGRAD_GAS_LOGCO = 36, BGRAD_AFE = 37
+    integer, parameter :: NBGRAD = 37
     !> The rows of the SFH tangents' parameters (opensps_sfh_tangent: SFHT_TAGE .. SFHT_SF_SLOPE)
     integer, parameter :: SFHT_ROWS(8) = [17, 18, 19, 20, 21, 22, 25, 26]
     !> Rows BGRAD_DUST1 .. BGRAD_DUSTE_GAMMA, summed per model by the attenuation adjoint (10-12 as
@@ -372,7 +372,7 @@ contains
         real(WP), intent(out), optional     :: weights_z_bar(:,:,:)
 
         integer :: n_mod, nt, nspec, nbands, m, k
-        real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk
+        real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk, wa_m
         logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw, host_m, imf, dev, zimf, grad
         logical  :: cue
         integer  :: st_cue
@@ -414,6 +414,11 @@ contains
         type(params_core), pointer :: pl
         integer,  pointer, contiguous :: it_tesc(:), iq(:), iu(:), ita(:), zlo(:), zhi(:)
         real(WP), pointer, contiguous :: wq(:), wu(:), gam(:), wta(:), dz(:), zcol(:), lum_linear(:), wext(:,:)
+        ! [alpha/Fe]: the stack of bases holds naf planes of nz slabs; each model blends the two planes
+        ! alo, alo + 1 with weight da (zlo, zhi are slabs of plane alo; nzs = nz is the plane stride, 0 without
+        ! an [alpha/Fe] axis)
+        real(WP), pointer, contiguous :: da(:)
+        integer :: naf, nzs, ia_lo, iz0
         logical,  pointer, contiguous :: emis(:), agn_on(:)
         real(WP), pointer, contiguous :: s_abs(:), s_norm(:), s_esc(:), s_line(:), msum(:), lsum(:)
         real(WP), pointer, contiguous :: msy(:), mso(:), lsy(:), lso(:)
@@ -617,7 +622,7 @@ contains
         end if
         nw = 1
         if (given_w .or. host_w) nw = nt * nzw * n_mod
-        allocate(ipk(6 * n_mod), rpk(6 * n_mod + nt + nw), lpk(2 * n_mod), rout(10 * n_mod))
+        allocate(ipk(6 * n_mod), rpk(7 * n_mod + nt + nw), lpk(2 * n_mod), rout(10 * n_mod))
         it_tesc => ipk(1:n_mod)
         iq => ipk(n_mod + 1:2 * n_mod)
         iu => ipk(2 * n_mod + 1:3 * n_mod)
@@ -631,6 +636,7 @@ contains
         dz => rpk(4 * n_mod + 1:5 * n_mod)
         zcol => rpk(5 * n_mod + 1:6 * n_mod)
         lum_linear => rpk(6 * n_mod + 1:6 * n_mod + nt)
+        da => rpk(6 * n_mod + nt + nw + 1:7 * n_mod + nt + nw)
         if (nw > 1) then
             wext(1:nt * nzw, 1:n_mod) => rpk(6 * n_mod + nt + 1:6 * n_mod + nt + nw)
         else
@@ -676,13 +682,31 @@ contains
         ! Per-model metallicity: a basis per metallicity of the context (interpolated at logzsol,
         ! unless the weights cover the metallicities)
         zmode = nzb > 1 .and. .not. zw
-        if ((zmode .or. (zw .and. nzb > 1)) .and. nzb /= ctx%state%nz) then
+        naf = 1
+        if (.not. imf .and. allocated(ctx%state%afe_basis)) naf = size(ctx%state%afe_basis)
+        if ((zmode .or. (zw .and. nzb > 1)) .and. nzb /= ctx%state%nz * naf) then
             status = 3; return
         end if
+        ! [alpha/Fe]: not with weights over ages and metallicities (they would need a plane too) nor the IMF per model
+        if (naf > 1 .and. (zw .or. imf)) then
+            status = 2; return
+        end if
         zlo = 1; zhi = 1; dz = 0.0_wp
+        da = 0.0_wp
+        nzs = 0
         if (zmode) then
             do m = 1, n_mod
                 call metallicity_interval(ctx, psets(m)%logzsol, zlo(m), dz(m))
+                zhi(m) = zlo(m) + 1
+            end do
+        end if
+        if (naf > 1) then
+            ! Plane interval and weight of the model's [alpha/Fe] (clamped to the grid: the flux of an
+            ! extrapolated plane could be negative), zlo, zhi the slabs of the lower plane
+            nzs = ctx%state%nz
+            do m = 1, n_mod
+                call afe_interval(ctx%state%afe_basis, psets(m)%afe, ia_lo, da(m))
+                zlo(m) = zlo(m) + nzs * (ia_lo - 1)
                 zhi(m) = zlo(m) + 1
             end do
         end if
@@ -969,10 +993,16 @@ contains
                     if (w > SAFE_FLOOR) then
                         if (zmode) then
                             ! The interpolated SSP's mass and L_bol (compute_interpolated_ssp)
-                            mk = w * ((1.0_wp - dz(m)) * bas_mass(k, zlo(m)) + &
-                                      dz(m) * bas_mass(k, zhi(m)))
-                            lk = w * 10.0_wp**((1.0_wp - dz(m)) * bas_lbol(k, zlo(m)) + &
-                                               dz(m) * bas_lbol(k, zhi(m)))
+                            mk = (1.0_wp - dz(m)) * bas_mass(k, zlo(m)) + dz(m) * bas_mass(k, zhi(m))
+                            lk = (1.0_wp - dz(m)) * bas_lbol(k, zlo(m)) + dz(m) * bas_lbol(k, zhi(m))
+                            if (nzs > 0) then
+                                mk = (1.0_wp - da(m)) * mk + da(m) * ((1.0_wp - dz(m)) * bas_mass(k, zlo(m) + nzs) + &
+                                                                      dz(m) * bas_mass(k, zhi(m) + nzs))
+                                lk = (1.0_wp - da(m)) * lk + da(m) * ((1.0_wp - dz(m)) * bas_lbol(k, zlo(m) + nzs) + &
+                                                                      dz(m) * bas_lbol(k, zhi(m) + nzs))
+                            end if
+                            mk = w * mk
+                            lk = w * 10.0_wp**lk
                         else
                             mk = w * bas_mass(k, 1)
                             lk = w * lum_linear(k)
@@ -1009,6 +1039,9 @@ contains
             ! (done above, from the operator)
         else if (zw) then
             call age_sums_w(nspec, nt, nzw, n_mod, ctx%state%ssp_basis_spec, wz, it_tesc, yo)
+        else if (zmode .and. nzs > 0) then
+            call age_sums_z4(nspec, nt, size(ctx%state%ssp_basis_spec, 3), nzs, n_mod, ctx%state%ssp_basis_spec, w2, &
+                             it_tesc, zlo, dz, da, yo)
         else if (zmode) then
             call age_sums_z(nspec, nt, size(ctx%state%ssp_basis_spec, 3), n_mod, ctx%state%ssp_basis_spec, w2, w2, &
                             it_tesc, zlo, zhi, dz, yo)
@@ -1016,7 +1049,7 @@ contains
             call age_sums(nspec, nt, n_mod, ctx%state%ssp_basis_spec(:, :, 1), w2, it_tesc, yo)
         end if
         if (neb .and. imf) then
-            call add_nebular_batch(ctx, n_mod, nspec, nt, nzb, nobasis, w2, it_tesc, zlo, zhi, dz, nb, yo, eml, &
+            call add_nebular_batch(ctx, n_mod, nspec, nt, nzb, nobasis, w2, it_tesc, zlo, zhi, dz, da, nzs, nb, yo, eml, &
                                    q_model=.true.)
         else if (neb .and. cue) then
             allocate(gas(5, n_mod))
@@ -1025,10 +1058,10 @@ contains
                              psets(m)%gas_logco]
             end do
             call add_nebular_batch(ctx, n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, w2, it_tesc, &
-                                   zlo, zhi, dz, nb, yo, eml, q_model=.false., gas=gas)
+                                   zlo, zhi, dz, da, nzs, nb, yo, eml, q_model=.false., gas=gas)
         else if (neb) then
             call add_nebular_batch(ctx, n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, w2, it_tesc, &
-                                   zlo, zhi, dz, nb, yo, eml, q_model=.false.)
+                                   zlo, zhi, dz, da, nzs, nb, yo, eml, q_model=.false.)
         end if
         if (neb) call attenuate_lines(ctx, PBUF_ARG, n_mod, nb%lum, nb%llo, eml, s_line)
         ! Intrinsic young and old spectra (the input of the attenuation), on request
@@ -1152,13 +1185,22 @@ contains
             if (present(mass_bar) .and. imf) mbx = mass_bar(1:n_mod)
             ! The template's interpolation weights against q_PAH, U_min and gamma (dl07_indices: linear in
             ! the bracketing interval, clamped to the grid; one-sided at the nodes)
-            allocate(dchain(7, n_mod))
+            allocate(dchain(8, n_mod))
             dchain = 0.0_wp
             ! Per-model metallicity: dz / d logzsol (metallicity_interval, not clamped)
             if (zmode) then
                 do m = 1, n_mod
-                    dchain(7, m) = 1.0_wp / (log10(ctx%state%zlegend(zhi(m)) / ctx%state%zsol) - &
-                                             log10(ctx%state%zlegend(zlo(m)) / ctx%state%zsol))
+                    ! (zlo is a slab of plane ia: its metallicity index is zlo - nzs (ia - 1))
+                    iz0 = zlo(m)
+                    if (nzs > 0) iz0 = zlo(m) - nzs * ((zlo(m) - 1) / nzs)
+                    dchain(7, m) = 1.0_wp / (log10(ctx%state%zlegend(iz0 + 1) / ctx%state%zsol) - &
+                                             log10(ctx%state%zlegend(iz0) / ctx%state%zsol))
+                    ! [alpha/Fe]: d da / d afe, 1 / (the plane interval's width) inside the grid, zero where clamped
+                    if (nzs > 0) then
+                        ia_lo = (zlo(m) - 1) / nzs + 1
+                        if (psets(m)%afe >= ctx%state%afe_basis(1) .and. psets(m)%afe <= ctx%state%afe_basis(naf)) &
+                            dchain(8, m) = 1.0_wp / (ctx%state%afe_basis(ia_lo + 1) - ctx%state%afe_basis(ia_lo))
+                    end if
                 end do
             end if
             ! Nebular: gas_logz and gas_logu as get_grid_indices_weights (linear in the interval,
@@ -1187,7 +1229,7 @@ contains
             end if
             if (any_emis) then
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
-                                    it_tesc, zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
+                                    it_tesc, zlo, zhi, dz, da, nzs, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
                                     absorbed, ysave, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
                                     neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
                                     psets(1)%min_wave_smooth, psets(1)%max_wave_smooth, &
@@ -1195,7 +1237,7 @@ contains
                                     mags_bar, spec_bar, params_bar, wbl, gas)
             else
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
-                                    it_tesc, zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
+                                    it_tesc, zlo, zhi, dz, da, nzs, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
                                     absorbed, yo, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
                                     neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
                                     psets(1)%min_wave_smooth, psets(1)%max_wave_smooth, &
@@ -1214,7 +1256,13 @@ contains
 #endif
                 do m = 1, n_mod
                     do k = 1, nt
-                        if (zmode) then
+                        if (zmode .and. nzs > 0) then
+                            wbl(k, m) = wbl(k, m) + mass_bar(m) * ( &
+                                (1.0_wp - da(m)) * ((1.0_wp - dz(m)) * ctx%state%ssp_basis_mass(k, zlo(m)) + &
+                                                    dz(m) * ctx%state%ssp_basis_mass(k, zhi(m))) + &
+                                da(m) * ((1.0_wp - dz(m)) * ctx%state%ssp_basis_mass(k, zlo(m) + nzs) + &
+                                         dz(m) * ctx%state%ssp_basis_mass(k, zhi(m) + nzs)))
+                        else if (zmode) then
                             wbl(k, m) = wbl(k, m) + mass_bar(m) * ((1.0_wp - dz(m)) * ctx%state%ssp_basis_mass(k, zlo(m)) + &
                                                                    dz(m) * ctx%state%ssp_basis_mass(k, zhi(m)))
                         else
@@ -1223,11 +1271,28 @@ contains
                     end do
                     if (zmode .and. present(params_bar)) then
                         w = 0.0_wp
+                        wa_m = 0.0_wp
                         do k = 1, nt
-                            if (weights(k, 1, m) > SAFE_FLOOR) w = w + weights(k, 1, m) * &
-                                (ctx%state%ssp_basis_mass(k, zhi(m)) - ctx%state%ssp_basis_mass(k, zlo(m)))
+                            if (weights(k, 1, m) > SAFE_FLOOR) then
+                                if (nzs > 0) then
+                                    w = w + weights(k, 1, m) * &
+                                        ((1.0_wp - da(m)) * (ctx%state%ssp_basis_mass(k, zhi(m)) - &
+                                                             ctx%state%ssp_basis_mass(k, zlo(m))) + &
+                                         da(m) * (ctx%state%ssp_basis_mass(k, zhi(m) + nzs) - &
+                                                  ctx%state%ssp_basis_mass(k, zlo(m) + nzs)))
+                                    wa_m = wa_m + weights(k, 1, m) * &
+                                        ((1.0_wp - dz(m)) * (ctx%state%ssp_basis_mass(k, zlo(m) + nzs) - &
+                                                             ctx%state%ssp_basis_mass(k, zlo(m))) + &
+                                         dz(m) * (ctx%state%ssp_basis_mass(k, zhi(m) + nzs) - &
+                                                  ctx%state%ssp_basis_mass(k, zhi(m))))
+                                else
+                                    w = w + weights(k, 1, m) * &
+                                        (ctx%state%ssp_basis_mass(k, zhi(m)) - ctx%state%ssp_basis_mass(k, zlo(m)))
+                                end if
+                            end if
                         end do
                         params_bar(BGRAD_LOGZSOL, m) = params_bar(BGRAD_LOGZSOL, m) + mass_bar(m) * w * dchain(7, m)
+                        if (nzs > 0) params_bar(BGRAD_AFE, m) = params_bar(BGRAD_AFE, m) + mass_bar(m) * wa_m * dchain(8, m)
                     end if
                 end do
             end if
@@ -1868,12 +1933,13 @@ contains
     !> q_model: the ionizing photons per age are per model (nb%q0(t, m), the IMF per model) and
     !> the EUV pixels of yo already have the escaping fraction (opensps_ssp_batch); basis is
     !> then not read.
-    subroutine add_nebular_batch(ctx, n_mod, nspec, nt, nzb, basis, w2, it_tesc, zlo, zhi, dz, nb, yo, eml, q_model, &
+    subroutine add_nebular_batch(ctx, n_mod, nspec, nt, nzb, basis, w2, it_tesc, zlo, zhi, dz, da, nzs, nb, yo, eml, q_model, &
                                  gas)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)              :: n_mod, nspec, nt, nzb, it_tesc(:), zlo(:), zhi(:)
         real(KP), intent(in), contiguous :: basis(:,:,:), w2(:,:)
-        real(WP), intent(in)             :: dz(:)
+        real(WP), intent(in)             :: dz(:), da(:)
+        integer, intent(in)              :: nzs
         type(nebular_setup_t), intent(inout) :: nb
         real(KP), intent(inout)          :: yo(:,:)
         real(KP), intent(out)            :: eml(:,:)
@@ -1888,13 +1954,13 @@ contains
         ! (the shapes of basis and nb%q0 as they are: with the IMF per model, basis is a placeholder
         ! and q0 has a column per model, not per metallicity)
         call nebular_kernels(ctx, n_mod, nspec, nt, nzb, size(basis, 1), size(basis, 2), size(basis, 3), &
-                             size(nb%q0, 2), basis, w2, it_tesc, zlo, zhi, dz, &
+                             size(nb%q0, 2), basis, w2, it_tesc, zlo, zhi, dz, da, nzs, &
                              nb%nt_neb, nb%whlylim, nb%cont, nb%lines_in_spec, nb%xrb, nb%ia, nb%wa, nb%dwa, &
                              nb%newr, nb%q0, nb%iz, nb%wz, nb%iu, nb%wu, nb%fesc, nb%fabs, nb%cy, nb%co, nb%lns, &
                              nb%lum, nb%lptr, nb%lid, yo, eml, q_model, .not. present(gas))
         if (present(gas) .and. nb%nt_neb >= 1) then
             call cue_nebular(ctx, n_mod, nspec, nt, nzb, size(basis, 1), size(basis, 2), size(basis, 3), basis, w2, &
-                             it_tesc, zlo, zhi, dz, nb%nt_neb, nb%cont, size(nb%q0, 2), nb%q0, nb%fabs, gas, &
+                             it_tesc, zlo, zhi, dz, da, nzs, nb%nt_neb, nb%cont, size(nb%q0, 2), nb%q0, nb%fabs, gas, &
                              nb%lum, yo, eml)
             if (nb%lines_in_spec) call line_profiles(ctx, n_mod, nspec, nb%lum, nb%lptr, nb%lid, yo)
         end if
@@ -1909,13 +1975,13 @@ contains
     !> absorbed photons (it attenuates with the stars that ionize it, as with the grids). Lines go to
     !> the context's line list (cue_line_map; unmatched lines 0); the continuum, on cue's grid, is
     !> splined to the spectral grid as cue does (none at and below 911.6 A).
-    subroutine cue_nebular(ctx, n_mod, nspec, nt, nzb, nb1, nb2, nb3, basis, w2, it_tesc, zlo, zhi, dz, nt_neb, &
+    subroutine cue_nebular(ctx, n_mod, nspec, nt, nzb, nb1, nb2, nb3, basis, w2, it_tesc, zlo, zhi, dz, da, nzs, nt_neb, &
                            cont, nq0, q0, fabs, gas, lum, yo, eml)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)     :: n_mod, nspec, nt, nzb, nb1, nb2, nb3, nt_neb, nq0
-        integer, intent(in)     :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
+        integer, intent(in)     :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod), nzs
         real(KP), intent(in)    :: basis(nb1, nb2, nb3), w2(nt, 2 * n_mod)
-        real(WP), intent(in)    :: dz(n_mod), q0(nt_neb, nq0), fabs(n_mod), gas(5, n_mod)
+        real(WP), intent(in)    :: dz(n_mod), da(n_mod), q0(nt_neb, nq0), fabs(n_mod), gas(5, n_mod)
         logical, intent(in)     :: cont
         real(KP), intent(inout) :: lum(NEMLINE, 2 * n_mod), yo(nspec, 2 * n_mod)
         real(KP), intent(out)   :: eml(NEMLINE, n_mod)
@@ -1953,7 +2019,7 @@ contains
             ! The ionizing spectrum of the nebular ages (escape not applied: it scales, not shapes) and
             ! the absorbed ionizing photons of the young and old nebular ages
             call cue_chunk_sources(c0, nc, n_mod, nion, nt, nt_neb, nzb, nb1, nb2, nb3, nq0, basis, w2, it_tesc, &
-                                   zlo, zhi, dz, q0, fabs, sion, qy, qo)
+                                   zlo, zhi, dz, da, nzs, q0, fabs, sion, qy, qo)
             call cue_ionizing_params(nc, nion, lam_ion, sion, ion)
             call cue_inputs(nc, ion, gas(1, c0 + 1), theta, logq)
             call cue_forward(cue_w, nc, theta, line_log, cont_log, fp64=ctx%cue_fp64_val == 1)
@@ -2033,11 +2099,11 @@ contains
     !> w2 of the young and old columns, the basis interpolated in log Z with the models' dz) over the
     !> first nion pixels, and the absorbed ionizing photons of the young and old ages, qy, qo.
     subroutine cue_chunk_sources(c0, nc, n_mod, nion, nt, nt_neb, nzb, nb1, nb2, nb3, nq0, basis, w2, it_tesc, zlo, zhi, &
-                                 dz, q0, fabs, sion, qy, qo)
+                                 dz, da, nzs, q0, fabs, sion, qy, qo)
         integer, intent(in)   :: c0, nc, n_mod, nion, nt, nt_neb, nzb, nb1, nb2, nb3, nq0
         real(KP), intent(in)  :: basis(nb1, nb2, nb3), w2(nt, 2 * n_mod)
-        integer, intent(in)   :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
-        real(WP), intent(in)  :: dz(n_mod), q0(nt_neb, nq0), fabs(n_mod)
+        integer, intent(in)   :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod), nzs
+        real(WP), intent(in)  :: dz(n_mod), da(n_mod), q0(nt_neb, nq0), fabs(n_mod)
         real(KP), intent(out) :: sion(nion, nc)
         real(WP), intent(out) :: qy(nc), qo(nc)
         integer  :: m, i, t
@@ -2054,7 +2120,12 @@ contains
                 s = 0.0_KP
                 dzk = real(dz(c0 + m), KP)
                 do t = 1, nt_neb
-                    if (nzb > 1) then
+                    if (nzs > 0) then
+                        bk = (1.0_KP - real(da(c0 + m), KP)) * ((1.0_KP - dzk) * basis(i, t, zlo(c0 + m)) + &
+                                                                dzk * basis(i, t, zhi(c0 + m))) + &
+                             real(da(c0 + m), KP) * ((1.0_KP - dzk) * basis(i, t, zlo(c0 + m) + nzs) + &
+                                                     dzk * basis(i, t, zhi(c0 + m) + nzs))
+                    else if (nzb > 1) then
                         bk = (1.0_KP - dzk) * basis(i, t, zlo(c0 + m)) + dzk * basis(i, t, zhi(c0 + m))
                     else
                         bk = basis(i, t, 1)
@@ -2073,7 +2144,12 @@ contains
             qy(m) = 0.0_wp
             qo(m) = 0.0_wp
             do t = 1, nt_neb
-                if (nzb > 1) then
+                if (nzs > 0) then
+                    q = abs(((1.0_wp - da(c0 + m)) * ((1.0_wp - dz(c0 + m)) * q0(t, zlo(c0 + m)) + &
+                                                       dz(c0 + m) * q0(t, zhi(c0 + m))) + &
+                             da(c0 + m) * ((1.0_wp - dz(c0 + m)) * q0(t, zlo(c0 + m) + nzs) + &
+                                           dz(c0 + m) * q0(t, zhi(c0 + m) + nzs))) * fabs(c0 + m))
+                else if (nzb > 1) then
                     q = abs(((1.0_wp - dz(c0 + m)) * q0(t, zlo(c0 + m)) + dz(c0 + m) * q0(t, zhi(c0 + m))) * &
                             fabs(c0 + m))
                 else
@@ -2108,25 +2184,25 @@ contains
     !> that photon rate is that of the linear form, as for the CLOUDY grids' weights.
     !> Differences from the forward at FP32 kernel precision: the cotangents are formed in FP64, the
     !> networks' reverse pass is that of the FP64 hidden layers (cue_forward_adjoint).
-    subroutine cue_nebular_backward(ctx, n_mod, nspec, nt, nzb, nb1, nb2, nb3, basis, w2, it_tesc, zlo, zhi, dz, nt_neb, &
+    subroutine cue_nebular_backward(ctx, n_mod, nspec, nt, nzb, nb1, nb2, nb3, basis, w2, it_tesc, zlo, zhi, dz, da, nzs, nt_neb, &
                                     cont, lines, nq0, q0, fabs, gas, gw, lbar, nwb, gneb, gcue)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)     :: n_mod, nspec, nt, nzb, nb1, nb2, nb3, nt_neb, nq0
-        integer, intent(in)     :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
+        integer, intent(in)     :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod), nzs
         real(KP), intent(in)    :: basis(nb1, nb2, nb3), w2(nt, 2 * n_mod), gw(nspec, 2 * n_mod)
         real(KP), intent(in)    :: lbar(:,:)
-        real(WP), intent(in)    :: dz(n_mod), q0(nt_neb, nq0), fabs(n_mod), gas(5, n_mod)
+        real(WP), intent(in)    :: dz(n_mod), da(n_mod), q0(nt_neb, nq0), fabs(n_mod), gas(5, n_mod)
         logical, intent(in)     :: cont, lines
         real(WP), intent(out)   :: nwb(max(1, nt_neb), n_mod), gcue(5, n_mod)
-        real(WP), intent(inout) :: gneb(5, n_mod)
+        real(WP), intent(inout) :: gneb(6, n_mod)
 
         integer  :: nion, ncw, nl, ch, c0, nc, m, i, t, k, map(NEMLINE)
         real(WP), allocatable :: lam_ion(:), ion(:,:), theta(:,:), logq(:), qy(:), qo(:), line_log(:,:), cont_log(:,:)
         real(WP), allocatable :: line_bar(:,:), cont_bar(:,:), theta_bar(:,:), ion_bar(:,:), sbar(:,:)
         real(WP), allocatable :: uy(:,:), uo(:,:), mb(:,:,:), el(:,:), lqb(:), qyb(:), qob(:)
-        real(WP), allocatable :: tsb(:,:), tdz(:,:), tfa(:,:)
+        real(WP), allocatable :: tsb(:,:), tdz(:,:), tfa(:,:), tda(:,:)
         real(KP), allocatable :: sion(:,:)
-        real(WP) :: e, ex, by, bo, gl, qt, fy, fyb, ssum, qtb, lin, sg, wq, sb, dbk, totlq, bk0, bk1
+        real(WP) :: e, ex, by, bo, gl, qt, fy, fyb, ssum, qtb, lin, sg, wq, sb, dbk, totlq, bk0, bk1, bk2, bk3, dba
         real(WP), parameter :: LN10 = log(10.0_wp)
 
         if (nt_neb < 1) then
@@ -2164,16 +2240,17 @@ contains
         allocate(sion(nion, ch), ion(CUE_NION, ch), theta(CUE_NIN, ch), logq(ch), qy(ch), qo(ch), &
                  line_log(nl, ch), cont_log(ncw, ch), line_bar(nl, ch), cont_bar(ncw, ch), theta_bar(CUE_NIN, ch), &
                  ion_bar(CUE_NION, ch), sbar(nion, ch), uy(ncw, ch), uo(ncw, ch), mb(ncw, ch, 2), el(ncw, ch), &
-                 lqb(ch), qyb(ch), qob(ch), tsb(max(1, nt_neb), ch), tdz(max(1, nt_neb), ch), tfa(max(1, nt_neb), ch))
+                 lqb(ch), qyb(ch), qob(ch), tsb(max(1, nt_neb), ch), tdz(max(1, nt_neb), ch), tfa(max(1, nt_neb), ch), &
+                 tda(max(1, nt_neb), ch))
 #ifdef OMP_TARGET
         !$omp target data map(to: lam_ion, map, gas) map(alloc: sion, ion, theta, logq, qy, qo, line_log, cont_log, &
-        !$omp&  line_bar, cont_bar, theta_bar, ion_bar, sbar, uy, uo, mb, el, lqb, qyb, qob, tsb, tdz, tfa)
+        !$omp&  line_bar, cont_bar, theta_bar, ion_bar, sbar, uy, uo, mb, el, lqb, qyb, qob, tsb, tdz, tfa, tda)
 #endif
         do c0 = 0, n_mod - 1, ch
             nc = min(ch, n_mod - c0)
             ! The forward: the source, the fit, the networks
             call cue_chunk_sources(c0, nc, n_mod, nion, nt, nt_neb, nzb, nb1, nb2, nb3, nq0, basis, w2, it_tesc, &
-                                   zlo, zhi, dz, q0, fabs, sion, qy, qo)
+                                   zlo, zhi, dz, da, nzs, q0, fabs, sion, qy, qo)
             call cue_ionizing_params(nc, nion, lam_ion, sion, ion)
             call cue_inputs(nc, ion, gas(1, c0 + 1), theta, logq)
             call cue_forward(cue_w, nc, theta, line_log, cont_log, fp64=ctx%cue_fp64_val == 1)
@@ -2274,13 +2351,18 @@ contains
             ! The sources' reverse pass: per (model, nebular age) the weights' cotangent, and the
             ! metallicity interpolation's and the absorbed fraction's
 #if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do collapse(2) private(i, lin, qt, sg, wq, sb, dbk, bk0, bk1, e)
+            !$omp target teams distribute parallel do collapse(2) private(i, lin, qt, sg, wq, sb, dbk, dba, bk0, bk1, bk2, bk3, e)
 #elif defined(_OPENMP)
-            !$omp parallel do collapse(2) private(i, lin, qt, sg, wq, sb, dbk, bk0, bk1, e)
+            !$omp parallel do collapse(2) private(i, lin, qt, sg, wq, sb, dbk, dba, bk0, bk1, bk2, bk3, e)
 #endif
             do m = 1, nc
                 do t = 1, nt_neb
-                    if (nzb > 1) then
+                    if (nzs > 0) then
+                        lin = (1.0_wp - da(c0 + m)) * ((1.0_wp - dz(c0 + m)) * q0(t, zlo(c0 + m)) + &
+                                                        dz(c0 + m) * q0(t, zhi(c0 + m))) + &
+                              da(c0 + m) * ((1.0_wp - dz(c0 + m)) * q0(t, zlo(c0 + m) + nzs) + &
+                                            dz(c0 + m) * q0(t, zhi(c0 + m) + nzs))
+                    else if (nzb > 1) then
                         lin = (1.0_wp - dz(c0 + m)) * q0(t, zlo(c0 + m)) + dz(c0 + m) * q0(t, zhi(c0 + m))
                     else
                         lin = q0(t, 1)
@@ -2297,8 +2379,18 @@ contains
                     end if
                     sb = 0.0_wp
                     dbk = 0.0_wp
+                    dba = 0.0_wp
                     do i = 1, nion
-                        if (nzb > 1) then
+                        if (nzs > 0) then
+                            bk0 = real(basis(i, t, zlo(c0 + m)), WP)
+                            bk1 = real(basis(i, t, zhi(c0 + m)), WP)
+                            bk2 = real(basis(i, t, zlo(c0 + m) + nzs), WP)
+                            bk3 = real(basis(i, t, zhi(c0 + m) + nzs), WP)
+                            sb = sb + sbar(i, m) * ((1.0_wp - da(c0 + m)) * ((1.0_wp - dz(c0 + m)) * bk0 + dz(c0 + m) * bk1) + &
+                                                    da(c0 + m) * ((1.0_wp - dz(c0 + m)) * bk2 + dz(c0 + m) * bk3))
+                            dbk = dbk + sbar(i, m) * ((1.0_wp - da(c0 + m)) * (bk1 - bk0) + da(c0 + m) * (bk3 - bk2))
+                            dba = dba + sbar(i, m) * ((1.0_wp - dz(c0 + m)) * (bk2 - bk0) + dz(c0 + m) * (bk3 - bk1))
+                        else if (nzb > 1) then
                             bk0 = real(basis(i, t, zlo(c0 + m)), WP)
                             bk1 = real(basis(i, t, zhi(c0 + m)), WP)
                             sb = sb + sbar(i, m) * ((1.0_wp - dz(c0 + m)) * bk0 + dz(c0 + m) * bk1)
@@ -2310,8 +2402,18 @@ contains
                     nwb(t, c0 + m) = e * qt + sb
                     tfa(t, m) = e * wq * sg * lin
                     tdz(t, m) = (real(w2(t, c0 + m), WP) + real(w2(t, n_mod + c0 + m), WP)) * dbk
-                    if (nzb > 1) tdz(t, m) = tdz(t, m) + &
-                                             e * wq * sg * fabs(c0 + m) * (q0(t, zhi(c0 + m)) - q0(t, zlo(c0 + m)))
+                    tda(t, m) = 0.0_wp
+                    if (nzs > 0) then
+                        tdz(t, m) = tdz(t, m) + e * wq * sg * fabs(c0 + m) * &
+                                    ((1.0_wp - da(c0 + m)) * (q0(t, zhi(c0 + m)) - q0(t, zlo(c0 + m))) + &
+                                     da(c0 + m) * (q0(t, zhi(c0 + m) + nzs) - q0(t, zlo(c0 + m) + nzs)))
+                        tda(t, m) = (real(w2(t, c0 + m), WP) + real(w2(t, n_mod + c0 + m), WP)) * dba + &
+                                    e * wq * sg * fabs(c0 + m) * &
+                                    ((1.0_wp - dz(c0 + m)) * (q0(t, zlo(c0 + m) + nzs) - q0(t, zlo(c0 + m))) + &
+                                     dz(c0 + m) * (q0(t, zhi(c0 + m) + nzs) - q0(t, zhi(c0 + m))))
+                    else if (nzb > 1) then
+                        tdz(t, m) = tdz(t, m) + e * wq * sg * fabs(c0 + m) * (q0(t, zhi(c0 + m)) - q0(t, zlo(c0 + m)))
+                    end if
                 end do
             end do
 #if defined(OMP_TARGET)
@@ -2324,9 +2426,11 @@ contains
                 gneb(2, c0 + m) = 0.0_wp
                 gneb(3, c0 + m) = 0.0_wp
                 gneb(5, c0 + m) = 0.0_wp
+                gneb(6, c0 + m) = 0.0_wp
                 do t = 1, nt_neb
                     gneb(3, c0 + m) = gneb(3, c0 + m) + tfa(t, m)
                     gneb(5, c0 + m) = gneb(5, c0 + m) + tdz(t, m)
+                    gneb(6, c0 + m) = gneb(6, c0 + m) + tda(t, m)
                 end do
             end do
         end do
@@ -2336,7 +2440,7 @@ contains
     end subroutine cue_nebular_backward
 
     !> The kernels of add_nebular_batch, on the components of its nebular_setup_t.
-    subroutine nebular_kernels(ctx, n_mod, nspec, nt, nzb, nb1, nb2, nb3, nq0, basis, w2, it_tesc, zlo, zhi, dz, &
+    subroutine nebular_kernels(ctx, n_mod, nspec, nt, nzb, nb1, nb2, nb3, nq0, basis, w2, it_tesc, zlo, zhi, dz, da, nzs, &
                                nb_nt_neb, nb_whlylim, nb_cont, nb_lines_in_spec, nb_xrb, nb_ia, nb_wa, nb_dwa, &
                                nb_newr, nb_q0, nb_iz, nb_wz, nb_iu, nb_wu, nb_fesc, nb_fabs, nb_cy, nb_co, nb_lns, &
                                nb_lum, nb_lptr, nb_lid, yo, eml, q_model, grid)
@@ -2351,9 +2455,9 @@ contains
         integer, intent(in)              :: nb1, nb2, nb3, nq0
         ! Explicit-shape arguments (no descriptors to map per launch), except nb_lid, whose size is not
         ! known here (the pixels' line lists)
-        integer, intent(in)              :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
+        integer, intent(in)              :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod), nzs
         real(KP), intent(in)             :: basis(nb1, nb2, nb3), w2(nt, 2 * n_mod)
-        real(WP), intent(in)             :: dz(n_mod)
+        real(WP), intent(in)             :: dz(n_mod), da(n_mod)
         logical, intent(in)              :: nb_cont, nb_lines_in_spec, nb_xrb
         integer, intent(in)              :: nb_ia(max(1, nb_nt_neb)), nb_iz(n_mod), nb_iu(n_mod), nb_lptr(nspec + 1)
         integer, intent(in), contiguous  :: nb_lid(:)
@@ -2463,7 +2567,12 @@ contains
                     o = 0.0_KP
                     dzk = real(dz(m), KP)
                     do k = 1, nt
-                        if (nzb > 1) then
+                        if (nzs > 0) then
+                            bk = (1.0_KP - real(da(m), KP)) * ((1.0_KP - dzk) * basis(i, k, zlo(m)) + &
+                                                               dzk * basis(i, k, zhi(m))) + &
+                                 real(da(m), KP) * ((1.0_KP - dzk) * basis(i, k, zlo(m) + nzs) + &
+                                                    dzk * basis(i, k, zhi(m) + nzs))
+                        else if (nzb > 1) then
                             bk = (1.0_KP - dzk) * basis(i, k, zlo(m)) + dzk * basis(i, k, zhi(m))
                         else
                             bk = basis(i, k, 1)
@@ -2510,7 +2619,10 @@ contains
                     if (q_model) then
                         q = abs(nb_q0(t, m) * nb_fabs(m))
                     else
-                        q = abs(((1.0_wp - dz(m)) * nb_q0(t, zlo(m)) + dz(m) * nb_q0(t, zhi(m))) * nb_fabs(m))
+                        q = ((1.0_wp - dz(m)) * nb_q0(t, zlo(m)) + dz(m) * nb_q0(t, zhi(m)))
+                        if (nzs > 0) q = (1.0_wp - da(m)) * q + da(m) * ((1.0_wp - dz(m)) * nb_q0(t, zlo(m) + nzs) + &
+                                                                       dz(m) * nb_q0(t, zhi(m) + nzs))
+                        q = abs(q * nb_fabs(m))
                     end if
                     if (t <= it_tesc(m)) then
                         wk = w2(t, m)
@@ -2525,7 +2637,10 @@ contains
                     if (q_model) then
                         q = abs(nb_q0(t, m) * nb_fabs(m))
                     else
-                        q = abs(((1.0_wp - dz(m)) * nb_q0(t, zlo(m)) + dz(m) * nb_q0(t, zhi(m))) * nb_fabs(m))
+                        q = ((1.0_wp - dz(m)) * nb_q0(t, zlo(m)) + dz(m) * nb_q0(t, zhi(m)))
+                        if (nzs > 0) q = (1.0_wp - da(m)) * q + da(m) * ((1.0_wp - dz(m)) * nb_q0(t, zlo(m) + nzs) + &
+                                                                       dz(m) * nb_q0(t, zhi(m) + nzs))
+                        q = abs(q * nb_fabs(m))
                     end if
                     if (t <= it_tesc(m)) then
                         wk = w2(t, m)
@@ -2686,7 +2801,10 @@ contains
                     if (q_model) then
                         q = abs(nb_q0(t, m) * nb_fabs(m))
                     else
-                        q = abs(((1.0_wp - dz(m)) * nb_q0(t, zlo(m)) + dz(m) * nb_q0(t, zhi(m))) * nb_fabs(m))
+                        q = ((1.0_wp - dz(m)) * nb_q0(t, zlo(m)) + dz(m) * nb_q0(t, zhi(m)))
+                        if (nzs > 0) q = (1.0_wp - da(m)) * q + da(m) * ((1.0_wp - dz(m)) * nb_q0(t, zlo(m) + nzs) + &
+                                                                       dz(m) * nb_q0(t, zhi(m) + nzs))
+                        q = abs(q * nb_fabs(m))
                     end if
                     if (q <= SAFE_FLOOR) cycle
                     a = nb_ia(t)
@@ -3167,6 +3285,17 @@ contains
         end associate
     end subroutine add_agn_batch
 
+    !> Plane interval and weight of an [alpha/Fe] in the grid of the resident bases: the interval index
+    !> ia_lo (1 .. size(grid) - 1) and d in [0, 1] (clamped: no extrapolation in [alpha/Fe]).
+    subroutine afe_interval(grid, x, ia_lo, d)
+        real(WP), intent(in)  :: grid(:), x
+        integer, intent(out)  :: ia_lo
+        real(WP), intent(out) :: d
+
+        ia_lo = max(1, min(find_interval(grid, x), size(grid) - 1))
+        d = max(0.0_wp, min((x - grid(ia_lo)) / (grid(ia_lo + 1) - grid(ia_lo)), 1.0_wp))
+    end subroutine afe_interval
+
     !> Interval and weight of log Z = logzsol in the context's metallicities, as
     !> compute_interpolated_ssp (the weight is not clamped: outside the grid it extrapolates).
     subroutine metallicity_interval(ctx, logzsol, zlo, dz)
@@ -3356,7 +3485,7 @@ contains
               end block
             end do
         end do
-#else
+#elif defined(OMP_TARGET)
         integer, parameter :: MT = 4
         integer  :: mq, i, k, l, mm(MT)
         real(KP) :: bk, y(MT), o(MT), d(MT)
@@ -3390,8 +3519,236 @@ contains
                 end do
             end do
         end do
+#else
+        ! Host: per model and block of pixels, contiguous (vectorizable) passes over the ages (the same arithmetic per
+        ! element as the loops of the device branch)
+        integer, parameter :: PB = 256
+        integer  :: m, ib, i0, n, k, it, i
+        real(KP) :: y(PB), o(PB), d, wk
+
+        !$omp parallel do collapse(2) private(ib, i0, n, k, it, i, y, o, d, wk)
+        do m = 1, n_mod
+            do ib = 1, (nspec + PB - 1) / PB
+                i0 = (ib - 1) * PB + 1
+                n = min(PB, nspec - i0 + 1)
+                it = it_tesc(m)
+                d = real(dz(m), KP)
+                y(1:n) = 0.0_KP
+                o(1:n) = 0.0_KP
+                do k = 1, nt
+                    if (k <= it) then
+                        wk = w2(k, m)
+                        do i = 1, n
+                            y(i) = y(i) + wk * ((1.0_KP - d) * basis(i0 + i - 1, k, zlo(m)) + d * basis(i0 + i - 1, k, zhi(m)))
+                        end do
+                    else
+                        wk = w2(k, n_mod + m)
+                        do i = 1, n
+                            o(i) = o(i) + wk * ((1.0_KP - d) * basis(i0 + i - 1, k, zlo(m)) + d * basis(i0 + i - 1, k, zhi(m)))
+                        end do
+                    end if
+                end do
+                yo(i0:i0 + n - 1, m) = y(1:n)
+                yo(i0:i0 + n - 1, n_mod + m) = o(1:n)
+            end do
+        end do
 #endif
     end subroutine age_sums_z
+
+    !> Age sums with per-model metallicity and [alpha/Fe]: each model's basis is the bilinear blend of four
+    !> slabs, (1 - da) [(1 - dz) b(zlo) + dz b(zlo + 1)] + da [(1 - dz) b(zlo + nzs) + dz b(zlo + nzs + 1)]
+    !> (zlo the slab of the lower [alpha/Fe] plane, nzs the plane stride), formed at kernel precision from the
+    !> four coefficients. Same structure as age_sums_z (portable kernel; also used in cuBLAS builds).
+    subroutine age_sums_z4(nspec, nt, nsl, nzs, n_mod, basis, w2flat, it_tesc, zlo, dz, da, yo)
+        integer, intent(in)  :: nspec, nt, nsl, nzs, n_mod, it_tesc(n_mod), zlo(n_mod)
+        real(KP), intent(in) :: basis(nspec, nt, nsl), w2flat(nt * 2 * n_mod)
+        real(WP), intent(in) :: dz(n_mod), da(n_mod)
+        real(KP), intent(out) :: yo(nspec, 2 * n_mod)
+#if defined(OMP_TARGET) && defined(__flang__)
+        ! LLVM flang / AMD: as age_sums_z (models sorted by their cell so that a tile shares its four slabs;
+        ! PT pixels per thread, MT models per tile). Measured on the R9700 against age_sums_z (N = 1e4, 107
+        ! ages): 1.4x at 5994 pixels with MT = 8, PT = 2; the tile shape matters (spills)
+        integer, parameter :: MT = 8, PT = 2
+        integer  :: m, mq, ip, npt, key, ncell
+        integer, allocatable :: zord(:), starts(:)
+
+        ncell = maxval(zlo(1:n_mod))
+        allocate(zord(n_mod), starts(ncell + 2))
+        starts = 0
+        do m = 1, n_mod
+            starts(zlo(m) + 1) = starts(zlo(m) + 1) + 1
+        end do
+        starts(1) = 1
+        do key = 2, ncell + 1
+            starts(key) = starts(key) + starts(key - 1)
+        end do
+        do m = 1, n_mod
+            zord(starts(zlo(m))) = m
+            starts(zlo(m)) = starts(zlo(m)) + 1
+        end do
+
+        npt = (nspec + PT - 1) / PT
+        !$omp target teams distribute parallel do collapse(2) map(to: zord)
+        do mq = 1, (n_mod + MT - 1) / MT
+            do ip = 1, npt
+              block
+                integer  :: i, k, l, p, mm(MT), ii(PT), s0, s1, s2, s3, it(MT), oy(MT), oo(MT)
+                real(KP) :: b0(PT), b1(PT), b2(PT), b3(PT), bk, wy, y(PT, MT), o(PT, MT)
+                real(KP) :: c0(MT), c1(MT), c2(MT), c3(MT)
+                logical  :: same
+                do l = 1, MT
+                    mm(l) = zord(min((mq - 1) * MT + l, n_mod))
+                    c0(l) = real((1.0_wp - dz(mm(l))) * (1.0_wp - da(mm(l))), KP)
+                    c1(l) = real(dz(mm(l)) * (1.0_wp - da(mm(l))), KP)
+                    c2(l) = real((1.0_wp - dz(mm(l))) * da(mm(l)), KP)
+                    c3(l) = real(dz(mm(l)) * da(mm(l)), KP)
+                    it(l) = it_tesc(mm(l))
+                    oy(l) = (mm(l) - 1) * nt
+                    oo(l) = (n_mod + mm(l) - 1) * nt
+                end do
+                do p = 1, PT
+                    ii(p) = min(ip + (p - 1) * npt, nspec)
+                end do
+                y = 0.0_KP
+                o = 0.0_KP
+                same = .true.
+                do l = 2, MT
+                    if (zlo(mm(l)) /= zlo(mm(1))) same = .false.
+                end do
+                if (same) then
+                    s0 = zlo(mm(1))
+                    s1 = s0 + 1
+                    s2 = s0 + nzs
+                    s3 = s2 + 1
+                    do k = 1, nt
+                        do p = 1, PT
+                            b0(p) = basis(ii(p), k, s0)
+                            b1(p) = basis(ii(p), k, s1)
+                            b2(p) = basis(ii(p), k, s2)
+                            b3(p) = basis(ii(p), k, s3)
+                        end do
+                        do l = 1, MT
+                            if (k <= it(l)) then
+                                wy = w2flat(oy(l) + k)
+                                do p = 1, PT
+                                    bk = c0(l) * b0(p) + c1(l) * b1(p) + c2(l) * b2(p) + c3(l) * b3(p)
+                                    y(p, l) = y(p, l) + wy * bk
+                                end do
+                            else
+                                wy = w2flat(oo(l) + k)
+                                do p = 1, PT
+                                    bk = c0(l) * b0(p) + c1(l) * b1(p) + c2(l) * b2(p) + c3(l) * b3(p)
+                                    o(p, l) = o(p, l) + wy * bk
+                                end do
+                            end if
+                        end do
+                    end do
+                else
+                    do k = 1, nt
+                        do l = 1, MT
+                            s0 = zlo(mm(l))
+                            if (k <= it(l)) then
+                                wy = w2flat(oy(l) + k)
+                                do p = 1, PT
+                                    bk = c0(l) * basis(ii(p), k, s0) + c1(l) * basis(ii(p), k, s0 + 1) + &
+                                         c2(l) * basis(ii(p), k, s0 + nzs) + c3(l) * basis(ii(p), k, s0 + nzs + 1)
+                                    y(p, l) = y(p, l) + wy * bk
+                                end do
+                            else
+                                wy = w2flat(oo(l) + k)
+                                do p = 1, PT
+                                    bk = c0(l) * basis(ii(p), k, s0) + c1(l) * basis(ii(p), k, s0 + 1) + &
+                                         c2(l) * basis(ii(p), k, s0 + nzs) + c3(l) * basis(ii(p), k, s0 + nzs + 1)
+                                    o(p, l) = o(p, l) + wy * bk
+                                end do
+                            end if
+                        end do
+                    end do
+                end if
+                do l = 1, MT
+                    do p = 1, PT
+                        yo(ii(p), mm(l)) = y(p, l)
+                        yo(ii(p), n_mod + mm(l)) = o(p, l)
+                    end do
+                end do
+              end block
+            end do
+        end do
+#elif defined(OMP_TARGET)
+        integer, parameter :: MT = 4
+        integer  :: mq, i, k, l, mm(MT), s0
+        real(KP) :: bk, y(MT), o(MT), c0(MT), c1(MT), c2(MT), c3(MT)
+
+        !$omp target teams distribute parallel do collapse(2) private(k, l, bk, mm, y, o, c0, c1, c2, c3, s0)
+        do mq = 1, (n_mod + MT - 1) / MT
+            do i = 1, nspec
+                do l = 1, MT
+                    mm(l) = min((mq - 1) * MT + l, n_mod)
+                    c0(l) = real((1.0_wp - dz(mm(l))) * (1.0_wp - da(mm(l))), KP)
+                    c1(l) = real(dz(mm(l)) * (1.0_wp - da(mm(l))), KP)
+                    c2(l) = real((1.0_wp - dz(mm(l))) * da(mm(l)), KP)
+                    c3(l) = real(dz(mm(l)) * da(mm(l)), KP)
+                    y(l) = 0.0_KP
+                    o(l) = 0.0_KP
+                end do
+                do k = 1, nt
+                    do l = 1, MT
+                        s0 = zlo(mm(l))
+                        bk = c0(l) * basis(i, k, s0) + c1(l) * basis(i, k, s0 + 1) + &
+                             c2(l) * basis(i, k, s0 + nzs) + c3(l) * basis(i, k, s0 + nzs + 1)
+                        if (k <= it_tesc(mm(l))) then
+                            y(l) = y(l) + w2flat(k + (mm(l) - 1) * nt) * bk
+                        else
+                            o(l) = o(l) + w2flat(k + (n_mod + mm(l) - 1) * nt) * bk
+                        end if
+                    end do
+                end do
+                do l = 1, MT
+                    yo(i, mm(l)) = y(l)
+                    yo(i, n_mod + mm(l)) = o(l)
+                end do
+            end do
+        end do
+#else
+        ! Host: per model and block of pixels, contiguous (vectorizable) passes over the ages
+        integer, parameter :: PB = 256
+        integer  :: m, ib, i0, n, k, s0, it, i
+        real(KP) :: y(PB), o(PB), c0, c1, c2, c3, wk
+
+        !$omp parallel do collapse(2) private(ib, i0, n, k, s0, it, i, y, o, c0, c1, c2, c3, wk)
+        do m = 1, n_mod
+            do ib = 1, (nspec + PB - 1) / PB
+                i0 = (ib - 1) * PB + 1
+                n = min(PB, nspec - i0 + 1)
+                s0 = zlo(m)
+                it = it_tesc(m)
+                c0 = real((1.0_wp - dz(m)) * (1.0_wp - da(m)), KP)
+                c1 = real(dz(m) * (1.0_wp - da(m)), KP)
+                c2 = real((1.0_wp - dz(m)) * da(m), KP)
+                c3 = real(dz(m) * da(m), KP)
+                y(1:n) = 0.0_KP
+                o(1:n) = 0.0_KP
+                do k = 1, nt
+                    if (k <= it) then
+                        wk = w2flat(k + (m - 1) * nt)
+                        do i = 1, n
+                            y(i) = y(i) + wk * (c0 * basis(i0 + i - 1, k, s0) + c1 * basis(i0 + i - 1, k, s0 + 1) + &
+                                                c2 * basis(i0 + i - 1, k, s0 + nzs) + c3 * basis(i0 + i - 1, k, s0 + nzs + 1))
+                        end do
+                    else
+                        wk = w2flat(k + (n_mod + m - 1) * nt)
+                        do i = 1, n
+                            o(i) = o(i) + wk * (c0 * basis(i0 + i - 1, k, s0) + c1 * basis(i0 + i - 1, k, s0 + 1) + &
+                                                c2 * basis(i0 + i - 1, k, s0 + nzs) + c3 * basis(i0 + i - 1, k, s0 + nzs + 1))
+                        end do
+                    end if
+                end do
+                yo(i0:i0 + n - 1, m) = y(1:n)
+                yo(i0:i0 + n - 1, n_mod + m) = o(1:n)
+            end do
+        end do
+#endif
+    end subroutine age_sums_z4
 
     !> IGM transmission per model (redshift and igm_factor per model), as compute_igm_transmission:
     !> the optical depth at KP, capped below the wavelength of its maximum, then exp(-tau factor).
@@ -4035,7 +4392,7 @@ contains
     !> final spectrum (N+1:2N), then of the young (1:N) and old (N+1:2N) age sums; yo (the
     !> forward's age sums) is read.
     subroutine batch_backward(ctx, pbuf, n_mod, nspec, nt, nbands, zred, igm_factor, mags, fband, zcm, it_tesc, &
-                              zlo, zhi, dz, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, yo, total, &
+                              zlo, zhi, dz, da, nzs, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, yo, total, &
                               emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, neb, nb, w2, lzm, tsave, &
                               sigma, minl, maxl, imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzb_out, mags_bar, &
                               spec_bar, params_bar, weights_bar, gas)
@@ -4048,8 +4405,8 @@ contains
 #endif
         real(WP), intent(in)             :: zred, igm_factor   ! the forward's common redshift and IGM factor
         real(WP), intent(in)             :: mags(:,:), fband(:,:), zcm(n_mod)
-        integer, intent(in)              :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod), ita(n_mod)
-        real(WP), intent(in)             :: dz(n_mod), wta(n_mod), lsum(n_mod), lum_linear(nt)
+        integer, intent(in)              :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod), ita(n_mod), nzs
+        real(WP), intent(in)             :: dz(n_mod), da(n_mod), wta(n_mod), lsum(n_mod), lum_linear(nt)
         logical, intent(in)              :: zmode, igm, zvar, agn_on(n_mod)
         real(KP), intent(in)             :: tdiff(:,:), tau(nspec, n_mod), total(nspec, n_mod)
         real(KP), intent(in)             :: yo(nspec, 2 * n_mod)
@@ -4058,7 +4415,7 @@ contains
         ! U_min, gamma)
         logical, intent(in)              :: emis(n_mod)
         integer, intent(in)              :: iq(n_mod), iu(n_mod)
-        real(WP), intent(in)             :: wq(n_mod), wu(n_mod), gam(n_mod), s_abs(n_mod), s_esc(n_mod), dchain(7, n_mod)
+        real(WP), intent(in)             :: wq(n_mod), wu(n_mod), gam(n_mod), s_abs(n_mod), s_esc(n_mod), dchain(8, n_mod)
         logical, intent(in)              :: smooth   ! the forward smoothed the spectra (smooth_columns)
         ! Nebular emission (add_neb_emission = 1): its setup, and the young / old SFH weights
         logical, intent(in)              :: neb
@@ -4126,7 +4483,7 @@ contains
         end if
         ntn = 0
         if (neb) ntn = nb%nt_neb
-        allocate(nwb(max(1, ntn), n_mod), gneb(5, n_mod), qb(max(1, ntn), n_mod), wbi(nt, n_mod), imfb(NIMFG, n_mod), &
+        allocate(nwb(max(1, ntn), n_mod), gneb(6, n_mod), qb(max(1, ntn), n_mod), wbi(nt, n_mod), imfb(NIMFG, n_mod), &
                  fescb(n_mod), zbi(n_mod))
         cue = neb .and. present(gas)
         allocate(gcue(5, n_mod))
@@ -4267,37 +4624,37 @@ contains
             if (nb%lines_in_spec) call line_profiles_adjoint(n_mod, nspec, nb%lj_lo, nb%lj_hi, ctx%state%gaussnebarr, gw, lbar)
             call cue_nebular_backward(ctx, n_mod, nspec, nt, nzb, size(ctx%state%ssp_basis_spec, 1), &
                                       size(ctx%state%ssp_basis_spec, 2), size(ctx%state%ssp_basis_spec, 3), &
-                                      ctx%state%ssp_basis_spec, w2, it_tesc, zlo, zhi, dz, nb%nt_neb, nb%cont, &
+                                      ctx%state%ssp_basis_spec, w2, it_tesc, zlo, zhi, dz, da, nzs, nb%nt_neb, nb%cont, &
                                       nb%lines_in_spec .or. lgiven, size(nb%q0, 2), nb%q0, nb%fabs, gas, gw, lbar, &
                                       nwb, gneb, gcue)
             call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, &
                                    ctx%state%ssp_basis_spec_t, &
-                                   ctx%state%ssp_basis_lbol, zmode, it_tesc, zlo, zhi, dz, lum_linear, &
+                                   ctx%state%ssp_basis_lbol, zmode, it_tesc, zlo, zhi, dz, da, nzs, lum_linear, &
                                    lsum_bar, gw, w_bar, ntn, nb%whlylim, nb%fesc, w2, nwb, gneb)
         else if (neb) then
             ! (the line profiles exist only with the lines in the spectrum; lbar stands in otherwise)
             if (nb%xrb .and. nb%lines_in_spec) then
-                call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, .true., it_tesc, zlo, zhi, dz, &
+                call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, .true., it_tesc, zlo, zhi, dz, da, nzs, &
                                       zmode .and. .not. imf, &
                                       nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, &
                                       nb%lj_lo, nb%lj_hi, nb%nrun, nb%rs, nb%rl, nb%rt, w2, &
                                       ctx%state%xnebem_cont, ctx%state%xnebem_line, ctx%state%gaussnebarr, gw, lbar, nwb, gneb, &
                                       imf, qb, lgiven)
             else if (nb%xrb) then
-                call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, lgiven, it_tesc, zlo, zhi, dz, &
+                call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, lgiven, it_tesc, zlo, zhi, dz, da, nzs, &
                                       zmode .and. .not. imf, &
                                       nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, &
                                       nb%lj_lo, nb%lj_hi, nb%nrun, nb%rs, nb%rl, nb%rt, w2, &
                                       ctx%state%xnebem_cont, ctx%state%xnebem_line, lbar, gw, lbar, nwb, gneb, imf, qb, lgiven)
             else if (nb%lines_in_spec) then
-                call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, .true., it_tesc, zlo, zhi, dz, &
+                call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, .true., it_tesc, zlo, zhi, dz, da, nzs, &
                                       zmode .and. .not. imf, &
                                       nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, &
                                       nb%lj_lo, nb%lj_hi, nb%nrun, nb%rs, nb%rl, nb%rt, w2, &
                                       ctx%state%nebem_cont, ctx%state%nebem_line, ctx%state%gaussnebarr, gw, lbar, nwb, gneb, &
                                       imf, qb, lgiven)
             else
-                call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, lgiven, it_tesc, zlo, zhi, dz, &
+                call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, lgiven, it_tesc, zlo, zhi, dz, da, nzs, &
                                       zmode .and. .not. imf, &
                                       nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, &
                                       nb%lj_lo, nb%lj_hi, nb%nrun, nb%rs, nb%rl, nb%rt, w2, &
@@ -4305,7 +4662,7 @@ contains
             end if
             if (.not. imf) call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, &
                                                   ctx%state%ssp_basis_spec_t, &
-                                                  ctx%state%ssp_basis_lbol, zmode, it_tesc, zlo, zhi, dz, lum_linear, &
+                                                  ctx%state%ssp_basis_lbol, zmode, it_tesc, zlo, zhi, dz, da, nzs, lum_linear, &
                                                   lsum_bar, gw, w_bar, ntn, nb%whlylim, nb%fesc, w2, nwb, gneb)
         else
             gneb = 0.0_wp
@@ -4324,7 +4681,7 @@ contains
             else if (.not. imf) then
                 call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, &
                                        ctx%state%ssp_basis_spec_t, &
-                                       ctx%state%ssp_basis_lbol, zmode, it_tesc, zlo, zhi, dz, lum_linear, &
+                                       ctx%state%ssp_basis_lbol, zmode, it_tesc, zlo, zhi, dz, da, nzs, lum_linear, &
                                        lsum_bar, gw, w_bar, 0, 0, nb%fesc, w2, nwb, gneb)
             end if
         end if
@@ -4377,6 +4734,7 @@ contains
                 params_bar(BGRAD_FRAC_OBRUN, m) = params_bar(BGRAD_FRAC_OBRUN, m) + &
                                                   (gneb(4, m) * dchain(6, m) - gneb(3, m)) * cscale(m)
                 params_bar(BGRAD_LOGZSOL, m) = gneb(5, m) * dchain(7, m) * cscale(m)
+                params_bar(BGRAD_AFE, m) = gneb(6, m) * dchain(8, m) * cscale(m)
                 params_bar(BGRAD_ZRED, m) = (dzo(m) + dpar(13, m)) * cscale(m) + dzd(m)
                 params_bar(BGRAD_SIGMA_SMOOTH, m) = dsg(m) * cscale(m)
                 ! (agn_tau: d L / d wta here; compute_csp_batch applies d wta / d agn_tau)
@@ -5320,21 +5678,27 @@ contains
     !> Nebular emission (ntn nebular ages): the EUV rows (pixels <= whlylim) of the nebular ages
     !> carry the escaping fraction fesc, as nebular_kernels redoes them; gneb(4, m) = d L / d fesc;
     !> nwb (the nebular continuum's and lines' part) is added for the nebular ages.
-    subroutine backward_age_sums(n_mod, nspec, nt, nzb, basis, basis_t, blbol, zmode, it_tesc, zlo, zhi, dz, lum_linear, &
+    subroutine backward_age_sums(n_mod, nspec, nt, nzb, basis, basis_t, blbol, zmode, it_tesc, zlo, zhi, dz, da, nzs, lum_linear, &
                                  lsum_bar, gw, w_bar, ntn, whlylim, fesc, w2, nwb, gneb)
-        integer, intent(in)     :: n_mod, nspec, nt, nzb, it_tesc(n_mod), zlo(n_mod), zhi(n_mod), ntn, whlylim
+        integer, intent(in)     :: n_mod, nspec, nt, nzb, it_tesc(n_mod), zlo(n_mod), zhi(n_mod), ntn, whlylim, nzs
         real(KP), intent(in)    :: basis(nspec, nt, nzb), basis_t(nt, nspec, nzb), gw(nspec, 2 * n_mod), w2(nt, 2 * n_mod)
-        real(WP), intent(in)    :: blbol(nt, nzb), dz(n_mod), lum_linear(nt), lsum_bar(n_mod), fesc(n_mod)
+        real(WP), intent(in)    :: blbol(nt, nzb), dz(n_mod), da(n_mod), lum_linear(nt), lsum_bar(n_mod), fesc(n_mod)
         real(WP), intent(in)    :: nwb(max(1, ntn), n_mod)
         logical, intent(in)     :: zmode
         real(WP), intent(out)   :: w_bar(nt, n_mod)
-        real(WP), intent(inout) :: gneb(5, n_mod)   ! (4): set here; (5): added to
+        real(WP), intent(inout) :: gneb(6, n_mod)   ! (4): set here; (5), (6): added to
 
         integer  :: m, k, i, col, zl, zh, nlim
         real(KP) :: sk, ck, term, tsum, d, bk, ek, ce, fk, dk, cd, dbk, bkl, bkh
         real(WP) :: lk, sf, sd
         real(WP) :: sr, se, hr, he, sw, ew, dw
         real(WP), allocatable :: euv(:,:), zd(:,:)
+
+        if (nzs > 0) then
+            call backward_age_sums_afe(n_mod, nspec, nt, nzb, nzs, basis_t, blbol, it_tesc, zlo, dz, da, lsum_bar, gw, &
+                                       w_bar, ntn, whlylim, fesc, w2, nwb, gneb)
+            return
+        end if
 
         ! zd(k, m): with per-model metallicity, d L / d dz through age k (the basis, its EUV rows and
         ! L_bol, interpolated in log Z)
@@ -5486,6 +5850,120 @@ contains
 #endif
     end subroutine backward_age_sums
 
+    !> Adjoint of the age sums and of L_bol with per-model metallicity and [alpha/Fe] (four slabs): as
+    !> backward_age_sums' device branch, with the bilinear blend; besides w_bar and d L / d fesc (gneb(4)) it
+    !> forms d L / d dz (added to gneb(5)) and d L / d da (added to gneb(6)) per age and model, summed. One thread
+    !> per (model, age), serial over the pixels, the sums compensated at kernel precision.
+    subroutine backward_age_sums_afe(n_mod, nspec, nt, nzb, nzs, basis_t, blbol, it_tesc, zlo, dz, da, lsum_bar, gw, &
+                                     w_bar, ntn, whlylim, fesc, w2, nwb, gneb)
+        integer, intent(in)     :: n_mod, nspec, nt, nzb, nzs, it_tesc(n_mod), zlo(n_mod), ntn, whlylim
+        real(KP), intent(in)    :: basis_t(nt, nspec, nzb), gw(nspec, 2 * n_mod), w2(nt, 2 * n_mod)
+        real(WP), intent(in)    :: blbol(nt, nzb), dz(n_mod), da(n_mod), lsum_bar(n_mod), fesc(n_mod)
+        real(WP), intent(in)    :: nwb(max(1, ntn), n_mod)
+        real(WP), intent(out)   :: w_bar(nt, n_mod)
+        real(WP), intent(inout) :: gneb(6, n_mod)   ! (4): set here; (5), (6): added to
+
+        integer  :: m, k, i, col, s0, nlim
+        real(KP) :: sk, ck, term, tsum, d, a, bk, ek, ce, fk, dk, cd, ak, ca, b00, b10, b01, b11, dbz, dba
+        real(KP) :: c00, c10, c01, c11
+        real(WP) :: lk, sf, sd, sa, dlz, dla
+        real(WP), allocatable :: euv(:,:), zd(:,:), ad(:,:)
+
+        allocate(euv(max(1, ntn), n_mod), zd(nt, n_mod), ad(nt, n_mod))
+#ifdef OMP_TARGET
+        !$omp target data map(alloc: euv, zd, ad)
+#endif
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(i, col, s0, sk, ck, term, tsum, d, a, bk, lk, ek, &
+        !$omp& ce, fk, nlim, dk, cd, ak, ca, b00, b10, b01, b11, dbz, dba, c00, c10, c01, c11, dlz, dla)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(i, col, s0, sk, ck, term, tsum, d, a, bk, lk, ek, ce, fk, nlim, dk, cd, ak, &
+        !$omp& ca, b00, b10, b01, b11, dbz, dba, c00, c10, c01, c11, dlz, dla)
+#endif
+        do m = 1, n_mod
+            do k = 1, nt
+                col = n_mod + m
+                if (k <= it_tesc(m)) col = m
+                nlim = 0
+                if (k <= ntn) nlim = whlylim
+                sk = 0.0_KP; ck = 0.0_KP; ek = 0.0_KP; ce = 0.0_KP
+                dk = 0.0_KP; cd = 0.0_KP; ak = 0.0_KP; ca = 0.0_KP
+                fk = 1.0_KP
+                if (k <= ntn) fk = real(fesc(m), KP)
+                s0 = zlo(m)
+                d = real(dz(m), KP)
+                a = real(da(m), KP)
+                c00 = (1.0_KP - a) * (1.0_KP - d)
+                c10 = (1.0_KP - a) * d
+                c01 = a * (1.0_KP - d)
+                c11 = a * d
+                do i = 1, nspec
+                    b00 = basis_t(k, i, s0)
+                    b10 = basis_t(k, i, s0 + 1)
+                    b01 = basis_t(k, i, s0 + nzs)
+                    b11 = basis_t(k, i, s0 + nzs + 1)
+                    bk = c00 * b00 + c10 * b10 + c01 * b01 + c11 * b11
+                    dbz = (1.0_KP - a) * (b10 - b00) + a * (b11 - b01)
+                    dba = (1.0_KP - d) * (b01 - b00) + d * (b11 - b10)
+                    if (i <= nlim) then
+                        ! the EUV pixels of a nebular age: the blend itself apart (ek), the derivatives with fesc
+                        dbz = dbz * fk
+                        dba = dba * fk
+                        term = bk * gw(i, col) - ce
+                        tsum = ek + term
+                        ce = (tsum - ek) - term
+                        ek = tsum
+                    else
+                        term = bk * gw(i, col) - ck
+                        tsum = sk + term
+                        ck = (tsum - sk) - term
+                        sk = tsum
+                    end if
+                    term = dbz * gw(i, col) - cd
+                    tsum = dk + term
+                    cd = (tsum - dk) - term
+                    dk = tsum
+                    term = dba * gw(i, col) - ca
+                    tsum = ak + term
+                    ca = (tsum - ak) - term
+                    ak = tsum
+                end do
+                lk = 10.0_wp**((1.0_wp - da(m)) * ((1.0_wp - dz(m)) * blbol(k, s0) + dz(m) * blbol(k, s0 + 1)) + &
+                               da(m) * ((1.0_wp - dz(m)) * blbol(k, s0 + nzs) + dz(m) * blbol(k, s0 + nzs + 1)))
+                dlz = (1.0_wp - da(m)) * (blbol(k, s0 + 1) - blbol(k, s0)) + da(m) * (blbol(k, s0 + nzs + 1) - blbol(k, s0 + nzs))
+                dla = (1.0_wp - dz(m)) * (blbol(k, s0 + nzs) - blbol(k, s0)) + dz(m) * (blbol(k, s0 + nzs + 1) - blbol(k, s0 + 1))
+                if (k <= ntn) euv(k, m) = real(ek, WP) * real(w2(k, col), WP)
+                w_bar(k, m) = real(sk, WP) + real(fk, WP) * real(ek, WP) + lsum_bar(m) * lk
+                zd(k, m) = real(w2(k, col), WP) * (real(dk, WP) + lsum_bar(m) * lk * log(10.0_wp) * dlz)
+                ad(k, m) = real(w2(k, col), WP) * (real(ak, WP) + lsum_bar(m) * lk * log(10.0_wp) * dla)
+                if (k <= ntn) w_bar(k, m) = w_bar(k, m) + nwb(k, m)
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(k, sf, sd, sa)
+#elif defined(_OPENMP)
+        !$omp parallel do private(k, sf, sd, sa)
+#endif
+        do m = 1, n_mod
+            sf = 0.0_wp
+            do k = 1, ntn
+                sf = sf + euv(k, m)
+            end do
+            gneb(4, m) = sf
+            sd = 0.0_wp
+            sa = 0.0_wp
+            do k = 1, nt
+                sd = sd + zd(k, m)
+                sa = sa + ad(k, m)
+            end do
+            gneb(5, m) = gneb(5, m) + sd
+            gneb(6, m) = gneb(6, m) + sa
+        end do
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine backward_age_sums_afe
+
     !> Adjoint of nebular_kernels' continuum and lines (add_neb_emission = 1, not the IMF per model):
     !> the young (old) sums gain, per nebular age t of the model's young (old) ages,
     !>     w_t q_t 10^lg(pixel or line, t),  q_t = |Q0(t)| (1 - frac_obrun),
@@ -5496,24 +5974,25 @@ contains
     !>   the same for wu, and d L / d(1 - frac_obrun) = sum_t w_t |Q0(t)| sum(y_bar 10^lg) (gneb(1:3)).
     !> One thread per (model, nebular age), serial over pixels and lines, sums compensated at FP32
     !> kernel precision; 10^lg q as exp_kp(lg ln 10 + ln q) (exponent formed in FP64, rule 3).
-    subroutine backward_nebular(n_mod, nspec, nt, nzb, ntn, cont, lines, it_tesc, zlo, zhi, dz, zmode, ia, wa, iz, wz, &
+    subroutine backward_nebular(n_mod, nspec, nt, nzb, ntn, cont, lines, it_tesc, zlo, zhi, dz, da, nzs, zmode, ia, wa, iz, wz, &
                                 iu, wu, fabs, q0, lj_lo, lj_hi, nrun, rs, rl, rt, w2, ctab, ltab, gauss, gw, lbar, &
                                 nwb, gneb, qmod, qb, lgiven)
 #if defined(OPENSPS_HIP)
         use, intrinsic :: iso_c_binding, only: c_loc, c_null_ptr, c_int
 #endif
-        integer, intent(in), target :: n_mod, nspec, nt, nzb, ntn, it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
+        integer, intent(in), target :: n_mod, nspec, nt, nzb, ntn, it_tesc(n_mod), zlo(n_mod), zhi(n_mod), nzs
         logical, intent(in)     :: cont, lines, zmode
         integer, intent(in), target :: ia(max(1, ntn)), iz(n_mod), iu(n_mod)
         integer, intent(in)     :: lj_lo(NEMLINE), lj_hi(NEMLINE), nrun
         integer, intent(in), target :: rs(max(1, ntn)), rl(max(1, ntn)), rt(max(1, ntn))
-        real(WP), intent(in), target :: dz(n_mod), wa(max(1, ntn)), wz(n_mod), wu(n_mod), fabs(n_mod), q0(max(1, ntn), nzb)
+        real(WP), intent(in), target :: dz(n_mod), da(n_mod), wa(max(1, ntn)), wz(n_mod), wu(n_mod), fabs(n_mod)
+        real(WP), intent(in), target :: q0(max(1, ntn), nzb)
         real(KP), intent(in), target :: w2(nt, 2 * n_mod), gw(nspec, 2 * n_mod)
         real(WP), intent(in), target :: ctab(nspec, NEBNZ, NEBNAGE, NEBNIP), ltab(:,:,:,:)
         real(KP), intent(in)    :: gauss(:,:)
         real(KP), intent(inout) :: lbar(:,:)
         real(WP), intent(out)   :: nwb(max(1, ntn), n_mod)
-        real(WP), intent(inout) :: gneb(5, n_mod)   ! (1:3) and (5) set here
+        real(WP), intent(inout) :: gneb(6, n_mod)   ! (1:3), (5) and (6) set here
         !> The IMF per model: Q per (age, model), q0(t, m); qb = d L / d Q (the operator's reverse pass)
         logical, intent(in)     :: qmod
         real(WP), intent(inout) :: qb(max(1, ntn), n_mod)
@@ -5524,7 +6003,8 @@ contains
         real(KP) :: sw, sz, su, cw, cz, cu, term, tsum, val, gv
         real(WP) :: qz, lnq, c00, c01, c10, c11, ra, rb, raz, rbz, rau, rbu, lg, w1, fa, qf, s1, s2, s3, s4, s5
         real(WP), parameter :: LN10 = log(10.0_wp)
-        real(WP), allocatable :: tz(:,:), tu(:,:), tf(:,:), tq(:,:)
+        real(WP) :: qlin
+        real(WP), allocatable :: tz(:,:), tu(:,:), tf(:,:), tq(:,:), tqa(:,:)
         ! The continuum (cont): runs of consecutive nebular ages in one CLOUDY age interval (at most
         ! NEB_RUN ages), run r = ages rs(r) .. rs(r) + rl(r) - 1 (rt(t): the run of age t); per
         ! (model, run, block of pixels) a thread sums the pixels (neb_run_block), partial sums cpart
@@ -5541,6 +6021,7 @@ contains
 
         ! (tq: per-model metallicity, d L / d dz through Q, interpolated in log Z)
         allocate(tz(max(1, ntn), n_mod), tu(max(1, ntn), n_mod), tf(max(1, ntn), n_mod), tq(max(1, ntn), n_mod))
+        allocate(tqa(max(1, ntn), n_mod))
         allocate(qzt(max(1, ntn), n_mod), lref(max(1, nrun), n_mod))
 #if defined(OPENSPS_HIP)
         if (cont .and. ntn > 0) then
@@ -5567,9 +6048,9 @@ contains
 #endif
 #ifdef OMP_TARGET
 #if defined(OPENSPS_HIP)
-        !$omp target data map(alloc: tz, tu, tf, tq, qzt, lref, csum)
+        !$omp target data map(alloc: tz, tu, tf, tq, tqa, qzt, lref, csum)
 #else
-        !$omp target data map(alloc: tz, tu, tf, tq, qzt, lref, cpart)
+        !$omp target data map(alloc: tz, tu, tf, tq, tqa, qzt, lref, cpart)
 #endif
 #endif
         ! Q per (age, model)
@@ -5582,6 +6063,9 @@ contains
             do t = 1, ntn
                 if (qmod) then
                     qzt(t, m) = abs(q0(t, m))
+                else if (zmode .and. nzs > 0) then
+                    qzt(t, m) = abs((1.0_wp - da(m)) * ((1.0_wp - dz(m)) * q0(t, zlo(m)) + dz(m) * q0(t, zhi(m))) + &
+                                    da(m) * ((1.0_wp - dz(m)) * q0(t, zlo(m) + nzs) + dz(m) * q0(t, zhi(m) + nzs)))
                 else if (zmode) then
                     qzt(t, m) = abs((1.0_wp - dz(m)) * q0(t, zlo(m)) + dz(m) * q0(t, zhi(m)))
                 else
@@ -5640,10 +6124,10 @@ contains
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(col, a, z0, u0, sw, sz, su, cw, cz, cu, term, &
         !$omp& tsum, val, gv, qz, lnq, c00, c01, c10, c11, ra, rb, raz, rbz, rau, rbu, lg, w1, fa, j, i, qf, s1, s2, &
-        !$omp& s3, s4, s5, k)
+        !$omp& s3, s4, s5, k, qlin)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(col, a, z0, u0, sw, sz, su, cw, cz, cu, term, tsum, val, gv, qz, lnq, &
-        !$omp& c00, c01, c10, c11, ra, rb, raz, rbz, rau, rbu, lg, w1, fa, j, i, qf, s1, s2, s3, s4, s5, k)
+        !$omp& c00, c01, c10, c11, ra, rb, raz, rbz, rau, rbu, lg, w1, fa, j, i, qf, s1, s2, s3, s4, s5, k, qlin)
 #endif
         do m = 1, n_mod
             do t = 1, ntn
@@ -5656,6 +6140,7 @@ contains
                 tu(t, m) = 0.0_wp
                 tf(t, m) = 0.0_wp
                 tq(t, m) = 0.0_wp
+                tqa(t, m) = 0.0_wp
                 if (qz * fa > SAFE_FLOOR) then
                     lnq = log(qz)
                     a = ia(t)
@@ -5722,9 +6207,20 @@ contains
                     tu(t, m) = real(w2(t, col), WP) * fa * s3
                     tf(t, m) = real(w2(t, col), WP) * s1
                     if (qmod) qb(t, m) = real(w2(t, col), WP) * fa * s1 / qz
-                    if (zmode) tq(t, m) = real(w2(t, col), WP) * fa * s1 / qz * &
-                                          sign(1.0_wp, (1.0_wp - dz(m)) * q0(t, zlo(m)) + dz(m) * q0(t, zhi(m))) * &
-                                          (q0(t, zhi(m)) - q0(t, zlo(m)))
+                    if (zmode .and. nzs > 0) then
+                        qlin = (1.0_wp - da(m)) * ((1.0_wp - dz(m)) * q0(t, zlo(m)) + dz(m) * q0(t, zhi(m))) + &
+                               da(m) * ((1.0_wp - dz(m)) * q0(t, zlo(m) + nzs) + dz(m) * q0(t, zhi(m) + nzs))
+                        tq(t, m) = real(w2(t, col), WP) * fa * s1 / qz * sign(1.0_wp, qlin) * &
+                                   ((1.0_wp - da(m)) * (q0(t, zhi(m)) - q0(t, zlo(m))) + &
+                                    da(m) * (q0(t, zhi(m) + nzs) - q0(t, zlo(m) + nzs)))
+                        tqa(t, m) = real(w2(t, col), WP) * fa * s1 / qz * sign(1.0_wp, qlin) * &
+                                    ((1.0_wp - dz(m)) * (q0(t, zlo(m) + nzs) - q0(t, zlo(m))) + &
+                                     dz(m) * (q0(t, zhi(m) + nzs) - q0(t, zhi(m))))
+                    else if (zmode) then
+                        tq(t, m) = real(w2(t, col), WP) * fa * s1 / qz * &
+                                   sign(1.0_wp, (1.0_wp - dz(m)) * q0(t, zlo(m)) + dz(m) * q0(t, zhi(m))) * &
+                                   (q0(t, zhi(m)) - q0(t, zlo(m)))
+                    end if
                 end if
             end do
         end do
@@ -5738,11 +6234,13 @@ contains
             gneb(2, m) = 0.0_wp
             gneb(3, m) = 0.0_wp
             gneb(5, m) = 0.0_wp
+            gneb(6, m) = 0.0_wp
             do t = 1, ntn
                 gneb(1, m) = gneb(1, m) + tz(t, m)
                 gneb(2, m) = gneb(2, m) + tu(t, m)
                 gneb(3, m) = gneb(3, m) + tf(t, m)
                 gneb(5, m) = gneb(5, m) + tq(t, m)
+                gneb(6, m) = gneb(6, m) + tqa(t, m)
             end do
         end do
 #ifdef OMP_TARGET

@@ -9,7 +9,13 @@ OUT_ROOT links every library of SOURCE_ROOT and adds, for the [alpha/Fe] tests:
   isochrones/mist2, stellar_spectra/miles2  afe = [0.4, 0.0] (default 0), the 0.4 block first:
                                             0.0 is the original data, 0.4 has log T + 0.01 and
                                             the flux doubled, so a selection is visible.
+  isochrones/mist5, stellar_spectra/miles5  afe = [-0.2, 0.0, 0.2, 0.4, 0.6] (default 0), every node
+                                            different (log T + 0.02 afe, flux x (1 + afe)): the stack of
+                                            opensps_build_afe_basis, tests/test_afe_library.f90 with
+                                            OPENSPS_AFE_ISOC=mist5 and OPENSPS_AFE_SPEC=miles5;
+                                            nebular/mist5_nodust is the tables of mist_nodust.
 """
+import json
 import os
 import shutil
 import sys
@@ -32,7 +38,7 @@ def copy_axes(w, lib):
             w.axis(ax, d["units"], values=lib.axis_values(ax))
 
 
-def isochrones(src, out, name, afe):
+def isochrones(src, out, name, afe, graded=False):
     lib = Library.open(src, "isochrones", "mist")
     w = LibraryWriter(out, "isochrones", name, title="afe test variant")
     w.metadata.update(lib.metadata)
@@ -44,19 +50,26 @@ def isochrones(src, out, name, afe):
     w.array("log_age", np.stack([logage] * n), axes=["afe", "Z", "age_index"], units="log10(yr)")
     for c in COLS:
         a = lib.array(c)
-        blocks = [a + 0.01 if (c == "logt" and v != 0.0) else a for v in afe]
+        if graded:
+            blocks = [a + 0.02 * v if c == "logt" else a for v in afe]
+        else:
+            blocks = [a + 0.01 if (c == "logt" and v != 0.0) else a for v in afe]
         w.array(c, np.concatenate(blocks), units=lib.manifest["arrays"][c]["units"])
     w.write()
 
 
-def spectra(src, out, name, afe):
+def spectra(src, out, name, afe, graded=False):
     lib = Library.open(src, "stellar_spectra", "miles")
     w = LibraryWriter(out, "stellar_spectra", name, title="afe test variant")
     w.metadata.update(lib.metadata)
     w.axis("afe", "[alpha/Fe]", values=afe, default=0.0)
     copy_axes(w, lib)
     f = lib.array("flux")
-    w.array("flux", np.stack([f * np.float32(2.0) if v != 0.0 else f for v in afe]),
+    if graded:
+        blocks = [f * np.float32(1.0 + v) for v in afe]
+    else:
+        blocks = [f * np.float32(2.0) if v != 0.0 else f for v in afe]
+    w.array("flux", np.stack(blocks),
             axes=["afe", "Z", "logg", "logT", "wavelength"], dtype="<f4", units="H_nu")
     w.array("resolution", lib.array("resolution"), axes=["wavelength"], units="as source")
     w.write()
@@ -81,6 +94,17 @@ def main(argv):
     isochrones(src, out, "mist2", [0.4, 0.0])
     spectra(src, out, "miles1", [0.0])
     spectra(src, out, "miles2", [0.4, 0.0])
+    isochrones(src, out, "mist5", [-0.2, 0.0, 0.2, 0.4, 0.6], graded=True)
+    spectra(src, out, "miles5", [-0.2, 0.0, 0.2, 0.4, 0.6], graded=True)
+    # the nebular grids are looked up by the isochrone library's name (<name>_nodust): the same tables
+    neb = os.path.join(out, "libraries", "nebular", "mist5_nodust")
+    shutil.copytree(os.path.join(src, "libraries", "nebular", "mist_nodust"), neb)
+    mpath = os.path.join(neb, "manifest.json")
+    with open(mpath) as f:
+        m = json.load(f)
+    m["name"] = "mist5_nodust"
+    with open(mpath, "w") as f:
+        json.dump(m, f, indent=1)
     return 0
 
 
