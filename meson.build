@@ -754,7 +754,7 @@ if python3.found()
     # through the C API, unit_c_afe_derived (below)
     test('unit_afe_derived', python3,
         args : [join_paths(meson.project_source_root(), 'tests/run_afe_derived_test.py'), afe_library_exe,
-                join_paths(meson.project_source_root(), 'tests/data/opensps-test-data'), meson.current_build_dir()],
+                join_paths(meson.project_source_root(), 'tests/data/opensps-test-data'), meson.current_build_dir(), 'tap'],
         env : unit_env,
         protocol : 'tap',
         suite : 'unit',
