@@ -518,6 +518,16 @@ if kernel_precision == 'single'
 else
     regression_env.set('FSPS_TEST_RTOL', '1.0E-5')
 endif
+# The [alpha/Fe] libraries (mist_afe, c3k_lr: optional archives of data-v4, fetched with --with or --all): with
+# them in the data root the real-library tests of the [alpha/Fe] axis (afe_library, c_afe) run on it, otherwise they
+# run on OPENSPS_AFE_DATA if the user exports it, or skip
+if (fs.is_dir(join_paths(data_home, 'libraries/isochrones/mist_afe')) and
+    fs.is_dir(join_paths(data_home, 'libraries/stellar_spectra/c3k_lr')))
+    regression_env.set('OPENSPS_AFE_DATA', data_home)
+else
+    message('mist_afe and c3k_lr not found in ' + data_home + ': the [alpha/Fe] tests on the real libraries are ' +
+            'skipped unless OPENSPS_AFE_DATA names a root that holds them (fetch_data.py --with)')
+endif
 # All three variables: OPENSPS_DATA_HOME or SPS_HOME, if exported by the user, would otherwise take
 # precedence
 regression_env.set('OPENSPS_DATA_HOME', data_home)

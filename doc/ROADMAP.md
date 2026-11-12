@@ -144,19 +144,20 @@ Alongside, two input generalisations that reuse the same machinery:
 
 ### 3b. [alpha/Fe] as an SSP axis
 
-Done on `feat/afe-axis`: the library grids of any size load (C3K-LR, 80 x 14); the resident stack of bases over
+Done (#92, 0.2.0): the library grids of any size load (C3K-LR, 80 x 14); the resident stack of bases over
 [alpha/Fe] and metallicity (`opensps_build_afe_basis`); `afe` per model with four-slab blends, in the forward and
 the reverse pass (row `BGRAD_AFE`), for the CLOUDY grids and cue; the C API (`doc/C_API.md`). Costs, on the R9700
 (FP32, N = 10^4, C3K-LR, 1936 pixels): forward +2%, with gradients +5% (`doc/GPU_RESULTS.md`).
 
+Parity with legacy FSPS v4 is reached at every node (2.5e-6 of the peak flux; `tools/legacy_parity/README.md`), and the
+converted libraries are in `data-v4` (optional archives `isochrones/mist_afe`, `stellar_spectra/c3k_lr`: MIST v2.5,
+solar 0.0185; `tools/fetch_data.py DEST --release data-v4 --with isochrones/mist_afe stellar_spectra/c3k_lr`).
+
 Left:
 
-- **Parity with legacy FSPS v4's [alpha/Fe]** (spectra at the planes: `doc/DATA_FORMAT.md` 3.1): the options
-  `use_lw_tpagb` and the unexplained UV and optical differences.
-- Nebular emission with [alpha/Fe]: no CLOUDY grids exist for it (the model's [Fe/H] is used);
+- Nebular emission with [alpha/Fe]: no CLOUDY grids exist for it (the model's [Fe/H] is used), and the nebular grids are
+  looked up by the isochrone library's name, so `mist_afe` has none yet;
 - the IMF per model and weights over ages and metallicities with the axis (status 2 today);
-- a data release with the converted `mist_afe` and `c3k_lr` (MIST v2.5, solar 0.0185: its own nebular and
-  dust tables follow the other libraries' solar scale);
 - single-element abundances as linear response functions about the base SSP (one extra load per element in the
   age sums), if response-function libraries are released;
 - the [alpha/Fe] gradient is piecewise (kinked at every plane of the grid).
