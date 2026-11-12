@@ -1,17 +1,17 @@
 {
- "comment": "Regression references this tree expects (libraries references/sps and references/param of the data release); written by tools/fsps_data/make_references.py",
+ "comment": "Regression references this tree expects (libraries references/sps and references/param of the data release); written by tools/opensps_data/make_references.py",
  "references/sps": {
-  "version": 1,
+  "version": 2,
   "files": {
    "sps_ref_MILES-1_MIST-1.bin": "437d6368e0c22192e8eb53008fc659e44fd1016d2f8cc573683e05d3b34e6d6c",
    "sps_ref_MILES-0_MIST-0_BASEL-1_PADOVA-1.bin": "6ed0d532295d11d4bf3b8b13a1b1d4676f2bde4b93c4b79c04c72bc196c1ebd5",
    "sps_ref_MILES-1_MIST-1_THEMIS-1_DL07-0.bin": "c51313b3ed86f2e5e8a36eb13d96add71cb34bb118580461386618ae3fb269b2",
-   "sps_ref_MILES-0_C3K-1_MIST-1.bin": "3ddb30d8e4617373a3fb77ddab034035427b42d46c9c4593b9f3454798ab7d04",
+   "sps_ref_MILES-0_C3K-1_MIST-1.bin": "e30263d445188d9837adca2a5c4602c8d11abbbb411623f7c266e60fbf744be0",
    "sps_ref_MIST-0_BPASS-1.bin": "4aabd4c0948d63c63d6c16e11d944b1deae0b4bcd944beb42d84d333acc1268c"
   }
  },
  "references/param": {
-  "version": 1,
+  "version": 2,
   "files": {
    "csp_agn.opsf": "48e6d40f157430e2482b6ca2ecbfc00406f795f56fb778d6de3e25204ced9c43",
    "csp_delayed.opsf": "f05963bd434f3220ceae92253a052ba6edeaf9bae3a95b58e03c6d37678f60e0",
@@ -35,7 +35,7 @@
    "csp_tau.opsf": "fd2fe089a87a3a5ef37162fb9745ba66dc4a663154b5eff7d0eaaff7a0f24f9f",
    "csp_tau_allages.opsf": "96eaada7d2521c5099b5be25a93600fe8e4a196bc229a784d688b371e19ac0ec",
    "lib_bpass.opsf": "c9b8820313594697e8a39ad7cca80d6c5bba0ef362c885670379452871fedbd8",
-   "lib_mist_c3k.opsf": "002cdeffdbfa84a95bbcdc28e4a0f1da7101d8890f623d8f64788d6fe7aea6c1",
+   "lib_mist_c3k.opsf": "a9417b01c1bc42da1f22de58d0485f592a81773e9ab5c43a560c0e008fef3481",
    "lib_padova_basel.opsf": "11bebb4b81bbde5f6eeb2949382c4eb101188fe90309915b056c93343773d17a",
    "lib_padova_basel_offgrid.opsf": "9a6774db6e8f7005614f1d8b818a5e53e73e76924b596109378fad0fff932377",
    "lib_themis.opsf": "c432ecd65a58e99adde741884cec0ab7feec4af7b7a6ddf25b8c83a754944a70",
