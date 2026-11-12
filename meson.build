@@ -749,6 +749,17 @@ if python3.found()
         suite : 'unit',
         timeout : 300
     )
+    # The [alpha/Fe] stack (opensps_build_afe_basis, the batch with the axis, its gradient) on five-node variants
+    # of the small test library: no external data (the same checks as afe_library, which uses the real libraries);
+    # through the C API, unit_c_afe_derived (below)
+    test('unit_afe_derived', python3,
+        args : [join_paths(meson.project_source_root(), 'tests/run_afe_derived_test.py'), afe_library_exe,
+                join_paths(meson.project_source_root(), 'tests/data/opensps-test-data'), meson.current_build_dir()],
+        env : unit_env,
+        protocol : 'tap',
+        suite : 'unit',
+        timeout : 300
+    )
     # The Python data tools (format round trip, converters of the upstream [alpha/Fe] layouts)
     test('unit_data_tools', python3,
         args : [join_paths(meson.project_source_root(), 'tools/opensps_data/test_opensps_data.py')],
@@ -798,6 +809,15 @@ test('c_afe', test_c_afe_exe,
     suite : 'regression',
     timeout : 600
 )
+if python3.found()
+    test('unit_c_afe_derived', python3,
+        args : [join_paths(meson.project_source_root(), 'tests/run_afe_derived_test.py'), test_c_afe_exe,
+                join_paths(meson.project_source_root(), 'tests/data/opensps-test-data'), meson.current_build_dir()],
+        env : unit_env,
+        suite : 'unit',
+        timeout : 300
+    )
+endif
 test_c_two_contexts_exe = executable('test_c_two_contexts', 'tests/test_c_two_contexts.c',
     dependencies : opensps_dep,
     include_directories : include_directories('include')

@@ -24,6 +24,10 @@ int main(void) {
     opensps_context_setup(-1, "mist", "miles", "DL07", h, &status);
     if (status != 0) { printf("setup failed\n"); return 1; }
     opensps_context_get_nbands(h, &nbands, &status);
+    /* use_lw_tpagb (O-rich TP-AGB spectra from the Lancon & Mouhcine library or from the main one) is a setting */
+    opensps_context_set_int(h, "use_lw_tpagb", 0, &status);
+    if (status != 0) { printf("FAIL: set use_lw_tpagb: status %d\n", status); failures++; }
+    opensps_context_set_int(h, "use_lw_tpagb", 1, &status);
 
     double *mags = (double *)malloc(sizeof(double) * nbands * N_MOD);
     opensps_context_compute_csp_batch(h, N_MOD, 1, names, values, NULL, mags, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -40,7 +44,8 @@ int main(void) {
     free(mags);
     opensps_context_destroy(h, &status);
 
-    /* On the real libraries (OPENSPS_AFE_DATA: a data root with mist_afe and c3k_lr): the stack through the C
+    /* On the real libraries (OPENSPS_AFE_DATA: a data root with mist_afe and c3k_lr) or the variants derived from
+     * the test library (OPENSPS_AFE_ISOC, OPENSPS_AFE_SPEC: tests/run_afe_derived_test.py): the stack through the C
      * API, a batch with logzsol and afe free per model, and d L / d afe against a central difference */
     const char *afe_root = getenv("OPENSPS_AFE_DATA");
     if (afe_root != NULL && afe_root[0] != '\0') {
@@ -49,19 +54,25 @@ int main(void) {
         double lz[N_MOD] = {-0.6, -0.2, 0.1}, af[N_MOD] = {0.07, 0.31, 0.52}, afp[N_MOD], afm[N_MOD];
         const double *v[2] = {lz, af}, *vp[2] = {lz, afp}, *vm[2] = {lz, afm};
         int h2 = 0, nb2 = 0, nt2 = 0;
+        const char *isoc = getenv("OPENSPS_AFE_ISOC"), *spec = getenv("OPENSPS_AFE_SPEC");
+        char sel_isoc[96], sel_spec[96];
+        if (isoc == NULL || isoc[0] == '\0') isoc = "mist_afe";
+        if (spec == NULL || spec[0] == '\0') spec = "c3k_lr";
+        snprintf(sel_isoc, sizeof sel_isoc, "%s:afe=0.0", isoc);
+        snprintf(sel_spec, sizeof sel_spec, "%s:afe=0.0", spec);
         /* (the magnitudes are linear in [alpha/Fe] inside an interval of the grid: a step of 1e-2 within it is exact
          * and resolved in FP32 builds too) */
         const double dh = 1.0e-2;
         setenv("OPENSPS_DATA_HOME", afe_root, 1);
         setenv("FSPS_DATA_HOME", afe_root, 1);
         opensps_context_create(&h2, &status);
-        opensps_context_setup(-1, "mist_afe:afe=0.0", "c3k_lr:afe=0.0", "DL07", h2, &status);
-        if (status != 0) { printf("FAIL: setup of mist_afe + c3k_lr: %d\n", status); return 1; }
+        opensps_context_setup(-1, sel_isoc, sel_spec, "DL07", h2, &status);
+        if (status != 0) { printf("FAIL: setup of %s + %s: %d\n", isoc, spec, status); return 1; }
         opensps_context_set_int(h2, "imf_type", 1, &status);
         opensps_context_set_int(h2, "sfh", 1, &status);
         opensps_context_set_float(h2, "tau", 1.5, &status);
         opensps_context_set_float(h2, "tage", 7.0, &status);
-        opensps_context_build_afe_basis(h2, "mist_afe", "c3k_lr", 5, grid, &status);
+        opensps_context_build_afe_basis(h2, isoc, spec, 5, grid, &status);
         if (status != 0) { printf("FAIL: build_afe_basis: %d\n", status); return 1; }
         opensps_context_get_nbands(h2, &nb2, &status);
         opensps_context_get_ntfull(h2, &nt2, &status);

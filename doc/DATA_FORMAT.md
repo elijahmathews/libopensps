@@ -384,7 +384,7 @@ All in `tools/` (Python >= 3.8; NumPy for everything except `fetch_data.py`):
 | `opensps_data/opensps_data.py` | Library writer/reader and verification (`LibraryWriter`, `Library`), root index, and a reader of Fortran list-directed text |
 | `opensps_data/convert_legacy.py LEGACY_ROOT OUT_ROOT` | Converts all 37 libraries of the legacy layout (35 s); `--only kind[/name]`; `--upstream-mist`, `--upstream-c3k` for the upstream [alpha/Fe] layouts |
 | `opensps_data/make_test_library.py STANDARD_ROOT OUT` | Builds the test library of Section 6 |
-| `opensps_data/make_afe_variants.py` | [alpha/Fe] variants of the test library for `unit_standard_library` |
+| `opensps_data/make_afe_variants.py` | [alpha/Fe] variants of the test library for `unit_standard_library` (two-node `mist2`, `miles2`) and for `unit_afe_derived` and `unit_c_afe_derived` (the five-node `mist5`, `miles5`, with the nebular tables of `mist_nodust` as `mist5_nodust`): the [alpha/Fe] stack, batch and gradients with no external data, the same checks as `afe_library` and `c_afe` on the real libraries |
 | `opensps_data/provenance.py`, `bibtex.py`, `data_release.bib` | Source, version, citations (ADS bibcodes) and redistribution note of each library (written into the manifests and DATA_README.md) |
 | `opensps_data/pack_data.py ROOT OUTDIR --release data-vK [--previous M]` | Versioned library archives, release manifest, DATA_README.md (Section 6) |
 | `opensps_data/upload_release.sh OUTDIR data-vK` | Publishes a packed release as a GitHub release (run by hand after review) |
