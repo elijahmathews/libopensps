@@ -1,3 +1,11 @@
+opensps (0.2.0-1) unstable; urgency=medium
+
+  * New upstream release 0.2.0: [alpha/Fe] as an SSP axis, cue nebular emission with
+    gradients, faster batched CSPs on GPUs; see CHANGELOG.md for the changes that
+    break compatibility.
+
+ -- libopensps Packager <23229627+elijahmathews@users.noreply.github.com>  Thu, 12 Nov 2026 12:00:00 +0000
+
 opensps (0.1.0-1) unstable; urgency=medium
 
   * Initial release.
