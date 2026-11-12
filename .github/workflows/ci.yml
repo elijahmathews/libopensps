@@ -172,6 +172,10 @@ jobs:
           pipx install meson
           pipx install ninja
           if [ "${{ matrix.coverage }}" = "true" ]; then sudo apt-get install -y -q gcovr; fi
+          # NumPy in the interpreter that runs meson (meson's python3): the tests that derive data on the fly
+          # (unit_afe_derived, unit_c_afe_derived, the [alpha/Fe] part of unit_standard_library, unit_data_tools)
+          # skip without it, and their coverage counts only if they run in this job
+          if [ "${{ matrix.coverage }}" = "true" ]; then pipx inject meson numpy; fi
 
       - name: Toolchain versions
         run: |
