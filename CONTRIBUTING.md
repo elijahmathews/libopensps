@@ -10,7 +10,7 @@ or to independent identities. Most of the rules below exist to protect that.
 
 You need:
 
-- a Fortran 2008 compiler: gfortran (the reference compiler), Intel ifx or LLVM flang;
+- a Fortran 2008 compiler: gfortran (the reference compiler; 13 or newer is what CI uses), Intel ifx or LLVM flang;
   NVIDIA HPC SDK (nvfortran) or LLVM flang for GPU builds (OpenMP target offload);
 - Meson and Ninja (`python3 -m pip install --user meson ninja` if your system lacks them);
 - Python 3 (standard library only) for the data tools.
