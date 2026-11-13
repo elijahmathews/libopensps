@@ -124,6 +124,8 @@ program test_csp_small_batch
 
     call opensps_destroy(ctx)
     deallocate(ctx)
+    deallocate(spec_big, mags_big, mass_big, lbol_big, wmat, t1, t2, w1, spec_z, mass_z, lbol_z)
+    if (allocated(wz_big)) deallocate(wz_big)
     call print_summary_line("compute_csp_batch, small batches", total_tests - total_failures, total_tests)
     call tap_finish()
     if (total_failures > 0) stop 1
