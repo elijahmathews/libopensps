@@ -200,7 +200,8 @@ rebuilds the full spectrum from the parts.
 
 `opensps_context_build_afe_basis(handle, isoc_name, spec_name, n_afe, afe, &status)` builds the resident SSP
 bases over [alpha/Fe] and every metallicity of an alpha-enhanced library pair (e.g. `mist_afe` and `c3k_lr`,
-FSPS v4's MIST v2.5 and C3K-LR, converted with `tools/opensps_data/convert_legacy.py --upstream-mist/--upstream-c3k`;
+FSPS v4's MIST v2.5 and C3K-LR: the optional archives of `data-v4` (`tools/fetch_data.py DEST --release data-v4 --with
+isochrones/mist_afe stellar_spectra/c3k_lr`), converted with `tools/opensps_data/convert_legacy.py --upstream-mist/--upstream-c3k`;
 `doc/DATA_FORMAT.md` 3.1): for each value of `afe` (increasing) the libraries `name:afe=value` are set up and the
 SSP of every metallicity generated, with the context's SSP parameters at the call. Afterwards `afe` is a per-model
 parameter of `opensps_context_compute_csp_batch` (with `logzsol`):

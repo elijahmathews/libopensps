@@ -30,7 +30,7 @@ authors:
 # version must equal the project version in meson.build (tools/check_versions.py, run by CI and
 # the release workflow, fails otherwise). date-released is left out: GitHub and Zenodo take the
 # release date from the release itself. Add the archive DOI once there is one.
-version: "0.1.0"
+version: "0.2.0"
 # doi: "10.5281/zenodo.TODO"
 references:
   - type: article

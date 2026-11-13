@@ -1,5 +1,5 @@
 project('opensps', ['fortran', 'c'],
-  version : '0.1.0',
+  version : '0.2.0',
   license : 'MIT',
   license_files : ['LICENSE.md'],
   default_options : [
@@ -518,6 +518,16 @@ if kernel_precision == 'single'
 else
     regression_env.set('FSPS_TEST_RTOL', '1.0E-5')
 endif
+# The [alpha/Fe] libraries (mist_afe, c3k_lr: optional archives of data-v4, fetched with --with or --all): with
+# them in the data root the real-library tests of the [alpha/Fe] axis (afe_library, c_afe) run on it, otherwise they
+# run on OPENSPS_AFE_DATA if the user exports it, or skip
+if (fs.is_dir(join_paths(data_home, 'libraries/isochrones/mist_afe')) and
+    fs.is_dir(join_paths(data_home, 'libraries/stellar_spectra/c3k_lr')))
+    regression_env.set('OPENSPS_AFE_DATA', data_home)
+else
+    message('mist_afe and c3k_lr not found in ' + data_home + ': the [alpha/Fe] tests on the real libraries are ' +
+            'skipped unless OPENSPS_AFE_DATA names a root that holds them (fetch_data.py --with)')
+endif
 # All three variables: OPENSPS_DATA_HOME or SPS_HOME, if exported by the user, would otherwise take
 # precedence
 regression_env.set('OPENSPS_DATA_HOME', data_home)
@@ -560,6 +570,23 @@ test('csp_batch', csp_batch_exe,
     env : regression_env,
     suite : 'regression',
     timeout : 900
+)
+
+# Batches below HOST_SFH_MAX models at one OpenMP thread, against the same models in a larger batch (#87: the
+# host path of the offload builds crashed in libomp at one thread); the small test library, no other data
+csp_small_batch_exe = executable('test_csp_small_batch', 'tests/test_csp_small_batch.f90',
+    dependencies : [opensps_dep, test_utils_dep],
+    link_language : 'fortran'
+)
+csp_small_batch_env = environment()
+csp_small_batch_env.set('FSPS_TEST_TAP', '1')
+csp_small_batch_env.set('FSPS_TEST_LIBRARY', join_paths(meson.project_source_root(), 'tests/data/opensps-test-data'))
+csp_small_batch_env.set('OMP_NUM_THREADS', '1')
+test('unit_csp_small_batch', csp_small_batch_exe,
+    protocol : 'tap',
+    env : csp_small_batch_env,
+    suite : 'unit',
+    timeout : 300
 )
 
 # The [alpha/Fe] axis on the real libraries (mist_afe + c3k_lr); runs only with OPENSPS_AFE_DATA set to a data

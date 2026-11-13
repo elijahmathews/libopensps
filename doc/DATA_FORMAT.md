@@ -563,3 +563,15 @@ the base archive, the two references archives, the manifest, `DATA_README.md` an
 `data_release.bib` (56 MB). Verified: in a tree without `data/` and without the in-tree
 references, with `OPENSPS_DATA_HOME` at a root fetched from that pack, unit + regression pass in
 FP64 and FP32 (38/38).
+
+**data-v3** (published 2026-11-12): `data-v2` with the C3K regression references regenerated for the
+corner floor of #92 (`references/sps` v2, `references/param` v2; the other references are unchanged).
+`FSPS_DATA_RELEASE` for CI and the pin `tests/data/references.json` name it.
+
+**data-v4** (packed 2026-11-12): `data-v3` plus the converted [alpha/Fe] libraries of FSPS v4, the
+optional archives `isochrones-mist_afe-v1` (229 MB) and `stellar_spectra-c3k_lr-v1` (222 MB):
+`tools/fetch_data.py DEST --release data-v4 --with isochrones/mist_afe stellar_spectra/c3k_lr`
+(or `--all`). Converted from the FSPS v4 export with `convert_legacy.py --upstream-mist/--upstream-c3k`
+(Section 3.1); the manifests record the upstream paths relative to the FSPS tree. With them in the
+data root, Meson (`-Ddata_home`) points `afe_library` and `c_afe` at it, and they run on the real
+libraries instead of skipping.

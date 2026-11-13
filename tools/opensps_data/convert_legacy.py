@@ -82,6 +82,16 @@ def one_per_record(path, n):
     return np.array([r.read(1)[0] for _ in range(n)])
 
 
+
+def upstream_label(path):
+    """The part of an upstream FSPS data path that names the library (``ISOCHRONES/MIST``,
+    ``SPECTRA/C3K/c3k_lr``), so that the provenance does not record where the converter ran."""
+    parts = os.path.normpath(path).split(os.sep)
+    for i in range(len(parts) - 1, -1, -1):
+        if parts[i] in ("ISOCHRONES", "SPECTRA"):
+            return "/".join(parts[i:])
+    return parts[-1]
+
 class Converter:
     def __init__(self, legacy_root, out_root):
         self.data = os.path.join(legacy_root, "data")
@@ -631,7 +641,7 @@ class Converter:
                     cols.extend(rows)
         cols = np.array(cols, dtype=np.float64).reshape(-1, 8)
         lib = LibraryWriter(self.out, "isochrones", name, title="MIST isochrones with [alpha/Fe] variations",
-                            provenance=dict(provenance("isochrones", name), converted_from="upstream FSPS layout: " + src))
+                            provenance=dict(provenance("isochrones", name), converted_from="upstream FSPS layout: " + upstream_label(src)))
         lib.metadata["solar_metallicity"] = zsol
         lib.axis("afe", "[alpha/Fe] (dex)", values=afe, default=0.0)
         lib.axis("feh", "[Fe/H] (dex); Z = solar_metallicity * 10^[Fe/H]", values=feh)
@@ -678,7 +688,7 @@ class Converter:
                 flux[ia, iz] = raw.reshape(ng, nt, nspec)
                 avail[ia, iz] = 1
         lib = LibraryWriter(self.out, "stellar_spectra", name, title=f"C3K spectra ({name}) with [alpha/Fe] variations",
-                            provenance=dict(provenance("stellar_spectra", name), converted_from="upstream FSPS layout: " + src))
+                            provenance=dict(provenance("stellar_spectra", name), converted_from="upstream FSPS layout: " + upstream_label(src)))
         lib.metadata["solar_metallicity"] = zsol
         lib.axis("afe", "[alpha/Fe] (dex)", values=[float(t) for t in afe_tags], default=0.0)
         lib.axis("feh", "[Fe/H] (dex); Z = solar_metallicity * 10^[Fe/H]", values=[float(t) for t in ztags])

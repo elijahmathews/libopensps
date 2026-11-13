@@ -35,7 +35,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from opensps_data import Library, read_root_index, root_index_path  # noqa: E402
 from provenance import write_data_readme  # noqa: E402
 
-DEFAULT_OPTIONAL = ["stellar_spectra/c3k_afe+0.0"]
+# Optional archives are fetched only with --with or --all: the C3K slice at [alpha/Fe] = 0 and the
+# [alpha/Fe] libraries (data-v4: 0.9 GB between them)
+DEFAULT_OPTIONAL = ["stellar_spectra/c3k_afe+0.0", "isochrones/mist_afe", "stellar_spectra/c3k_lr"]
 GITHUB_REPO = "elijahmathews/opensps-data"
 # Download locations of an archive, tried in order; {tag} is the release the archive was uploaded
 # to. More mirrors (e.g. a Zenodo record of a tagged release) can be appended here later.

@@ -857,9 +857,20 @@ contains
 #if defined(OMP_TARGET)
         host_m = (given_w .or. host_w) .and. n_mod < HOST_SFH_MAX .and. .not. imf
 #endif
-        if (given_w .or. host_w) then
+        ! The host form of these loops is a plain loop, not the target construct with a false
+        ! if clause: LLVM's libomp (flang 22) crashes in __kmpc_dist_for_static_init_4u when a
+        ! "teams distribute parallel do" runs on the host with one OpenMP thread (#87)
+        if (host_m) then
+            do m = 1, n_mod
+                do k = 1, nt
+                    do z = 1, nzw
+                        weights(k, z, m) = wext((z - 1) * nt + k, m)
+                    end do
+                end do
+            end do
+        else if (given_w .or. host_w) then
 #if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do collapse(2) if(target: .not. host_m)
+            !$omp target teams distribute parallel do collapse(2)
 #elif defined(_OPENMP)
             !$omp parallel do collapse(2)
 #endif
@@ -914,36 +925,63 @@ contains
         if (zw) then
             ! Weights over ages and metallicities: mass and L_bol summed over both (metallicities
             ! outer, as compute_csp_scenario with nzin > 1), the weights cast once to KP
-#if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do private(k, z, w, mk, lk) if(target: .not. host_m) &
-            !$omp& map(OMP_MAP_PRESENT_ALLOC: bas_lbol, bas_mass)
-#elif defined(_OPENMP)
-            !$omp parallel do private(k, z, w, mk, lk)
-#endif
-            do m = 1, n_mod
-                msum(m) = 0.0_wp
-                lsum(m) = 0.0_wp
-                msy(m) = 0.0_wp; mso(m) = 0.0_wp; lsy(m) = 0.0_wp; lso(m) = 0.0_wp
-                do z = 1, nzw
-                    do k = 1, nt
-                        w = weights(k, z, m)
-                        if (w > SAFE_FLOOR) then
-                            mk = w * bas_mass(k, z)
-                            lk = w * 10.0_wp**bas_lbol(k, z)
-                            msum(m) = msum(m) + mk
-                            lsum(m) = lsum(m) + lk
-                            if (k <= it_tesc(m)) then
-                                msy(m) = msy(m) + mk; lsy(m) = lsy(m) + lk
+            if (host_m) then
+                do m = 1, n_mod
+                    msum(m) = 0.0_wp
+                    lsum(m) = 0.0_wp
+                    msy(m) = 0.0_wp; mso(m) = 0.0_wp; lsy(m) = 0.0_wp; lso(m) = 0.0_wp
+                    do z = 1, nzw
+                        do k = 1, nt
+                            w = weights(k, z, m)
+                            if (w > SAFE_FLOOR) then
+                                mk = w * bas_mass(k, z)
+                                lk = w * 10.0_wp**bas_lbol(k, z)
+                                msum(m) = msum(m) + mk
+                                lsum(m) = lsum(m) + lk
+                                if (k <= it_tesc(m)) then
+                                    msy(m) = msy(m) + mk; lsy(m) = lsy(m) + lk
+                                else
+                                    mso(m) = mso(m) + mk; lso(m) = lso(m) + lk
+                                end if
                             else
-                                mso(m) = mso(m) + mk; lso(m) = lso(m) + lk
+                                w = 0.0_wp
                             end if
-                        else
-                            w = 0.0_wp
-                        end if
-                        wz(k, z, m) = real(w, KP)
+                            wz(k, z, m) = real(w, KP)
+                        end do
                     end do
                 end do
-            end do
+            else
+#if defined(OMP_TARGET)
+                !$omp target teams distribute parallel do private(k, z, w, mk, lk) &
+                !$omp& map(OMP_MAP_PRESENT_ALLOC: bas_lbol, bas_mass)
+#elif defined(_OPENMP)
+                !$omp parallel do private(k, z, w, mk, lk)
+#endif
+                do m = 1, n_mod
+                    msum(m) = 0.0_wp
+                    lsum(m) = 0.0_wp
+                    msy(m) = 0.0_wp; mso(m) = 0.0_wp; lsy(m) = 0.0_wp; lso(m) = 0.0_wp
+                    do z = 1, nzw
+                        do k = 1, nt
+                            w = weights(k, z, m)
+                            if (w > SAFE_FLOOR) then
+                                mk = w * bas_mass(k, z)
+                                lk = w * 10.0_wp**bas_lbol(k, z)
+                                msum(m) = msum(m) + mk
+                                lsum(m) = lsum(m) + lk
+                                if (k <= it_tesc(m)) then
+                                    msy(m) = msy(m) + mk; lsy(m) = lsy(m) + lk
+                                else
+                                    mso(m) = mso(m) + mk; lso(m) = lso(m) + lk
+                                end if
+                            else
+                                w = 0.0_wp
+                            end if
+                            wz(k, z, m) = real(w, KP)
+                        end do
+                    end do
+                end do
+            end if
         else if (imf) then
             ! The model's own SSPs (IMF per model): the surviving mass and L_bol per age and model
 #if defined(OMP_TARGET)
@@ -978,53 +1016,97 @@ contains
                 end do
             end do
         else
-#if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do private(k, w, mk, lk) if(target: .not. host_m) &
-            !$omp& map(OMP_MAP_PRESENT_ALLOC: bas_lbol, bas_mass)
-#elif defined(_OPENMP)
-            !$omp parallel do private(k, w, mk, lk)
-#endif
-            do m = 1, n_mod
-                msum(m) = 0.0_wp
-                lsum(m) = 0.0_wp
-                msy(m) = 0.0_wp; mso(m) = 0.0_wp; lsy(m) = 0.0_wp; lso(m) = 0.0_wp
-                do k = 1, nt
-                    w = weights(k, 1, m)
-                    if (w > SAFE_FLOOR) then
-                        if (zmode) then
-                            ! The interpolated SSP's mass and L_bol (compute_interpolated_ssp)
-                            mk = (1.0_wp - dz(m)) * bas_mass(k, zlo(m)) + dz(m) * bas_mass(k, zhi(m))
-                            lk = (1.0_wp - dz(m)) * bas_lbol(k, zlo(m)) + dz(m) * bas_lbol(k, zhi(m))
-                            if (nzs > 0) then
-                                mk = (1.0_wp - da(m)) * mk + da(m) * ((1.0_wp - dz(m)) * bas_mass(k, zlo(m) + nzs) + &
-                                                                      dz(m) * bas_mass(k, zhi(m) + nzs))
-                                lk = (1.0_wp - da(m)) * lk + da(m) * ((1.0_wp - dz(m)) * bas_lbol(k, zlo(m) + nzs) + &
-                                                                      dz(m) * bas_lbol(k, zhi(m) + nzs))
+            if (host_m) then
+                do m = 1, n_mod
+                    msum(m) = 0.0_wp
+                    lsum(m) = 0.0_wp
+                    msy(m) = 0.0_wp; mso(m) = 0.0_wp; lsy(m) = 0.0_wp; lso(m) = 0.0_wp
+                    do k = 1, nt
+                        w = weights(k, 1, m)
+                        if (w > SAFE_FLOOR) then
+                            if (zmode) then
+                                ! The interpolated SSP's mass and L_bol (compute_interpolated_ssp)
+                                mk = (1.0_wp - dz(m)) * bas_mass(k, zlo(m)) + dz(m) * bas_mass(k, zhi(m))
+                                lk = (1.0_wp - dz(m)) * bas_lbol(k, zlo(m)) + dz(m) * bas_lbol(k, zhi(m))
+                                if (nzs > 0) then
+                                    mk = (1.0_wp - da(m)) * mk + da(m) * ((1.0_wp - dz(m)) * bas_mass(k, zlo(m) + nzs) + &
+                                                                          dz(m) * bas_mass(k, zhi(m) + nzs))
+                                    lk = (1.0_wp - da(m)) * lk + da(m) * ((1.0_wp - dz(m)) * bas_lbol(k, zlo(m) + nzs) + &
+                                                                          dz(m) * bas_lbol(k, zhi(m) + nzs))
+                                end if
+                                mk = w * mk
+                                lk = w * 10.0_wp**lk
+                            else
+                                mk = w * bas_mass(k, 1)
+                                lk = w * lum_linear(k)
                             end if
-                            mk = w * mk
-                            lk = w * 10.0_wp**lk
+                            msum(m) = msum(m) + mk
+                            lsum(m) = lsum(m) + lk
+                            ! Young (ages <= dust_tesc) and old parts, summed separately (no differences)
+                            if (k <= it_tesc(m)) then
+                                msy(m) = msy(m) + mk; lsy(m) = lsy(m) + lk
+                            else
+                                mso(m) = mso(m) + mk; lso(m) = lso(m) + lk
+                            end if
                         else
-                            mk = w * bas_mass(k, 1)
-                            lk = w * lum_linear(k)
+                            w = 0.0_wp
                         end if
-                        msum(m) = msum(m) + mk
-                        lsum(m) = lsum(m) + lk
-                        ! Young (ages <= dust_tesc) and old parts, summed separately (no differences)
                         if (k <= it_tesc(m)) then
-                            msy(m) = msy(m) + mk; lsy(m) = lsy(m) + lk
+                            w2(k, m) = real(w, KP); w2(k, n_mod + m) = 0.0_KP
                         else
-                            mso(m) = mso(m) + mk; lso(m) = lso(m) + lk
+                            w2(k, m) = 0.0_KP; w2(k, n_mod + m) = real(w, KP)
                         end if
-                    else
-                        w = 0.0_wp
-                    end if
-                    if (k <= it_tesc(m)) then
-                        w2(k, m) = real(w, KP); w2(k, n_mod + m) = 0.0_KP
-                    else
-                        w2(k, m) = 0.0_KP; w2(k, n_mod + m) = real(w, KP)
-                    end if
+                    end do
                 end do
-            end do
+            else
+#if defined(OMP_TARGET)
+                !$omp target teams distribute parallel do private(k, w, mk, lk) &
+                !$omp& map(OMP_MAP_PRESENT_ALLOC: bas_lbol, bas_mass)
+#elif defined(_OPENMP)
+                !$omp parallel do private(k, w, mk, lk)
+#endif
+                do m = 1, n_mod
+                    msum(m) = 0.0_wp
+                    lsum(m) = 0.0_wp
+                    msy(m) = 0.0_wp; mso(m) = 0.0_wp; lsy(m) = 0.0_wp; lso(m) = 0.0_wp
+                    do k = 1, nt
+                        w = weights(k, 1, m)
+                        if (w > SAFE_FLOOR) then
+                            if (zmode) then
+                                ! The interpolated SSP's mass and L_bol (compute_interpolated_ssp)
+                                mk = (1.0_wp - dz(m)) * bas_mass(k, zlo(m)) + dz(m) * bas_mass(k, zhi(m))
+                                lk = (1.0_wp - dz(m)) * bas_lbol(k, zlo(m)) + dz(m) * bas_lbol(k, zhi(m))
+                                if (nzs > 0) then
+                                    mk = (1.0_wp - da(m)) * mk + da(m) * ((1.0_wp - dz(m)) * bas_mass(k, zlo(m) + nzs) + &
+                                                                          dz(m) * bas_mass(k, zhi(m) + nzs))
+                                    lk = (1.0_wp - da(m)) * lk + da(m) * ((1.0_wp - dz(m)) * bas_lbol(k, zlo(m) + nzs) + &
+                                                                          dz(m) * bas_lbol(k, zhi(m) + nzs))
+                                end if
+                                mk = w * mk
+                                lk = w * 10.0_wp**lk
+                            else
+                                mk = w * bas_mass(k, 1)
+                                lk = w * lum_linear(k)
+                            end if
+                            msum(m) = msum(m) + mk
+                            lsum(m) = lsum(m) + lk
+                            ! Young (ages <= dust_tesc) and old parts, summed separately (no differences)
+                            if (k <= it_tesc(m)) then
+                                msy(m) = msy(m) + mk; lsy(m) = lsy(m) + lk
+                            else
+                                mso(m) = mso(m) + mk; lso(m) = lso(m) + lk
+                            end if
+                        else
+                            w = 0.0_wp
+                        end if
+                        if (k <= it_tesc(m)) then
+                            w2(k, m) = real(w, KP); w2(k, n_mod + m) = 0.0_KP
+                        else
+                            w2(k, m) = 0.0_KP; w2(k, n_mod + m) = real(w, KP)
+                        end if
+                    end do
+                end do
+            end if
 
         end if
         end associate
