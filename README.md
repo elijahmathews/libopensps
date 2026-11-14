@@ -84,7 +84,7 @@ git clone https://github.com/elijahmathews/libopensps.git
 cd libopensps
 
 # Stellar libraries, isochrones, nebular grids, dust, filters (not part of this repository)
-python3 tools/fetch_data.py ~/opensps-data --release data-v3
+python3 tools/fetch_data.py ~/opensps-data --release data-v4
 export OPENSPS_DATA_HOME=~/opensps-data
 
 meson setup build --buildtype=release

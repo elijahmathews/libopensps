@@ -11,7 +11,7 @@ Three workflows, split by how often a check needs to run:
 Pull requests that supersede a running build cancel it. Every job has a timeout.
 
 Both `ci.yml` and `nightly.yml` take their data from the published release named by the repository
-variable `FSPS_DATA_RELEASE` (`tools/fetch_data.py`, cached per release). Without it the regression
+variable `OPENSPS_DATA_RELEASE` (`tools/fetch_data.py`, cached per release). Without it the regression
 tests skip and the stress tests stop at "FSPS data path not found", so a nightly run that fails in
 well under a minute at the stress step is a data problem first (issue #80).
 
