@@ -11,6 +11,7 @@ module opensps_batch_photometry
     !> Light-weighted ages and redshifted colors are not handled (callers use compute_magnitudes).
 
     use opensps_precision, only: WP, KP
+    use opensps_tuning, only: TUNE_BAND_BLOCK, TUNE_GEMM_MIN_COLS, TUNE_NCH, TUNE_MBLK, TUNE_SMALL_N
     use opensps_constants, only: SAFE_FLOOR, C_LIGHT, ABS_MAG_ZEROPOINT_LOG
     use opensps_context_types, only: opensps_context_t, batch_grid_release
     use opensps_offload, only: offload_on_host
@@ -37,7 +38,7 @@ module opensps_batch_photometry
     integer, parameter  :: IDX_V_BAND = 1
     !> Pixels per block of the split-K band product: each block is a plain FP32 sum
     !> of at most 256 positive terms; the blocks are added in FP64
-    integer, parameter :: BAND_BLOCK = 256
+    integer, parameter :: BAND_BLOCK = TUNE_BAND_BLOCK
     real(KP), allocatable, save, target :: smooth_work(:,:)
 
 contains
@@ -69,7 +70,7 @@ contains
         logical  :: done
 #if defined(OPENSPS_ACCEL_BLAS)
         integer :: npad
-        integer, parameter :: GEMM_MIN_COLS = 16
+        integer, parameter :: GEMM_MIN_COLS = TUNE_GEMM_MIN_COLS
 #endif
 
         nspec = ctx%state%nspec
@@ -536,7 +537,7 @@ contains
         real(WP), intent(in)    :: sm_dcoef(ncoef), kfac
         real(KP), intent(in)    :: spec(nspec, n_col), spec_bar(nspec, n_col)
         real(WP), intent(out)   :: ds(n_col)
-        integer, parameter :: NCH = 64
+        integer, parameter :: NCH = TUNE_NCH
         real(WP), allocatable :: part(:,:)
         integer  :: m, c, i, k, lo, off
         real(WP) :: s, sx, sxx
@@ -900,7 +901,7 @@ contains
 
         !> Models per gang: the threads of a gang share one band, hence one trip count (no
         !> divergence)
-        integer, parameter :: MBLK = 128, SMALL_N = 16, NCH = 64
+        integer, parameter :: MBLK = TUNE_MBLK, SMALL_N = TUNE_SMALL_N, NCH = TUNE_NCH
         integer  :: m, j, b, mb, ml, ch, jlo, jhi, nj
         real(KP), allocatable :: part(:, :, :)
         real(KP) :: s, c, term, tsum

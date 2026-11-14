@@ -23,6 +23,7 @@ module opensps_ssp
     !> - **Vectorization:** Critical loops are marked `contiguous` to enable SIMD.
 
     use opensps_precision, only: WP, KP
+    use opensps_tuning, only: TUNE_PIX_BLOCK
     use opensps_constants, only: NM, M_SOL, L_SOL, VERBOSE, BHB_SBS_TIME, TIME_RES_INCR, SAFE_FLOOR
     use opensps_types, only: params
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings
@@ -1186,7 +1187,7 @@ contains
         real(WP) :: wv
         integer, allocatable  :: age_first(:), age_last(:), sl_key(:,:), sl_ptr(:), e_lib(:), e_a(:), e_b(:)
         real(WP), allocatable :: e_w(:)
-        integer, parameter :: PIX_BLOCK = 512
+        integer, parameter :: PIX_BLOCK = TUNE_PIX_BLOCK
         integer  :: p0, p1, nb, q, qa, qb
         real(KP), allocatable :: va(:,:), vc(:,:), vl(:,:), vlc(:,:)
         real(KP) :: xs(PIX_BLOCK)

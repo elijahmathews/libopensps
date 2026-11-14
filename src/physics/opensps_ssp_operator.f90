@@ -81,6 +81,7 @@ module opensps_ssp_operator
     !> (direct spectra); C3K none.
 
     use opensps_precision, only: WP, KP
+    use opensps_tuning, only: TUNE_SEG_LEN, TUNE_PT_PIECE, TUNE_PIX_BLOCK
     use opensps_constants, only: NM, SAFE_FLOOR, TIME_RES_INCR, C_LIGHT, H_PLANCK, L_SOL
     use opensps_types, only: params
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings
@@ -104,9 +105,9 @@ module opensps_ssp_operator
 
     !> Row kinds (the order of the rows within an age)
     !> Entries per segment of an effective template's list (ssp_operator_t: seg_ptr)
-    integer, parameter :: SEG_LEN = 256
+    integer, parameter :: SEG_LEN = TUNE_SEG_LEN
     !> Points per piece of an age's points (ssp_operator_t: pc_ptr)
-    integer, parameter :: PT_PIECE = 32
+    integer, parameter :: PT_PIECE = TUNE_PT_PIECE
 
     integer, parameter, public :: ROW_MAIN = 1, ROW_SMALL = 2, ROW_DUSTY = 3, ROW_DIRECT = 4, &
                                   ROW_MASS = 5, ROW_LBOL = 6
@@ -844,7 +845,7 @@ contains
         real(KP), intent(out) :: y(nspec, ncol)
         logical, intent(in)   :: dev
 
-        integer, parameter :: PIX_BLOCK = 512
+        integer, parameter :: PIX_BLOCK = TUNE_PIX_BLOCK
         integer  :: i, c, k, p0, p1, nb, q
         real(KP) :: acc, comp, wk, term, tsum
         real(KP), allocatable :: va(:,:), vc(:,:)

@@ -7,6 +7,13 @@ major version is 0, a minor release may change the API, and each such change is 
 
 ## Unreleased
 
+### Added
+
+- **One module for the hardware tuning parameters** (`src/core/opensps_tuning.f90`, `doc/TUNING.md`). The sizes that
+  were literals in ten places are named constants there. Three run-time ones (`SSP_BATCH_CHUNK`, `HOST_SFH_MAX`,
+  `PINNED_CHUNK_BYTES`) can be set with `OPENSPS_TUNE_<NAME>`. Defaults are the previous values: no change in
+  results or speed unless a variable is set.
+
 ### Fixed
 
 - **`H0`, `om0` and `ol0` set on a context now change the batched magnitudes** (#95). They were accepted but the
