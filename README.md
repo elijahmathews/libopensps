@@ -56,7 +56,7 @@ What it adds to FSPS:
   (LLVM flang, ROCm) and NVIDIA (nvfortran, CUDA) GPUs, with optional native HIP kernels and
   vendor BLAS (rocBLAS, hipBLAS or cuBLAS) for the matrix products.
 - **Analytic gradients.** Reverse-mode (adjoint) derivatives of the batched outputs with respect to
-  33 physical parameters, non-parametric SFH weights and enrichment histories, with no
+  37 physical parameters, non-parametric SFH weights and enrichment histories, with no
   finite-difference noise.
 - **Free IMF parameters per model.** SSP operators decouple the isochrones from the IMF integrals,
   so IMF slopes, characteristic masses and bounds can vary from galaxy to galaxy within a batch.
@@ -64,6 +64,8 @@ What it adds to FSPS:
   precision (setup, isochrones and the other weights stay in double). It is much faster on GPUs with slow
   FP64, and the regression suite checks it against the FP64 references. See
   [doc/MIXED_PRECISION.md](doc/MIXED_PRECISION.md) for the accuracy evidence.
+- **[α/Fe] as an SSP axis** (FSPS v4's MIST v2.5 and C3K-LR libraries, optional archives of
+  `data-v4`) and **cue nebular emission** (`nebular_model = 1`), both with analytic gradients.
 - **Thread-safe contexts.** Independent `Context` objects replace FSPS's global state, so several
   setups can live in one process.
 - **A stable C API** (`include/opensps.h`) that Python, C++, Julia, Rust and others can bind to.
@@ -82,7 +84,7 @@ git clone https://github.com/elijahmathews/libopensps.git
 cd libopensps
 
 # Stellar libraries, isochrones, nebular grids, dust, filters (not part of this repository)
-python3 tools/fetch_data.py ~/opensps-data --release data-v2
+python3 tools/fetch_data.py ~/opensps-data --release data-v3
 export OPENSPS_DATA_HOME=~/opensps-data
 
 meson setup build --buildtype=release
@@ -92,7 +94,9 @@ meson test -C build --suite unit --suite regression
 
 ## Requirements
 
-- A Fortran 2008 compiler (see the table below) and a C compiler.
+- A Fortran 2008 compiler (see the table below) and a C compiler. The code builds with
+  `-std=f2008` (checked in CI, gfortran) and CI uses gfortran 13 or newer, LLVM flang 20, Intel ifx
+  2026.1 and nvfortran 26.1; older compilers are not tested.
 - [Meson](https://mesonbuild.com) 1.1 or newer and [Ninja](https://ninja-build.org). LLVM flang needs
   a recent Meson (1.11 has been used); older releases pass classic-flang flags to it. Install with
   `python3 -m pip install --user meson ninja` if your system's version is too old.
@@ -119,7 +123,9 @@ Supported platforms and compilers, in order of how much they are used and tested
 
 The two GPU targets come first because that is where development and testing happen. The last four
 rows are secondary targets (they are on the [roadmap](doc/ROADMAP.md)) that are only exercised by
-CI, so expect rougher edges there. Windows is not currently tested.
+CI, so expect rougher edges there. Windows is not currently tested. An LLVM flang offload build
+that runs on the host (no GPU, or `OMP_TARGET_OFFLOAD=DISABLED`) is not supported: use a CPU build
+for host runs ([CHANGELOG.md](CHANGELOG.md), "Known limitations").
 
 ### The GPU build flags
 

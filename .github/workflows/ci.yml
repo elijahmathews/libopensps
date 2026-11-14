@@ -109,6 +109,13 @@ jobs:
             setup_args: -Denable_openmp=true -Dkernel_precision=single -Dcpu_baseline=x86-64-v3
             fflags: -Minfo=mp
 
+          # Strict language standard: the library, tests and tools must compile as Fortran 2008
+          # (README "Requirements"); gfortran rejects any extension or later-standard feature
+          - name: gfortran / Fortran 2008 (-std=f2008) / Linux x86-64
+            os: ubuntu-24.04
+            install: apt-gfortran
+            setup_args: -Dfortran_std=f2008
+
           # FP32 kernels (-Dkernel_precision=single), the configuration a consumer GPU would run;
           # the regression suite checks them against the FP64 references
           - name: gfortran / FP32 kernels / Linux x86-64

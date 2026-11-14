@@ -4,7 +4,7 @@ Three workflows, split by how often a check needs to run:
 
 | Workflow | When | What |
 |---|---|---|
-| `ci.yml` | Every push to `main`, every pull request (skipped for documentation-only changes) | Nine compiler/hardware builds running the unit and regression suites; AddressSanitizer and ThreadSanitizer jobs running focused stress phases |
+| `ci.yml` | Every push to `main`, every pull request (skipped for documentation-only changes) | Ten compiler/hardware builds running the unit and regression suites; AddressSanitizer and ThreadSanitizer jobs running focused stress phases |
 | `nightly.yml` | Daily, and on demand | All stress phases at more iterations (ASan, TSan, nvfortran OpenMP host threads); newest gfortran on Linux and macOS; optional GPU job (OpenMP target) on a self-hosted runner |
 | `packaging.yml` | Changes to packaging or build files, pushes to `master`, weekly, on demand | Fedora RPM and Ubuntu DEB, each running the test suite with the distribution's compiler |
 
@@ -43,6 +43,7 @@ coverage only if the upload itself fails.
 | gfortran / macOS arm64 | gfortran 14 (Homebrew) | Apple silicon | macOS toolchain and linker |
 | LLVM flang / Linux x86-64 | flang 20 | x86-64 | LLVM front end |
 | Intel ifx / Linux x86-64 | ifx 2026.1 | x86-64 | Intel LLVM-based compiler |
+| gfortran / Fortran 2008 | gfortran, `-Dfortran_std=f2008` | x86-64 | Library, tests and tools compile as strict Fortran 2008 (the README's language claim) |
 | gfortran / OpenMP host threads | gfortran, `-Denable_openmp=true` | x86-64 | The OpenMP loops of the device kernels on host threads |
 | nvfortran / OpenMP host threads (FP64, FP32) | nvfortran 26.1, `-Denable_openmp=true` | x86-64 | The same with nvfortran (nvfortran's front end and OpenMP runtime) |
 | AddressSanitizer + UBSan | gfortran | x86-64 | Unit tests; stress phases A (leaks) and C (reallocation) |
