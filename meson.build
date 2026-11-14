@@ -1,5 +1,5 @@
 project('opensps', ['fortran', 'c'],
-  version : '0.2.0',
+  version : '0.2.1',
   license : 'MIT',
   license_files : ['LICENSE.md'],
   default_options : [
