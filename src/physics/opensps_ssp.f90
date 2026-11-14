@@ -23,7 +23,7 @@ module opensps_ssp
     !> - **Vectorization:** Critical loops are marked `contiguous` to enable SIMD.
 
     use opensps_precision, only: WP, KP
-    use opensps_tuning, only: TUNE_PIX_BLOCK
+    use opensps_tuning, only: TUNE_PIX_BLOCK, TUNE_SSP_STAR_BATCH
     use opensps_constants, only: NM, M_SOL, L_SOL, VERBOSE, BHB_SBS_TIME, TIME_RES_INCR, SAFE_FLOOR
     use opensps_types, only: params
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings
@@ -90,7 +90,7 @@ module opensps_ssp
     ! ------------------------------------------------------------------------
     real(WP), parameter :: MIN_WEIGHT_CUTOFF = 0.0_wp     ! Skip stars with negligible weight
     real(WP), parameter :: LN10 = log(10.0_wp)            ! Natural log of 10
-    integer, parameter :: BATCH_SIZE = 32                 ! Process stars in chunks for L1 cache locality
+    integer, parameter :: BATCH_SIZE = TUNE_SSP_STAR_BATCH   ! Process stars in chunks for L1 cache locality
 
     ! ------------------------------------------------------------------------
     ! DERIVED TYPES

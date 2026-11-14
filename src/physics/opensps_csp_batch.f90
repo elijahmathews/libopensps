@@ -80,7 +80,11 @@ module opensps_csp_batch
     !> (summation order differs).
 
     use opensps_precision, only: WP, KP, kahan_add
-    use opensps_tuning, only: TUNE_NCHG, TUNE_CSP_PT, TUNE_NCH, TUNE_P_HOST_SFH_MAX, TUNE_P_PINNED_CHUNK_BYTES, tuning_get
+    use opensps_tuning, only: TUNE_NCHG, TUNE_CSP_PT, &
+                              TUNE_AGE_SUMS_Z4_FLANG_MT, TUNE_AGE_SUMS_Z4_FLANG_PT, TUNE_AGE_SUMS_Z_FLANG_MT, &
+                              TUNE_AGE_SUMS_Z_FLANG_PT, TUNE_AGE_SUMS_Z_NVF_MT, TUNE_AGE_SUMS_Z4_NVF_MT, &
+                              TUNE_AGE_SUMS_MT, TUNE_AGE_SUMS_PT, TUNE_NCH, &
+                              TUNE_P_HOST_SFH_MAX, TUNE_P_PINNED_CHUNK_BYTES, tuning_get
     use opensps_constants, only: SAFE_FLOOR, PI, NEMLINE, NEBNAGE, NEBNZ, NEBNIP, H_PLANCK, L_SOL
     use opensps_types, only: params, params_core
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings, batch_out_reserve, &
@@ -3498,7 +3502,7 @@ contains
         ! is unchanged (same results bit for bit).
         ! Tile of PT pixels x MT models per thread. FP64 on the 780M: 4 pixels spill registers (890 ms at
         ! N = 10^4; 658 ms with 2; 8 models x 1-4 pixels is the best range, 16 or more models 6-8 s)
-        integer, parameter :: MT = 8, PT = merge(2, 4, KP == WP)
+        integer, parameter :: MT = TUNE_AGE_SUMS_Z_FLANG_MT, PT = TUNE_AGE_SUMS_Z_FLANG_PT
         integer  :: m, mq, ip, npt, key, nzk
         integer, allocatable :: zord(:), starts(:)
 
@@ -3595,7 +3599,7 @@ contains
             end do
         end do
 #elif defined(OMP_TARGET)
-        integer, parameter :: MT = 4
+        integer, parameter :: MT = TUNE_AGE_SUMS_Z_NVF_MT
         integer  :: mq, i, k, l, mm(MT)
         real(KP) :: bk, y(MT), o(MT), d(MT)
 
@@ -3677,7 +3681,7 @@ contains
         ! LLVM flang / AMD: as age_sums_z (models sorted by their cell so that a tile shares its four slabs;
         ! PT pixels per thread, MT models per tile). Measured on the R9700 against age_sums_z (N = 1e4, 107
         ! ages): 1.4x at 5994 pixels with MT = 8, PT = 2; the tile shape matters (spills)
-        integer, parameter :: MT = 8, PT = 2
+        integer, parameter :: MT = TUNE_AGE_SUMS_Z4_FLANG_MT, PT = TUNE_AGE_SUMS_Z4_FLANG_PT
         integer  :: m, mq, ip, npt, key, ncell
         integer, allocatable :: zord(:), starts(:)
 
@@ -3784,7 +3788,7 @@ contains
             end do
         end do
 #elif defined(OMP_TARGET)
-        integer, parameter :: MT = 4
+        integer, parameter :: MT = TUNE_AGE_SUMS_Z4_NVF_MT
         integer  :: mq, i, k, l, mm(MT), s0
         real(KP) :: bk, y(MT), o(MT), c0(MT), c1(MT), c2(MT), c3(MT)
 
@@ -4048,7 +4052,7 @@ contains
         ! running sum per (pixel, model), stored as the young sum at the model's last young age
         ! (it_tesc) and restarted for the old ages. Same sums, in the same order, as two separate
         ! products.
-        integer, parameter :: MT = 8, PT = 4
+        integer, parameter :: MT = TUNE_AGE_SUMS_MT, PT = TUNE_AGE_SUMS_PT
         integer  :: mq, ip, npt, i, k, l, p, mm(MT), it(MT), ii(PT)
         real(KP) :: bk(PT), wk(MT), acc(PT, MT), yy(PT, MT)
 

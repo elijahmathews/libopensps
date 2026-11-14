@@ -13,6 +13,12 @@ major version is 0, a minor release may change the API, and each such change is 
   were literals in ten places are named constants there. Three run-time ones (`SSP_BATCH_CHUNK`, `HOST_SFH_MAX`,
   `PINNED_CHUNK_BYTES`) can be set with `OPENSPS_TUNE_<NAME>`. Defaults are the previous values: no change in
   results or speed unless a variable is set.
+- **Device profiles for the tuning parameters** (`OPENSPS_TUNE_PROFILE`, `doc/TUNING.md`): per-architecture values
+  measured on the device and cited in the document, chosen from the build's `-Dgpu_arch` (`cc80`, `gfx1201`).
+  Built for the R9700, batches below 160 models form the SFH weights on the host (the host path measured
+  up to 1.4x faster there; the default is 16, measured on the A100). `OPENSPS_BENCH_SIZES` sets the batch sizes of
+  `benchmark_csp_batch`. The register tiles and other kernel sizes that were literals are named
+  constants of the registry; `unit_tuning_literals` fails on a literal tuning parameter outside it.
 
 ## 0.2.1
 

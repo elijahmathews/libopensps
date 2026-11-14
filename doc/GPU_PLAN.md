@@ -175,6 +175,10 @@ Forecast to compare against: ~4 us per model (FP32) on the A100 at large N.
 - `!$acc routine seq` is required on every routine called inside device code (a missing one
   silently broke the AGB dust screen in CI once).
 - Use `OMP_TARGET_OFFLOAD=MANDATORY` for OpenMP target runs so a silent host fallback fails.
+- Tuning numbers (chunk and block sizes, host/device crossovers, tile sizes) live in
+  `src/core/opensps_tuning.f90`, with device profiles whose measurements are cited
+  (`doc/TUNING.md`): a number measured on one device is a profile entry for that device, not a
+  new literal (and not a change of the default, which every other device uses).
 - Device code must build with toolchains other than nvfortran (LLVM flang + ROCm on AMD, Intel):
   - no libm calls without a device fallback (AMD's GPU libm has no `lgamma`; `log_gamma` of an
     integer became a sum of logs);

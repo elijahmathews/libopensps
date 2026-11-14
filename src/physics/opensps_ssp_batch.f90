@@ -24,7 +24,8 @@ module opensps_ssp_batch
     !> and as OpenMP host loops otherwise, with the same arithmetic in the same order.
 
     use opensps_precision, only: WP, KP
-    use opensps_tuning, only: TUNE_P_SSP_BATCH_CHUNK, tuning_get
+    use opensps_tuning, only: TUNE_P_SSP_BATCH_CHUNK, TUNE_TEMPLATE_MT, TUNE_TEMPLATE_PT, TUNE_TEMPLATE_PIX_BLOCK, &
+                              TUNE_TEMPLATE_KB, TUNE_GEMM_KB, TUNE_GEMM_NC_BATCHED, TUNE_IMF_GRAD_CHG, tuning_get
     use opensps_constants, only: SAFE_FLOOR
     use opensps_imf, only: imf_integral_p, imf_bin_weights_tab, imf_bin_logs, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT, &
                            IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE, IMF_P_LOWER_BOUND, IMF_NPAR, imf_integral_dp, &
@@ -52,7 +53,7 @@ module opensps_ssp_batch
 #ifdef KERNEL_SINGLE_PRECISION
     !> Column counts up to which the FP32 accelerated BLAS product uses the batched form (gemm_columns_batched),
     !> and its work array (pixels x NC_BATCHED x blocks, on the device once allocated)
-    integer, parameter :: NC_BATCHED = 512
+    integer, parameter :: NC_BATCHED = TUNE_GEMM_NC_BATCHED
     real(KP), allocatable, save :: gtmp(:,:,:)
 #endif
 #endif
@@ -453,7 +454,7 @@ contains
         !> metallicities of cz (stars + remnants), each a function of the IMF parameters
         real(WP), intent(in), contiguous :: smass(:,:), msum_bar(:)
 
-        integer, parameter :: CHG = 256
+        integer, parameter :: CHG = TUNE_IMF_GRAD_CHG
         integer, parameter :: PROWS(NIMFG) = [IMF_P_ALPHA, IMF_P_ALPHA + 1, IMF_P_ALPHA + 2, IMF_P_VDMC, IMF_P_MDAVE]
         integer :: nz, m, t, j, np1, np2, nc_max, neb_cols, ntq
         integer, allocatable :: perm1(:), perm2(:), viz1(:), viz2(:), ptr(:), cnt(:), it1(:), it2(:)
@@ -2187,7 +2188,8 @@ contains
         integer, intent(in) :: np, nspec, n_eff, k, nc, v0, c0
         real(KP), intent(in), contiguous, target :: etpl(:,:), v(:,:)
         real(KP), intent(inout), contiguous, target :: yo(:,:)
-        integer, parameter :: MT = 8, PT = 4, PIX_BLOCK = 256, KB = 4
+        integer, parameter :: MT = TUNE_TEMPLATE_MT, PT = TUNE_TEMPLATE_PT, PIX_BLOCK = TUNE_TEMPLATE_PIX_BLOCK, &
+                              KB = TUNE_TEMPLATE_KB
         integer  :: i, j, e, e0, mq, ip, npt, l, p, mm(MT), ii(PT), p0, p1, nb, q
         real(KP) :: bk(PT), wk(MT), acc(PT, MT), cmp(PT, MT), blk(PT, MT), term, tsum
         real(KP), allocatable :: a(:,:), c(:,:)
@@ -2326,7 +2328,7 @@ contains
         integer, intent(in) :: np, nspec, n_eff, k, nc, v0, c0
         real(KP), intent(in), contiguous, target :: etpl(:,:), v(:,:)
         real(KP), intent(inout), contiguous, target :: yo(:,:)
-        integer, parameter :: KB = 256
+        integer, parameter :: KB = TUNE_GEMM_KB
         integer :: nfull, rem, nb, i, j, b
         real(KP) :: term, tsum, acc, cmp
 
@@ -2418,7 +2420,7 @@ contains
         integer, intent(in) :: np, nspec, n_eff, k, nc, v0, c0
         real(KP), intent(in), contiguous, target :: etpl(:,:), v(:,:)
         real(KP), intent(inout), contiguous, target :: yo(:,:)
-        integer, parameter :: KB = 256
+        integer, parameter :: KB = TUNE_GEMM_KB
 #ifdef KERNEL_SINGLE_PRECISION
         integer :: j0, nc1
 #endif
