@@ -11,16 +11,26 @@
 !>   `TUNE_PT_PIECE`) changes the rounding of the results, so each is a constant of the build that the
 !>   tests of both precisions gate; none is overridable at run time.
 !> * Run-time parameters (`tuning_get`): launch and chunking decisions that do not change what is
-!>   computed beyond the gates (`TUNE_P_*` ids). Each starts at its default, may be set by the
-!>   environment variable `OPENSPS_TUNE_<NAME>` (read once, at the first use), and may be changed by
+!>   computed beyond the gates (`TUNE_P_*` ids). A value is resolved in layers, a later one
+!>   overriding an earlier one: the default (right for hardware nobody has measured); the device
+!>   profile (below); the environment variable `OPENSPS_TUNE_<NAME>` (read once, at the first use);
 !>   `tuning_set` (tests, programs that tune themselves). A value outside the legal range of its
-!>   parameter, or not an integer, is refused with one message on stderr and the default is kept.
+!>   parameter, or not an integer, is refused with one message on stderr and the layer below stays.
+!>
+!> Device profiles are the one place a number measured on one device lives. An entry is a (profile,
+!> parameter, value) triple with a reference to the measurement that justifies it, listed with its data in
+!> doc/TUNING.md ("Measured device data"): no measurement, no entry, and a device without entries
+!> uses the defaults. The profile is that of the build's `-Dgpu_arch` when it names one target
+!> (`cc80`, `gfx1201`); a build for several, or `OPENSPS_TUNE_PROFILE=<name>`, selects by hand (the
+!> variable wins; an unknown name is refused with a message and no profile applies).
 !>
 !> `tuning_report` lists every parameter with its value, where the value came from and its range.
-!> Device-specific profiles (a table by architecture) and a measuring tuner are the next steps;
-!> every consumer already reads through this module, so they will not touch the kernels.
+!> A measuring tuner, a C API and a device query are the next steps; every consumer already reads
+!> through this module, so they will not touch the kernels.
 module opensps_tuning
     use, intrinsic :: iso_fortran_env, only: error_unit
+    use opensps_precision, only: WP, KP
+    use opensps_build_arch, only: BUILD_GPU_ARCH
     implicit none
     private
 
@@ -53,6 +63,46 @@ module opensps_tuning
     !> Ages per thread of the tiled nebular continuum.
     integer, parameter, public :: TUNE_CSP_PT = 4
 
+    !> Register tile of the age sums of the single-metallicity-cell kernel `age_sums_z4` (LLVM flang / AMD
+    !> variant): models per tile and pixels per thread. Measured on the R9700 against `age_sums` (N = 1e4, 107 ages):
+    !> 1.4x at 5994 pixels with MT = 8, PT = 2; the tile shape matters (register spills). Retune per device.
+    integer, parameter, public :: TUNE_AGE_SUMS_Z4_FLANG_MT = 8
+    integer, parameter, public :: TUNE_AGE_SUMS_Z4_FLANG_PT = 2
+    !> Register tile of `age_sums` (models per tile, pixels per thread): chosen for the accumulators of one
+    !> thread to fit the registers without spills; "retune on other GPUs, where registers per thread and the
+    !> load / FMA balance differ" (the comment this replaces).
+    integer, parameter, public :: TUNE_AGE_SUMS_MT = 8
+    integer, parameter, public :: TUNE_AGE_SUMS_PT = 4
+    !> Register tile of the batched SSP's template sums (`template_columns`): columns per tile, pixels per
+    !> thread, pixels per block of the plain partial sum (blocks are added in FP64: changes the summation
+    !> order), templates per step.
+    integer, parameter, public :: TUNE_TEMPLATE_MT = 8
+    integer, parameter, public :: TUNE_TEMPLATE_PT = 4
+    integer, parameter, public :: TUNE_TEMPLATE_PIX_BLOCK = 256
+    integer, parameter, public :: TUNE_TEMPLATE_KB = 4
+
+    !> Register tile of the age sums of `age_sums_z` (models per tile, pixels per thread), LLVM flang / AMD
+    !> variant: models of a tile share one pair of basis slabs. FP64 on the 780M: 4 pixels spill registers (890 ms
+    !> at N = 10^4; 658 ms with 2; 8 models x 1-4 pixels is the best range, 16 or more models 6-8 s).
+    integer, parameter, public :: TUNE_AGE_SUMS_Z_FLANG_MT = 8
+    integer, parameter, public :: TUNE_AGE_SUMS_Z_FLANG_PT = merge(2, 4, KP == WP)
+    !> Models per thread of `age_sums_z` and `age_sums_z4` in the nvfortran variants.
+    integer, parameter, public :: TUNE_AGE_SUMS_Z_NVF_MT = 4
+    integer, parameter, public :: TUNE_AGE_SUMS_Z4_NVF_MT = 4
+    !> Templates per block of the split-K template product (`gemm_columns`, `gemm_columns_batched`): each block
+    !> is a plain sum, the blocks are added in FP64 (changes the summation order).
+    integer, parameter, public :: TUNE_GEMM_KB = 256
+
+    !> Stars per chunk of the single-model SSP sum (host path: L1 cache locality).
+    integer, parameter, public :: TUNE_SSP_STAR_BATCH = 32
+    !> Column counts up to which the FP32 accelerated BLAS product uses the batched form (`gemm_columns_batched`);
+    !> sets the size of its work array (pixels x NC_BATCHED x blocks, on the device once allocated).
+    integer, parameter, public :: TUNE_GEMM_NC_BATCHED = 512
+    !> Models per chunk of the IMF-gradient reduction of the batched SSP (`CHG`).
+    integer, parameter, public :: TUNE_IMF_GRAD_CHG = 256
+    !> Pixels per thread of the observed-frame band-flux kernel (`CH`).
+    integer, parameter, public :: TUNE_BAND_PIX_PER_THREAD = 16
+
     ! ---- Run-time parameters ---------------------------------------------------------------------
     !> Models per chunk of the batched SSP.
     integer, parameter, public :: TUNE_P_SSP_BATCH_CHUNK = 1
@@ -75,13 +125,25 @@ module opensps_tuning
     integer, parameter :: lo_limit(N_TUNE) = [1, 0, 65536]
     integer, parameter :: hi_limit(N_TUNE) = [1000000, 1000000, 1024 * 1024 * 1024]
 
+    ! ---- Device profiles (each entry cites its measurement in doc/TUNING.md, "Measured device data") ----
+    integer, parameter :: N_PROFILE = 3
+    integer, parameter :: PROFILE_LEN = 16
+    character(len=PROFILE_LEN), parameter :: prof_arch(N_PROFILE) = [character(len=PROFILE_LEN) :: &
+        'cc80', 'cc80', 'gfx1201']
+    integer, parameter :: prof_id(N_PROFILE) = [TUNE_P_HOST_SFH_MAX, TUNE_P_PINNED_CHUNK_BYTES, TUNE_P_HOST_SFH_MAX]
+    integer, parameter :: prof_val(N_PROFILE) = [16, 16 * 1024 * 1024, 160]
+    !> The measurement of each entry (M-numbers of doc/TUNING.md)
+    character(len=4), parameter :: prof_ref(N_PROFILE) = ['M1  ', 'M2  ', 'M3  ']
+
     integer, save :: values(N_TUNE) = defaults
-    !> 0 default, 1 environment, 2 set by tuning_set
+    !> 0 default, 1 environment, 2 set by tuning_set, 3 device profile
     integer, save :: source(N_TUNE) = 0
     logical, save :: env_read = .false.
+    character(len=PROFILE_LEN), save :: active_profile = ''
 
     public :: tuning_get, tuning_set, tuning_reset, tuning_report, tuning_count, tuning_name, &
-              tuning_parse, tuning_in_range
+              tuning_parse, tuning_in_range, tuning_profile, tuning_source, tuning_profile_known, &
+              tuning_select_profile
 
 contains
 
@@ -185,14 +247,117 @@ contains
     subroutine tuning_reset()
         values = defaults
         source = 0
+        active_profile = ''
         env_read = .false.
     end subroutine tuning_reset
+
+    !> True when `name` (any case) has entries in the profile table.
+    logical function tuning_profile_known(name)
+        character(len=*), intent(in) :: name
+        character(len=PROFILE_LEN) :: key
+        integer :: i
+
+        tuning_profile_known = .false.
+        key = lower(name)
+        do i = 1, N_PROFILE
+            if (prof_arch(i) == key) tuning_profile_known = .true.
+        end do
+    end function tuning_profile_known
+
+    !> The profile in effect ('' when none): the one named by OPENSPS_TUNE_PROFILE, else the build's offload
+    !> target when it is a single one.
+    function tuning_profile() result(nm)
+        character(len=PROFILE_LEN) :: nm
+        integer :: dummy
+
+        dummy = tuning_get(1)
+        nm = active_profile
+    end function tuning_profile
+
+    !> Where the value of a parameter came from: 0 default, 1 environment, 2 tuning_set, 3 device profile.
+    integer function tuning_source(id)
+        integer, intent(in) :: id
+        integer :: dummy
+
+        dummy = tuning_get(1)
+        tuning_source = -1
+        if (id >= 1 .and. id <= N_TUNE) tuning_source = source(id)
+    end function tuning_source
+
+    !> Selects a profile by name (any case; '' for none) and applies it over the defaults, discarding what the
+    !> environment and tuning_set had set. ok is false, and no profile applies, for an unknown name.
+    subroutine tuning_select_profile(name, ok)
+        character(len=*), intent(in) :: name
+        logical, intent(out) :: ok
+        integer :: dummy
+
+        dummy = tuning_get(1)
+        call apply_profile(name, ok)
+    end subroutine tuning_select_profile
+
+    subroutine apply_profile(name, ok)
+        character(len=*), intent(in) :: name
+        logical, intent(out) :: ok
+        character(len=PROFILE_LEN) :: key
+        integer :: i
+
+        values = defaults
+        source = 0
+        active_profile = ''
+        key = lower(name)
+        ok = len_trim(key) == 0
+        if (ok) return
+        ok = tuning_profile_known(key)
+        if (.not. ok) return
+        active_profile = key
+        do i = 1, N_PROFILE
+            if (prof_arch(i) == key) then
+                values(prof_id(i)) = prof_val(i)
+                source(prof_id(i)) = 3
+            end if
+        end do
+    end subroutine apply_profile
+
+    pure function lower(text) result(r)
+        character(len=*), intent(in) :: text
+        character(len=len(text)) :: r
+        integer :: i, c
+
+        r = text
+        do i = 1, len(text)
+            c = iachar(text(i:i))
+            if (c >= iachar('A') .and. c <= iachar('Z')) r(i:i) = achar(c + 32)
+        end do
+        r = adjustl(r)
+    end function lower
+
+    !> The build's offload target when it names exactly one ('gfx90a:xnack+' counts as gfx90a), else ''.
+    function build_profile() result(nm)
+        character(len=PROFILE_LEN) :: nm
+        integer :: c
+
+        nm = ''
+        if (len_trim(BUILD_GPU_ARCH) == 0 .or. index(BUILD_GPU_ARCH, ',') > 0) return
+        c = index(BUILD_GPU_ARCH, ':')
+        if (c == 0) c = len_trim(BUILD_GPU_ARCH) + 1
+        if (c - 1 <= PROFILE_LEN) nm = lower(BUILD_GPU_ARCH(1:c - 1))
+    end function build_profile
 
     subroutine read_environment()
         integer :: id, len_v, stat, v
         logical :: ok
         character(len=64) :: val
         character(len=NAME_LEN + 16) :: var
+        character(len=PROFILE_LEN) :: want
+
+        ! Device profile: OPENSPS_TUNE_PROFILE if set, else the build's single offload target
+        want = build_profile()
+        call get_environment_variable('OPENSPS_TUNE_PROFILE', val, length=len_v, status=stat)
+        if (stat == 0 .and. len_v > 0) want = val(1:min(len_v, len(val)))
+        call apply_profile(want, ok)
+        if (.not. ok) then
+            write (error_unit, '(a,a,a)') 'opensps: tuning profile "', trim(want), '" is unknown; the defaults apply'
+        end if
 
         do id = 1, N_TUNE
             var = 'OPENSPS_TUNE_' // trim(names(id))
@@ -205,7 +370,7 @@ contains
                 source(id) = 1
             else
                 write (error_unit, '(a,a,a,i0,a,i0,a,i0)') 'opensps: ', trim(var), ' ignored (not an integer in [', &
-                    lo_limit(id), ', ', hi_limit(id), ']); using ', defaults(id)
+                    lo_limit(id), ', ', hi_limit(id), ']); using ', values(id)
             end if
         end do
     end subroutine read_environment
@@ -213,11 +378,16 @@ contains
     !> Writes the table of run-time parameters (value, source, default, range) to a unit.
     subroutine tuning_report(unit)
         integer, intent(in) :: unit
-        character(len=8), parameter :: src(0:2) = ['default ', 'env     ', 'set     ']
+        character(len=8), parameter :: src(0:3) = ['default ', 'env     ', 'set     ', 'profile ']
         integer :: id, v
 
         v = tuning_get(1)
         write (unit, '(a)') 'OpenSPS tuning (run-time parameters; set with OPENSPS_TUNE_<NAME>)'
+        if (len_trim(active_profile) > 0) then
+            write (unit, '(2x,a,a)') 'device profile: ', trim(active_profile)
+        else
+            write (unit, '(2x,a)') 'device profile: (none)'
+        end if
         do id = 1, N_TUNE
             write (unit, '(2x,a24,i12,2x,a8,"default ",i0,"  range [",i0,", ",i0,"]")') names(id), values(id), &
                 src(source(id)), defaults(id), lo_limit(id), hi_limit(id)

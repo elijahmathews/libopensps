@@ -3,7 +3,8 @@ program benchmark_csp_batch
     !> call per model, on the benchmark_phases setup (MIST + MILES + DL07, tau model with dust and
     !> dust emission). Tau, age and the dust parameters vary across the batch.
     !> Usage: benchmark_csp_batch [n_max [n_single [config [n_min]]]] (batch sizes 1, 100, 1000,
-    !> 10^4 from n_min to n_max; n_min = 10^4 with n_single = 0 times one size, e.g. for profiling).
+    !> 10^4 from n_min to n_max; n_min = 10^4 with n_single = 0 times one size, e.g. for profiling;
+    !> OPENSPS_BENCH_SIZES=16,64,256 replaces the list of sizes, ascending, e.g. to find the crossover of a tuning parameter).
     !> config = "full": the real-world
     !> fitting configuration (dust1 = 0.5, dust2 = 0.3, DL07 dust emission, nebular emission,
     !> IGM at zred = 0.5, AGN with fagn = 0.1, spectral indices; tau, age, U_min and gas_logu vary);
@@ -53,7 +54,9 @@ program benchmark_csp_batch
     real(WP), allocatable :: indx(:, :)
     integer(8) :: t0, t1, rate
     integer :: n_max = 10000, n_single = 200, n_min = 1, status, nspec, ntfull, i, n, rep, n_rep, k
-    integer, parameter :: sizes(4) = [1, 100, 1000, 10000]
+    integer, allocatable :: sizes(:)
+    character(len=256) :: size_list
+    integer :: size_len, size_stat, nsz, p0, p1
     real(WP) :: dt, total
     type(c_ptr) :: dptr
     integer :: k_nspec, k_n, k_bytes
@@ -66,6 +69,22 @@ program benchmark_csp_batch
     if (len_trim(arg) > 0) config = arg
     call get_command_argument(4, arg)
     if (len_trim(arg) > 0) read(arg, *) n_min
+    ! Batch sizes: 1, 100, 1000, 10^4, or the ascending comma-separated list of OPENSPS_BENCH_SIZES (e.g. to sweep
+    ! the crossover of a tuning parameter: OPENSPS_BENCH_SIZES=16,64,256,1024)
+    sizes = [1, 100, 1000, 10000]
+    call get_environment_variable('OPENSPS_BENCH_SIZES', size_list, length=size_len, status=size_stat)
+    if (size_stat == 0 .and. size_len > 0) then
+        deallocate(sizes)
+        allocate(sizes(0))
+        p0 = 1
+        do while (p0 <= size_len)
+            p1 = index(size_list(p0:size_len), ',')
+            p1 = merge(size_len, p0 + p1 - 2, p1 == 0)
+            read (size_list(p0:p1), *) nsz
+            sizes = [sizes, nsz]
+            p0 = p1 + 2
+        end do
+    end if
     full =index(config, 'full') == 1
     afe = index(config, '_afe') > 0
     lib = index(config, '_lib') > 0     ! the [alpha/Fe] libraries at [alpha/Fe] = 0 only (the 2-slab path), for comparison

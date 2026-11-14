@@ -11,7 +11,7 @@ module opensps_batch_photometry
     !> Light-weighted ages and redshifted colors are not handled (callers use compute_magnitudes).
 
     use opensps_precision, only: WP, KP
-    use opensps_tuning, only: TUNE_BAND_BLOCK, TUNE_GEMM_MIN_COLS, TUNE_NCH, TUNE_MBLK, TUNE_SMALL_N
+    use opensps_tuning, only: TUNE_BAND_BLOCK, TUNE_GEMM_MIN_COLS, TUNE_NCH, TUNE_MBLK, TUNE_SMALL_N, TUNE_BAND_PIX_PER_THREAD
     use opensps_constants, only: SAFE_FLOOR, C_LIGHT, ABS_MAG_ZEROPOINT_LOG
     use opensps_context_types, only: opensps_context_t, batch_grid_release
     use opensps_offload, only: offload_on_host
@@ -708,7 +708,7 @@ contains
         real(KP), intent(in)    :: wl(:), total(:,:)
         real(KP), intent(out)   :: fobs(:,:)
 
-        integer, parameter :: CH = 16   ! pixels per thread
+        integer, parameter :: CH = TUNE_BAND_PIX_PER_THREAD   ! pixels per thread
         integer  :: m, j, jc, il, nch
         real(WP) :: v, target, t
         real(KP) :: f
