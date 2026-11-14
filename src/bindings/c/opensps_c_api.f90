@@ -970,6 +970,10 @@ contains
                                        weights_z_bar=weights_z_bar)
             end if
         end if
+        if (st == 5) call opensps_set_error(5, '[OPENSPS-C] compute_csp_batch: this offload build is running its '// &
+            'target regions on the host (no device, or OMP_TARGET_OFFLOAD=DISABLED) and cannot run this call: '// &
+            'LLVM flang needs two or more OpenMP threads there, and the HIP gradients, IMF per model and cue need '// &
+            'a device. Run on the GPU, or use a build without -Daccel.')
     end subroutine run_batch
 
     !> Where the last batch's spectra are (see batch_spectra_device): the device address, nspec,

@@ -67,6 +67,13 @@ void opensps_context_set_str(int handle, const char *key, const char *value, int
 
 ```
 
+Notes on the setters. Status 101 to 103 is an unknown key. A parameter the SSPs depend on (the IMF, the isochrone and
+spectral-library options, the smoothing, ...) set to the value it already has changes nothing: the context keeps its SSP
+grids, so setting every parameter before every call costs nothing. `H0`, `om0` and `ol0` (the cosmology of the
+distance modulus of redshifted magnitudes and of the age of the universe; defaults 72, 0.27, 0.73) may be set at any
+time and take effect at the next computation; `H0 <= 0`, `om0 < 0`, `om0 + ol0 <= 0` and non-finite values are
+refused with status 104 (and leave the cosmology unchanged).
+
 ### API version
 
 `OPENSPS_API_VERSION_MAJOR`, `_MINOR` and `_PATCH` in `opensps.h` equal what
@@ -234,7 +241,7 @@ void opensps_context_compute_csp_batch_grad(
 );
 ```
 
-* `params_bar`: `[NBGRAD, n]` column-major array receiving exact analytical gradients of the loss $L$ with respect to physical parameters. Indexed by `OPENSPS_BGRAD_*` (0 to `OPENSPS_NBGRAD - 1`).
+* `params_bar`: `[NBGRAD, n]` column-major array receiving exact analytical gradients of the loss $L$ with respect to physical parameters. Indexed by `OPENSPS_BGRAD_*` (0 to `OPENSPS_NBGRAD - 1`). The library writes every row and takes no capacity argument: **allocate it with `opensps_get_nbgrad()` rows, not a constant** (`OPENSPS_NBGRAD` grew from 33 to 37 in 0.2.0, and may grow in any minor release).
 * `weights_bar`: `[ntfull, n]` receiving $dL / d(weights)$ when `ssp_weights` is used.
 * `weights_z_bar`: `[ntfull, nz, n]` receiving $dL / d(weights\_z)$ when `ssp_weights_z` is used.
 * `mags_bar`, `spec_bar`, `mass_bar`, `lbol_bar`: incoming cotangents (derivatives of loss with respect to outputs). Any may be `NULL`.

@@ -16,7 +16,7 @@ module opensps_cosmology
     !> and adhere to `WP` precision.
 
     use opensps_precision, only: WP, KP
-    use opensps_context_types, only: opensps_context_t
+    use opensps_context_types, only: opensps_context_t, batch_grid_release
     use opensps_constants, only: C_LIGHT
     use opensps_interpolation, only: find_interval, interpolate_linear
     use opensps_integration, only: integrate_trapezoid_array
@@ -305,7 +305,12 @@ contains
     subroutine refresh_cosmology(ctx)
         type(opensps_context_t), intent(inout) :: ctx
 
-        if (ctx%cosmology_dirty) call update_cosmology_table(ctx)
+        if (ctx%cosmology_dirty) then
+            call update_cosmology_table(ctx)
+            ! The batch grid cache holds the distance term of its redshift (and, on a device, copies of it
+            ! that live as long as the context does): it was built with the old cosmology
+            call batch_grid_release(ctx%state%batch)
+        end if
     end subroutine refresh_cosmology
 
     !> @brief

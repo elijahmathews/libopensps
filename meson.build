@@ -607,6 +607,23 @@ test('unit_context_params', context_params_exe,
     timeout : 300
 )
 
+# Offload builds on the host (no device, OMP_TARGET_OFFLOAD=DISABLED): a forward batch runs, what cannot run is
+# refused with status 5 (#97); on a device and in CPU builds everything runs
+offload_host_exe = executable('test_offload_host', 'tests/test_offload_host.f90',
+    dependencies : [opensps_dep, test_utils_dep],
+    link_language : 'fortran'
+)
+offload_host_env = environment()
+offload_host_env.set('FSPS_TEST_TAP', '1')
+offload_host_env.set('FSPS_TEST_LIBRARY', join_paths(meson.project_source_root(), 'tests/data/opensps-test-data'))
+offload_host_env.set('OMP_NUM_THREADS', '2')
+test('unit_offload_host', offload_host_exe,
+    protocol : 'tap',
+    env : offload_host_env,
+    suite : 'unit',
+    timeout : 300
+)
+
 # The [alpha/Fe] axis on the real libraries (mist_afe + c3k_lr); runs only with OPENSPS_AFE_DATA set to a data
 # root that holds them (tools/opensps_data/convert_legacy.py --upstream-mist/--upstream-c3k), skipped otherwise
 afe_library_exe = executable('test_afe_library', 'tests/test_afe_library.f90',

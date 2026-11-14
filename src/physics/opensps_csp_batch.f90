@@ -580,18 +580,6 @@ contains
         ! cue (nebular_model = 1): with the resident bases, with gradients (cue_nebular_backward), not
         ! the IMF per model (which uses the CLOUDY grids' kernels); its weights are read on first use
         cue = ctx%add_neb_emission_val == 1 .and. ctx%nebular_model_val == 1
-        ! An offload build whose target regions run on the host (no device, OMP_TARGET_OFFLOAD=DISABLED): the
-        ! LLVM flang runtime crashes at one OpenMP thread (#87), and the native HIP kernels (the gradients,
-        ! the IMF per model, cue) take device pointers: refuse (status 5) rather than return wrong numbers.
-        ! The forward model without those runs on the host (the band fluxes take the OpenMP kernel).
-        if (offload_host_unusable()) then
-            status = 5; return
-        end if
-#if defined(OPENSPS_HIP)
-        if (offload_on_host() .and. (grad .or. imf .or. cue)) then
-            status = 5; return
-        end if
-#endif
         if (cue) then
             if (imf) then
                 status = 2; return
@@ -710,6 +698,19 @@ contains
         if (naf > 1 .and. (zw .or. imf)) then
             status = 2; return
         end if
+        ! (After the argument checks, so that a call that is invalid anyway keeps its status.)
+        ! An offload build whose target regions run on the host (no device, OMP_TARGET_OFFLOAD=DISABLED): the
+        ! LLVM flang runtime crashes at one OpenMP thread (#87), and the native HIP kernels (the gradients,
+        ! the IMF per model, cue) take device pointers: refuse (status 5) rather than return wrong numbers.
+        ! The forward model without those runs on the host (the band fluxes take the OpenMP kernel).
+        if (offload_host_unusable()) then
+            status = 5; return
+        end if
+#if defined(OPENSPS_HIP)
+        if (offload_on_host() .and. (grad .or. imf .or. cue)) then
+            status = 5; return
+        end if
+#endif
         zlo = 1; zhi = 1; dz = 0.0_wp
         da = 0.0_wp
         nzs = 0
@@ -2993,6 +2994,9 @@ contains
 #endif
 
 #if defined(OPENSPS_HIP)
+        ! (the HIP kernel takes device pointers: with the target regions on the host (no device,
+        ! OMP_TARGET_OFFLOAD=DISABLED) the OpenMP kernel below serves, as in band_fluxes; #97)
+        if (.not. offload_on_host()) then
         allocate(newr_int(nt_neb))
         newr_int = merge(1, 0, newr)
         !$omp target data map(to: newr_int) use_device_addr(tab, ia, wa, dwa, newr_int, cy, co, lns, iz, wz, iu, wu, yo)
@@ -3010,6 +3014,7 @@ contains
         !$omp end target data
         deallocate(newr_int)
         return
+        end if
 #endif
 
         npt = (nspec + PT - 1) / PT

@@ -101,6 +101,8 @@ const char *opensps_get_version_string(void);
 // Source revision of a development build (git describe), e.g. "v0.2.0-37-g6de9eb6"; "" for a
 // release build. Static storage; do not free.
 const char *opensps_get_build_id(void);
+// Rows of params_bar (the gradient entry points write every one, with no capacity argument): allocate with this,
+// not with OPENSPS_NBGRAD; the number may grow in any minor release (33 in 0.1.0, 37 in 0.2.0).
 void opensps_get_nbgrad(int *nbgrad);
 void opensps_get_grad_param_name(int grad_idx, char *name, int max_len, int *status);
 void opensps_validate_params(int *status); // Note: Checks legacy global state context
@@ -198,7 +200,9 @@ void opensps_context_get_csp(int handle, double *age, double *mass, double *lbol
 // NULL replaces the SFH parameters. Outputs column-major (quantity x n); all but mags may be
 // NULL. status 0 on success, 1 bad handle, 2 unsupported (e.g. an SSP parameter varied),
 // 3 unknown parameter or bad shape, 4 data missing (nebular_model = 1 without cue's weights,
-// OPENSPS_CUE_DATA: tools/cue/README.md).
+// OPENSPS_CUE_DATA: tools/cue/README.md), 5 an offload (GPU) build running its target regions on the host
+// (no device, or OMP_TARGET_OFFLOAD=DISABLED) that cannot run the call: at one OpenMP thread with LLVM
+// flang, or, with the native HIP kernels, with gradients, the IMF per model or cue.
 void opensps_context_compute_csp_batch(int handle, int n, int n_params, const char *const *names,
                                     const double *const *values, const double *ssp_weights,
                                     double *mags, double *spec, double *mass, double *lbol,
