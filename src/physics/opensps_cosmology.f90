@@ -16,7 +16,7 @@ module opensps_cosmology
     !> and adhere to `WP` precision.
 
     use opensps_precision, only: WP, KP
-    use opensps_context_types, only: opensps_context_t
+    use opensps_context_types, only: opensps_context_t, batch_grid_release
     use opensps_constants, only: C_LIGHT
     use opensps_interpolation, only: find_interval, interpolate_linear
     use opensps_integration, only: integrate_trapezoid_array
@@ -30,6 +30,8 @@ module opensps_cosmology
     public :: vacuum_to_air
     public :: get_universe_age
     public :: get_luminosity_distance
+    public :: update_cosmology_table
+    public :: refresh_cosmology
     public :: compute_igm_transmission, igm_tau, igm_tau_dz
     public :: convolve_with_mdf
 
@@ -272,6 +274,44 @@ contains
         luminosity_dist_pc = (1.0_wp + redshift) * hubble_distance_pc * integral_sum
 
     end function get_luminosity_distance
+
+    !> @brief
+    !> Fills the context's cosmology table from its current H0, Omega_m and Omega_Lambda.
+    !>
+    !> @details
+    !> `state%cosmospl(:, 1:3)` holds (redshift, age of the universe in Gyr, luminosity distance in pc) on
+    !> a grid of 500 scale factors, and `state%tuniv` the age at z = 0. The distance modulus of every
+    !> magnitude at a redshift and the age-redshift relation of the scenario path read it. Called at setup
+    !> and, through refresh_cosmology, after H0, om0 or ol0 changed.
+    subroutine update_cosmology_table(ctx)
+        type(opensps_context_t), intent(inout) :: ctx
+        integer :: i
+        real(WP) :: a_scale
+
+        do i = 1, 500
+            ! Scale factor 'a' distribution (legacy formula)
+            a_scale = real(i - 1, kind=WP)/499.0_wp*(1.0_wp - 1.0_wp/1001.0_wp) + 1.0_wp/1001.0_wp
+            ctx%state%cosmospl(i, 1) = (1.0_wp/a_scale) - 1.0_wp
+            ctx%state%cosmospl(i, 2) = get_universe_age(ctx, ctx%state%cosmospl(i, 1))
+            ctx%state%cosmospl(i, 3) = get_luminosity_distance(ctx, ctx%state%cosmospl(i, 1))
+        end do
+        ctx%state%tuniv = get_universe_age(ctx, 0.0_wp)
+        ctx%cosmology_dirty = .false.
+    end subroutine update_cosmology_table
+
+    !> @brief Rebuilds the cosmology table if H0, om0 or ol0 changed since it was built (host side: the
+    !> table is read by the host code of the magnitudes and of the scenario path). Called at the start of
+    !> every computation that reads it.
+    subroutine refresh_cosmology(ctx)
+        type(opensps_context_t), intent(inout) :: ctx
+
+        if (ctx%cosmology_dirty) then
+            call update_cosmology_table(ctx)
+            ! The batch grid cache holds the distance term of its redshift (and, on a device, copies of it
+            ! that live as long as the context does): it was built with the old cosmology
+            call batch_grid_release(ctx%state%batch)
+        end if
+    end subroutine refresh_cosmology
 
     !> @brief
     !> Calculates the Intergalactic Medium (IGM) transmission curve.

@@ -30,6 +30,7 @@ module opensps_c_api
     use opensps_interpolation, only: find_interval
     use opensps_spectral_indices, only: compute_spectral_indices
     use opensps_photometry, only: compute_magnitudes
+    use opensps_cosmology, only: refresh_cosmology
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                             is_ssp_sensitive_float_param, is_ssp_sensitive_int_param, &
                             is_ssp_sensitive_str_param, opensps_context_prepare_csp_workspace, &
@@ -458,8 +459,8 @@ contains
 
         call c_to_f_string(c_key, key)
         call opensps_set_param_int(ctx_pool(handle)%c, key(1:LEN_TRIM(key)), value, status)
-        ! zmet only selects among the stored grids
-        if (status == 0 .and. TRIM(key) /= 'zmet' .and. is_ssp_sensitive_int_param(TRIM(key))) &
+        ! zmet only selects among the stored grids; a value set to what it was changes nothing
+        if (status == 0 .and. TRIM(key) /= 'zmet' .and. ctx_pool(handle)%c%last_set_changed_ssp) &
             call invalidate_ssps(ctx_store(handle))
     end subroutine opensps_context_set_int_handle
 
@@ -485,7 +486,7 @@ contains
         call opensps_set_param_float(ctx_pool(handle)%c, key(1:LEN_TRIM(key)), real(value, WP), status)
         ! The nebular parameters change the SSPs only with nebular emission in them
         ! (add_neb_emission = 2), as in opensps_context_compute_csp_batch
-        if (status == 0 .and. is_ssp_sensitive_float_param(TRIM(key))) then
+        if (status == 0 .and. ctx_pool(handle)%c%last_set_changed_ssp) then
             if (ctx_pool(handle)%c%add_neb_emission_val == 2 .or. .not. &
                 any(TRIM(key) == [character(LEN=10) :: 'gas_logu', 'gas_logz', 'frac_obrun'])) &
                 call invalidate_ssps(ctx_store(handle))
@@ -514,7 +515,7 @@ contains
         call c_to_f_string(c_key, key)
         call c_to_f_string(c_val, val)
         call opensps_set_param_str(ctx_pool(handle)%c, key(1:LEN_TRIM(key)), val(1:LEN_TRIM(val)), status)
-        if (status == 0 .and. is_ssp_sensitive_str_param(TRIM(key))) call invalidate_ssps(ctx_store(handle))
+        if (status == 0 .and. ctx_pool(handle)%c%last_set_changed_ssp) call invalidate_ssps(ctx_store(handle))
     end subroutine opensps_context_set_str_handle
 
     subroutine opensps_context_set_fast_mode_handle(handle, fast_mode, status) &
@@ -969,6 +970,10 @@ contains
                                        weights_z_bar=weights_z_bar)
             end if
         end if
+        if (st == 5) call opensps_set_error(5, '[OPENSPS-C] compute_csp_batch: this offload build is running its '// &
+            'target regions on the host (no device, or OMP_TARGET_OFFLOAD=DISABLED) and cannot run this call: '// &
+            'LLVM flang needs two or more OpenMP threads there, and the HIP gradients, IMF per model and cue need '// &
+            'a device. Run on the GPU, or use a build without -Daccel.')
     end subroutine run_batch
 
     !> Where the last batch's spectra are (see batch_spectra_device): the device address, nspec,
@@ -2728,6 +2733,7 @@ contains
 
         do i = 1, n_time
             tspec = global_ocompsp(i)%spec
+            call refresh_cosmology(opensps_default_ctx)
             call compute_magnitudes(opensps_default_ctx, real(zred, WP), tspec, f_mags(:, i), all_bands)
         end do
 
@@ -2759,6 +2765,7 @@ contains
 
         do i = 1, n_time
             tspec = global_ocompsp(i)%spec
+            call refresh_cosmology(opensps_default_ctx)
             call compute_magnitudes(opensps_default_ctx, real(zred, WP), tspec, f_mags(:, i), f_mc)
         end do
 
@@ -3301,6 +3308,7 @@ contains
                     call get_stellar_spectrum(opensps_default_ctx, global_pset, mact(tt, i), logt(tt, i), 10**logl(tt, i), &
                                               logg(tt, i), phase(tt, i), ffco(tt, i), lmdot(tt, i), kspec)
                     spec = kspec
+                    call refresh_cosmology(opensps_default_ctx)
                     call compute_magnitudes(opensps_default_ctx, dz, spec, mags_tmp)
 
                     if (isoc_type .eq. 'bsti') then

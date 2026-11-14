@@ -28,6 +28,7 @@ contains
         use opensps_sfh, only: get_sfh_properties_at_age
         use opensps_csp_batch, only: compute_csp_batch
         use opensps_interpolation, only: interpolate_linear
+        use opensps_cosmology, only: refresh_cosmology
         type(opensps_context_t), intent(inout)       :: ctx
         type(params), intent(in)                  :: pset
         integer, intent(in)                       :: nzin
@@ -45,6 +46,7 @@ contains
         ! of the context's metallicities resident: the batch then sums them with weights over ages
         ! and metallicities
         st = 3
+        call refresh_cosmology(ctx)      ! (the age-redshift column below)
         if (size(ctx%state%ssp_basis_spec, 3) /= nzin) return
         if (nzin > 1 .and. nzin /= ctx%state%nz) return
         nt = ctx%state%ntfull

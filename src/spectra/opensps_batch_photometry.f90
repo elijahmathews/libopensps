@@ -13,6 +13,7 @@ module opensps_batch_photometry
     use opensps_precision, only: WP, KP
     use opensps_constants, only: SAFE_FLOOR, C_LIGHT, ABS_MAG_ZEROPOINT_LOG
     use opensps_context_types, only: opensps_context_t, batch_grid_release
+    use opensps_offload, only: offload_on_host
     use opensps_cosmology, only: compute_igm_transmission
     use opensps_interpolation, only: find_interval, find_interval_with_hint, interpolate_linear
     use opensps_special_functions, only: mag_from_flux
@@ -905,8 +906,12 @@ contains
         real(KP) :: s, c, term, tsum
 
 #if defined(OPENSPS_HIP)
-        call run_hip_band_fluxes(n_mod, nspec, nbands, bands_t, j_lo, j_hi, do_band, wt, fobs_t, fband)
-        return
+        ! (the HIP kernel takes device pointers: with the target regions on the host, which a HIP build can be
+        ! run in (no device, OMP_TARGET_OFFLOAD=DISABLED), the OpenMP kernels below serve; #97)
+        if (.not. offload_on_host()) then
+            call run_hip_band_fluxes(n_mod, nspec, nbands, bands_t, j_lo, j_hi, do_band, wt, fobs_t, fband)
+            return
+        end if
 #endif
 
 #if defined(OMP_TARGET) && !defined(__flang__)

@@ -33,6 +33,8 @@ module opensps_context
     public :: opensps_context_set_fast_mode
     public :: opensps_context_get_paths
     public :: opensps_context_prepare_pset
+    public :: ssp_int_param_value
+    public :: ssp_float_param_value
     public :: is_ssp_sensitive_float_param
     public :: is_ssp_sensitive_int_param
     public :: is_ssp_sensitive_str_param
@@ -294,9 +296,14 @@ contains
         integer, intent(in) :: value
         integer, intent(out) :: status
         character(len=64) :: key_norm
+        integer :: old_value, new_value
+        logical :: sensitive, have_old, have_new
 
         status = 0
         key_norm = trim(key)
+        ctx%last_set_changed_ssp = .false.
+        old_value = ssp_int_param_value(ctx, key_norm, have_old)
+        sensitive = is_ssp_sensitive_int_param(key_norm)
         select case (key_norm)
         case ('sfh')
             ctx%pset%sfh = value
@@ -411,8 +418,14 @@ contains
             status = OPENSPS_ERR_UNKNOWN_INT_PARAM
         end select
 
-        if (status == 0 .and. is_ssp_sensitive_int_param(key_norm)) then
-            ctx%state%ssp_basis_is_dirty = .true.
+        if (status == 0 .and. sensitive) then
+            new_value = ssp_int_param_value(ctx, key_norm, have_new)
+            ! A value the SSPs depend on, set to what it was, changes nothing: keep the basis (and the
+            ! bindings' SSP grids). Anything that cannot be compared counts as changed.
+            if (.not. have_new .or. new_value /= old_value) then
+                ctx%state%ssp_basis_is_dirty = .true.
+                ctx%last_set_changed_ssp = .true.
+            end if
         end if
     end subroutine opensps_context_set_param_int
 
@@ -438,19 +451,40 @@ contains
         real(WP), intent(in) :: value
         integer, intent(out) :: status
         character(len=64) :: key_norm
+        real(WP) :: old_value, new_value
+        logical :: sensitive, have_old, have_new
 
         status = 0
         key_norm = trim(key)
+        ctx%last_set_changed_ssp = .false.
+        old_value = ssp_float_param_value(ctx, key_norm, have_old)
+        sensitive = is_ssp_sensitive_float_param(key_norm)
         select case (key_norm)
         case ('om0')
-            ctx%om0_val = value
-            ctx%settings_dirty = .true.
+            ! the cosmology table (distance modulus of the magnitudes, age of the universe) follows
+            if (valid_cosmology(ctx%H0_val, value, ctx%ol0_val)) then
+                if (value /= ctx%om0_val) ctx%cosmology_dirty = .true.
+                ctx%om0_val = value
+                ctx%settings_dirty = .true.
+            else
+                status = OPENSPS_ERR_UNSUPPORTED_PARAM
+            end if
         case ('ol0')
-            ctx%ol0_val = value
-            ctx%settings_dirty = .true.
+            if (valid_cosmology(ctx%H0_val, ctx%om0_val, value)) then
+                if (value /= ctx%ol0_val) ctx%cosmology_dirty = .true.
+                ctx%ol0_val = value
+                ctx%settings_dirty = .true.
+            else
+                status = OPENSPS_ERR_UNSUPPORTED_PARAM
+            end if
         case ('H0')
-            ctx%H0_val = value
-            ctx%settings_dirty = .true.
+            if (valid_cosmology(value, ctx%om0_val, ctx%ol0_val)) then
+                if (value /= ctx%H0_val) ctx%cosmology_dirty = .true.
+                ctx%H0_val = value
+                ctx%settings_dirty = .true.
+            else
+                status = OPENSPS_ERR_UNSUPPORTED_PARAM
+            end if
         case ('tiny_logt')
             ctx%tiny_logt_val = value
             ctx%settings_dirty = .true.
@@ -576,8 +610,13 @@ contains
             status = OPENSPS_ERR_UNKNOWN_FLOAT_PARAM
         end select
 
-        if (status == 0 .and. is_ssp_sensitive_float_param(key_norm)) then
-            ctx%state%ssp_basis_is_dirty = .true.
+        if (status == 0 .and. sensitive) then
+            new_value = ssp_float_param_value(ctx, key_norm, have_new)
+            ! (a NaN compares unequal to itself: counts as changed)
+            if (.not. have_new .or. new_value /= old_value) then
+                ctx%state%ssp_basis_is_dirty = .true.
+                ctx%last_set_changed_ssp = .true.
+            end if
         end if
     end subroutine opensps_context_set_param_float
 
@@ -592,9 +631,12 @@ contains
         character(len=*), intent(in) :: value
         integer, intent(out) :: status
         character(len=64) :: key_norm
+        character(len=len(ctx%pset%imf_filename)) :: old_filename
 
         status = 0
         key_norm = trim(key)
+        ctx%last_set_changed_ssp = .false.
+        old_filename = ctx%pset%imf_filename
         select case (key_norm)
         case ('imf_filename')
             ctx%pset%imf_filename = trim(value)
@@ -605,7 +647,10 @@ contains
         end select
 
         if (status == 0 .and. is_ssp_sensitive_str_param(key_norm)) then
-            ctx%state%ssp_basis_is_dirty = .true.
+            if (ctx%pset%imf_filename /= old_filename) then
+                ctx%state%ssp_basis_is_dirty = .true.
+                ctx%last_set_changed_ssp = .true.
+            end if
         end if
     end subroutine opensps_context_set_param_str
 
@@ -797,6 +842,91 @@ contains
             ctx%state%ssp_basis_is_dirty = .false.
         end if
     end subroutine opensps_context_update_ssp_basis
+
+    !> The stored value of an SSP-sensitive integer parameter, as the setter writes it (found = .false. for
+    !> any other key). The setters compare it before and after: a set that changes nothing keeps the SSPs.
+    !> Every key of is_ssp_sensitive_int_param is handled here (tests/test_context_params.f90 checks it);
+    !> a key missing here is safe (the setter counts it as changed), only slower.
+    integer function ssp_int_param_value(ctx, key, found) result(v)
+        type(opensps_context_t), intent(in) :: ctx
+        character(len=*), intent(in) :: key
+        logical, intent(out) :: found
+
+        found = .true.
+        v = 0
+        select case (trim(key))
+        case ('zmet');               v = ctx%pset%zmet
+        case ('wgp1');               v = ctx%pset%wgp1
+        case ('wgp2');               v = ctx%pset%wgp2
+        case ('wgp3');               v = ctx%pset%wgp3
+        case ('evtype');             v = ctx%pset%evtype
+        case ('imf_type');           v = ctx%imf_type_val
+        case ('tpagb_norm_type');    v = ctx%tpagb_norm_type_val
+        case ('interpolation_type'); v = ctx%interpolation_type_val
+        case ('use_wr_spectra');     v = ctx%use_wr_spectra_val
+        case ('use_lw_tpagb');       v = ctx%use_lw_tpagb_val
+        case ('add_neb_emission');   v = ctx%add_neb_emission_val
+        case ('add_neb_continuum');  v = ctx%add_neb_continuum_val
+        case ('add_xrb_emission');   v = ctx%add_xrb_emission_val
+        case ('add_stellar_remnants'); v = ctx%add_stellar_remnants_val
+        case ('smooth_velocity');    v = ctx%smooth_velocity_val
+        case ('smooth_lsf');         v = ctx%smooth_lsf_val
+        case ('smoothspec_fast');    v = ctx%smoothspec_fast_val
+        case ('vactoair_flag');      v = ctx%vactoair_flag_val
+        case ('use_isoc_mdot');      v = ctx%use_isoc_mdot_val
+        case ('add_agb_dust_model'); v = ctx%add_agb_dust_model_val
+        case default
+            found = .false.
+        end select
+    end function ssp_int_param_value
+
+    !> As ssp_int_param_value, for the floating-point SSP-sensitive parameters.
+    real(WP) function ssp_float_param_value(ctx, key, found) result(v)
+        type(opensps_context_t), intent(in) :: ctx
+        character(len=*), intent(in) :: key
+        logical, intent(out) :: found
+
+        found = .true.
+        v = 0.0_wp
+        select case (trim(key))
+        case ('tiny_logt');            v = ctx%tiny_logt_val
+        case ('imf_upper_limit');      v = ctx%imf_upper_limit_val
+        case ('imf_lower_limit');      v = ctx%imf_lower_limit_val
+        case ('logt_wmb_hot');         v = ctx%logt_wmb_hot_val
+        case ('nebular_smooth_init');  v = ctx%nebular_smooth_init_val
+        case ('imf1');                 v = ctx%pset%imf1
+        case ('imf2');                 v = ctx%pset%imf2
+        case ('imf3');                 v = ctx%pset%imf3
+        case ('vdmc');                 v = ctx%pset%vdmc
+        case ('mdave');                v = ctx%pset%mdave
+        case ('dell');                 v = ctx%pset%dell
+        case ('delt');                 v = ctx%pset%delt
+        case ('sbss');                 v = ctx%pset%sbss
+        case ('fbhb');                 v = ctx%pset%fbhb
+        case ('pagb');                 v = ctx%pset%pagb
+        case ('redgb');                v = ctx%pset%redgb
+        case ('agb');                  v = ctx%pset%agb
+        case ('masscut');              v = ctx%pset%masscut
+        case ('fcstar');               v = ctx%pset%fcstar
+        case ('frac_xrb');             v = ctx%pset%frac_xrb
+        case ('sigma_smooth');         v = ctx%pset%sigma_smooth
+        case ('min_wave_smooth');      v = ctx%pset%min_wave_smooth
+        case ('max_wave_smooth');      v = ctx%pset%max_wave_smooth
+        case ('gas_logu');             v = ctx%pset%gas_logu
+        case ('gas_logz');             v = ctx%pset%gas_logz
+        case ('agb_dust');             v = ctx%pset%agb_dust
+        case ('frac_obrun');           v = ctx%pset%frac_obrun
+        case default
+            found = .false.
+        end select
+    end function ssp_float_param_value
+
+    !> A cosmology the distance and age integrals are defined for: H0 > 0, Omega_m >= 0, finite values.
+    pure logical function valid_cosmology(h0, om0, ol0) result(ok)
+        real(WP), intent(in) :: h0, om0, ol0
+        ok = h0 > 0.0_wp .and. om0 >= 0.0_wp .and. om0 + ol0 > 0.0_wp
+        ok = ok .and. h0 <= huge(1.0_wp) .and. om0 <= huge(1.0_wp) .and. abs(ol0) <= huge(1.0_wp)
+    end function valid_cosmology
 
     logical function is_ssp_sensitive_int_param(key) result(is_sensitive)
         character(len=*), intent(in) :: key

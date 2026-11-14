@@ -5,6 +5,25 @@ carries the release's version (`OPENSPS_API_VERSION_*`, `opensps_get_api_version
 major version is 0, a minor release may change the API, and each such change is listed here under
 "Breaking". Pull request numbers refer to <https://github.com/elijahmathews/libopensps>.
 
+## Unreleased
+
+### Fixed
+
+- **`H0`, `om0` and `ol0` set on a context now change the batched magnitudes** (#95). They were accepted but the
+  distance table was built once, at setup, from FSPS's defaults (H0 = 72, Omega_m = 0.27): fluxes at a redshift in
+  another cosmology were off by 8% at z = 0.1 for WMAP9. The table (and the age of the universe) is rebuilt at
+  the next computation after a change. **Results change for code that set these parameters** (they were
+  ignored). Invalid values (H0 <= 0, Omega_m < 0, NaN) are now refused with status 104.
+- **Setting an SSP-sensitive parameter to the value it already has no longer drops the SSP basis** (#96). A client
+  that sets every parameter before every call (Prospector does) rebuilt the basis each time: a single-model call
+  took 20 ms instead of 2 ms for `imf_type`. A real change still invalidates.
+- **An offload build whose target regions run on the host** (no device, or `OMP_TARGET_OFFLOAD=DISABLED`) no longer
+  returns wrong magnitudes (#97). In an AMD build the native HIP band-flux kernel was called with host pointers
+  and never wrote its output (the HIP kernels are compiled in whenever `hipcc` is found, with or without
+  `-Daccel_hip`); with no device it now takes the OpenMP kernel. What cannot run on the host, `compute_csp_batch`
+  refuses with **status 5**: LLVM flang's libomp crashes in `teams distribute parallel do` at one OpenMP thread
+  (#87, no workaround here), and the HIP gradients, the IMF per model and cue take device pointers.
+
 ## 0.2.0
 
 Data: `data-v3` (the regression references; `FSPS_DATA_RELEASE` pins it for CI) and `data-v4`
@@ -39,6 +58,10 @@ Data: `data-v3` (the regression references; `FSPS_DATA_RELEASE` pins it for CI) 
 
 ### Breaking
 
+- **`OPENSPS_NBGRAD` grew from 33 to 37** (rows `gas_logn`, `gas_logno`, `gas_logco`, `afe`). The caller allocates
+  `params_bar` (NBGRAD x n) and the library writes every row, with no capacity argument: a binding that sizes the
+  buffer with a constant overruns it silently (wrong gradients, heap corruption). Size it with
+  `opensps_get_nbgrad()`; the row count may grow in any minor release (#98).
 - **FP32 builds only:** the batched IMF bin weights are always formed in FP32 arithmetic (the
   `fp32_imf_weights` build option is gone), so the mass and L_bol of the IMF-free batch are no
   longer FP64-exact there (#84); cue's hidden layers default to the kernel precision

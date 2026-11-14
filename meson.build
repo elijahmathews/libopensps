@@ -292,6 +292,7 @@ lib_sources = files(
 
     # Core FSPS Modules
     'src/core/opensps_trace.f90',
+    'src/core/opensps_offload.f90',
     'src/core/opensps_cache.f90',
     'src/core/opensps_setup_lock.c',
     'src/core/opensps_constants.f90',
@@ -585,6 +586,40 @@ csp_small_batch_env.set('OMP_NUM_THREADS', '1')
 test('unit_csp_small_batch', csp_small_batch_exe,
     protocol : 'tap',
     env : csp_small_batch_env,
+    suite : 'unit',
+    timeout : 300
+)
+
+# Context parameters: a set to the value a parameter has changes nothing (the SSP basis is kept, #96), H0, om0
+# and ol0 reach the magnitudes' distance modulus and the age of the universe (#95)
+context_params_exe = executable('test_context_params', 'tests/test_context_params.f90',
+    dependencies : [opensps_dep, test_utils_dep],
+    link_language : 'fortran'
+)
+context_params_env = environment()
+context_params_env.set('FSPS_TEST_TAP', '1')
+context_params_env.set('FSPS_TEST_LIBRARY', join_paths(meson.project_source_root(), 'tests/data/opensps-test-data'))
+context_params_env.set('OMP_NUM_THREADS', '2')
+test('unit_context_params', context_params_exe,
+    protocol : 'tap',
+    env : context_params_env,
+    suite : 'unit',
+    timeout : 300
+)
+
+# Offload builds on the host (no device, OMP_TARGET_OFFLOAD=DISABLED): a forward batch runs, what cannot run is
+# refused with status 5 (#97); on a device and in CPU builds everything runs
+offload_host_exe = executable('test_offload_host', 'tests/test_offload_host.f90',
+    dependencies : [opensps_dep, test_utils_dep],
+    link_language : 'fortran'
+)
+offload_host_env = environment()
+offload_host_env.set('FSPS_TEST_TAP', '1')
+offload_host_env.set('FSPS_TEST_LIBRARY', join_paths(meson.project_source_root(), 'tests/data/opensps-test-data'))
+offload_host_env.set('OMP_NUM_THREADS', '2')
+test('unit_offload_host', offload_host_exe,
+    protocol : 'tap',
+    env : offload_host_env,
     suite : 'unit',
     timeout : 300
 )
