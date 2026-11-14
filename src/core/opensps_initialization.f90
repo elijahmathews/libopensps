@@ -36,7 +36,7 @@ module opensps_initialization
                        use_standard_library, library_spec, metallicity_axis
     use opensps_datalib, only: datalib_t, datalib_available, datalib_open, datalib_meta_real, datalib_axis_len, &
                             datalib_axis_values, datalib_check_array, datalib_read_real
-    use opensps_cosmology, only: get_universe_age, get_luminosity_distance
+    use opensps_cosmology, only: update_cosmology_table
     use opensps_interpolation, only: find_interval, interpolate_linear
     use opensps_integration, only: integrate_trapezoid_array
     use opensps_smoothing, only: velocity_kernel_t, build_velocity_kernel, apply_velocity_kernel
@@ -819,7 +819,7 @@ contains
         type(opensps_context_t), intent(inout) :: ctx
 
         integer :: i, j
-        real(WP) :: x_inv_micron, a_scale
+        real(WP) :: x_inv_micron
         real(WP), dimension(:), pointer :: lam
 
         ! Alias for readability
@@ -849,30 +849,11 @@ contains
         end do
 
         ! --------------------------------------------------------------------
-        ! 2. Cosmology Lookup Table (cosmospl)
+        ! 2. Cosmology Lookup Table (cosmospl) and age of the universe at z = 0 (tuniv)
         ! --------------------------------------------------------------------
-        ! Generates a grid of 500 points scaling factor 'a' from ~0.001 to 1.0.
-        ! Stores: [Redshift, Age(Gyr), Luminosity Distance(pc)]
-
-        do i = 1, 500
-            ! Scale factor 'a' distribution (legacy formula)
-            a_scale = real(i - 1, kind=WP)/499.0_wp*(1.0_wp - 1.0_wp/1001.0_wp) + &
-                      1.0_wp/1001.0_wp
-
-            ! Col 1: Redshift (z = 1/a - 1)
-            ctx%state%cosmospl(i, 1) = (1.0_wp/a_scale) - 1.0_wp
-
-            ! Col 2: Age of Universe at z
-            ctx%state%cosmospl(i, 2) = get_universe_age(ctx, ctx%state%cosmospl(i, 1))
-
-            ! Col 3: Luminosity Distance at z
-            ctx%state%cosmospl(i, 3) = get_luminosity_distance(ctx, ctx%state%cosmospl(i, 1))
-        end do
-
-        ! --------------------------------------------------------------------
-        ! 3. Age of the Universe (z=0)
-        ! --------------------------------------------------------------------
-        ctx%state%tuniv = get_universe_age(ctx, 0.0_wp)
+        ! [Redshift, Age(Gyr), Luminosity Distance(pc)] on 500 scale factors; rebuilt by
+        ! refresh_cosmology when H0, om0 or ol0 are set afterwards
+        call update_cosmology_table(ctx)
 
         ! --------------------------------------------------------------------
         ! 4. Key Wavelength Indices

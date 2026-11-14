@@ -91,7 +91,9 @@ module opensps_csp_batch
     use opensps_sfh, only: get_sfh_properties_at_age
     use opensps_dust, only: compute_attenuation_curve_point, one_minus_trans
     use opensps_interpolation, only: find_interval, find_interval_with_hint
-    use opensps_cosmology, only: igm_tau, igm_tau_dz, igm_tau_pixel_terms, igm_tau_z_terms, IGM_NTERM
+    use opensps_cosmology, only: igm_tau, igm_tau_dz, igm_tau_pixel_terms, igm_tau_z_terms, IGM_NTERM, &
+                                 refresh_cosmology
+    use opensps_offload, only: offload_on_host, offload_host_unusable
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
     use opensps_gas, only: get_grid_indices_weights, prepare_line_gaussians
     use opensps_cue, only: cue_w, cue_sp, cue_load, cue_line_map, cue_spline_build, cue_spline_solve, &
@@ -299,7 +301,11 @@ contains
     !> @param[out]   mags    Magnitudes (nbands, N); bands not requested in psets(1)%mag_compute
     !>                       are NaN, as in compute_magnitudes.
     !> @param[out]   status  0 on success; 1 no setup or basis; 2 unsupported option; 3 bad shape;
-    !>                       4 data missing (nebular_model = 1 without cue's weights: OPENSPS_CUE_DATA).
+    !>                       4 data missing (nebular_model = 1 without cue's weights: OPENSPS_CUE_DATA);
+    !>                       5 an offload build running its target regions on the host (no device, or
+    !>                       OMP_TARGET_OFFLOAD=DISABLED) that cannot run this call: with fewer than two OpenMP
+    !>                       threads (LLVM flang's libomp crashes, #87), or, in a build with the native HIP
+    !>                       kernels, with gradients, the IMF per model or cue (they take device pointers).
     !> @param[out]   spec    Optional spectra (nspec, N), L_sun/Hz per solar mass formed.
     !> @param[out]   mass, lbol, mdust, sfr  Optional per-model scalars as in compspout.
     !> @param[out]   emlines Optional emission-line luminosities (NEMLINE, N), as compspout%emlines
@@ -439,6 +445,7 @@ contains
 #if defined(OMP_TARGET)
         if (.not. ctx%on_device) call opensps_context_move_to_device(ctx)
 #endif
+        call refresh_cosmology(ctx)      ! (H0, om0 or ol0 set since setup: the distance term follows)
         call opensps_context_sync_device_settings(ctx)
         status = 0
         n_mod = size(psets)
@@ -573,6 +580,18 @@ contains
         ! cue (nebular_model = 1): with the resident bases, with gradients (cue_nebular_backward), not
         ! the IMF per model (which uses the CLOUDY grids' kernels); its weights are read on first use
         cue = ctx%add_neb_emission_val == 1 .and. ctx%nebular_model_val == 1
+        ! An offload build whose target regions run on the host (no device, OMP_TARGET_OFFLOAD=DISABLED): the
+        ! LLVM flang runtime crashes at one OpenMP thread (#87), and the native HIP kernels (the gradients,
+        ! the IMF per model, cue) take device pointers: refuse (status 5) rather than return wrong numbers.
+        ! The forward model without those runs on the host (the band fluxes take the OpenMP kernel).
+        if (offload_host_unusable()) then
+            status = 5; return
+        end if
+#if defined(OPENSPS_HIP)
+        if (offload_on_host() .and. (grad .or. imf .or. cue)) then
+            status = 5; return
+        end if
+#endif
         if (cue) then
             if (imf) then
                 status = 2; return

@@ -266,6 +266,13 @@ module opensps_context_types
         !> moved to the device: device kernels read the device copy of ctx, so the compute entry
         !> points refresh it first (opensps_context_sync_device_settings)
         logical :: settings_dirty = .false.
+        !> True when the last opensps_context_set_param_* call changed a value that the SSPs depend on
+        !> (an SSP-sensitive parameter set to the value it already had changes nothing): the bindings
+        !> drop their SSP grids on it
+        logical :: last_set_changed_ssp = .false.
+        !> True when H0, om0 or ol0 changed since the cosmology table (state%cosmospl, state%tuniv) was
+        !> built: refresh_cosmology rebuilds it at the next computation
+        logical :: cosmology_dirty = .false.
         logical :: fast_mode = .false.
         integer :: zin = 0
         character(len=64) :: isoc_type_name = ''
