@@ -41,7 +41,7 @@ jobs:
             stress_env: FSPS_STRESS_ITERS=20
     env:
       OMP_NUM_THREADS: 4
-      DATA_RELEASE: ${{ vars.FSPS_DATA_RELEASE }}
+      DATA_RELEASE: ${{ vars.OPENSPS_DATA_RELEASE }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -68,7 +68,7 @@ jobs:
         if: matrix.install == 'nvidia-hpc'
         run: echo "MTH_I_ARCH=avx2" >> "$GITHUB_ENV"
       - run: pipx install meson && pipx install ninja
-      # The data release (repository variable FSPS_DATA_RELEASE), as in ci.yml: without it the
+      # The data release (repository variable OPENSPS_DATA_RELEASE), as in ci.yml: without it the
       # regression tests skip and the stress tests stop at "FSPS data path not found" (issue #80).
       # The verified archives are cached per release, so a release is downloaded once.
       - name: Cache the data release
@@ -116,7 +116,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     env:
-      DATA_RELEASE: ${{ vars.FSPS_DATA_RELEASE }}
+      DATA_RELEASE: ${{ vars.OPENSPS_DATA_RELEASE }}
     strategy:
       fail-fast: false
       matrix:
@@ -142,7 +142,7 @@ jobs:
           compiler: ${{ matrix.toolchain }}
           version: ${{ matrix.version }}
       - run: pipx install meson && pipx install ninja
-      # The data release (repository variable FSPS_DATA_RELEASE), as in ci.yml: without it the
+      # The data release (repository variable OPENSPS_DATA_RELEASE), as in ci.yml: without it the
       # regression tests skip and the stress tests stop at "FSPS data path not found" (issue #80).
       # The verified archives are cached per release, so a release is downloaded once.
       - name: Cache the data release
@@ -176,14 +176,14 @@ jobs:
     timeout-minutes: 60
     env:
       OMP_TARGET_OFFLOAD: MANDATORY   # a silent host fallback fails
-      DATA_RELEASE: ${{ vars.FSPS_DATA_RELEASE }}
+      DATA_RELEASE: ${{ vars.OPENSPS_DATA_RELEASE }}
     steps:
       - uses: actions/checkout@v7
       - name: Toolchain and device
         run: |
           nvfortran --version
           nvidia-smi
-      # The data release (repository variable FSPS_DATA_RELEASE), as in ci.yml: without it the
+      # The data release (repository variable OPENSPS_DATA_RELEASE), as in ci.yml: without it the
       # regression tests skip and the stress tests stop at "FSPS data path not found" (issue #80).
       # The verified archives are cached per release, so a release is downloaded once.
       - name: Cache the data release

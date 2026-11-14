@@ -125,7 +125,7 @@ jobs:
 
     env:
       FFLAGS: ${{ matrix.fflags }}
-      DATA_RELEASE: ${{ vars.FSPS_DATA_RELEASE }}
+      DATA_RELEASE: ${{ vars.OPENSPS_DATA_RELEASE }}
 
     steps:
       - name: Checkout (without the C3K library)
@@ -214,7 +214,7 @@ jobs:
           echo "pinned:"; MTH_I_ARCH=avx2 MTH_I_DEBUG=1 "$RUNNER_TEMP/mth" 2>&1 | grep __math_target
 
       # Data from the published release instead of the checked-out data/ (doc/DATA_FORMAT.md,
-      # Section 6). Off until the repository variable FSPS_DATA_RELEASE is set (e.g. data-v1);
+      # Section 6). Off until the repository variable OPENSPS_DATA_RELEASE is set (e.g. data-v1);
       # the verified archives are cached per release, so a release is downloaded once.
       - name: Cache the data release
         if: env.DATA_RELEASE != ''
@@ -326,7 +326,7 @@ jobs:
       FFLAGS: -ffpe-summary=invalid,zero,overflow
       FC: ccache gfortran
       CC: ccache gcc
-      DATA_RELEASE: ${{ vars.FSPS_DATA_RELEASE }}
+      DATA_RELEASE: ${{ vars.OPENSPS_DATA_RELEASE }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -346,7 +346,7 @@ jobs:
           key: asan
           max-size: 200M
       # Data from the published release instead of the checked-out data/ (doc/DATA_FORMAT.md,
-      # Section 6). Off until the repository variable FSPS_DATA_RELEASE is set (e.g. data-v1);
+      # Section 6). Off until the repository variable OPENSPS_DATA_RELEASE is set (e.g. data-v1);
       # the verified archives are cached per release, so a release is downloaded once.
       - name: Cache the data release
         if: env.DATA_RELEASE != ''
@@ -393,7 +393,7 @@ jobs:
       FFLAGS: -ffpe-summary=invalid,zero,overflow
       FC: ccache gfortran
       CC: ccache gcc
-      DATA_RELEASE: ${{ vars.FSPS_DATA_RELEASE }}
+      DATA_RELEASE: ${{ vars.OPENSPS_DATA_RELEASE }}
       OMP_NUM_THREADS: 2
       # Suppress known false positives in the uninstrumented Fortran/OpenMP runtimes (all steps)
       TSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/tsan.supp halt_on_error=1 second_deadlock_stack=1
@@ -416,7 +416,7 @@ jobs:
           key: tsan
           max-size: 200M
       # Data from the published release instead of the checked-out data/ (doc/DATA_FORMAT.md,
-      # Section 6). Off until the repository variable FSPS_DATA_RELEASE is set (e.g. data-v1);
+      # Section 6). Off until the repository variable OPENSPS_DATA_RELEASE is set (e.g. data-v1);
       # the verified archives are cached per release, so a release is downloaded once.
       - name: Cache the data release
         if: env.DATA_RELEASE != ''

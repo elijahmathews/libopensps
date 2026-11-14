@@ -38,7 +38,7 @@ import urllib.request
 
 GITHUB_REPO = "elijahmathews/opensps-data"
 MANIFEST_URL = "https://github.com/" + GITHUB_REPO + "/releases/download/{tag}/{tag}.json"
-DEFAULT_RELEASE = "data-v3"
+DEFAULT_RELEASE = "data-v4"
 CHUNK = 1 << 22
 # Retries of a URL after a transient failure: attempts in all, and the first delay in seconds,
 # doubled at each retry and multiplied by a random factor in [0.5, 1.5) (jitter, so that parallel

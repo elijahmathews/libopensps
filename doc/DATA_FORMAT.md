@@ -493,13 +493,13 @@ then `write_root_index(root, release)` once all libraries are in place.
   `-Ddata_home=<converted root>` and `FSPS_DATA_FORMAT=standard`.
 - **CI**: today every job uses the checked-out `data/`, and the full-data job also converts it
   and runs `data_parity`. The switch to the published release is prepared in `ci.yml`: when the
-  repository variable `FSPS_DATA_RELEASE` is set (e.g. `data-v1`), the test and sanitizer jobs
+  repository variable `OPENSPS_DATA_RELEASE` is set (e.g. `data-v1`), the test and sanitizer jobs
   restore `~/.cache/opensps-data` from a cache keyed on the release (plus `-all` for the full-data
   job, which also fetches the optional C3K), run
-  `tools/fetch_data.py $HOME/opensps-data --release $FSPS_DATA_RELEASE`, and configure with
+  `tools/fetch_data.py $HOME/opensps-data --release $OPENSPS_DATA_RELEASE`, and configure with
   `-Ddata_home=$HOME/opensps-data`; `data_parity` is then skipped. To flip: publish the release
   (`tools/opensps_data/upload_release.sh`), then *Settings > Secrets and variables > Actions >
-  Variables*: `FSPS_DATA_RELEASE = data-v1` (or `gh variable set FSPS_DATA_RELEASE --body data-v1
+  Variables*: `OPENSPS_DATA_RELEASE = data-v1` (or `gh variable set OPENSPS_DATA_RELEASE --body data-v1
   --repo elijahmathews/fsps`); unset it to return to the checkout. Once CI is green on the
   release, `data/` can leave the tree (a fresh repository started from that commit). The
   archives are `.tar.zst`, which `fetch_data.py` unpacks with the `zstd` command on the hosted
@@ -554,7 +554,7 @@ change):
    `tools/opensps_data/pack_data.py <root> <outdir> --release data-vK --previous <outdir of data-vK-1>/data-vK-1.json`
    (only the base archive and the changed references archive are new), publish it with
    `tools/opensps_data/upload_release.sh <outdir> data-vK`, and set the CI variable
-   `FSPS_DATA_RELEASE=data-vK`. Merge the PR after the release is published, so that the pin and
+   `OPENSPS_DATA_RELEASE=data-vK`. Merge the PR after the release is published, so that the pin and
    the release agree.
 
 **data-v2** (packed 2026-10-20, not published): `data-v1` plus `references-sps-v1.tar.zst` and
@@ -566,9 +566,9 @@ FP64 and FP32 (38/38).
 
 **data-v3** (published 2026-11-12): `data-v2` with the C3K regression references regenerated for the
 corner floor of #92 (`references/sps` v2, `references/param` v2; the other references are unchanged).
-`FSPS_DATA_RELEASE` for CI and the pin `tests/data/references.json` name it.
+The pin `tests/data/references.json` names its references; CI used it until `data-v4`.
 
-**data-v4** (packed 2026-11-12): `data-v3` plus the converted [alpha/Fe] libraries of FSPS v4, the
+**data-v4** (published 2026-11-13; the CI release, `OPENSPS_DATA_RELEASE = data-v4`; the variable was `FSPS_DATA_RELEASE`): `data-v3` plus the converted [alpha/Fe] libraries of FSPS v4, the
 optional archives `isochrones-mist_afe-v1` (229 MB) and `stellar_spectra-c3k_lr-v1` (222 MB):
 `tools/fetch_data.py DEST --release data-v4 --with isochrones/mist_afe stellar_spectra/c3k_lr`
 (or `--all`). Converted from the FSPS v4 export with `convert_legacy.py --upstream-mist/--upstream-c3k`
