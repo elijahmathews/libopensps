@@ -98,6 +98,8 @@ format, conversion, packing; format and workflows in `doc/DATA_FORMAT.md`).
   - `target teams loop` only where it is measured faster and the tests pass in FP32 and FP64:
     with nvfortran 25.1 it is 2x faster than `teams distribute parallel do` on some kernels,
     5x slower or wrong on others.
+  - hardware-dependent sizes (chunks, blocks, crossovers) go in `src/core/opensps_tuning.f90`, not as
+    literals in a kernel (`doc/TUNING.md`).
   More in `doc/GPU_PLAN.md` ("Rules learned so far").
 - The CSP physics has one implementation, `compute_csp_batch`; `compute_csp_scenario` runs as a
   batch (one model per output age). A physics change goes there, and is checked by the

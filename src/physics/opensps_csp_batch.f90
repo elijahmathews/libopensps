@@ -80,6 +80,7 @@ module opensps_csp_batch
     !> (summation order differs).
 
     use opensps_precision, only: WP, KP, kahan_add
+    use opensps_tuning, only: TUNE_NCHG, TUNE_CSP_PT, TUNE_NCH, TUNE_P_HOST_SFH_MAX, TUNE_P_PINNED_CHUNK_BYTES, tuning_get
     use opensps_constants, only: SAFE_FLOOR, PI, NEMLINE, NEBNAGE, NEBNZ, NEBNIP, H_PLANCK, L_SOL
     use opensps_types, only: params, params_core
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings, batch_out_reserve, &
@@ -183,7 +184,7 @@ module opensps_csp_batch
     !> Nebular continuum adjoint: at most this many ages per run (ages in one CLOUDY interval)
     integer, parameter :: NEB_RUN = 4
     !> Pixel chunks per model of the attenuation adjoint (each thread takes every NCHG-th pixel)
-    integer, parameter :: NCHG = 64
+    integer, parameter :: NCHG = TUNE_NCHG
 
 #if defined(__flang__)
 #define PBUF_ARG pbuf
@@ -399,7 +400,7 @@ contains
         !> model's SFH integral is one serial thread (~0.3 ms on the A100, the same on the P100),
         !> on the host ~20 us per model. (Hardware note: the crossover depends on the host core
         !> and on the GPU's single-thread FP64 speed; measured on the A100 node.)
-        integer, parameter :: HOST_SFH_MAX = 16
+        integer :: HOST_SFH_MAX
         real(WP), allocatable :: wh(:,:), t1h(:), t2h(:)
         integer  :: nzb, nw, nzw, z
 
@@ -608,6 +609,7 @@ contains
                 end if
             end do
         end if
+        HOST_SFH_MAX = tuning_get(TUNE_P_HOST_SFH_MAX)
         host_w = .false.
 #if defined(OMP_TARGET)
         host_w = (.not. given_w) .and. n_mod < HOST_SFH_MAX
@@ -1549,7 +1551,7 @@ contains
         !> (The kernels are synchronous, so the data is ready when the copy starts; hardware note:
         !> ~16 MB chunks measured best on the A100 node, PCIe 3 host: large enough to reach the DMA
         !> rate, small enough to overlap most of the conversion)
-        integer, parameter :: CHUNK_BYTES = 16 * 1024 * 1024
+        integer :: CHUNK_BYTES
         integer :: cw, nch, c, q, kb, st
         type(c_ptr) :: dbase
 
@@ -1563,6 +1565,7 @@ contains
             dbase = c_loc(sp)
             !$omp end target data
             kb = storage_size(sp) / 8
+            CHUNK_BYTES = tuning_get(TUNE_P_PINNED_CHUNK_BYTES)
             cw = max(1, CHUNK_BYTES / (nspec * kb))
             nch = (n_mod + cw - 1) / cw
             if (issue(1, min(cw, n_mod), 1)) then
@@ -2986,7 +2989,7 @@ contains
         logical, intent(in)     :: newr(nt_neb)
         real(KP), intent(inout), target :: yo(nspec, 2 * n_mod)
 
-        integer, parameter :: PT = 4
+        integer, parameter :: PT = TUNE_CSP_PT
         real(WP), parameter :: LN10 = log(10.0_wp)
         integer  :: m, ip, npt
 #if defined(OPENSPS_HIP)
@@ -4379,7 +4382,7 @@ contains
         real(KP) :: sa, sn, se, ca, cn, ce
 #if defined(OMP_TARGET) && defined(__flang__)
         !> Partial sums per model: each takes every NCH-th pixel (consecutive threads, consecutive pixels)
-        integer, parameter :: NCH = 64
+        integer, parameter :: NCH = TUNE_NCH
         real(KP), allocatable :: part(:,:,:)
         integer  :: c
 

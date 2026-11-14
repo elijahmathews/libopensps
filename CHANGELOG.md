@@ -5,6 +5,15 @@ carries the release's version (`OPENSPS_API_VERSION_*`, `opensps_get_api_version
 major version is 0, a minor release may change the API, and each such change is listed here under
 "Breaking". Pull request numbers refer to <https://github.com/elijahmathews/libopensps>.
 
+## Unreleased
+
+### Added
+
+- **One module for the hardware tuning parameters** (`src/core/opensps_tuning.f90`, `doc/TUNING.md`). The sizes that
+  were literals in ten places are named constants there. Three run-time ones (`SSP_BATCH_CHUNK`, `HOST_SFH_MAX`,
+  `PINNED_CHUNK_BYTES`) can be set with `OPENSPS_TUNE_<NAME>`. Defaults are the previous values: no change in
+  results or speed unless a variable is set.
+
 ## 0.2.1
 
 A bug-fix release: no C API entry point or signature changes (the one new status value, 5, is returned only where

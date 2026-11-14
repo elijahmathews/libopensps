@@ -293,6 +293,7 @@ lib_sources = files(
     # Core FSPS Modules
     'src/core/opensps_trace.f90',
     'src/core/opensps_offload.f90',
+    'src/core/opensps_tuning.f90',
     'src/core/opensps_cache.f90',
     'src/core/opensps_setup_lock.c',
     'src/core/opensps_constants.f90',
@@ -605,6 +606,22 @@ test('unit_context_params', context_params_exe,
     env : context_params_env,
     suite : 'unit',
     timeout : 300
+)
+
+# The tuning registry: defaults, parsing, ranges, environment and tuning_set
+tuning_exe = executable('test_tuning', 'tests/test_tuning.f90',
+    dependencies : [opensps_dep, test_utils_dep],
+    link_language : 'fortran'
+)
+tuning_env = environment()
+tuning_env.set('FSPS_TEST_TAP', '1')
+tuning_env.set('OPENSPS_TUNE_HOST_SFH_MAX', '8')
+tuning_env.set('OPENSPS_TUNE_SSP_BATCH_CHUNK', 'lots')
+test('unit_tuning', tuning_exe,
+    protocol : 'tap',
+    env : tuning_env,
+    suite : 'unit',
+    timeout : 60
 )
 
 # Offload builds on the host (no device, OMP_TARGET_OFFLOAD=DISABLED): a forward batch runs, what cannot run is

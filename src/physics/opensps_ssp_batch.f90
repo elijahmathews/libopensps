@@ -24,6 +24,7 @@ module opensps_ssp_batch
     !> and as OpenMP host loops otherwise, with the same arithmetic in the same order.
 
     use opensps_precision, only: WP, KP
+    use opensps_tuning, only: TUNE_P_SSP_BATCH_CHUNK, tuning_get
     use opensps_constants, only: SAFE_FLOOR
     use opensps_imf, only: imf_integral_p, imf_bin_weights_tab, imf_bin_logs, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT, &
                            IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE, IMF_P_LOWER_BOUND, IMF_NPAR, imf_integral_dp, &
@@ -253,7 +254,7 @@ contains
         real(KP), intent(inout), contiguous :: yo(:,:)
         real(WP), intent(inout), contiguous :: smass(:,:), slum(:,:), q0(:,:)
 
-        integer, parameter :: CHUNK = 2048
+        integer :: CHUNK
         integer :: nc_max, neb_cols, nz, pass, m, k, t, ntq
         integer, allocatable :: perm1(:), perm2(:), viz1(:), viz2(:), ptr1(:), ptr2(:), cnt(:)
         real(WP), allocatable :: cz1(:), cz2(:), w(:,:), tot(:), vp(:,:,:), pps(:,:,:)
@@ -266,6 +267,7 @@ contains
         call ssp_opset_to_device(set)
         neb_cols = 0
         if (nt_neb > 0 .and. whl > 0) neb_cols = 1
+        CHUNK = tuning_get(TUNE_P_SSP_BATCH_CHUNK)
         nc_max = min(CHUNK, n_mod)
         allocate(perm1(n_mod), perm2(n_mod), viz1(n_mod), viz2(n_mod), ptr1(nz + 1), ptr2(nz + 1), cnt(nz + 1), &
                  cz1(n_mod), cz2(n_mod))
