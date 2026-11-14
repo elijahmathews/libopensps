@@ -114,6 +114,8 @@ program test_offload_host
 
     call opensps_destroy(ctx)
     deallocate(ctx)
+    ! (the main program's allocatables are not freed at exit: LeakSanitizer reports them)
+    deallocate(spec_z, mass_z, lbol_z, mags, mbar, pbar)
     call print_summary_line("offload builds on the host", total_tests - total_failures, total_tests)
     call tap_finish()
     if (total_failures > 0) stop 1

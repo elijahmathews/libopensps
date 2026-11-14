@@ -156,6 +156,9 @@ program test_afe_library
 
     call opensps_destroy(ctx)
     deallocate(ctx)
+    ! (the main program's allocatables are not freed at exit: LeakSanitizer reports them)
+    deallocate(spec, mags, ref_spec, ref_mags, spec_n)
+    if (allocated(sp_no_neb)) deallocate(sp_no_neb)
     call print_summary_line("[alpha/Fe] axis", total_tests - total_failures, total_tests)
     call tap_finish()
     if (total_failures > 0) stop 1
