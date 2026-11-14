@@ -1,3 +1,10 @@
+opensps (0.2.1-1) unstable; urgency=medium
+
+  * New upstream release 0.2.1: bug fixes (cosmology parameters, unchanged SSP sets,
+    offload builds on the host); see CHANGELOG.md.
+
+ -- libopensps Packager <23229627+elijahmathews@users.noreply.github.com>  Sat, 14 Nov 2026 12:00:00 +0000
+
 opensps (0.2.0-1) unstable; urgency=medium
 
   * New upstream release 0.2.0: [alpha/Fe] as an SSP axis, cue nebular emission with

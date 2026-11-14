@@ -1,5 +1,5 @@
 Name:           opensps
-Version:        0.2.0
+Version:        0.2.1
 Release:        1%{?dist}
 Summary:        Stellar population synthesis library derived from FSPS
 
@@ -83,6 +83,8 @@ rm -rf %{buildroot}%{_datadir}/fsps
 %{_libdir}/pkgconfig/opensps.pc
 
 %changelog
+* Sat Nov 14 2026 FSPS Packager <23229627+elijahmathews@users.noreply.github.com> - 0.2.1-1
+- libopensps 0.2.1: bug fixes (cosmology parameters, unchanged SSP sets, offload builds on the host); see CHANGELOG.md
 * Thu Nov 12 2026 FSPS Packager <23229627+elijahmathews@users.noreply.github.com> - 0.2.0-1
 - libopensps 0.2.0: [alpha/Fe] as an SSP axis, cue nebular emission with gradients, faster
   batched CSPs on GPUs; see CHANGELOG.md for the changes that break compatibility
