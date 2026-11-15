@@ -3499,10 +3499,87 @@ contains
 #endif
     end subroutine age_sums_w
 
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+    !> age_sums_z with the HIP kernel (opensps_hip_age_sums_z): the models sorted by the lower slab of their
+    !> metallicity pair and cut into tiles of 64 models of one pair
+    subroutine age_sums_z_hip(nspec, nt, nz, n_mod, basis, w2flat, it_tesc, zlo, dz, yo)
+        use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
+        integer, intent(in)  :: nspec, nt, nz, n_mod
+        integer, intent(in), target  :: it_tesc(n_mod), zlo(n_mod)
+        real(KP), intent(in), target :: basis(nspec, nt, nz), w2flat(nt * 2 * n_mod)
+        real(WP), intent(in), target :: dz(n_mod)
+        real(KP), intent(out), target :: yo(nspec, 2 * n_mod)
+        integer, allocatable, target :: zord(:), starts(:), tfirst(:), tcnt(:), tzl(:), fill(:)
+        integer :: m, key, nzk, ntile, g, c, j
+        interface
+            subroutine opensps_hip_age_sums_z(nspec, nt, n_mod, ntile, zord, tfirst, tcnt, tzl, basis, w2, it, dz, yo, stream) &
+                bind(C, name="opensps_hip_age_sums_z")
+                import :: c_int, c_ptr
+                integer(c_int), value :: nspec, nt, n_mod, ntile
+                type(c_ptr), value :: zord, tfirst, tcnt, tzl, basis, w2, it, dz, yo, stream
+            end subroutine opensps_hip_age_sums_z
+        end interface
+
+        nzk = maxval(zlo(1:n_mod))
+        allocate(zord(n_mod), starts(nzk + 2), fill(nzk + 1))
+        starts = 0
+        do m = 1, n_mod
+            starts(zlo(m) + 1) = starts(zlo(m) + 1) + 1
+        end do
+        starts(1) = 1
+        do key = 2, nzk + 2
+            starts(key) = starts(key) + starts(key - 1)
+        end do
+        fill(1:nzk + 1) = starts(1:nzk + 1)
+        do m = 1, n_mod
+            zord(fill(zlo(m))) = m
+            fill(zlo(m)) = fill(zlo(m)) + 1
+        end do
+        ntile = 0
+        do g = 1, nzk
+            c = starts(g + 1) - starts(g)
+            ntile = ntile + (c + 63) / 64
+        end do
+        allocate(tfirst(max(ntile, 1)), tcnt(max(ntile, 1)), tzl(max(ntile, 1)))
+        j = 0
+        do g = 1, nzk
+            c = starts(g + 1) - starts(g)
+            do m = 0, c - 1, 64
+                j = j + 1
+                tfirst(j) = starts(g) - 1 + m
+                tcnt(j) = min(64, c - m)
+                tzl(j) = g
+            end do
+        end do
+        !$omp target data map(to: zord, tfirst, tcnt, tzl) use_device_addr(basis, w2flat, it_tesc, dz, yo)
+        !$omp target data use_device_addr(zord, tfirst, tcnt, tzl)
+        call opensps_hip_age_sums_z(int(nspec, c_int), int(nt, c_int), int(n_mod, c_int), int(ntile, c_int), c_loc(zord), &
+                                    c_loc(tfirst), c_loc(tcnt), c_loc(tzl), c_loc(basis), c_loc(w2flat), c_loc(it_tesc), &
+                                    c_loc(dz), c_loc(yo), c_null_ptr)
+        !$omp end target data
+        !$omp end target data
+    end subroutine age_sums_z_hip
+#endif
+
     !> Age sums with per-model metallicity: each model's basis is (1 - dz) basis(:, :, zlo) +
     !> dz basis(:, :, zhi), formed at kernel precision term by term (portable kernel; also used in
     !> cuBLAS builds). One pass over the ages (young or old per model), 4 models per thread.
     subroutine age_sums_z(nspec, nt, nz, n_mod, basis, w2, w2flat, it_tesc, zlo, zhi, dz, yo)
+        integer, intent(in)              :: nspec, nt, nz, n_mod, it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
+        real(KP), intent(in)             :: basis(nspec, nt, nz), w2(nt, 2 * n_mod), w2flat(nt * 2 * n_mod)
+        real(WP), intent(in)             :: dz(n_mod)
+        real(KP), intent(out)            :: yo(nspec, 2 * n_mod)
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+        ! The two slabs of every model's pair adjacent (always, with the metallicity interval): a product per pair
+        if (all(zhi(1:n_mod) == zlo(1:n_mod) + 1)) then
+            call age_sums_z_hip(nspec, nt, nz, n_mod, basis, w2flat, it_tesc, zlo, dz, yo)
+            return
+        end if
+#endif
+        call age_sums_z_generic(nspec, nt, nz, n_mod, basis, w2, w2flat, it_tesc, zlo, zhi, dz, yo)
+    end subroutine age_sums_z
+
+    subroutine age_sums_z_generic(nspec, nt, nz, n_mod, basis, w2, w2flat, it_tesc, zlo, zhi, dz, yo)
         ! Explicit-shape dummies (no array descriptors in the kernel)
         integer, intent(in)              :: nspec, nt, nz, n_mod, it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
         real(KP), intent(in)             :: basis(nspec, nt, nz), w2(nt, 2 * n_mod), w2flat(nt * 2 * n_mod)
@@ -3681,7 +3758,7 @@ contains
             end do
         end do
 #endif
-    end subroutine age_sums_z
+    end subroutine age_sums_z_generic
 
     !> Age sums with per-model metallicity and [alpha/Fe]: each model's basis is the bilinear blend of four
     !> slabs, (1 - da) [(1 - dz) b(zlo) + dz b(zlo + 1)] + da [(1 - dz) b(zlo + nzs) + dz b(zlo + nzs + 1)]

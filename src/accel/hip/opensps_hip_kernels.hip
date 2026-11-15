@@ -2849,7 +2849,164 @@ __global__ void __launch_bounds__(128) observed_frame_kernel(
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Age sums with per-model metallicity (age_sums_z, FP32 kernels), as a product per metallicity pair
+//
+// Model m (metallicity interval zl, zl + 1, weight d) has young / old age sums
+//   y(i) = sum_{k <= it} w_y(k) [(1 - d) B(i, k, zl) + d B(i, k, zl + 1)],   o(i) = same over k > it with w_o,
+// B(i, k, z) the basis spectra. The two slabs of a pair are adjacent columns of the basis seen as an
+// (nspec x nt nz) matrix, so for the models of one pair this is A times a coefficient matrix ((1 - d) w,
+// d w per column) formed while the tile is staged. A block computes 128 pixels x 64 models of the young sums
+// (blockIdx.z = 0: ages k <= the tile's largest it, in both slabs) or of the old sums (z = 1: ages above the
+// tile's smallest it); the zero coefficients outside are not multiplied. 8 x 4 per thread, templates 16 at
+// a time in shared memory; arithmetic as the template products: blocks of 4 terms with plain multiply-adds
+// (all terms >= 0), the blocks added with compensation (the Fortran kernel summed ~100 ages plainly).
+// tile t: models zord[first[t] .. first[t] + cnt[t] - 1] (1-based model numbers), all of metallicity pair zl[t]
+// ---------------------------------------------------------------------------
+__global__ void __launch_bounds__(256, 2) age_sums_z_kernel(
+    int nspec, int nt, int n_mod,
+    const int* __restrict__ zord, const int* __restrict__ tfirst, const int* __restrict__ tcnt, const int* __restrict__ tzl,
+    const float* __restrict__ basis, const float* __restrict__ w2, const int* __restrict__ it_tesc,
+    const double* __restrict__ dz, float* __restrict__ yo
+) {
+    __shared__ float As[TC_KC][TC_BM];
+    __shared__ float Bs[TC_KC][64];
+    __shared__ int   s_wb[64];     // offset of the column's weights in w2
+    __shared__ int   s_it[64];
+    __shared__ float s_d[64];
+    __shared__ int   s_out[64];    // model column of yo (-1: no model)
+    __shared__ int   s_klo, s_khi;
+    const int tid = threadIdx.x;
+    const int tx = tid & 15, ty = tid >> 4;
+    const int i0 = blockIdx.x * TC_BM;
+    const int t = blockIdx.y;
+    const int old = blockIdx.z;
+    const int first = tfirst[t], cnt = tcnt[t], zl = tzl[t];
+    if (tid == 0) { s_klo = nt; s_khi = 0; }
+    __syncthreads();
+    if (tid < 64) {
+        if (tid < cnt) {
+            const int m = zord[first + tid] - 1;
+            s_wb[tid] = (old ? n_mod + m : m) * nt;
+            s_it[tid] = it_tesc[m];
+            s_d[tid] = (float)dz[m];
+            s_out[tid] = old ? n_mod + m : m;
+            if (old) atomicMin(&s_klo, it_tesc[m]); else atomicMax(&s_khi, it_tesc[m]);
+        } else {
+            s_wb[tid] = 0; s_it[tid] = 0; s_d[tid] = 0.f; s_out[tid] = -1;
+        }
+    }
+    __syncthreads();
+    // 0-based ages kk of the range: young kk < it_max, old kk >= it_min (it is 1-based: ages 1 .. it are young)
+    const int klo = old ? s_klo : 0;
+    const int khi = old ? nt : s_khi;
+    const int len = max(khi - klo, 0);
+    const int K = 2 * len;
+    const float* Ab = basis + (size_t)(zl - 1) * nt * nspec;
+
+    float acc[TC_RM][TC_RN], cmp[TC_RM][TC_RN], blk[TC_RM][TC_RN];
+#pragma unroll
+    for (int r = 0; r < TC_RM; ++r)
+#pragma unroll
+        for (int c = 0; c < TC_RN; ++c) { acc[r][c] = 0.f; cmp[r][c] = 0.f; }
+
+    float pa[TC_KC * TC_BM / 256], pb[TC_KC * 64 / 256];
+    auto gload = [&](int e0) {
+#pragma unroll
+        for (int q = 0; q < TC_KC * TC_BM / 256; ++q) {
+            int idx = tid + q * 256, i = idx % TC_BM, e = e0 + idx / TC_BM;
+            float v = 0.f;
+            if (i0 + i < nspec && e < K) {
+                int half = e >= len;
+                int kk = klo + e - (half ? len : 0);
+                v = Ab[(size_t)(half * nt + kk) * nspec + i0 + i];
+            }
+            pa[q] = v;
+        }
+#pragma unroll
+        for (int q = 0; q < TC_KC * 64 / 256; ++q) {
+            int idx = tid + q * 256, el = idx % TC_KC, col = idx / TC_KC;
+            int e = e0 + el;
+            float v = 0.f;
+            if (e < K && s_out[col] >= 0) {
+                int half = e >= len;
+                int kk = klo + e - (half ? len : 0);
+                int k1 = kk + 1;
+                bool use = old ? (k1 > s_it[col]) : (k1 <= s_it[col]);
+                if (use) v = w2[s_wb[col] + kk] * (half ? s_d[col] : 1.0f - s_d[col]);
+            }
+            pb[q] = v;
+        }
+    };
+    gload(0);
+    for (int e0 = 0; e0 < K; e0 += TC_KC) {
+        __syncthreads();
+#pragma unroll
+        for (int q = 0; q < TC_KC * TC_BM / 256; ++q) {
+            int idx = tid + q * 256; As[idx / TC_BM][idx % TC_BM] = pa[q];
+        }
+#pragma unroll
+        for (int q = 0; q < TC_KC * 64 / 256; ++q) {
+            int idx = tid + q * 256; Bs[idx % TC_KC][idx / TC_KC] = pb[q];
+        }
+        __syncthreads();
+        if (e0 + TC_KC < K) gload(e0 + TC_KC);
+#pragma unroll
+        for (int g = 0; g < TC_KC / 4; ++g) {
+            if (e0 + g * 4 >= K) break;
+#pragma unroll
+            for (int r = 0; r < TC_RM; ++r)
+#pragma unroll
+                for (int c = 0; c < TC_RN; ++c) blk[r][c] = 0.f;
+#pragma unroll
+            for (int u = 0; u < 4; ++u) {
+                const int e = g * 4 + u;
+                float av[TC_RM], bv[TC_RN];
+#pragma unroll
+                for (int r = 0; r < TC_RM; ++r) av[r] = As[e][tx + 16 * r];
+#pragma unroll
+                for (int c = 0; c < TC_RN; ++c) bv[c] = Bs[e][ty + 16 * c];
+#pragma unroll
+                for (int r = 0; r < TC_RM; ++r)
+#pragma unroll
+                    for (int c = 0; c < TC_RN; ++c) blk[r][c] = fmaf(av[r], bv[c], blk[r][c]);
+            }
+#pragma unroll
+            for (int r = 0; r < TC_RM; ++r)
+#pragma unroll
+                for (int c = 0; c < TC_RN; ++c) {
+                    float term = blk[r][c] - cmp[r][c];
+                    float tsum = acc[r][c] + term;
+                    cmp[r][c] = (tsum - acc[r][c]) - term;
+                    acc[r][c] = tsum;
+                }
+        }
+    }
+#pragma unroll
+    for (int c = 0; c < TC_RN; ++c) {
+        int col = ty + 16 * c;
+        if (s_out[col] >= 0) {
+#pragma unroll
+            for (int r = 0; r < TC_RM; ++r) {
+                int i = i0 + tx + 16 * r;
+                if (i < nspec) yo[(size_t)s_out[col] * nspec + i] = acc[r][c] - cmp[r][c];
+            }
+        }
+    }
+}
+
 extern "C" {
+
+void opensps_hip_age_sums_z(int nspec, int nt, int n_mod, int ntile, const int* d_zord, const int* d_tfirst,
+                            const int* d_tcnt, const int* d_tzl, const float* d_basis, const float* d_w2,
+                            const int* d_it, const double* d_dz, float* d_yo, void* stream) {
+    if (nspec <= 0 || ntile <= 0) return;
+    hipStream_t s = (hipStream_t)stream;
+    age_sums_z_kernel<<<dim3((nspec + TC_BM - 1) / TC_BM, ntile, 2), 256, 0, s>>>(
+        nspec, nt, n_mod, d_zord, d_tfirst, d_tcnt, d_tzl, d_basis, d_w2, d_it, d_dz, d_yo);
+    (void)hipStreamSynchronize(s);
+}
 
 void opensps_hip_attenuate(int nspec, int n_mod, int nq, const float* d_mp, const int* d_mi, const float* d_ttab,
                            const double* d_ltab, const double* d_dustem, size_t n_dustem, int any_emis,
