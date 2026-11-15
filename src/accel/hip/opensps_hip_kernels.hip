@@ -2529,6 +2529,125 @@ __global__ void __launch_bounds__(BF_SMALL_THREADS) band_fluxes_small_kernel(
     if (t == 0) d_fband[(size_t)m * nbands + b] = (double)partial[0];
 }
 
+
+// ---------------------------------------------------------------------------
+// Band fluxes of many models as a product (FP32): fband(m, b) = sum_p A(b, p) fobs_t(m, p)
+//
+// The trapezoid sum of band_fluxes_kernel, sum_{j = j_lo}^{j_hi} w_j (f_j B_j + f_{j+1} B_{j+1}), is linear in
+// the pixels: pixel p carries A(b, p) = B_p (w_p [j_lo <= p <= j_hi] + w_{p-1} [j_lo <= p - 1 <= j_hi]).
+// band_matrix_kernel forms A (nbands x nspec, bands fastest) once per call, band_gemm_kernel is the
+// shared-memory tiled product (as template_columns_kernel: blocks of 4 pixels with plain multiply-adds,
+// the blocks added with compensation; all terms are >= 0). Each observed pixel is read once per tile of
+// 64 models instead of once per band by every thread of the band, and the whole call is a product of
+// ~1e10 multiply-adds instead of the (bands x width) serial sums.
+// ---------------------------------------------------------------------------
+__global__ void band_matrix_kernel(int nspec, int nbands, const float* __restrict__ bands_t,
+                                   const int* __restrict__ j_lo, const int* __restrict__ j_hi,
+                                   const int* __restrict__ do_band, const float* __restrict__ wt,
+                                   float* __restrict__ A) {
+    int p = blockIdx.x * blockDim.x + threadIdx.x;
+    int b = blockIdx.y;
+    if (p >= nspec || b >= nbands) return;
+    float v = 0.f;
+    if (do_band[b] != 0) {
+        int js = j_lo[b] - 1, je = j_hi[b] - 1;
+        float w = 0.f;
+        if (p >= js && p <= je) w += wt[p];
+        if (p >= 1 && p - 1 >= js && p - 1 <= je) w += wt[p - 1];
+        v = w * bands_t[(size_t)p * nbands + b];
+    }
+    A[(size_t)p * nbands + b] = v;
+}
+
+template <int RM>
+__global__ void __launch_bounds__(256, 2) band_gemm_kernel(
+    int nbands, int n_mod, int nspec,
+    const float* __restrict__ A, const float* __restrict__ F, double* __restrict__ out
+) {
+    constexpr int BMT = 16 * RM;
+    __shared__ float As[16][BMT];
+    __shared__ float Bs[16][64];
+    const int tid = threadIdx.x;
+    const int tx = tid & 15, ty = tid >> 4;
+    const int i0 = blockIdx.y * BMT, m0 = blockIdx.x * 64;
+    float acc[RM][4], cmp[RM][4], blk[RM][4];
+#pragma unroll
+    for (int r = 0; r < RM; ++r)
+#pragma unroll
+        for (int c = 0; c < 4; ++c) { acc[r][c] = 0.f; cmp[r][c] = 0.f; }
+    float pa[RM], pb[4];
+    auto gload = [&](int e0) {
+#pragma unroll
+        for (int q = 0; q < RM; ++q) {
+            int idx = tid + q * 256, i = idx % BMT, e = idx / BMT;
+            pa[q] = (i0 + i < nbands && e0 + e < nspec) ? A[(size_t)(e0 + e) * nbands + i0 + i] : 0.f;
+        }
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+            int idx = tid + q * 256, i = idx & 63, e = idx >> 6;
+            pb[q] = (m0 + i < n_mod && e0 + e < nspec) ? F[(size_t)(e0 + e) * n_mod + m0 + i] : 0.f;
+        }
+    };
+    gload(0);
+    for (int e0 = 0; e0 < nspec; e0 += 16) {
+        __syncthreads();
+#pragma unroll
+        for (int q = 0; q < RM; ++q) {
+            int idx = tid + q * 256; As[idx / BMT][idx % BMT] = pa[q];
+        }
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+            int idx = tid + q * 256; Bs[idx >> 6][idx & 63] = pb[q];
+        }
+        __syncthreads();
+        if (e0 + 16 < nspec) gload(e0 + 16);
+#pragma unroll
+        for (int g = 0; g < 4; ++g) {
+            if (e0 + g * 4 >= nspec) break;
+#pragma unroll
+            for (int r = 0; r < RM; ++r)
+#pragma unroll
+                for (int c = 0; c < 4; ++c) blk[r][c] = 0.f;
+#pragma unroll
+            for (int u = 0; u < 4; ++u) {
+                const int e = g * 4 + u;
+                float av[RM], bv[4];
+#pragma unroll
+                for (int r = 0; r < RM; ++r) av[r] = As[e][tx + 16 * r];
+#pragma unroll
+                for (int c = 0; c < 4; ++c) bv[c] = Bs[e][ty + 16 * c];
+#pragma unroll
+                for (int r = 0; r < RM; ++r)
+#pragma unroll
+                    for (int c = 0; c < 4; ++c) blk[r][c] = fmaf(av[r], bv[c], blk[r][c]);
+            }
+#pragma unroll
+            for (int r = 0; r < RM; ++r)
+#pragma unroll
+                for (int c = 0; c < 4; ++c) {
+                    float term = blk[r][c] - cmp[r][c];
+                    float tsum = acc[r][c] + term;
+                    cmp[r][c] = (tsum - acc[r][c]) - term;
+                    acc[r][c] = tsum;
+                }
+        }
+    }
+#pragma unroll
+    for (int c = 0; c < 4; ++c) {
+        int m = m0 + ty + 16 * c;
+        if (m < n_mod) {
+#pragma unroll
+            for (int r = 0; r < RM; ++r) {
+                int b = i0 + tx + 16 * r;
+                if (b < nbands) out[(size_t)m * nbands + b] = (double)(acc[r][c] - cmp[r][c]);
+            }
+        }
+    }
+}
+
+static float* g_band_A = nullptr;
+static size_t g_band_A_n = 0;
+
 extern "C" {
 
 void opensps_hip_band_fluxes_sp(
@@ -2550,6 +2669,28 @@ void opensps_hip_band_fluxes_sp(
         band_fluxes_small_kernel<float><<<dim3(n_mod, nbands), BF_SMALL_THREADS, 0, s>>>(
             n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband
         );
+    } else if (nbands > 0 && nspec > 0) {
+        size_t need = (size_t)nspec * nbands;
+        if (need > g_band_A_n) {
+            if (g_band_A) (void)hipFree(g_band_A);
+            if (hipMalloc((void**)&g_band_A, need * sizeof(float)) != hipSuccess) { g_band_A = nullptr; g_band_A_n = 0; }
+            else g_band_A_n = need;
+        }
+        if (g_band_A) {
+            band_matrix_kernel<<<dim3((nspec + 255) / 256, nbands), 256, 0, s>>>(
+                nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, g_band_A);
+            if (nbands <= 16)
+                band_gemm_kernel<1><<<dim3((n_mod + 63) / 64, 1), 256, 0, s>>>(nbands, n_mod, nspec, g_band_A, d_fobs_t, d_fband);
+            else if (nbands <= 32)
+                band_gemm_kernel<2><<<dim3((n_mod + 63) / 64, (nbands + 31) / 32), 256, 0, s>>>(nbands, n_mod, nspec, g_band_A, d_fobs_t, d_fband);
+            else
+                band_gemm_kernel<4><<<dim3((n_mod + 63) / 64, (nbands + 63) / 64), 256, 0, s>>>(nbands, n_mod, nspec, g_band_A, d_fobs_t, d_fband);
+        } else {
+            dim3 block(32, 1);
+            dim3 grid((n_mod + 31) / 32, nbands);
+            band_fluxes_kernel<float><<<grid, block, 0, s>>>(
+                n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband);
+        }
     } else {
         dim3 block(32, 1);
         dim3 grid((n_mod + 31) / 32, nbands);
