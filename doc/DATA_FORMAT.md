@@ -271,7 +271,7 @@ shown. Units are those of the converted libraries; a new library must use the sa
 | `nebular/<isoc>_<dust\|nodust>`, `nebular/bpss_xray_<dust\|nodust>` | `continuum` [logZ, age, logU, wavelength] (L_sun/Hz per ionizing photon s^-1); `lines` [logZ, age, logU, line_wavelength] (L_sun per photon s^-1) | `logZ` (log Z/Z_sun), `age` (yr), `logU`, `wavelength`, `line_wavelength` (line names: `data/emlines_info.dat`) | free: continuum wavelength; fixed: 11 x 10 x 7 grid, 166 lines |
 | `dust_emission/<DL07\|THEMIS>` | `spectra` [qpah, umin, component, wavelength] (L_nu per H nucleon) | `qpah` (percent), `umin`, `component` = (delta U_min, U_min..U_max) | free (wavelengths >= 1 um are used) |
 | `agn_torus/clumpy` | `spectra` [tau, wavelength] (f_nu, unit normalization) | `tau`, `wavelength` | free wavelength; fixed: 9 tau |
-| `filters/allfilters` | `npoints` [filter] int32; `wavelength`, `transmission` (concatenated curves) | `filter` (labels); metadata `filters`: one entry per filter with `name`, `description` and optionally `calibration` {`lambda_ref`, `exponent`} | free: number of filters, points |
+| `filters/<name>` (`allfilters` is the default list; any other name is installed with `opensps_context_set_filters_library`) | `npoints` [filter] int32; `wavelength` (A), `transmission` (concatenated curves, as tabulated) | `filter` (labels); metadata `filters`: one entry per filter with `name`, `description`, optionally `detector` (`photon`, the default, or `energy`), `calibration` {`lambda_ref`, `exponent`}, `hash` (SHA-256 of the cleaned curve; verified on load, mismatch refused) and `source` (provenance, not read) | free: number of filters, points |
 | `reference_spectra/<vega\|sun>` | `flux` [wavelength] | metadata `flux_density`: `f_lambda` (multiplied by lambda^2 on load) or `f_nu` | free |
 | `attenuation/dirty` | `attenuation` [structure, tau_v, model, wavelength] | `structure` (homogeneous, clumpy), `tau_v`, `model` (labels) | fixed: 2 x 18 x 6 x 25 |
 | `attenuation/smc_bar` | `extinction` [wavelength] (A_lambda/A_V) | `wavelength` (A, increasing) | free |
@@ -291,6 +291,7 @@ What "a new library without code changes" covers today:
   for Wolf-Rayet temperatures with `mist`, log g from (M, L, T) for `bsti`, horizontal-branch
   detection for `pdva`, the lower IMF bound for `gnva`) is applied by name only. A nebular grid
   is used if `nebular/<isoc>_<dust|nodust>` exists.
+- New **filter curves**, without code changes: a `filters/<name>` library written by `tools/opensps_data/filters_tool.py` (from SVO VOTables or text files) or supplied as arrays at run time (`doc/FILTERS_PLAN.md`).
 - A replacement of any other library under its fixed name (e.g. new filter curves, a finer
   nebular continuum, other Vega or solar spectra), within the fixed sizes of the table.
 - Limits: the (log T, log g) grid of a legacy-layout spectral library is 68 x 19 (a standard-format

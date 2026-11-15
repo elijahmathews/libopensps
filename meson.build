@@ -315,6 +315,7 @@ lib_sources = files(
     'src/core/opensps_offload.f90',
     'src/core/opensps_tuning.f90',
     'src/core/opensps_cache.f90',
+    'src/core/opensps_filter_types.f90',
     'src/core/opensps_setup_lock.c',
     'src/core/opensps_constants.f90',
     'src/core/opensps_context_types.f90',
@@ -335,6 +336,7 @@ lib_sources = files(
     'src/math/opensps_accel_blas.f90',
     'src/math/opensps_integration.f90',
     'src/math/opensps_interpolation.f90',
+    'src/math/opensps_sha256.f90',
     'src/math/opensps_special_functions.f90',
 
     # Physics Modules
@@ -355,6 +357,8 @@ lib_sources = files(
 
     # Spectra Modules
     'src/spectra/opensps_batch_photometry.f90',
+    'src/spectra/opensps_context_filters.f90',
+    'src/spectra/opensps_filters.f90',
     'src/spectra/opensps_photometry.f90',
     'src/spectra/opensps_smoothing.f90',
     'src/spectra/opensps_spectral_indices.f90',
@@ -676,6 +680,23 @@ test('unit_tuning_overrides', find_program('python3'),
     timeout : 60
 )
 
+# Bandpass curves (doc/FILTERS_PLAN.md): SHA-256 vectors, the pipeline against analytic results, and filters
+# installed after setup on the small test library
+filters_exe = executable('test_filters', 'tests/test_filters.f90',
+    dependencies : [opensps_dep, test_utils_dep],
+    link_language : 'fortran'
+)
+filters_env = environment()
+filters_env.set('FSPS_TEST_TAP', '1')
+filters_env.set('FSPS_TEST_LIBRARY', join_paths(meson.project_source_root(), 'tests/data/opensps-test-data'))
+filters_env.set('OMP_NUM_THREADS', '2')
+test('unit_filters', filters_exe,
+    protocol : 'tap',
+    env : filters_env,
+    suite : 'unit',
+    timeout : 300
+)
+
 # Offload builds on the host (no device, OMP_TARGET_OFFLOAD=DISABLED): a forward batch runs, what cannot run is
 # refused with status 5 (#97); on a device and in CPU builds everything runs
 offload_host_exe = executable('test_offload_host', 'tests/test_offload_host.f90',
@@ -943,6 +964,21 @@ test('c_afe', test_c_afe_exe,
 if python3.found()
     test('unit_c_afe_derived', python3,
         args : [join_paths(meson.project_source_root(), 'tests/run_afe_derived_test.py'), test_c_afe_exe,
+                join_paths(meson.project_source_root(), 'tests/data/opensps-test-data'), meson.current_build_dir()],
+        env : unit_env,
+        suite : 'unit',
+        timeout : 300
+    )
+endif
+# Bandpass curves through the C API and a filter library written by filters_tool.py (hashes cross-checked
+# against the Python reference implementation); small test library, no external data
+test_c_filters_exe = executable('test_c_filters', 'tests/test_c_filters.c',
+    dependencies : [opensps_dep, meson.get_compiler('c').find_library('m', required : false)],
+    include_directories : include_directories('include')
+)
+if python3.found()
+    test('unit_c_filters', python3,
+        args : [join_paths(meson.project_source_root(), 'tests/run_filters_library_test.py'), test_c_filters_exe,
                 join_paths(meson.project_source_root(), 'tests/data/opensps-test-data'), meson.current_build_dir()],
         env : unit_env,
         suite : 'unit',

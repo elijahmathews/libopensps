@@ -24,6 +24,20 @@ major version is 0, a minor release may change the API, and each such change is 
   up to 1.4x faster there; the default is 16, measured on the A100). `OPENSPS_BENCH_SIZES` sets the batch sizes of
   `benchmark_csp_batch`. The register tiles and other kernel sizes that were literals are named
   constants of the registry; `unit_tuning_literals` fails on a literal tuning parameter outside it.
+- **Bandpass curves of your own** (`doc/FILTERS_PLAN.md`). A filter set (name, curve in Angstrom, photon- or
+  energy-counting detector, optional calibration) is built with `opensps_filterset_*` and installed in a set-up
+  context with `opensps_context_set_filters`, at any time and without a new setup; `opensps_context_set_filters_library`
+  installs any `filters/<name>` library. Curves are cleaned and checked, resampled onto the model grid so that the
+  integral of the response is conserved on any grid (the legacy point interpolation stays for the legacy list),
+  normalized and calibrated; a filter that lies beyond the model wavelength range or has no throughput is refused
+  by default instead of being truncated and renormalized silently. Each filter has a SHA-256 content hash
+  (`opensps_context_get_filter_report`, with coverage, points across the passband and the resampling used), verified against a
+  library's manifest. `tools/opensps_data/filters_tool.py` packs SVO Filter Profile Service VOTables or text
+  files into such a library. The default list is bit-identical to before. New status codes 320-324.
+- **Linear fluxes**: with `keep_maggies = 1`, `opensps_context_get_batch_maggies` returns the batch's AB fluxes in
+  maggies (10^(-0.4 m), no logarithm and back). Magnitudes stay AB by default.
+- The Vega system of a user filter set can have no reference band (Vega is magnitude 0 in every band);
+  the default list keeps the legacy anchor on band 1.
 
 ## 0.2.1
 

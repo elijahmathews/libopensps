@@ -98,6 +98,35 @@ Wavelengths are in air with `vactoair_flag = 1`, in vacuum otherwise. `mag_vega`
 magnitude of Vega (AB - Vega offset per band); `mag_sun` the absolute AB magnitude of the Sun.
 Any of the three filter pointers may be `NULL`. Status 1 for a bad handle, 301 before setup.
 
+### Filters and linear fluxes
+
+Magnitudes are **AB** by default (`compute_vega_mags = 0`); the Vega system is opt-in. Design, conventions and
+tests: `doc/FILTERS_PLAN.md`. Wavelengths are in Angstrom; the language wrappers convert other units.
+
+```c
+int fs, status;
+opensps_filterset_create(&fs, &status);
+opensps_filterset_add(fs, "my_band", n, lambda_aa, response, OPENSPS_DETECTOR_PHOTON, 0.0, 0.0, &status);
+opensps_context_set_filters(handle, fs, OPENSPS_RESAMPLE_CONSERVING, OPENSPS_GRID_POLICY_ERROR,
+                            0 /* Vega = 0 in every band */, &status);
+opensps_filterset_free(fs, &status);          // the context holds a copy
+```
+
+`opensps_context_set_filters` (or `opensps_context_set_filters_library(handle, "name", ...)` for a
+`filters/<name>` library) replaces the filters of a set-up context: no new setup, other contexts and the
+shared data are untouched, and `nbands`, the band mask and all outputs follow the new set. A curve that is
+unusable is status 320, one beyond the model wavelength range 321 (under `GRID_POLICY_ERROR`), one without
+throughput 322, a library hash mismatch 323, a missing library 324; `opensps_get_last_error` names the filter,
+and the context keeps its filters. `opensps_context_get_filter_report` returns per filter the name, the
+SHA-256 content hash, coverage, points above half maximum, flags and detector, and the hash of the wavelength
+grid with the resampling and policy used, so a result can say exactly which bandpass it used.
+
+**Linear fluxes.** `opensps_context_set_int(handle, "keep_maggies", 1)` before a batch (also `batch_parts`,
+`batch_grad`, and `compute_csp`, which runs as a batch), then `opensps_context_get_batch_maggies(handle,
+maggies, &nb, &n, &status)`: nbands x n, `maggies = f_nu / 3631 Jy = 10^(-0.4 m_AB)`, with the distance term and
+redshift, always AB (whatever `compute_vega_mags` is), formed from the band flux (0 where the magnitude is
+NaN, NaN for masked bands). f_nu in Jy is 3631 x maggies.
+
 ### Single CSP
 
 ```c

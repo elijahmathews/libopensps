@@ -35,7 +35,6 @@ module opensps_batch_photometry
     public :: observed_frame_z   ! (likewise)
 
     real(WP), parameter :: AB_ZEROPOINT = 48.60_wp
-    integer, parameter  :: IDX_V_BAND = 1
     !> Pixels per block of the split-K band product: each block is a plain FP32 sum
     !> of at most 256 positive terms; the blocks are added in FP64
     integer, parameter :: BAND_BLOCK = TUNE_BAND_BLOCK
@@ -48,7 +47,8 @@ contains
     !> zred_col, column i at redshift zred_col(i) (zred is then ignored). fband_out: the band fluxes
     !> (filter integrals of the observed spectrum / lambda, before the distance term), for the
     !> adjoint of the magnitudes.
-    subroutine compute_magnitudes_columns(ctx, zred, igm_factor, spec, n_col, mags, mag_compute, zred_col, fband_out)
+    subroutine compute_magnitudes_columns(ctx, zred, igm_factor, spec, n_col, mags, mag_compute, zred_col, fband_out, &
+                                          maggies_out)
         type(opensps_context_t), intent(inout) :: ctx
         real(WP), intent(in)                :: zred, igm_factor
         real(KP), intent(in)                :: spec(:,:)
@@ -57,6 +57,7 @@ contains
         integer, intent(in), optional       :: mag_compute(:)
         real(WP), intent(in), optional      :: zred_col(:)
         real(WP), intent(out), optional     :: fband_out(:,:)
+        real(WP), intent(out), optional     :: maggies_out(:,:)
 
         integer  :: nspec, nbands, b, m
         integer, allocatable  :: do_band(:)
@@ -66,7 +67,7 @@ contains
         real(WP), pointer, contiguous :: zc(:), dist(:)
         logical  :: zvar
         real(KP), allocatable :: fobs(:,:)
-        real(WP) :: flux
+        real(WP) :: flux, scale, qnan_m
         logical  :: done
 #if defined(OPENSPS_ACCEL_BLAS)
         integer :: npad
@@ -75,6 +76,7 @@ contains
 
         nspec = ctx%state%nspec
         nbands = ctx%state%nbands
+        qnan_m = ieee_value(1.0_wp, ieee_quiet_nan)
         zvar = present(zred_col)
         ! Per-column redshifts: the grid data of z = 0 (filters, trapezoid weights); the observed
         ! frame is then formed per column on the device, and the distance terms per column here
@@ -101,7 +103,7 @@ contains
         if (present(mag_compute)) then
             b = min(nbands, size(mag_compute))
             do_band(1:b) = mag_compute(1:b)
-            if (ctx%compute_vega_mags_val == 1) do_band(IDX_V_BAND) = 1
+            if (ctx%compute_vega_mags_val == 1 .and. ctx%state%vega_ref_band > 0) do_band(ctx%state%vega_ref_band) = 1
         end if
 
         associate(g => ctx%state%batch)
@@ -123,7 +125,7 @@ contains
             call band_fluxes_gemm(n_col, npad, nbands, g%cmat, fobs, fband)
             call magnitudes_from_fluxes(ctx, n_col, nbands, do_band, dist, fband, mags_l)
 #ifdef OMP_TARGET
-            if (present(fband_out)) then
+            if (present(fband_out) .or. present(maggies_out)) then
                 !$omp target update from(fband)
             end if
             !$omp end target data
@@ -144,7 +146,7 @@ contains
             call band_fluxes(n_col, nspec, nbands, g%bands_t, g%j_lo, g%j_hi, do_band, g%wtl, fobs, fband)
             call magnitudes_from_fluxes(ctx, n_col, nbands, do_band, dist, fband, mags_l)
 #ifdef OMP_TARGET
-            if (present(fband_out)) then
+            if (present(fband_out) .or. present(maggies_out)) then
                 !$omp target update from(fband)
             end if
             !$omp end target data
@@ -158,6 +160,20 @@ contains
 
         mags(1:nbands, 1:n_col) = mags_l
         if (present(fband_out)) fband_out(1:nbands, 1:n_col) = fband
+        ! Linear AB fluxes: 10^(-0.4 m) of the magnitudes above (AB, distance term included), formed from the
+        ! band flux itself: no logarithm and back, and finite where the magnitude is NaN (flux <= 0)
+        if (present(maggies_out)) then
+            do m = 1, n_col
+                scale = 10.0_wp**(0.4_wp * (AB_ZEROPOINT + 2.5_wp * ABS_MAG_ZEROPOINT_LOG - dist(m)))
+                do b = 1, nbands
+                    if (do_band(b) /= 0) then
+                        maggies_out(b, m) = fband(b, m) * scale
+                    else
+                        maggies_out(b, m) = qnan_m
+                    end if
+                end do
+            end do
+        end if
     end subroutine compute_magnitudes_columns
 
     !> Magnitudes from band fluxes (fband, present), as compute_magnitudes: AB, the distance term,
@@ -170,12 +186,17 @@ contains
         real(WP), intent(in)             :: fband(nbands, n_col)
         real(WP), intent(out)            :: mags_l(nbands, n_col)
 
-        integer  :: m, b
-        real(WP) :: qnan, v, vv
+        integer  :: m, b, vref
+        real(WP) :: qnan, v, vv, anchor
         logical  :: vega_on
 
         qnan = ieee_value(1.0_wp, ieee_quiet_nan)
         vega_on = ctx%compute_vega_mags_val == 1
+        ! The Vega system's reference band (legacy: band 1, which stays AB) and its Vega magnitude;
+        ! vref = 0: Vega is magnitude 0 in every band. Scalars, so the kernel does not read the context
+        vref = ctx%state%vega_ref_band
+        anchor = 0.0_wp
+        if (vref > 0) anchor = ctx%state%magvega(vref)
 
         ! (Vega magnitudes from the context's resident copy: no upload per call)
 #if defined(OMP_TARGET)
@@ -188,14 +209,18 @@ contains
             do b = 1, nbands
                 v = qnan
                 if (do_band(b) /= 0) v = mag_from_flux(fband(b, m)) - AB_ZEROPOINT - 2.5_wp * ABS_MAG_ZEROPOINT_LOG + dist(m)
-                if (vega_on .and. b >= 2) then
-                    vv = qnan
-                    if (do_band(IDX_V_BAND) /= 0) &
-                        vv = mag_from_flux(fband(IDX_V_BAND, m)) - AB_ZEROPOINT - 2.5_wp * ABS_MAG_ZEROPOINT_LOG + dist(m)
-                    if (vv == vv) then
-                        v = v - ctx%state%magvega(b) + ctx%state%magvega(IDX_V_BAND)
+                if (vega_on .and. b /= vref) then
+                    if (vref > 0) then
+                        vv = qnan
+                        if (do_band(vref) /= 0) &
+                            vv = mag_from_flux(fband(vref, m)) - AB_ZEROPOINT - 2.5_wp * ABS_MAG_ZEROPOINT_LOG + dist(m)
+                        if (vv == vv) then
+                            v = v - ctx%state%magvega(b) + anchor
+                        else
+                            v = qnan
+                        end if
                     else
-                        v = qnan
+                        v = v - ctx%state%magvega(b)
                     end if
                 end if
                 mags_l(b, m) = v

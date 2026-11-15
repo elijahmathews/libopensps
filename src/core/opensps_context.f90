@@ -95,6 +95,7 @@ contains
         ctx%dust_type_val = 0
         ctx%imf_type_val = 2
         ctx%compute_vega_mags_val = 0
+        ctx%keep_maggies_val = 0
         ctx%vactoair_flag_val = 0
         ctx%redshift_colors_val = 0
         ctx%use_isoc_mdot_val = 0
@@ -341,6 +342,8 @@ contains
         case ('compute_vega_mags')
             ctx%compute_vega_mags_val = value
             ctx%settings_dirty = .true.
+        case ('keep_maggies')
+            ctx%keep_maggies_val = value
         case ('vactoair_flag')
             ctx%vactoair_flag_val = value
             ctx%settings_dirty = .true.

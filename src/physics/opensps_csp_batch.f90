@@ -1245,21 +1245,36 @@ contains
         ! ------------------------------------------------------------------
         ! (fbk: the band fluxes, allocated only for the gradients; unallocated, the argument is absent)
         if (grad) allocate(fbk(nbands, n_mod))
+        ! keep_maggies = 1: the linear AB fluxes of this batch stay in the context (opensps_context_get_batch_maggies)
+        if (ctx%keep_maggies_val == 1) then
+            if (allocated(ctx%state%last_maggies)) then
+                if (any(shape(ctx%state%last_maggies) /= [nbands, n_mod])) deallocate(ctx%state%last_maggies)
+            end if
+            if (.not. allocated(ctx%state%last_maggies)) allocate(ctx%state%last_maggies(nbands, n_mod))
+        else if (allocated(ctx%state%last_maggies)) then
+            deallocate(ctx%state%last_maggies)
+        end if
         if (present(zred_mags) .and. allocated(psets(1)%mag_compute)) then
             call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, psets(1)%mag_compute, &
-                                            zred_col=zred_mags(1:n_mod), fband_out=fbk)
+                                            zred_col=zred_mags(1:n_mod), fband_out=fbk, &
+                                            maggies_out=ctx%state%last_maggies)
         else if (present(zred_mags)) then
             call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, &
-                                            zred_col=zred_mags(1:n_mod), fband_out=fbk)
+                                            zred_col=zred_mags(1:n_mod), fband_out=fbk, &
+                                            maggies_out=ctx%state%last_maggies)
         else if (zvar .and. allocated(psets(1)%mag_compute)) then
             call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, psets(1)%mag_compute, &
-                                            zred_col=zcol, fband_out=fbk)
+                                            zred_col=zcol, fband_out=fbk, &
+                                            maggies_out=ctx%state%last_maggies)
         else if (zvar) then
-            call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, zred_col=zcol, fband_out=fbk)
+            call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, zred_col=zcol, fband_out=fbk, &
+                                            maggies_out=ctx%state%last_maggies)
         else if (allocated(psets(1)%mag_compute)) then
-            call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, psets(1)%mag_compute, fband_out=fbk)
+            call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, psets(1)%mag_compute, &
+                                            fband_out=fbk, maggies_out=ctx%state%last_maggies)
         else
-            call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, fband_out=fbk)
+            call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, fband_out=fbk, &
+                                            maggies_out=ctx%state%last_maggies)
         end if
         if (present(indx)) call compute_spectral_indices_columns(ctx, ctx%state%spec_lambda, total, n_mod, indx)
         ! ------------------------------------------------------------------
