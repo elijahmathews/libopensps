@@ -1737,7 +1737,8 @@ __global__ void __launch_bounds__(128, 8) imf_pieces_weights_kernel(
         int kl = gp - o_0;
         size_t out_idx = (size_t)kl * ldw + j;
 
-        d_w[out_idx] = 0.0;
+        // d_w (the FP64 weights) is only the reverse pass's: a forward-only call passes a null pointer
+        if (d_w) d_w[out_idx] = 0.0;
         d_wk[out_idx] = (T_WK)0.0;
 
         double mini = d_pt_mini[gp];
@@ -1819,7 +1820,7 @@ __global__ void __launch_bounds__(128, 8) imf_pieces_weights_kernel(
             if (seg == 0) cur = 0;
         }
         double wv = val * inv_total;
-        d_w[out_idx] = wv;
+        if (d_w) d_w[out_idx] = wv;
         d_wk[out_idx] = (T_WK)wv;
         sm += d_pt_cm[gp] * wv;
         sl += d_pt_cl[gp] * wv;
@@ -1830,6 +1831,175 @@ __global__ void __launch_bounds__(128, 8) imf_pieces_weights_kernel(
     d_pps[pps_base + 0 * ldw] = sm;
     d_pps[pps_base + 1 * ldw] = sl;
     d_pps[pps_base + 2 * ldw] = sq;
+}
+
+
+// ---------------------------------------------------------------------------
+// FP32-arithmetic point weights (the forward-only call: the FP64 array w is not wanted)
+//
+// The same weights as imf_pieces_weights_kernel, with the per-point arithmetic in FP32, because the
+// R9700's FP64 rate is 1/64 of its FP32 rate and the FP64 kernel is limited by it. Where FP32 would lose
+// accuracy the kernel does not: every argument of an exponential is formed as an unevaluated sum of two
+// FP32 numbers (hi + lo; the exact product error comes from an fma), so that
+//   plo = lo^e  = exp(p) (1 + r),          p + r = e ln(m1)        (r ~ 1e-7 |p|, p the FP32 product)
+//   em1 = expm1(y) + (1 + expm1(y)) yr,    y + yr = e ln(m2 / m1)
+// are good to the rounding of expf / expm1f (1-2 ulp) instead of |e ln m| times the FP32 epsilon (4e-7
+// for the largest arguments). The bin weights are independent (no chain of products, which would
+// accumulate n roundings). The piece's sums of the mass, L_bol and Q coefficients are Neumaier sums of
+// the exact products (fma error terms) in FP32, Q scaled by 2^-80 (photon rates exceed the FP32 range),
+// and widened to FP64 at the end. The rare points where the closed form is not a power law of one
+// segment (the first bin of an age, bins that straddle a break of the IMF) take the FP64 path of the
+// original kernel. The per-point tests are done on the bit patterns of the (positive) FP64 values: an
+// FP64 comparison also runs at the FP64 rate.
+// ---------------------------------------------------------------------------
+
+__device__ inline bool lt_pos(double a, double b) { return __double_as_longlong(a) < __double_as_longlong(b); }
+__device__ inline bool le_pos(double a, double b) { return __double_as_longlong(a) <= __double_as_longlong(b); }
+
+__device__ inline void neumaier_add(float& s, float& c, float x) {
+    float t = s + x;
+    float bp = t - s;
+    c += (s - (t - bp)) + (x - bp);
+    s = t;
+}
+
+__global__ void __launch_bounds__(128, 8) imf_pieces_weights_f32_kernel(
+    int m0_0based,
+    int nc,
+    int n_pc_max,
+    int ldw,
+    int imf_type,
+    const int*    __restrict__ d_perm,
+    const int*    __restrict__ d_viz,
+    const double* __restrict__ d_pm,
+    const double* __restrict__ d_tot,
+    const int*    __restrict__ d_n_pc,
+    const int*    __restrict__ d_pt_off,
+    const int*    __restrict__ d_pc_off,
+    const int*    __restrict__ d_pc_ptr,
+    const double* __restrict__ d_pt_mini,
+    const double* __restrict__ d_pt_m1,
+    const double* __restrict__ d_pt_m2,
+    const int*    __restrict__ d_pt_first,
+    const float*  __restrict__ d_ptf,   // per point: ln m1 (hi, lo), ln(m2/m1) (hi, lo), cm, cl, q 2^-80, 0
+    float*        __restrict__ d_wk,
+    double*       __restrict__ d_pps
+) {
+    int tj = threadIdx.x;
+    int tq = threadIdx.y;
+    int j = blockIdx.x * blockDim.x + tj;
+    int q = blockIdx.y * blockDim.y + tq;
+    if (j >= nc || q >= n_pc_max) return;
+
+    int idx = m0_0based + j;
+    int m = d_perm[idx] - 1;
+    int iz_0 = d_viz[idx] - 1;
+    if (q >= d_n_pc[iz_0]) return;
+
+    int pc_off_val = d_pc_off[iz_0];
+    int k0_0 = d_pc_ptr[pc_off_val + q] - 1;
+    int k1_0 = d_pc_ptr[pc_off_val + q + 1] - 1;
+    int n = k1_0 - k0_0;
+    int o_0 = d_pt_off[iz_0];
+
+    const double* p = d_pm + (size_t)m * 312;
+    int t_imf = imf_type % 10;
+    double lim_lo = p[6];
+    double lim_hi = p[7];
+    double p_bound = p[8];
+    double md = (t_imf == 4) ? p[5] : 0.0;
+    double tot_val = d_tot[j];
+    double inv_total = (tot_val > 0.0) ? (1.0 / tot_val) : 1.0;
+
+    float sm = 0.f, cm_ = 0.f, sl = 0.f, cl_ = 0.f, sq = 0.f, cq_ = 0.f;
+    int cur = 0;
+    double e = 0.0, c = 0.0, d = 1.0, ce = 0.0;
+    float ehi = 0.f, elo = 0.f, scf = 0.f, cf = 0.f;
+
+    for (int k = 0; k < n; ++k) {
+        int gp = k0_0 + k;
+        size_t out_idx = (size_t)(gp - o_0) * ldw + j;
+
+        if (lt_pos(d_pt_mini[gp], lim_lo) || lt_pos(lim_hi, d_pt_mini[gp])) { d_wk[out_idx] = 0.f; continue; }
+
+        int first = d_pt_first[gp];
+        double lo = (first == 1) ? p_bound : d_pt_m1[gp];
+        double hi = d_pt_m2[gp];
+        if (!lt_pos(lo, hi)) { d_wk[out_idx] = 0.f; continue; }
+
+        int seg = 0;
+        if (t_imf == 0) {
+            seg = 1;
+        } else if (t_imf == 2) {
+            if (!lt_pos(lo, 0.08) && le_pos(hi, 0.5)) seg = 1;
+            else if (!lt_pos(lo, 0.5) && le_pos(hi, 1.0)) seg = 2;
+            else if (!lt_pos(lo, 1.0)) seg = 3;
+        } else {
+            if (!lt_pos(lo, 0.08) && le_pos(hi, md)) seg = 1;
+            else if (!lt_pos(lo, md)) seg = 2;
+        }
+
+        if (seg > 0 && seg != cur) {
+            double alpha, coeff = 1.0;
+            if (t_imf == 0) {
+                alpha = p[0];
+            } else if (t_imf == 2) {
+                alpha = p[seg];
+                if (seg > 1) coeff = pow(0.5, -p[1] + p[2]);
+            } else {
+                alpha = p[seg];
+                if (seg > 1) coeff = pow(md, -p[1] + p[2]);
+            }
+            e = 1.0 - alpha;
+            c = coeff;
+            d = 1.0 - alpha;
+            ce = (e != 0.0) ? (c / e) : 0.0;
+            cur = seg;
+            ehi = (float)e;
+            elo = (float)(e - (double)ehi);
+            scf = (float)(ce * inv_total);
+            cf = (float)(c * inv_total);
+        }
+
+        float wv;
+        if (seg > 0 && cur == seg && first != 1) {
+            const float4 a = *reinterpret_cast<const float4*>(d_ptf + (size_t)gp * 8);
+            if (e == 0.0) {
+                wv = cf * (a.z + a.w);
+            } else {
+                float pp = ehi * a.x;
+                float pe = fmaf(ehi, a.x, -pp) + (ehi * a.y + elo * a.x);
+                float ex = expf(pp);
+                float plo = fmaf(ex, pe, ex);
+                float y = ehi * a.z;
+                float ye = fmaf(ehi, a.z, -y) + (ehi * a.w + elo * a.z);
+                float em1 = expm1f(y);
+                em1 = fmaf(em1 + 1.0f, ye, em1);
+                wv = scf * plo * em1;
+            }
+        } else {
+            double val;
+            if (seg > 0 && cur == seg) {   // first bin of an age
+                if (fabs(d) <= 1.0e-12) val = c * log(hi / lo);
+                else val = c * (pow(hi, e) - pow(lo, e)) / d;
+            } else {
+                val = integrate_imf_number(t_imf, p, lo, hi);
+                if (seg == 0) cur = 0;
+            }
+            wv = (float)(val * inv_total);
+        }
+        d_wk[out_idx] = wv;
+        const float4 b = *reinterpret_cast<const float4*>(d_ptf + (size_t)gp * 8 + 4);
+        float x, ex_;
+        x = b.x * wv; ex_ = fmaf(b.x, wv, -x); cm_ += ex_; neumaier_add(sm, cm_, x);
+        x = b.y * wv; ex_ = fmaf(b.y, wv, -x); cl_ += ex_; neumaier_add(sl, cl_, x);
+        x = b.z * wv; ex_ = fmaf(b.z, wv, -x); cq_ += ex_; neumaier_add(sq, cq_, x);
+    }
+
+    size_t pps_base = ((size_t)q * 3) * ldw + j;
+    d_pps[pps_base + 0 * ldw] = (double)sm + (double)cm_;
+    d_pps[pps_base + 1 * ldw] = (double)sl + (double)cl_;
+    d_pps[pps_base + 2 * ldw] = ((double)sq + (double)cq_) * 1.2089258196146292e24;   // 2^80
 }
 
 extern "C" {
@@ -1861,6 +2031,7 @@ void opensps_hip_imf_pieces_weights_sp(
     double*       d_w,
     float*        d_wk,
     double*       d_pps,
+    const float*  d_ptf,
     void*         stream
 ) {
     if (nc <= 0 || n_pc_max <= 0) return;
@@ -1869,6 +2040,15 @@ void opensps_hip_imf_pieces_weights_sp(
     int grid_q = (n_pc_max + 3) / 4;
     dim3 grid(grid_j, grid_q);
     hipStream_t s = (hipStream_t)stream;
+    if (d_w == nullptr) {   // forward only: FP32 arithmetic, no FP64 weights
+        imf_pieces_weights_f32_kernel<<<grid, block, 0, s>>>(
+            m0_0based, nc, n_pc_max, ldw, imf_type,
+            d_perm, d_viz, d_pm, d_tot, d_n_pc, d_pt_off, d_pc_off, d_pc_ptr,
+            d_pt_mini, d_pt_m1, d_pt_m2, d_pt_first, d_ptf, d_wk, d_pps
+        );
+        (void)hipStreamSynchronize(s);
+        return;
+    }
     imf_pieces_weights_kernel<float><<<grid, block, 0, s>>>(
         m0_0based, nc, n_pc_max, n_pts_max, ldw, imf_type,
         d_perm, d_viz, d_pm, d_tot, d_n_pc, d_pt_off, d_pc_off, d_pc_ptr,
