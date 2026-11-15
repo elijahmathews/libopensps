@@ -1856,7 +1856,10 @@ __global__ void __launch_bounds__(128, 8) imf_pieces_weights_kernel(
 __device__ inline bool lt_pos(double a, double b) { return __double_as_longlong(a) < __double_as_longlong(b); }
 __device__ inline bool le_pos(double a, double b) { return __double_as_longlong(a) <= __double_as_longlong(b); }
 
+// (Products whose rounding error is taken with an fma are formed with __fmul_rn: a plain a * b + c is
+// contracted into one fma by the compiler, which would count the rounding error twice.)
 __device__ inline void neumaier_add(float& s, float& c, float x) {
+    #pragma clang fp contract(off)
     float t = s + x;
     float bp = t - s;
     c += (s - (t - bp)) + (x - bp);
@@ -1885,6 +1888,7 @@ __global__ void __launch_bounds__(128, 8) imf_pieces_weights_f32_kernel(
     float*        __restrict__ d_wk,
     double*       __restrict__ d_pps
 ) {
+    #pragma clang fp contract(off)
     int tj = threadIdx.x;
     int tq = threadIdx.y;
     int j = blockIdx.x * blockDim.x + tj;
@@ -1967,11 +1971,11 @@ __global__ void __launch_bounds__(128, 8) imf_pieces_weights_f32_kernel(
             if (e == 0.0) {
                 wv = cf * (a.z + a.w);
             } else {
-                float pp = ehi * a.x;
+                float pp = __fmul_rn(ehi, a.x);
                 float pe = fmaf(ehi, a.x, -pp) + (ehi * a.y + elo * a.x);
                 float ex = expf(pp);
                 float plo = fmaf(ex, pe, ex);
-                float y = ehi * a.z;
+                float y = __fmul_rn(ehi, a.z);
                 float ye = fmaf(ehi, a.z, -y) + (ehi * a.w + elo * a.z);
                 float em1 = expm1f(y);
                 em1 = fmaf(em1 + 1.0f, ye, em1);
@@ -1991,9 +1995,9 @@ __global__ void __launch_bounds__(128, 8) imf_pieces_weights_f32_kernel(
         d_wk[out_idx] = wv;
         const float4 b = *reinterpret_cast<const float4*>(d_ptf + (size_t)gp * 8 + 4);
         float x, ex_;
-        x = b.x * wv; ex_ = fmaf(b.x, wv, -x); cm_ += ex_; neumaier_add(sm, cm_, x);
-        x = b.y * wv; ex_ = fmaf(b.y, wv, -x); cl_ += ex_; neumaier_add(sl, cl_, x);
-        x = b.z * wv; ex_ = fmaf(b.z, wv, -x); cq_ += ex_; neumaier_add(sq, cq_, x);
+        x = __fmul_rn(b.x, wv); ex_ = fmaf(b.x, wv, -x); cm_ += ex_; neumaier_add(sm, cm_, x);
+        x = __fmul_rn(b.y, wv); ex_ = fmaf(b.y, wv, -x); cl_ += ex_; neumaier_add(sl, cl_, x);
+        x = __fmul_rn(b.z, wv); ex_ = fmaf(b.z, wv, -x); cq_ += ex_; neumaier_add(sq, cq_, x);
     }
 
     size_t pps_base = ((size_t)q * 3) * ldw + j;
@@ -2033,6 +2037,7 @@ __global__ void __launch_bounds__(128, 8) fold_multi_kernel(
     const float*  __restrict__ d_w,
     double*       __restrict__ d_vp
 ) {
+    #pragma clang fp contract(off)
     int s = blockIdx.x;                         // 0-based segment
     int j = blockIdx.y * blockDim.x + threadIdx.x;
     if (j >= nc) return;
@@ -2064,7 +2069,7 @@ __global__ void __launch_bounds__(128, 8) fold_multi_kernel(
         if (t > 0) {
             float2 ev = d_eff_f[k];
             float w = d_w[(size_t)ep * ldw + j];
-            float p1 = ev.x * w;
+            float p1 = __fmul_rn(ev.x, w);
             float e1 = fmaf(ev.x, w, -p1);
             float tt = as + p1;
             float bp = tt - as;
@@ -2664,7 +2669,8 @@ static size_t g_band_A_n = 0;
 // mi: 0 flags (1 has_ed, 2 birth, 4 old, 8 nodust, 16 emis, 32 agn), 1 iq (0-based), 2 iu (0-based)
 // ---------------------------------------------------------------------------
 __device__ inline float expdf(float ehi, float elo, float lhi, float llo) {
-    float p = ehi * lhi;
+    #pragma clang fp contract(off)
+    float p = __fmul_rn(ehi, lhi);
     float r = fmaf(ehi, lhi, -p) + (ehi * llo + elo * lhi);
     float ex = expf(p);
     return fmaf(ex, r, ex);
@@ -2753,6 +2759,96 @@ static size_t g_ltf_n = 0;
 static float2* g_dust = nullptr;
 static size_t g_dust_n = 0;
 
+
+// ---------------------------------------------------------------------------
+// Observed-frame spectra with a redshift per model (observed_frame_z, transposed layout, FP32 kernels)
+//
+// fobs(m, j) = max(f_rest(lambda_j / (1 + z_m)), 0) wl(j): the rest-frame spectrum linearly interpolated at
+// the pixel's rest wavelength. The Fortran kernel did the wavelength arithmetic in FP64 (a division for the
+// target, one for the interpolation fraction, FP64 comparisons) per (pixel, model). Here the fraction
+// t = (lambda_j - lambda_il (1 + z)) / ((1 + z) (lambda_il+1 - lambda_il)) is formed from hi + lo FP32 pairs
+// (the numerator is a difference of nearly equal wavelengths: an FMA gives the product's error term, so it is
+// good to ~1e-7 of the pixel spacing, not 1e-4 as plain FP32 would be), and the interval is found from the
+// sign of that numerator (consecutive pixels walk the interval index; each thread's first pixel bisects), as
+// the hinted search of the Fortran kernel.
+// ---------------------------------------------------------------------------
+__device__ inline float obs_num(float2 lj, float2 li, float ahi, float alo) {
+    #pragma clang fp contract(off)
+    float P = __fmul_rn(li.x, ahi);   // (not contractible: Pe below is its rounding error)
+    float Pe = fmaf(li.x, ahi, -P);
+    float S = Pe + (li.x * alo + li.y * ahi);
+    return (lj.x - P) + (lj.y - S);
+}
+
+__global__ void __launch_bounds__(128) observed_frame_kernel(
+    int n_col, int nspec, int npad, int ch, int ldf, double zfloor,
+    const double* __restrict__ zc, const float2* __restrict__ lam, const float* __restrict__ wl,
+    const float* __restrict__ total, float* __restrict__ fobs
+) {
+    const int m = blockIdx.x * blockDim.x + threadIdx.x;
+    const int jc = blockIdx.y;
+    if (m >= n_col) return;
+    const double z = zc[m];
+    const bool zon = fabs(z) > zfloor;
+    const double a = 1.0 + z;
+    const float ahi = (float)a, alo = (float)(a - (double)ahi);
+    const int j0 = jc * ch, j1 = min(j0 + ch, npad);
+    const float* tm = total + (size_t)m * nspec;
+    int il = -1;
+    for (int j = j0; j < j1; ++j) {
+        float f = 0.f;
+        if (j < nspec) {
+            float v;
+            if (zon) {
+                const float2 lj = lam[j];
+                if (il < 0) {   // bisect: the last interval whose lower wavelength is <= the target
+                    int lo = 0, hi = nspec - 2;
+                    while (lo < hi) {
+                        int mid = (lo + hi + 1) >> 1;
+                        if (obs_num(lj, lam[mid], ahi, alo) >= 0.f) lo = mid; else hi = mid - 1;
+                    }
+                    il = lo;
+                }
+                // num = lambda_j - a lambda_il >= 0 and numu = lambda_j - a lambda_il+1 < 0 inside the interval; the
+                // two weights t = num / (num - numu) and u = -numu / (num - numu) are each accurate to ~1e-7 relative
+                // and sum to one (the denominator is a sum of two non-negative numbers, no cancellation): where
+                // the spectrum drops by orders of magnitude between the nodes (Lyman break) f0 + t (f1 - f0) would
+                // carry the error of t times f0 into a value ~f1, and a denominator a * dl of its own would scale the
+                // whole interpolation by its rounding
+                float num = obs_num(lj, lam[il], ahi, alo);
+                float numu = obs_num(lj, lam[il + 1], ahi, alo);
+                while (il > 0 && num < 0.f) {
+                    --il;
+                    numu = num;
+                    num = obs_num(lj, lam[il], ahi, alo);
+                }
+                while (il < nspec - 2 && numu >= 0.f) {
+                    ++il;
+                    num = numu;
+                    numu = obs_num(lj, lam[il + 1], ahi, alo);
+                }
+                if ((il == 0 && num < 0.f) || (il == nspec - 2 && numu >= 0.f)) {
+                    // Outside the rest-frame grid the Fortran kernel extrapolates the end interval linearly: the
+                    // fraction is far from [0, 1] there and f0 + t (f1 - f0) amplifies its error, so these pixels
+                    // (a few per model, at the blue end) take the FP64 form of the original
+                    const double l0 = (double)lam[il].x + (double)lam[il].y, l1 = (double)lam[il + 1].x + (double)lam[il + 1].y;
+                    const double target = ((double)lj.x + (double)lj.y) / a;
+                    const double td = (target - l0) / (l1 - l0);
+                    v = (float)((double)tm[il] + td * ((double)tm[il + 1] - (double)tm[il]));
+                } else {
+                    const float den = num - numu;
+                    v = (tm[il] * (-numu) + tm[il + 1] * num) / den;
+                }
+            } else {
+                v = tm[j];
+            }
+            if (v != v) v = 0.f;
+            f = fmaxf(v, 0.f) * wl[j];
+        }
+        fobs[(size_t)j * ldf + m] = f;
+    }
+}
+
 extern "C" {
 
 void opensps_hip_attenuate(int nspec, int n_mod, int nq, const float* d_mp, const int* d_mi, const float* d_ttab,
@@ -2778,6 +2874,23 @@ void opensps_hip_attenuate(int nspec, int n_mod, int nq, const float* d_mp, cons
     attenuate_kernel<<<dim3((nspec + 255) / 256, n_mod), 256, 0, s>>>(nspec, n_mod, nq, d_mp, d_mi, d_ttab, g_ltf, g_dust,
                                                                      d_yo, d_total, d_absorbed, d_tdiff);
     (void)hipStreamSynchronize(s);
+}
+
+int opensps_hip_observed_frame(int n_col, int nspec, int npad, int ch, int ldf, double zfloor, const double* d_zc,
+                                const double* d_lambda, const float* d_wl, const float* d_total, float* d_fobs,
+                                void* stream) {
+    if (n_col <= 0 || nspec <= 1) return 0;
+    hipStream_t s = (hipStream_t)stream;
+    if ((size_t)nspec > g_ltf_n) {
+        if (g_ltf) (void)hipFree(g_ltf);
+        if (hipMalloc((void**)&g_ltf, (size_t)nspec * sizeof(float2)) != hipSuccess) { g_ltf = nullptr; g_ltf_n = 0; return 1; }
+        g_ltf_n = nspec;
+    }
+    split_ltab_kernel<<<(nspec + 255) / 256, 256, 0, s>>>(nspec, d_lambda, g_ltf);
+    observed_frame_kernel<<<dim3((n_col + 127) / 128, (npad + ch - 1) / ch), 128, 0, s>>>(
+        n_col, nspec, npad, ch, ldf, zfloor, d_zc, g_ltf, d_wl, d_total, d_fobs);
+    (void)hipStreamSynchronize(s);
+    return 0;
 }
 
 void opensps_hip_band_fluxes_sp(

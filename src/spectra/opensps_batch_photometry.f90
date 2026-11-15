@@ -779,12 +779,19 @@ contains
         integer  :: m, j, jc, il, nch
         real(WP) :: v, target, t
         real(KP) :: f
+        logical  :: done
 
         ! Consecutive pixels of a model fall in consecutive (or the same) rest-frame intervals, so each
         ! thread takes CH of them and searches from the previous pixel's interval (find_interval_with_hint
         ! gives the same index as the full bisection, which every (pixel, model) paid before). The model is
         ! the fast thread index in the transposed layout so that its writes are contiguous.
         nch = (npad + CH - 1) / CH
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+        if (transposed) then
+            call observed_frame_hip(n_col, nspec, npad, CH, zc, ctx%state%spec_lambda, wl, total, fobs, done)
+            if (done) return
+        end if
+#endif
         if (transposed) then
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(il, v, target, t, f, j) &
@@ -845,6 +852,35 @@ contains
             end do
         end if
     end subroutine observed_frame_z
+
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+    !> observed_frame_z (transposed layout) with the FP32 HIP kernel (opensps_hip_observed_frame)
+    subroutine observed_frame_hip(n_col, nspec, npad, ch, zc, lambda, wl, total, fobs, done)
+        use, intrinsic :: iso_c_binding, only: c_int, c_double, c_ptr, c_loc, c_null_ptr
+        integer, intent(in)     :: n_col, nspec, npad, ch
+        real(WP), intent(in), target, contiguous :: zc(:), lambda(:)
+        real(KP), intent(in), target, contiguous :: wl(:), total(:,:)
+        real(KP), intent(inout), target, contiguous :: fobs(:,:)
+        logical, intent(out)    :: done
+        integer(c_int) :: rc
+        interface
+            function opensps_hip_observed_frame(n_col, nspec, npad, ch, ldf, zfloor, zc, lambda, wl, total, fobs, stream) result(rc) &
+                bind(C, name="opensps_hip_observed_frame")
+                import :: c_int, c_double, c_ptr
+                integer(c_int), value :: n_col, nspec, npad, ch, ldf
+                real(c_double), value :: zfloor
+                type(c_ptr), value :: zc, lambda, wl, total, fobs, stream
+                integer(c_int) :: rc
+            end function opensps_hip_observed_frame
+        end interface
+        !$omp target data use_device_addr(zc, lambda, wl, total, fobs)
+        rc = opensps_hip_observed_frame(int(n_col, c_int), int(nspec, c_int), int(npad, c_int), int(ch, c_int), &
+                                        int(size(fobs, 1), c_int), real(SAFE_FLOOR, c_double), c_loc(zc(1)), &
+                                        c_loc(lambda(1)), c_loc(wl(1)), c_loc(total(1, 1)), c_loc(fobs(1, 1)), c_null_ptr)
+        !$omp end target data
+        done = rc == 0
+    end subroutine observed_frame_hip
+#endif
 
     !> Observed-frame spectrum / lambda (prepare_observed_spectrum), zero in the padding rows.
     subroutine observed_frame(n_mod, nspec, npad, i_lo, t_obs, wl, total, fobs)

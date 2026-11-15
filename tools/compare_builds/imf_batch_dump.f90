@@ -1,5 +1,6 @@
 program imf_batch_dump
-    !> Dump batched-SSP (IMF per model) results for a set of extreme IMF parameters: arg1 imf_type, arg2 file
+    !> Dump batched-SSP (IMF per model) results for a set of extreme IMF parameters: arg1 imf_type, arg2 file,
+    !> optional arg3 'z': also a redshift per model (0 to 3, 0 included: the observed-frame path with one redshift per model)
     use opensps_precision, only: WP
     use opensps_types, only: PARAMS
     use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
@@ -16,11 +17,12 @@ program imf_batch_dump
     type(ssp_opset_t) :: opset
     type(ssp_operator_t), allocatable :: ops(:)
     real(WP), allocatable :: mags(:,:), spec(:,:), mass(:), lbol(:), mdust(:)
-    character(len=256) :: arg, fname
+    character(len=256) :: arg, fname, zarg
     integer :: status, itype, i, n, nspec, u
     n = 64
     call get_command_argument(1, arg); read(arg, *) itype
     call get_command_argument(2, fname)
+    call get_command_argument(3, zarg)
     allocate(ctx)
     call opensps_create(ctx)
     ctx%pset%zmet = 10
@@ -47,6 +49,7 @@ program imf_batch_dump
         psets(i)%imf3 = 0.3_wp + 0.057_wp * mod(13 * i, 64)
         psets(i)%vdmc = 0.02_wp + 0.004_wp * mod(i, 40)
         psets(i)%mdave = 0.1_wp + 0.03_wp * mod(i, 40)
+        if (trim(zarg) == 'z') psets(i)%zred = 0.05_wp * mod(i, 61)
     end do
     call compute_csp_batch(ctx, psets, mags, status, spec=spec, mass=mass, lbol=lbol, mdust=mdust, ssp_ops=opset)
     write(*, *) 'status', status
