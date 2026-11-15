@@ -35,6 +35,7 @@ program benchmark_csp_batch
     use opensps_api, only: opensps_build_afe_basis
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build
     use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build
+    use opensps_tuning, only: tuning_ct_count, tuning_ct_name, tuning_ct_value
     implicit none
 
     type(opensps_context_t), allocatable :: ctx
@@ -154,6 +155,9 @@ program benchmark_csp_batch
     allocate(spec_ssp(nspec, ntfull), mass_ssp(ntfull), lbol_ssp(ntfull))
     call opensps_context_set_pset(ctx, pset)
     write(*, '(A,A)') 'config ', trim(config)
+    do i = 1, tuning_ct_count()      ! the compile-time tuning parameters this build has (provenance of a sweep)
+        write(*, '(A,A,A,I0)') 'tuning_ct_', trim(tuning_ct_name(i)), ' ', tuning_ct_value(i)
+    end do
     if (.not. afe) then
         call generate_ssp_grid(ctx, pset, mass_ssp, lbol_ssp, spec_ssp)
         call opensps_context_update_ssp_basis(ctx, reshape(spec_ssp, [nspec, ntfull, 1]), &

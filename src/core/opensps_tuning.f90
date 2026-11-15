@@ -37,71 +37,256 @@ module opensps_tuning
     ! ---- Compile-time defaults -------------------------------------------------------------------
     !> Entries per segment of an effective template's list (ssp_operator_t: seg_ptr). Measured on the A100
     !> only (#46: to sweep on other devices). Changes the summation order.
+#ifdef TUNE_SEG_LEN_OVERRIDE
+    integer, parameter, public :: TUNE_SEG_LEN = TUNE_SEG_LEN_OVERRIDE
+    logical, parameter :: CT_OVR_SEG_LEN = .true.
+#else
     integer, parameter, public :: TUNE_SEG_LEN = 256
+    logical, parameter :: CT_OVR_SEG_LEN = .false.
+#endif
     !> Points per piece of an age's points (ssp_operator_t: pc_ptr). A100-tuned guess (#46).
     !> Changes the summation order.
+#ifdef TUNE_PT_PIECE_OVERRIDE
+    integer, parameter, public :: TUNE_PT_PIECE = TUNE_PT_PIECE_OVERRIDE
+    logical, parameter :: CT_OVR_PT_PIECE = .true.
+#else
     integer, parameter, public :: TUNE_PT_PIECE = 32
+    logical, parameter :: CT_OVR_PT_PIECE = .false.
+#endif
     !> Pixels per block of the SSP operator and SSP band-flux sums (plain sum per block, blocks added in
     !> FP64). Changes the summation order.
+#ifdef TUNE_PIX_BLOCK_OVERRIDE
+    integer, parameter, public :: TUNE_PIX_BLOCK = TUNE_PIX_BLOCK_OVERRIDE
+    logical, parameter :: CT_OVR_PIX_BLOCK = .true.
+#else
     integer, parameter, public :: TUNE_PIX_BLOCK = 512
+    logical, parameter :: CT_OVR_PIX_BLOCK = .false.
+#endif
     !> Pixels per block of the split-K band product: each block is a plain FP32 sum of at most this many
     !> positive terms. Changes the summation order.
+#ifdef TUNE_BAND_BLOCK_OVERRIDE
+    integer, parameter, public :: TUNE_BAND_BLOCK = TUNE_BAND_BLOCK_OVERRIDE
+    logical, parameter :: CT_OVR_BAND_BLOCK = .true.
+#else
     integer, parameter, public :: TUNE_BAND_BLOCK = 256
+    logical, parameter :: CT_OVR_BAND_BLOCK = .false.
+#endif
     !> Fewest columns for which the BLAS band product is used instead of the compensated kernel
     !> (OPENSPS_ACCEL_BLAS builds). Changes which sum is taken.
+#ifdef TUNE_GEMM_MIN_COLS_OVERRIDE
+    integer, parameter, public :: TUNE_GEMM_MIN_COLS = TUNE_GEMM_MIN_COLS_OVERRIDE
+    logical, parameter :: CT_OVR_GEMM_MIN_COLS = .true.
+#else
     integer, parameter, public :: TUNE_GEMM_MIN_COLS = 16
+    logical, parameter :: CT_OVR_GEMM_MIN_COLS = .false.
+#endif
     !> Partial sums per model of the band-derivative and nebular adjoint reductions: each takes every
     !> NCH-th pixel. Changes the summation order.
+#ifdef TUNE_NCH_OVERRIDE
+    integer, parameter, public :: TUNE_NCH = TUNE_NCH_OVERRIDE
+    logical, parameter :: CT_OVR_NCH = .true.
+#else
     integer, parameter, public :: TUNE_NCH = 64
+    logical, parameter :: CT_OVR_NCH = .false.
+#endif
     !> Pixel chunks per model of the attenuation adjoint (each thread takes every NCHG-th pixel).
     !> Changes the summation order.
+#ifdef TUNE_NCHG_OVERRIDE
+    integer, parameter, public :: TUNE_NCHG = TUNE_NCHG_OVERRIDE
+    logical, parameter :: CT_OVR_NCHG = .true.
+#else
     integer, parameter, public :: TUNE_NCHG = 64
+    logical, parameter :: CT_OVR_NCHG = .false.
+#endif
     !> Models per gang of the band-flux kernel (the threads of a gang share one band: one trip count).
+#ifdef TUNE_MBLK_OVERRIDE
+    integer, parameter, public :: TUNE_MBLK = TUNE_MBLK_OVERRIDE
+    logical, parameter :: CT_OVR_MBLK = .true.
+#else
     integer, parameter, public :: TUNE_MBLK = 128
+    logical, parameter :: CT_OVR_MBLK = .false.
+#endif
     !> Largest batch for which the band fluxes use a workgroup per band (small batches).
+#ifdef TUNE_SMALL_N_OVERRIDE
+    integer, parameter, public :: TUNE_SMALL_N = TUNE_SMALL_N_OVERRIDE
+    logical, parameter :: CT_OVR_SMALL_N = .true.
+#else
     integer, parameter, public :: TUNE_SMALL_N = 16
+    logical, parameter :: CT_OVR_SMALL_N = .false.
+#endif
     !> Ages per thread of the tiled nebular continuum.
+#ifdef TUNE_CSP_PT_OVERRIDE
+    integer, parameter, public :: TUNE_CSP_PT = TUNE_CSP_PT_OVERRIDE
+    logical, parameter :: CT_OVR_CSP_PT = .true.
+#else
     integer, parameter, public :: TUNE_CSP_PT = 4
+    logical, parameter :: CT_OVR_CSP_PT = .false.
+#endif
 
     !> Register tile of the age sums of the single-metallicity-cell kernel `age_sums_z4` (LLVM flang / AMD
     !> variant): models per tile and pixels per thread. Measured on the R9700 against `age_sums` (N = 1e4, 107 ages):
     !> 1.4x at 5994 pixels with MT = 8, PT = 2; the tile shape matters (register spills). Retune per device.
+#ifdef TUNE_AGE_SUMS_Z4_FLANG_MT_OVERRIDE
+    integer, parameter, public :: TUNE_AGE_SUMS_Z4_FLANG_MT = TUNE_AGE_SUMS_Z4_FLANG_MT_OVERRIDE
+    logical, parameter :: CT_OVR_AGE_SUMS_Z4_FLANG_MT = .true.
+#else
     integer, parameter, public :: TUNE_AGE_SUMS_Z4_FLANG_MT = 8
+    logical, parameter :: CT_OVR_AGE_SUMS_Z4_FLANG_MT = .false.
+#endif
+#ifdef TUNE_AGE_SUMS_Z4_FLANG_PT_OVERRIDE
+    integer, parameter, public :: TUNE_AGE_SUMS_Z4_FLANG_PT = TUNE_AGE_SUMS_Z4_FLANG_PT_OVERRIDE
+    logical, parameter :: CT_OVR_AGE_SUMS_Z4_FLANG_PT = .true.
+#else
     integer, parameter, public :: TUNE_AGE_SUMS_Z4_FLANG_PT = 2
+    logical, parameter :: CT_OVR_AGE_SUMS_Z4_FLANG_PT = .false.
+#endif
     !> Register tile of `age_sums` (models per tile, pixels per thread): chosen for the accumulators of one
     !> thread to fit the registers without spills; "retune on other GPUs, where registers per thread and the
     !> load / FMA balance differ" (the comment this replaces).
+#ifdef TUNE_AGE_SUMS_MT_OVERRIDE
+    integer, parameter, public :: TUNE_AGE_SUMS_MT = TUNE_AGE_SUMS_MT_OVERRIDE
+    logical, parameter :: CT_OVR_AGE_SUMS_MT = .true.
+#else
     integer, parameter, public :: TUNE_AGE_SUMS_MT = 8
+    logical, parameter :: CT_OVR_AGE_SUMS_MT = .false.
+#endif
+#ifdef TUNE_AGE_SUMS_PT_OVERRIDE
+    integer, parameter, public :: TUNE_AGE_SUMS_PT = TUNE_AGE_SUMS_PT_OVERRIDE
+    logical, parameter :: CT_OVR_AGE_SUMS_PT = .true.
+#else
     integer, parameter, public :: TUNE_AGE_SUMS_PT = 4
+    logical, parameter :: CT_OVR_AGE_SUMS_PT = .false.
+#endif
     !> Register tile of the batched SSP's template sums (`template_columns`): columns per tile, pixels per
     !> thread, pixels per block of the plain partial sum (blocks are added in FP64: changes the summation
     !> order), templates per step.
+#ifdef TUNE_TEMPLATE_MT_OVERRIDE
+    integer, parameter, public :: TUNE_TEMPLATE_MT = TUNE_TEMPLATE_MT_OVERRIDE
+    logical, parameter :: CT_OVR_TEMPLATE_MT = .true.
+#else
     integer, parameter, public :: TUNE_TEMPLATE_MT = 8
+    logical, parameter :: CT_OVR_TEMPLATE_MT = .false.
+#endif
+#ifdef TUNE_TEMPLATE_PT_OVERRIDE
+    integer, parameter, public :: TUNE_TEMPLATE_PT = TUNE_TEMPLATE_PT_OVERRIDE
+    logical, parameter :: CT_OVR_TEMPLATE_PT = .true.
+#else
     integer, parameter, public :: TUNE_TEMPLATE_PT = 4
+    logical, parameter :: CT_OVR_TEMPLATE_PT = .false.
+#endif
+#ifdef TUNE_TEMPLATE_PIX_BLOCK_OVERRIDE
+    integer, parameter, public :: TUNE_TEMPLATE_PIX_BLOCK = TUNE_TEMPLATE_PIX_BLOCK_OVERRIDE
+    logical, parameter :: CT_OVR_TEMPLATE_PIX_BLOCK = .true.
+#else
     integer, parameter, public :: TUNE_TEMPLATE_PIX_BLOCK = 256
+    logical, parameter :: CT_OVR_TEMPLATE_PIX_BLOCK = .false.
+#endif
+#ifdef TUNE_TEMPLATE_KB_OVERRIDE
+    integer, parameter, public :: TUNE_TEMPLATE_KB = TUNE_TEMPLATE_KB_OVERRIDE
+    logical, parameter :: CT_OVR_TEMPLATE_KB = .true.
+#else
     integer, parameter, public :: TUNE_TEMPLATE_KB = 4
+    logical, parameter :: CT_OVR_TEMPLATE_KB = .false.
+#endif
 
     !> Register tile of the age sums of `age_sums_z` (models per tile, pixels per thread), LLVM flang / AMD
     !> variant: models of a tile share one pair of basis slabs. FP64 on the 780M: 4 pixels spill registers (890 ms
     !> at N = 10^4; 658 ms with 2; 8 models x 1-4 pixels is the best range, 16 or more models 6-8 s).
+#ifdef TUNE_AGE_SUMS_Z_FLANG_MT_OVERRIDE
+    integer, parameter, public :: TUNE_AGE_SUMS_Z_FLANG_MT = TUNE_AGE_SUMS_Z_FLANG_MT_OVERRIDE
+    logical, parameter :: CT_OVR_AGE_SUMS_Z_FLANG_MT = .true.
+#else
     integer, parameter, public :: TUNE_AGE_SUMS_Z_FLANG_MT = 8
+    logical, parameter :: CT_OVR_AGE_SUMS_Z_FLANG_MT = .false.
+#endif
+#ifdef TUNE_AGE_SUMS_Z_FLANG_PT_OVERRIDE
+    integer, parameter, public :: TUNE_AGE_SUMS_Z_FLANG_PT = TUNE_AGE_SUMS_Z_FLANG_PT_OVERRIDE
+    logical, parameter :: CT_OVR_AGE_SUMS_Z_FLANG_PT = .true.
+#else
     integer, parameter, public :: TUNE_AGE_SUMS_Z_FLANG_PT = merge(2, 4, KP == WP)
+    logical, parameter :: CT_OVR_AGE_SUMS_Z_FLANG_PT = .false.
+#endif
     !> Models per thread of `age_sums_z` and `age_sums_z4` in the nvfortran variants.
+#ifdef TUNE_AGE_SUMS_Z_NVF_MT_OVERRIDE
+    integer, parameter, public :: TUNE_AGE_SUMS_Z_NVF_MT = TUNE_AGE_SUMS_Z_NVF_MT_OVERRIDE
+    logical, parameter :: CT_OVR_AGE_SUMS_Z_NVF_MT = .true.
+#else
     integer, parameter, public :: TUNE_AGE_SUMS_Z_NVF_MT = 4
+    logical, parameter :: CT_OVR_AGE_SUMS_Z_NVF_MT = .false.
+#endif
+#ifdef TUNE_AGE_SUMS_Z4_NVF_MT_OVERRIDE
+    integer, parameter, public :: TUNE_AGE_SUMS_Z4_NVF_MT = TUNE_AGE_SUMS_Z4_NVF_MT_OVERRIDE
+    logical, parameter :: CT_OVR_AGE_SUMS_Z4_NVF_MT = .true.
+#else
     integer, parameter, public :: TUNE_AGE_SUMS_Z4_NVF_MT = 4
+    logical, parameter :: CT_OVR_AGE_SUMS_Z4_NVF_MT = .false.
+#endif
     !> Templates per block of the split-K template product (`gemm_columns`, `gemm_columns_batched`): each block
     !> is a plain sum, the blocks are added in FP64 (changes the summation order).
+#ifdef TUNE_GEMM_KB_OVERRIDE
+    integer, parameter, public :: TUNE_GEMM_KB = TUNE_GEMM_KB_OVERRIDE
+    logical, parameter :: CT_OVR_GEMM_KB = .true.
+#else
     integer, parameter, public :: TUNE_GEMM_KB = 256
+    logical, parameter :: CT_OVR_GEMM_KB = .false.
+#endif
 
     !> Stars per chunk of the single-model SSP sum (host path: L1 cache locality).
+#ifdef TUNE_SSP_STAR_BATCH_OVERRIDE
+    integer, parameter, public :: TUNE_SSP_STAR_BATCH = TUNE_SSP_STAR_BATCH_OVERRIDE
+    logical, parameter :: CT_OVR_SSP_STAR_BATCH = .true.
+#else
     integer, parameter, public :: TUNE_SSP_STAR_BATCH = 32
+    logical, parameter :: CT_OVR_SSP_STAR_BATCH = .false.
+#endif
     !> Column counts up to which the FP32 accelerated BLAS product uses the batched form (`gemm_columns_batched`);
     !> sets the size of its work array (pixels x NC_BATCHED x blocks, on the device once allocated).
+#ifdef TUNE_GEMM_NC_BATCHED_OVERRIDE
+    integer, parameter, public :: TUNE_GEMM_NC_BATCHED = TUNE_GEMM_NC_BATCHED_OVERRIDE
+    logical, parameter :: CT_OVR_GEMM_NC_BATCHED = .true.
+#else
     integer, parameter, public :: TUNE_GEMM_NC_BATCHED = 512
+    logical, parameter :: CT_OVR_GEMM_NC_BATCHED = .false.
+#endif
     !> Models per chunk of the IMF-gradient reduction of the batched SSP (`CHG`).
+#ifdef TUNE_IMF_GRAD_CHG_OVERRIDE
+    integer, parameter, public :: TUNE_IMF_GRAD_CHG = TUNE_IMF_GRAD_CHG_OVERRIDE
+    logical, parameter :: CT_OVR_IMF_GRAD_CHG = .true.
+#else
     integer, parameter, public :: TUNE_IMF_GRAD_CHG = 256
+    logical, parameter :: CT_OVR_IMF_GRAD_CHG = .false.
+#endif
     !> Pixels per thread of the observed-frame band-flux kernel (`CH`).
+#ifdef TUNE_BAND_PIX_PER_THREAD_OVERRIDE
+    integer, parameter, public :: TUNE_BAND_PIX_PER_THREAD = TUNE_BAND_PIX_PER_THREAD_OVERRIDE
+    logical, parameter :: CT_OVR_BAND_PIX_PER_THREAD = .true.
+#else
     integer, parameter, public :: TUNE_BAND_PIX_PER_THREAD = 16
+    logical, parameter :: CT_OVR_BAND_PIX_PER_THREAD = .false.
+#endif
+
+    ! ---- The compile-time parameters as a table (the report, tests, the sweeps' provenance) ----------
+    integer, parameter :: N_CT = 27
+    character(len=24), parameter :: ct_names(N_CT) = [character(len=24) :: &
+        'SEG_LEN', 'PT_PIECE', 'PIX_BLOCK', 'BAND_BLOCK', 'GEMM_MIN_COLS', 'NCH', 'NCHG', 'MBLK', 'SMALL_N', &
+        'CSP_PT', 'AGE_SUMS_Z4_FLANG_MT', 'AGE_SUMS_Z4_FLANG_PT', 'AGE_SUMS_MT', 'AGE_SUMS_PT', &
+        'TEMPLATE_MT', 'TEMPLATE_PT', 'TEMPLATE_PIX_BLOCK', 'TEMPLATE_KB', 'AGE_SUMS_Z_FLANG_MT', &
+        'AGE_SUMS_Z_FLANG_PT', 'AGE_SUMS_Z_NVF_MT', 'AGE_SUMS_Z4_NVF_MT', 'GEMM_KB', 'SSP_STAR_BATCH', &
+        'GEMM_NC_BATCHED', 'IMF_GRAD_CHG', 'BAND_PIX_PER_THREAD']
+    integer, parameter :: ct_values(N_CT) = [ &
+        TUNE_SEG_LEN, TUNE_PT_PIECE, TUNE_PIX_BLOCK, TUNE_BAND_BLOCK, TUNE_GEMM_MIN_COLS, TUNE_NCH, &
+        TUNE_NCHG, TUNE_MBLK, TUNE_SMALL_N, TUNE_CSP_PT, TUNE_AGE_SUMS_Z4_FLANG_MT, &
+        TUNE_AGE_SUMS_Z4_FLANG_PT, TUNE_AGE_SUMS_MT, TUNE_AGE_SUMS_PT, TUNE_TEMPLATE_MT, TUNE_TEMPLATE_PT, &
+        TUNE_TEMPLATE_PIX_BLOCK, TUNE_TEMPLATE_KB, TUNE_AGE_SUMS_Z_FLANG_MT, TUNE_AGE_SUMS_Z_FLANG_PT, &
+        TUNE_AGE_SUMS_Z_NVF_MT, TUNE_AGE_SUMS_Z4_NVF_MT, TUNE_GEMM_KB, TUNE_SSP_STAR_BATCH, &
+        TUNE_GEMM_NC_BATCHED, TUNE_IMF_GRAD_CHG, TUNE_BAND_PIX_PER_THREAD ]
+    logical, parameter :: ct_over(N_CT) = [ &
+        CT_OVR_SEG_LEN, CT_OVR_PT_PIECE, CT_OVR_PIX_BLOCK, CT_OVR_BAND_BLOCK, CT_OVR_GEMM_MIN_COLS, &
+        CT_OVR_NCH, CT_OVR_NCHG, CT_OVR_MBLK, CT_OVR_SMALL_N, CT_OVR_CSP_PT, CT_OVR_AGE_SUMS_Z4_FLANG_MT, &
+        CT_OVR_AGE_SUMS_Z4_FLANG_PT, CT_OVR_AGE_SUMS_MT, CT_OVR_AGE_SUMS_PT, CT_OVR_TEMPLATE_MT, &
+        CT_OVR_TEMPLATE_PT, CT_OVR_TEMPLATE_PIX_BLOCK, CT_OVR_TEMPLATE_KB, CT_OVR_AGE_SUMS_Z_FLANG_MT, &
+        CT_OVR_AGE_SUMS_Z_FLANG_PT, CT_OVR_AGE_SUMS_Z_NVF_MT, CT_OVR_AGE_SUMS_Z4_NVF_MT, CT_OVR_GEMM_KB, &
+        CT_OVR_SSP_STAR_BATCH, CT_OVR_GEMM_NC_BATCHED, CT_OVR_IMF_GRAD_CHG, CT_OVR_BAND_PIX_PER_THREAD ]
 
     ! ---- Run-time parameters ---------------------------------------------------------------------
     !> Models per chunk of the batched SSP.
@@ -143,9 +328,34 @@ module opensps_tuning
 
     public :: tuning_get, tuning_set, tuning_reset, tuning_report, tuning_count, tuning_name, &
               tuning_parse, tuning_in_range, tuning_profile, tuning_source, tuning_profile_known, &
-              tuning_select_profile
+              tuning_select_profile, tuning_ct_count, tuning_ct_name, tuning_ct_value, tuning_ct_overridden
 
 contains
+
+    !> Number of compile-time parameters (the TUNE_* constants), and the name, value and "built with an
+    !> override" flag of the i-th: the build's record of what it was compiled with (-Dtuning_overrides).
+    pure integer function tuning_ct_count()
+        tuning_ct_count = N_CT
+    end function tuning_ct_count
+
+    function tuning_ct_name(i) result(nm)
+        integer, intent(in) :: i
+        character(len=24) :: nm
+        nm = ''
+        if (i >= 1 .and. i <= N_CT) nm = ct_names(i)
+    end function tuning_ct_name
+
+    pure integer function tuning_ct_value(i)
+        integer, intent(in) :: i
+        tuning_ct_value = -1
+        if (i >= 1 .and. i <= N_CT) tuning_ct_value = ct_values(i)
+    end function tuning_ct_value
+
+    pure logical function tuning_ct_overridden(i)
+        integer, intent(in) :: i
+        tuning_ct_overridden = .false.
+        if (i >= 1 .and. i <= N_CT) tuning_ct_overridden = ct_over(i)
+    end function tuning_ct_overridden
 
     !> Number of run-time parameters.
     pure integer function tuning_count()
@@ -391,6 +601,10 @@ contains
         do id = 1, N_TUNE
             write (unit, '(2x,a24,i12,2x,a8,"default ",i0,"  range [",i0,", ",i0,"]")') names(id), values(id), &
                 src(source(id)), defaults(id), lo_limit(id), hi_limit(id)
+        end do
+        write (unit, '(a)') 'OpenSPS tuning (compile-time parameters; override with -Dtuning_overrides=NAME=VALUE,...)'
+        do id = 1, N_CT
+            write (unit, '(2x,a24,i12,2x,a)') ct_names(id), ct_values(id), merge('override', 'default ', ct_over(id))
         end do
     end subroutine tuning_report
 

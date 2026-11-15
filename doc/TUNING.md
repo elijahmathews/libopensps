@@ -25,7 +25,7 @@ module, `src/core/opensps_tuning.f90`. The kernels read it; nothing else holds s
 
 | Kind | Where | Changes the result? | Overridable |
 |---|---|---|---|
-| Compile-time (`TUNE_*`) | named constants | the summation parameters change the rounding of FP sums, so they are gated by the FP32 (1e-5) and FP64 (1e-10) tests of the build | no: they fix array extents, trip counts and the order of sums inside device kernels |
+| Compile-time (`TUNE_*`) | named constants | the summation parameters change the rounding of FP sums, so they are gated by the FP32 (1e-5) and FP64 (1e-10) tests of the build | not at run time: they fix array extents, trip counts and the order of sums inside device kernels; **at build time**, with `-Dtuning_overrides` (below) |
 | Run-time (`TUNE_P_*`) | `tuning_get(id)` | no beyond the gates: chunk sizes, and the batch size below which the SFH weights are formed on the host | yes |
 
 Compile-time parameters (what each one is and what it changes: the comments in the module):
@@ -34,6 +34,26 @@ Compile-time parameters (what each one is and what it changes: the comments in t
 `TUNE_NCHG`, `TUNE_MBLK`, `TUNE_SMALL_N`, `TUNE_CSP_PT`, `TUNE_BAND_PIX_PER_THREAD`,
 `TUNE_IMF_GRAD_CHG`, `TUNE_SSP_STAR_BATCH`, the register tiles of the age sums
 (`TUNE_AGE_SUMS_*`) and of the template sums (`TUNE_TEMPLATE_*`).
+
+### Overriding a compile-time parameter at build time (sweeps and tuners)
+
+`-Dtuning_overrides=NAME=VALUE[,NAME=VALUE...]` builds with other values of compile-time parameters, with the
+registry's names without the `TUNE_` prefix:
+
+```sh
+meson setup b-seg128 -Daccel=omp_gpu -Dgpu_arch=gfx1201 -Dtuning_overrides=SEG_LEN=128,PT_PIECE=16
+```
+
+This is how a compile-time parameter is swept (one build per value) and how a tuner will build its variants; it is
+not for releases or packages. Meson refuses a name the registry does not define (a typo would otherwise change
+nothing and look like a result), a repeated name, and a value that is not a non-negative integer
+(`tools/tuning/overrides.py`, tested by `unit_tuning_overrides`). Whether a value is *legal* for its parameter (a
+tile that fits the registers, a block that divides the trip count) is not checked: that is what the sweep and the
+tests of both precisions decide, so run `unit` and `regression` in FP64 and FP32 for every variant before using a
+number. Every build records what it was compiled with: `tuning_report` lists the compile-time parameters with
+`default` or `override`, and `benchmark_csp_batch` prints `tuning_ct_<NAME> <value>` for each at the start, so a
+sweep's results carry the values they were measured with. `tools/check_tuning_literals.py` (`unit_tuning_literals`)
+fails when a compile-time constant of the registry lacks its override pair or its table row.
 
 Run-time parameters:
 
