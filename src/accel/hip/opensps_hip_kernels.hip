@@ -2183,6 +2183,84 @@ __global__ void __launch_bounds__(256, 2) template_columns_kernel(
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Velocity smoothing of the spectra (smooth_kernel, FP32 kernels)
+//
+// out(i, m) = sum_{k = lo(i)}^{hi(i)} c(i, k) in(k, m), the banded operator of build_velocity_kernel
+// (normalised trapezoid weights, all >= 0; spectra are >= 0); pixels with lo(i) = 0 pass through.
+// The Fortran kernel summed in FP64 (1/64 of the FP32 rate on the R9700). Here: each coefficient is an
+// FP32 hi + lo pair (exact to 1e-14), the taps are summed in blocks of SM_KB with plain multiply-adds
+// (non-negative terms: a block loses at most ~2 SM_KB eps of itself), the blocks into the total with
+// compensation (doc/MIXED_PRECISION.md, rule 1). A block of 256 threads = 64 pixels x 16 models (4 per
+// thread); the spectra of the tile's window are staged through shared memory, 256 pixels at a time.
+// ---------------------------------------------------------------------------
+#define SM_KB 4
+#define SM_PB 64
+#define SM_MB 16
+#define SM_KCH 256
+
+__global__ void __launch_bounds__(256) smooth_kernel_f32(
+    int nspec, int n_col,
+    const int* __restrict__ d_lo, const int* __restrict__ d_hi, const int* __restrict__ d_off,
+    const float2* __restrict__ d_cf,
+    const float* __restrict__ in, float* __restrict__ out
+) {
+    __shared__ float sp[SM_MB][SM_KCH];
+    __shared__ int s_k0, s_k1;
+    const int tid = threadIdx.x;
+    const int ip = tid & (SM_PB - 1), mq = tid / SM_PB;
+    const int i0 = blockIdx.x * SM_PB, m0 = blockIdx.y * SM_MB;
+    const int i = i0 + ip;
+    if (tid == 0) { s_k0 = nspec + 1; s_k1 = 0; }
+    __syncthreads();
+    int lo = 0, hi = -1, off = 0;
+    if (i < nspec) { lo = d_lo[i]; hi = d_hi[i]; off = d_off[i] - 1 - lo; }
+    if (lo > 0) { atomicMin(&s_k0, lo); atomicMax(&s_k1, hi); }
+    __syncthreads();
+    const int k0 = s_k0, k1 = s_k1;
+    float acc[4] = {0.f, 0.f, 0.f, 0.f}, cmp[4] = {0.f, 0.f, 0.f, 0.f}, blk[4] = {0.f, 0.f, 0.f, 0.f};
+    for (int c0 = k0; c0 <= k1; c0 += SM_KCH) {
+        __syncthreads();
+        for (int idx = tid; idx < SM_KCH * SM_MB; idx += 256) {
+            int row = idx % SM_KCH, mc = idx / SM_KCH;
+            int k = c0 + row, m = m0 + mc;
+            sp[mc][row] = (k <= k1 && m < n_col) ? in[(size_t)m * nspec + (k - 1)] : 0.f;
+        }
+        __syncthreads();
+        if (lo > 0) {
+            int ka = max(lo, c0), kb = min(hi, c0 + SM_KCH - 1);
+            for (int k = ka; k <= kb; ++k) {
+                float2 cf = d_cf[off + k];
+                int t = k - lo;
+#pragma unroll
+                for (int q = 0; q < 4; ++q) {
+                    float x = sp[mq * 4 + q][k - c0];
+                    blk[q] = fmaf(cf.x, x, blk[q]);
+                    blk[q] = fmaf(cf.y, x, blk[q]);
+                }
+                if ((t + 1) % SM_KB == 0 || k == hi) {
+#pragma unroll
+                    for (int q = 0; q < 4; ++q) {
+                        float term = blk[q] - cmp[q];
+                        float tsum = acc[q] + term;
+                        cmp[q] = (tsum - acc[q]) - term;
+                        acc[q] = tsum;
+                        blk[q] = 0.f;
+                    }
+                }
+            }
+        }
+    }
+    if (i < nspec) {
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+            int m = m0 + mq * 4 + q;
+            if (m < n_col) out[(size_t)m * nspec + i] = (lo > 0) ? acc[q] - cmp[q] : in[(size_t)m * nspec + i];
+        }
+    }
+}
+
 extern "C" {
 
 void opensps_hip_imf_pieces_weights_sp(
@@ -2300,6 +2378,17 @@ int opensps_hip_template_columns(int np, int nc, int k, int kb, int lda, int ldb
     }
     (void)hipStreamSynchronize(s);
     return 0;
+}
+
+void opensps_hip_smooth(int nspec, int n_col, const int* d_lo, const int* d_hi, const int* d_off,
+                        const float* d_cf, const float* d_in, float* d_out, void* stream) {
+    if (nspec <= 0 || n_col <= 0) return;
+    dim3 block(256);
+    dim3 grid((nspec + SM_PB - 1) / SM_PB, (n_col + SM_MB - 1) / SM_MB);
+    hipStream_t s = (hipStream_t)stream;
+    smooth_kernel_f32<<<grid, block, 0, s>>>(nspec, n_col, d_lo, d_hi, d_off,
+                                             reinterpret_cast<const float2*>(d_cf), d_in, d_out);
+    (void)hipStreamSynchronize(s);
 }
 
 void opensps_hip_fold_multi(

@@ -14,7 +14,7 @@ module opensps_context_types
     use opensps_types, only: PARAMS, COMPSPOUT, TLSF, OBSDAT
     use opensps_cache, only: opensps_setup_cache_t
     use opensps_filter_types, only: filter_info_t, filter_info_clear
-    use, intrinsic :: iso_c_binding, only: c_int, c_size_t, c_loc, c_ptr
+    use, intrinsic :: iso_c_binding, only: c_int, c_size_t, c_loc, c_ptr, c_float
 
     implicit none
     private
@@ -51,6 +51,8 @@ module opensps_context_types
         real(WP) :: sm_sigma = 0.0_wp, sm_minl = 0.0_wp, sm_maxl = 0.0_wp
         integer,  allocatable :: sm_lo(:), sm_hi(:), sm_off(:), sm_t_lo(:), sm_t_hi(:)
         real(WP), allocatable :: sm_coef(:), sm_dcoef(:)
+        !> sm_coef as FP32 hi + lo pairs (2 x ncoef): the FP32 kernels' smoothing (exact to ~1e-14 per coefficient)
+        real(c_float), allocatable :: sm_coef_f(:,:)
     end type batch_grid_t
 
     !> Spectra of the last batched CSP (kernel precision, nspec x models), kept on the device
@@ -422,12 +424,14 @@ contains
         if (g%sm_ready) then
 #ifdef OMP_TARGET
             associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef, &
-                       d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef)
-                !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef)
+                       d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef, d_sm_coef_f => g%sm_coef_f)
+                !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef, &
+                !$omp&     d_sm_coef_f)
             end associate
 #endif
         end if
-        if (allocated(g%sm_lo)) deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef, g%sm_t_lo, g%sm_t_hi, g%sm_dcoef)
+        if (allocated(g%sm_lo)) deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef, g%sm_t_lo, g%sm_t_hi, g%sm_dcoef, &
+                                           g%sm_coef_f)
         g%sm_ready = .false.
     end subroutine batch_grid_release
 

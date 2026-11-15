@@ -10,6 +10,7 @@ module opensps_batch_photometry
     !> IGM transmission) are cached in ctx%state%batch and on the device (prepare_batch_grid).
     !> Light-weighted ages and redshifted colors are not handled (callers use compute_magnitudes).
 
+    use, intrinsic :: iso_c_binding, only: c_float
     use opensps_precision, only: WP, KP
     use opensps_tuning, only: TUNE_BAND_BLOCK, TUNE_GEMM_MIN_COLS, TUNE_NCH, TUNE_MBLK, TUNE_SMALL_N, TUNE_BAND_PIX_PER_THREAD
     use opensps_constants, only: SAFE_FLOOR, C_LIGHT, ABS_MAG_ZEROPOINT_LOG
@@ -415,11 +416,12 @@ contains
             if (g%sm_sigma == sigma .and. g%sm_minl == minl .and. g%sm_maxl == maxl) return
 #ifdef OMP_TARGET
             associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef, &
-                       d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef)
-                !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef)
+                       d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef, d_sm_coef_f => g%sm_coef_f)
+                !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef, &
+                !$omp&     d_sm_coef_f)
             end associate
 #endif
-            deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef, g%sm_t_lo, g%sm_t_hi, g%sm_dcoef)
+            deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef, g%sm_t_lo, g%sm_t_hi, g%sm_dcoef, g%sm_coef_f)
             g%sm_ready = .false.
         end if
         nspec = ctx%state%nspec
@@ -453,6 +455,11 @@ contains
             end do
             deallocate(ll)
         end if
+        allocate(g%sm_coef_f(2, size(g%sm_coef)))
+        do k = 1, size(g%sm_coef)
+            g%sm_coef_f(1, k) = real(g%sm_coef(k), c_float)
+            g%sm_coef_f(2, k) = real(g%sm_coef(k) - real(g%sm_coef_f(1, k), WP), c_float)
+        end do
         allocate(g%sm_t_lo(nspec), g%sm_t_hi(nspec))
         g%sm_t_lo = nspec + 1
         g%sm_t_hi = 0
@@ -466,8 +473,8 @@ contains
         end do
 #ifdef OMP_TARGET
         associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef, &
-                   d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef)
-            !$omp target enter data map(to: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef)
+                   d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef, d_sm_coef_f => g%sm_coef_f)
+            !$omp target enter data map(to: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef, d_sm_coef_f)
         end associate
 #endif
         g%sm_sigma = sigma
@@ -515,9 +522,44 @@ contains
         ! The operator's arrays passed as arrays: device code does not refer to the cache's
         ! derived type, which is mapped only through its components
         call ensure_smooth_work(ctx%state%nspec, n_col)
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+        call smooth_kernel_hip(ctx%state%nspec, n_col, ctx%state%batch%sm_lo, ctx%state%batch%sm_hi, &
+                               ctx%state%batch%sm_off, ctx%state%batch%sm_coef_f, smooth_work, spec)
+#else
         call smooth_kernel(ctx%state%nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
                            ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_coef, smooth_work, spec)
+#endif
     end subroutine smooth_columns
+
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+    !> smooth_kernel in FP32 (a HIP kernel, see opensps_hip_smooth): the smoothed spectra go to sm, then
+    !> back into spec
+    subroutine smooth_kernel_hip(nspec, n_col, sm_lo, sm_hi, sm_off, cf, sm, spec)
+        use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
+        integer, intent(in)                 :: nspec, n_col
+        integer, intent(in), target, contiguous :: sm_lo(:), sm_hi(:), sm_off(:)
+        real(c_float), intent(in), target, contiguous :: cf(:,:)
+        real(KP), intent(inout), target     :: sm(nspec, *), spec(nspec, *)
+        integer :: m, i
+        interface
+            subroutine opensps_hip_smooth(nspec, n_col, lo, hi, off, cf, in, out, stream) bind(C, name="opensps_hip_smooth")
+                import :: c_int, c_ptr
+                integer(c_int), value :: nspec, n_col
+                type(c_ptr), value :: lo, hi, off, cf, in, out, stream
+            end subroutine opensps_hip_smooth
+        end interface
+        !$omp target data use_device_addr(sm_lo, sm_hi, sm_off, cf, sm, spec)
+        call opensps_hip_smooth(int(nspec, c_int), int(n_col, c_int), c_loc(sm_lo(1)), c_loc(sm_hi(1)), c_loc(sm_off(1)), &
+                                c_loc(cf(1, 1)), c_loc(spec(1, 1)), c_loc(sm(1, 1)), c_null_ptr)
+        !$omp end target data
+        !$omp target teams distribute parallel do collapse(2)
+        do m = 1, n_col
+            do i = 1, nspec
+                spec(i, m) = sm(i, m)
+            end do
+        end do
+    end subroutine smooth_kernel_hip
+#endif
 
     !> The transpose of smooth_columns, in place: spec_bar(k) = sum over pixels i of C(i, k)
     !> spec_bar_out(i) (pixels outside the smoothing window pass through), for the gradients of
