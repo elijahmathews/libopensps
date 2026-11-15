@@ -2079,6 +2079,110 @@ __global__ void __launch_bounds__(128, 8) fold_multi_kernel(
     d_vp[base + 3 * (size_t)ldv] = oe;
 }
 
+
+// ---------------------------------------------------------------------------
+// Template products yo(i, c0 + j) = sum_e etpl(i, e) v(e, v0 + j)   (template_columns, FP32 kernels)
+//
+// The arithmetic of the Fortran device kernel: the templates in blocks of KB, each block summed with
+// plain multiply-adds (all terms are >= 0: a block loses at most ~KB eps of itself), the blocks added
+// to the total with compensation (rule 1 of doc/MIXED_PRECISION.md). The tile of a block is
+// 128 pixels x 64 columns, 8 x 4 per thread, the templates staged through shared memory 16 at a time
+// (each etpl element read once per column tile instead of once per 8 columns), the next stage's global
+// loads issued before the current stage's multiply-adds.
+// ---------------------------------------------------------------------------
+#define TC_BM 128
+#define TC_BN 64
+#define TC_KC 16
+#define TC_RM 8
+#define TC_RN 4
+
+template <int KB>
+__global__ void __launch_bounds__(256, 2) template_columns_kernel(
+    int np, int nc, int k, int lda, int ldb, int ldc,
+    const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C
+) {
+    __shared__ float As[TC_KC][TC_BM];
+    __shared__ float Bs[TC_KC][TC_BN];
+    const int tid = threadIdx.x;
+    const int tx = tid & 15, ty = tid >> 4;
+    const int i0 = blockIdx.x * TC_BM, j0 = blockIdx.y * TC_BN;
+
+    float acc[TC_RM][TC_RN], cmp[TC_RM][TC_RN], blk[TC_RM][TC_RN];
+#pragma unroll
+    for (int r = 0; r < TC_RM; ++r)
+#pragma unroll
+        for (int c = 0; c < TC_RN; ++c) { acc[r][c] = 0.f; cmp[r][c] = 0.f; }
+
+    float pa[TC_KC * TC_BM / 256], pb[TC_KC * TC_BN / 256];
+    auto gload = [&](int e0) {
+#pragma unroll
+        for (int q = 0; q < TC_KC * TC_BM / 256; ++q) {
+            int idx = tid + q * 256, i = idx % TC_BM, e = idx / TC_BM;
+            pa[q] = (i0 + i < np && e0 + e < k) ? A[(size_t)(e0 + e) * lda + i0 + i] : 0.f;
+        }
+#pragma unroll
+        for (int q = 0; q < TC_KC * TC_BN / 256; ++q) {
+            int idx = tid + q * 256, e = idx % TC_KC, j = idx / TC_KC;
+            pb[q] = (j0 + j < nc && e0 + e < k) ? B[(size_t)(j0 + j) * ldb + e0 + e] : 0.f;
+        }
+    };
+    gload(0);
+    for (int e0 = 0; e0 < k; e0 += TC_KC) {
+        __syncthreads();
+#pragma unroll
+        for (int q = 0; q < TC_KC * TC_BM / 256; ++q) {
+            int idx = tid + q * 256; As[idx / TC_BM][idx % TC_BM] = pa[q];
+        }
+#pragma unroll
+        for (int q = 0; q < TC_KC * TC_BN / 256; ++q) {
+            int idx = tid + q * 256; Bs[idx % TC_KC][idx / TC_KC] = pb[q];
+        }
+        __syncthreads();
+        if (e0 + TC_KC < k) gload(e0 + TC_KC);
+#pragma unroll
+        for (int g = 0; g < TC_KC / KB; ++g) {
+            if (e0 + g * KB >= k) break;
+#pragma unroll
+            for (int r = 0; r < TC_RM; ++r)
+#pragma unroll
+                for (int c = 0; c < TC_RN; ++c) blk[r][c] = 0.f;
+#pragma unroll
+            for (int u = 0; u < KB; ++u) {
+                const int e = g * KB + u;
+                float av[TC_RM], bv[TC_RN];
+#pragma unroll
+                for (int r = 0; r < TC_RM; ++r) av[r] = As[e][tx + 16 * r];
+#pragma unroll
+                for (int c = 0; c < TC_RN; ++c) bv[c] = Bs[e][ty + 16 * c];
+#pragma unroll
+                for (int r = 0; r < TC_RM; ++r)
+#pragma unroll
+                    for (int c = 0; c < TC_RN; ++c) blk[r][c] = fmaf(av[r], bv[c], blk[r][c]);
+            }
+#pragma unroll
+            for (int r = 0; r < TC_RM; ++r)
+#pragma unroll
+                for (int c = 0; c < TC_RN; ++c) {
+                    float term = blk[r][c] - cmp[r][c];
+                    float tsum = acc[r][c] + term;
+                    cmp[r][c] = (tsum - acc[r][c]) - term;
+                    acc[r][c] = tsum;
+                }
+        }
+    }
+#pragma unroll
+    for (int c = 0; c < TC_RN; ++c) {
+        int j = j0 + ty + 16 * c;
+        if (j < nc) {
+#pragma unroll
+            for (int r = 0; r < TC_RM; ++r) {
+                int i = i0 + tx + 16 * r;
+                if (i < np) C[(size_t)j * ldc + i] = acc[r][c];
+            }
+        }
+    }
+}
+
 extern "C" {
 
 void opensps_hip_imf_pieces_weights_sp(
@@ -2177,6 +2281,25 @@ void opensps_hip_imf_pieces_weights_dp(
         d_pt_cm, d_pt_cl, d_pt_q, d_w, d_wk, d_pps
     );
     (void)hipStreamSynchronize(s);
+}
+
+// Returns 0 if run, 1 if kb is not supported (the caller then takes its own kernel)
+int opensps_hip_template_columns(int np, int nc, int k, int kb, int lda, int ldb, int ldc,
+                                 const float* d_A, const float* d_B, float* d_C, void* stream) {
+    if (np <= 0 || nc <= 0 || k <= 0) return 0;
+    dim3 block(256);
+    dim3 grid((np + TC_BM - 1) / TC_BM, (nc + TC_BN - 1) / TC_BN);
+    hipStream_t s = (hipStream_t)stream;
+    switch (kb) {
+        case 1: template_columns_kernel<1><<<grid, block, 0, s>>>(np, nc, k, lda, ldb, ldc, d_A, d_B, d_C); break;
+        case 2: template_columns_kernel<2><<<grid, block, 0, s>>>(np, nc, k, lda, ldb, ldc, d_A, d_B, d_C); break;
+        case 4: template_columns_kernel<4><<<grid, block, 0, s>>>(np, nc, k, lda, ldb, ldc, d_A, d_B, d_C); break;
+        case 8: template_columns_kernel<8><<<grid, block, 0, s>>>(np, nc, k, lda, ldb, ldc, d_A, d_B, d_C); break;
+        case 16: template_columns_kernel<16><<<grid, block, 0, s>>>(np, nc, k, lda, ldb, ldc, d_A, d_B, d_C); break;
+        default: return 1;
+    }
+    (void)hipStreamSynchronize(s);
+    return 0;
 }
 
 void opensps_hip_fold_multi(

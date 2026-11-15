@@ -1791,6 +1791,31 @@ contains
         !$omp end target data
     end subroutine run_hip_fold_multi
 
+    !> The HIP template products (FP32 kernels): false if the block size KB is not one the kernel is built for
+    function run_hip_template_columns(np, k, nc, etpl, v, v0, yo, c0) result(done)
+        use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
+        integer, intent(in) :: np, k, nc, v0, c0
+        real(KP), intent(in), target, contiguous :: etpl(:,:), v(:,:)
+        real(KP), intent(inout), target, contiguous :: yo(:,:)
+        logical :: done
+        integer(c_int) :: rc
+        interface
+            function opensps_hip_template_columns(np, nc, k, kb, lda, ldb, ldc, a, b, c, stream) result(rc) &
+                bind(C, name="opensps_hip_template_columns")
+                import :: c_int, c_ptr
+                integer(c_int), value :: np, nc, k, kb, lda, ldb, ldc
+                type(c_ptr), value :: a, b, c, stream
+                integer(c_int) :: rc
+            end function opensps_hip_template_columns
+        end interface
+        !$omp target data use_device_addr(etpl, v, yo)
+        rc = opensps_hip_template_columns(int(np, c_int), int(nc, c_int), int(k, c_int), int(TUNE_TEMPLATE_KB, c_int), &
+                                          int(size(etpl, 1), c_int), int(size(v, 1), c_int), int(size(yo, 1), c_int), &
+                                          c_loc(etpl(1, 1)), c_loc(v(1, v0 + 1)), c_loc(yo(1, c0 + 1)), c_null_ptr)
+        !$omp end target data
+        done = rc == 0
+    end function run_hip_template_columns
+
     subroutine run_hip_imf_pieces_weights(m0, nc, n_pc_max, n_pts_max, ldw, imf_type, &
                                           perm, viz, pm, tot, n_pc, pt_off, pc_off, pc_ptr, &
                                           pt_mini, pt_m1, pt_m2, pt_llo, pt_dl, pt_first, &
@@ -2325,6 +2350,9 @@ contains
         end if
 
         if (dev) then
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+            if (run_hip_template_columns(np, k, nc, etpl, v, v0, yo, c0)) return
+#endif
 #if defined(OPENSPS_ACCEL_BLAS)
             call gemm_columns(np, nspec, n_eff, k, nc, etpl, v, v0, yo, c0)
             return
