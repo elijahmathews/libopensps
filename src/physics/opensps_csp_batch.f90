@@ -2112,7 +2112,8 @@ contains
 
         integer  :: nion, ncw, ch, c0, nc, m, i, k, j, map(NEMLINE)
         real(WP), allocatable :: lam_ion(:), ion(:,:), theta(:,:), logq(:), qy(:), qo(:), line_log(:,:), cont_log(:,:)
-        real(KP), allocatable :: sion(:,:), v(:,:), mm(:,:)
+        real(WP), allocatable :: lqy(:), lqo(:), lqt(:)
+        real(KP), allocatable :: sion(:,:), v(:,:), mm(:,:), fyv(:)
         real(KP) :: fy, fo, tt, u, c
         integer  :: kk
         real(WP) :: e
@@ -2133,10 +2134,11 @@ contains
 
         ch = max(1, min(n_mod, cue_batch_chunk))
         allocate(sion(nion, ch), ion(CUE_NION, ch), theta(CUE_NIN, ch), logq(ch), qy(ch), qo(ch), &
-                 line_log(cue_w%nlines, ch), cont_log(ncw, ch), v(ncw, ch), mm(ncw, ch))
+                 line_log(cue_w%nlines, ch), cont_log(ncw, ch), v(ncw, ch), mm(ncw, ch), &
+                 lqy(ch), lqo(ch), lqt(ch), fyv(ch))
 #ifdef OMP_TARGET
         !$omp target data map(to: lam_ion, map, gas) map(alloc: sion, ion, theta, logq, qy, qo, line_log, cont_log, &
-        !$omp&  v, mm)
+        !$omp&  v, mm, lqy, lqo, lqt, fyv)
 #endif
         do c0 = 0, n_mod - 1, ch
             nc = min(ch, n_mod - c0)
@@ -2147,6 +2149,23 @@ contains
             call cue_ionizing_params(nc, nion, lam_ion, sion, ion)
             call cue_inputs(nc, ion, gas(1, c0 + 1), theta, logq)
             call cue_forward(cue_w, nc, theta, line_log, cont_log, fp64=ctx%cue_fp64_val == 1)
+            ! Per model, once: the logarithms of the absorbed photons (qy = 0: log -> 0, the value is then not used)
+            ! and the young fraction of the continuum (FP64 logarithms and a division per (line, model),
+            ! (pixel, model) otherwise, at 1/64 of the FP32 rate on some GPUs)
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do
+#elif defined(_OPENMP)
+            !$omp parallel do
+#endif
+            do m = 1, nc
+                lqy(m) = 0.0_wp; lqo(m) = 0.0_wp; lqt(m) = 0.0_wp; fyv(m) = 0.0_KP
+                if (qy(m) > 0.0_wp) lqy(m) = log(qy(m))
+                if (qo(m) > 0.0_wp) lqo(m) = log(qo(m))
+                if (qy(m) + qo(m) > 0.0_wp) then
+                    lqt(m) = log(qy(m) + qo(m))
+                    fyv(m) = real(qy(m) / (qy(m) + qo(m)), KP)
+                end if
+            end do
             ! Lines: cue's L for its Q(U, n_H), scaled to the absorbed photons (FP64 exponent)
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do collapse(2) private(k, e)
@@ -2161,8 +2180,8 @@ contains
                         e = (line_log(k, m) - logq(m) - CUE_LOG_LSUN) * LN10
                         lum(i, c0 + m) = 0.0_KP
                         lum(i, n_mod + c0 + m) = 0.0_KP
-                        if (qy(m) > 0.0_wp) lum(i, c0 + m) = exp_kp(e + log(qy(m)))
-                        if (qo(m) > 0.0_wp) lum(i, n_mod + c0 + m) = exp_kp(e + log(qo(m)))
+                        if (qy(m) > 0.0_wp) lum(i, c0 + m) = exp_kp(e + lqy(m))
+                        if (qo(m) > 0.0_wp) lum(i, n_mod + c0 + m) = exp_kp(e + lqo(m))
                     else
                         lum(i, c0 + m) = 0.0_KP
                         lum(i, n_mod + c0 + m) = 0.0_KP
@@ -2181,13 +2200,14 @@ contains
             do m = 1, nc
                 do i = 1, ncw
                     if (qy(m) + qo(m) > 0.0_wp) then
-                        v(i, m) = exp_kp((cont_log(i, m) - logq(m) - CUE_LOG_LSUN) * LN10 + log(qy(m) + qo(m)))
+                        v(i, m) = exp_kp((cont_log(i, m) - logq(m) - CUE_LOG_LSUN) * LN10 + lqt(m))
                     else
                         v(i, m) = 0.0_KP
                     end if
                 end do
             end do
-            call cue_spline_solve(ncw, nc, cue_sp%h, cue_sp%cp, cue_sp%rden, cue_sp%aa, cue_sp%m0c, cue_sp%mnc, v, mm)
+            call cue_spline_solve(ncw, nc, cue_sp%h, cue_sp%cp, cue_sp%rden, cue_sp%aa, cue_sp%m0c, cue_sp%mnc, v, mm, &
+                                 cue_sp%rh6)
             ! The spline at each pixel, added to the young and old sums (in one pass)
             associate (sk => cue_sp%k, st => cue_sp%t, sh6 => cue_sp%hh6)
 #if defined(OMP_TARGET)
@@ -2204,8 +2224,7 @@ contains
                     u = 1.0_KP - tt
                     c = u * v(kk, m) + tt * v(kk + 1, m) + &
                         sh6(j) * ((u * u * u - u) * mm(kk, m) + (tt * tt * tt - tt) * mm(kk + 1, m))
-                    fy = 0.0_KP
-                    if (qy(m) + qo(m) > 0.0_wp) fy = real(qy(m) / (qy(m) + qo(m)), KP)
+                    fy = fyv(m)
                     fo = 1.0_KP - fy
                     yo(j, c0 + m) = yo(j, c0 + m) + fy * c
                     yo(j, n_mod + c0 + m) = yo(j, n_mod + c0 + m) + fo * c

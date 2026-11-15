@@ -1,6 +1,7 @@
 program imf_batch_dump
     !> Dump batched-SSP (IMF per model) results for a set of extreme IMF parameters: arg1 imf_type, arg2 file,
     !> imf_type -1: the fixed Chabrier IMF with the metallicity free per model (the per-metallicity basis, age_sums_z)
+    !> optional arg3 containing 'cue': the cue nebular model (OPENSPS_CUE_DATA; not with a free IMF),
     !> optional arg3 'z': also a redshift per model (0 to 3, 0 included: the observed-frame path with one redshift per model)
     use opensps_precision, only: WP
     use opensps_types, only: PARAMS
@@ -35,6 +36,9 @@ program imf_batch_dump
     call si('imf_type', merge(1, itype, itype < 0)); call si('zmet', 10); call si('sfh', 1)
     call sf('tau', 1.0_wp); call sf('tage', 10.0_wp); call sf('dust2', 0.3_wp); call sf('dust1', 0.5_wp)
     call si('add_neb_emission', 1); call si('add_igm_absorption', 1); call sf('zred', 0.5_wp)
+    if (index(zarg, 'cue') > 0) then
+        call si('nebular_model', 1); call si('cue_fp64', 0)
+    end if
     call si('add_agn_dust', 1); call sf('fagn', 0.1_wp); call si('compute_indices', 0)
     call opensps_context_prepare_pset(ctx)
     call opensps_context_get_pset(ctx, pset)
@@ -72,7 +76,7 @@ program imf_batch_dump
         psets(i)%imf3 = 0.3_wp + 0.057_wp * mod(13 * i, 64)
         psets(i)%vdmc = 0.02_wp + 0.004_wp * mod(i, 40)
         psets(i)%mdave = 0.1_wp + 0.03_wp * mod(i, 40)
-        if (trim(zarg) == 'z') psets(i)%zred = 0.05_wp * mod(i, 61)
+        if (index(zarg, 'z') > 0) psets(i)%zred = 0.05_wp * mod(i, 61)
         if (itype < 0) psets(i)%logzsol = -1.5_wp + 0.0267_wp * mod(5 * i, 64)
     end do
     if (itype >= 0) then
