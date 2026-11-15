@@ -123,7 +123,9 @@ Supported platforms and compilers, in order of how much they are used and tested
 
 The two GPU targets come first because that is where development and testing happen. The last four
 rows are secondary targets (they are on the [roadmap](doc/ROADMAP.md)) that are only exercised by
-CI, so expect rougher edges there. Windows is not currently tested. An LLVM flang offload build
+CI, so expect rougher edges there. Windows is not currently tested. Among NVIDIA GPUs, the A100 (`cc80`) is the tested
+part and the A40 (`cc86`) a supported target whose first measurements are pending; the P100 cannot be built for
+(nvfortran's OpenMP offload needs `cc70` or newer) and the V100 is not supported. An LLVM flang offload build
 that runs on the host (no GPU, or `OMP_TARGET_OFFLOAD=DISABLED`) is not supported: use a CPU build
 for host runs ([CHANGELOG.md](CHANGELOG.md), "Known limitations").
 

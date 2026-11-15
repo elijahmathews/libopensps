@@ -1,4 +1,4 @@
-# GPU plan: first GPU session (A100 or P100)
+# GPU plan: first GPU session (A100)
 
 > **OpenACC was removed (roadmap priority 2).** GPU builds are OpenMP target offload only:
 > `FC=nvfortran CC=nvc meson setup b -Daccel=omp_gpu -Dgpu_arch=cc80` (`-Daccel_blas=cublas` for
@@ -8,7 +8,7 @@
 > history of the sessions that built the GPU path; "Rules learned so far" still applies,
 > with `!$omp declare target` in place of `!$acc routine seq`.
 
-Runbook for the first session on an NVIDIA GPU node (A100, or P100: see below). The goal is to measure, then build the two
+Runbook for the first session on an NVIDIA GPU node (A100; the P100 section below is history). The goal is to measure, then build the two
 kernels that matter, with every step validated against the CPU build. Work on a branch
 (`gpu/a100-<topic>`), commit and push as you go (`git push origin <branch>`), and do not merge.
 
@@ -48,22 +48,18 @@ kernels that matter, with every step validated against the CPU build. Work on a 
   path /usr/lib/gcc/...", its `localrc` is stale after a GCC upgrade: rerun
   `makelocalrc -x <bindir>` (or point `NVLOCALRC` at a regenerated copy).
 
-## On a P100 node (ICDS cluster)
+## P100 and V100 (ICDS cluster): not supported
 
-The first session may run on a P100 (Pascal, `cc60`) instead of an A100. HPC SDK 26.x ships
-only CUDA 13 (`cc75` and newer), so load `nvhpc/25.1` (CUDA 12, still supports Pascal):
+The supported NVIDIA GPUs on the cluster are the A100 (`cc80`) and the A40 (`cc86`; first measurements
+pending).
 
-```
-module load nvhpc/25.1
-FC=nvfortran CC=nvc meson setup build_gpu --buildtype=release -Daccel=gpu -Dgpu_arch=cc60
-```
-
-(If `meson`/`ninja` are missing: `python3 -m pip install --user meson ninja`.) CI tests
-nvfortran 26.1 only, so an older-compiler front-end issue may appear at the first build; fix
-it in place. A P100 answers the correctness and where-the-time-goes questions as well as an
-A100; it cannot measure A100 absolute speed, TF32 or FP64 tensor-core GEMMs, and Nsight
-Compute does not support Pascal (Nsight Systems and `compute-sanitizer` do). Its FP64 runs at
-half the FP32 rate, so FP32 gains there (~2x) understate those on consumer GPUs.
+- **P100 (Pascal, `cc60`)** cannot be built for. nvfortran 25.1 compiles OpenMP target offload only for
+  compute capability `cc70` or newer (`NVFORTRAN-S-0155: OpenMP GPU Offload is available only on systems
+  with NVIDIA GPUs with compute capability '>= cc70'`), and HPC SDK 26 dropped Pascal. The OpenACC build
+  (`-Daccel=gpu`) that the P100 sessions used was removed (#23; `meson.options` offers `none` and
+  `omp_gpu`). The P100 sessions' notes and numbers in `doc/GPU_RESULTS.md` are history.
+- **V100 (Volta, `cc70`)** is not supported: HPC SDK 26 dropped it, and the project does not keep a
+  separate old-compiler path for it.
 
 ## On the R9700 desktop (Fedora 44, AMD Radeon AI PRO R9700)
 

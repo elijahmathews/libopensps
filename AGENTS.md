@@ -132,8 +132,10 @@ format, conversion, packing; format and workflows in `doc/DATA_FORMAT.md`).
 
 ## Machines
 
-- Penn State ICDS cluster: `module load nvhpc/25.1` (CUDA 12; P100 is `cc60`, A100 `cc80`).
-  HPC SDK 26 dropped Pascal and Volta.
+- Penn State ICDS cluster: `module load nvhpc/25.1` (CUDA 12). The supported GPUs there are the
+  A100 (`cc80`) and the A40 (`cc86`; first measurements pending). The P100 (`cc60`) cannot be
+  built for: nvfortran's OpenMP offload needs `cc70` or newer, and OpenACC is gone (#23). The V100
+  (`cc70`) is not supported: HPC SDK 26 dropped Pascal and Volta.
 - User `elijahmathews`'s laptop has an AMD Radeon 780M iGPU (gfx1103) that also drives the
   display. A GPU fault or hang there resets the GPU and kills the desktop session. Do not
   run GPU offload tests on it without the user's go-ahead; debug with host runs
