@@ -27,17 +27,18 @@ Config `full` (MIST + MILES + DL07, dust, nebular, IGM, AGN, indices). Benchmark
 
 | step | N=1e3 | N=1e4 | N=1e5 |
 |---|---|---|---|
-| nebular kernels (continuum + lines, 3 kernels) | 43.9 % | 50.4 % | 50.7 % |
+| nebular kernels (continuum + lines, 3 kernels) | 39.4 % | 48.8 % | 49.2 % |
 | dust attenuation (`attenuate_batch`) | 6.4 % | 8.4 % | 8.4 % |
-| AGN / line profiles / dust emission / indices / IGM / other | ~25 % | ~25 % | ~26 % |
-| SFH weights (`compute_csp_batch` L912; not a GEMM) | 12.5 % | 1.9 % | ~0.3 % |
+| AGN / line profiles / dust emission / indices / IGM / other | 16.3 % | 19.6 % | 19.5 % |
+| mass/lbol weights + observed-frame photometry (not GEMMs) | 3.2 % | 2.1 % | 2.3 % |
+| SFH weights (`compute_csp_batch` L912; not a GEMM) | 12.5 % | 1.9 % | 0.9 % |
 | **age sum GEMM** (SSP basis x SFH weights) | 2.6 % | 3.2 % | 3.2 % |
 | **band-flux GEMM** (band table x spectrum) | 5.5 % | 4.5 % | 2.6 % |
 | **GEMMs together** | **8.0 %** | **7.8 %** | **5.8 %** |
 
 Generous upper bound, also counting the SFH-weights kernel, the mass/lbol weight kernel and the observed-frame
-photometry kernel as "GEMM-shaped": about 24 % at N=1e3 (launch-bound, dominated by the weights kernel), 13 % at
-1e4, 9 % at 1e5. The gate holds on the strict definition at every size, and the generous one at 1e4 and 1e5.
+photometry kernel as "GEMM-shaped": 23.8 % at N=1e3 (launch-bound, dominated by the weights kernel), 11.8 % at
+1e4, 9.0 % at 1e5. The gate holds at every size on both definitions (the generous one is just under 25 % at N=1e3).
 
 ## GEMM shapes and achieved speed (FP32 cuBLAS `sgemm`, peak 19.49 TFLOPS)
 
@@ -55,7 +56,7 @@ already at 84-91 % of the FP32 peak; the band-flux GEMM is small and launch-limi
   (156 vs 19.5 TFLOPS); GEMM times here are 0.2-15 ms per call, so at best they shrink to a few percent of the batch.
 - End to end 1.1-1.3x: **not reachable.** Amdahl with the GEMM fraction f = 0.06-0.09: 4x faster GEMMs give
   1.05-1.07x, infinitely fast 1.06-1.09x. Reaching 1.1x would need f >= 0.09 and an infinite speed-up.
-- The batch is dominated by the nebular kernels (~50 % at N >= 1e4), then attenuation (8 %): speed work belongs there.
+- The batch is dominated by the nebular kernels (~49 % at N >= 1e4), then attenuation (8 %): speed work belongs there.
 
 ## Not run
 
