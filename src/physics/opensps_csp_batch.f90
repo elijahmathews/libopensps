@@ -4236,6 +4236,13 @@ contains
         type(params_core), pointer :: pl
 
         dt = ctx%dust_type_val
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION) && defined(__flang__)
+        ! The tabulated curves (not types 3 and 5, whose curve is computed per pixel): the FP32 HIP kernel
+        if (dt /= 3 .and. dt /= 5) then
+            call attenuate_hip(ctx, pbuf, n_mod, nspec, dt, iq, iu, wq, wu, gam, emis, agn_on, yo, total, absorbed, tdiff)
+            return
+        end if
+#endif
         ! The grid-only curve tables of the context (attenuation_tables_cached, built once per dust type)
         associate (ttab => ctx%state%att_tab, ltab => ctx%state%att_ltab)
 #if defined(OMP_TARGET)
@@ -4291,6 +4298,104 @@ contains
         end do
         end associate
     end subroutine attenuate_batch
+
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION) && defined(__flang__)
+    !> attenuate_batch with the HIP kernel (opensps_hip_attenuate): the per-model parameters of the
+    !> transmissions and of the DL07 interpolation are formed once per model in FP32 (mp, mi: layout in the kernel's
+    !> header; the products that need FP64 are the interpolation weights and the power-law arguments, which the
+    !> kernel forms from hi + lo pairs), then every (pixel, model) is a short FP32 expression
+    subroutine attenuate_hip(ctx, pbuf, n_mod, nspec, dt, iq, iu, wq, wu, gam, emis, agn_on, yo, total, absorbed, tdiff)
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)              :: n_mod, nspec, dt
+        integer(int64), intent(in), target :: pbuf(NPW, n_mod)
+        integer, intent(in)              :: iq(n_mod), iu(n_mod)
+        real(WP), intent(in)             :: wq(n_mod), wu(n_mod), gam(n_mod)
+        logical, intent(in)              :: emis(n_mod), agn_on(n_mod)
+        real(KP), intent(inout), target  :: yo(nspec, 2 * n_mod)
+        real(KP), intent(out), target    :: total(nspec, n_mod), absorbed(nspec, n_mod)
+        real(KP), intent(inout), target  :: tdiff(:,:)
+        real(KP), allocatable, target :: mp(:,:)
+        integer, allocatable, target  :: mi(:,:)
+        type(params_core), pointer :: pl
+        integer  :: m, fl
+        real(WP) :: ed, e1
+        real(KP) :: ehi, elo, e1hi, e1lo
+
+        allocate(mp(24, n_mod), mi(4, n_mod))
+        !$omp target data map(alloc: mp, mi)
+        !$omp target teams distribute parallel do private(pl, fl, ed, e1, ehi, elo, e1hi, e1lo)
+        do m = 1, n_mod
+            call c_f_pointer(c_loc(pbuf(1, m)), pl)
+            fl = 0
+            ed = 0.0_wp
+            mp(3, m) = 0.0_KP; mp(4, m) = 0.0_KP; mp(5, m) = 0.0_KP
+            if (dt == 0) then
+                ed = pl%dust_index
+            else if (dt == 1) then
+                mp(3, m) = 1.0_KP / real(pl%mwr, KP)
+                mp(4, m) = real(pl%uvb, KP)
+                mp(5, m) = mp(4, m) * mp(3, m)
+            else if (dt == 4) then
+                ed = pl%dust_index
+                mp(3, m) = real(ed, KP)
+            end if
+            if (ed /= 0.0_wp) fl = fl + 1
+            ehi = real(ed, KP);  elo = real(ed - real(ehi, WP), KP)
+            mp(1, m) = ehi; mp(2, m) = elo
+            mp(6, m) = real(pl%dust2, KP)
+            mp(7, m) = real(pl%dust1, KP)
+            e1 = pl%dust1_index
+            e1hi = real(e1, KP); e1lo = real(e1 - real(e1hi, WP), KP)
+            mp(8, m) = e1hi; mp(9, m) = e1lo
+            mp(10, m) = real(pl%dust3, KP)
+            mp(11, m) = real(pl%frac_obrun, KP)
+            mp(12, m) = real(pl%frac_nodust, KP)
+            if (.not. (pl%dust1 <= SAFE_FLOOR .or. 1.0_wp - pl%frac_obrun <= SAFE_FLOOR)) fl = fl + 2
+            if (abs(pl%dust3) > SAFE_FLOOR) fl = fl + 4
+            if (1.0_wp - pl%frac_nodust > SAFE_FLOOR) fl = fl + 8
+            if (emis(m)) fl = fl + 16
+            if (agn_on(m)) fl = fl + 32
+            mp(13, m) = real((1 - wq(m)) * (1 - wu(m)), KP)
+            mp(14, m) = real(wq(m) * (1 - wu(m)), KP)
+            mp(15, m) = real(wq(m) * wu(m), KP)
+            mp(16, m) = real((1 - wq(m)) * wu(m), KP)
+            mp(17, m) = real(gam(m), KP)
+            mi(1, m) = fl
+            mi(2, m) = iq(m) - 1
+            mi(3, m) = iu(m) - 1
+            mi(4, m) = 0
+        end do
+        call attenuate_hip_launch(nspec, n_mod, size(ctx%state%dustem2_dustem, 2), emis, mp, mi, ctx%state%att_tab, &
+                                  ctx%state%att_ltab, ctx%state%dustem2_dustem, yo, total, absorbed, tdiff)
+        !$omp end target data
+    end subroutine attenuate_hip
+
+    subroutine attenuate_hip_launch(nspec, n_mod, nq, emis_h, mp, mi, ttab, ltab, dustem, yo, total, absorbed, tdiff)
+        use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr, c_size_t
+        integer, intent(in) :: nspec, n_mod, nq
+        logical, intent(in) :: emis_h(:)
+        real(KP), intent(in), target, contiguous :: mp(:,:), ttab(:,0:)
+        integer, intent(in), target, contiguous  :: mi(:,:)
+        real(WP), intent(in), target, contiguous :: ltab(:), dustem(:,:,:)
+        real(KP), intent(inout), target, contiguous :: yo(:,:), tdiff(:,:)
+        real(KP), intent(out), target, contiguous :: total(:,:), absorbed(:,:)
+        interface
+            subroutine opensps_hip_attenuate(nspec, n_mod, nq, mp, mi, ttab, ltab, dustem, ndust, any_emis, yo, total, &
+                                             absorbed, tdiff, stream) bind(C, name="opensps_hip_attenuate")
+                import :: c_int, c_ptr, c_size_t
+                integer(c_int), value :: nspec, n_mod, nq, any_emis
+                integer(c_size_t), value :: ndust
+                type(c_ptr), value :: mp, mi, ttab, ltab, dustem, yo, total, absorbed, tdiff, stream
+            end subroutine opensps_hip_attenuate
+        end interface
+        !$omp target data use_device_addr(mp, mi, ttab, ltab, dustem, yo, total, absorbed, tdiff)
+        call opensps_hip_attenuate(int(nspec, c_int), int(n_mod, c_int), int(nq, c_int), c_loc(mp(1, 1)), c_loc(mi(1, 1)), &
+                                   c_loc(ttab(1, 0)), c_loc(ltab(1)), c_loc(dustem(1, 1, 1)), int(size(dustem), c_size_t), &
+                                   int(merge(1, 0, any(emis_h)), c_int), c_loc(yo(1, 1)), &
+                                   c_loc(total(1, 1)), c_loc(absorbed(1, 1)), c_loc(tdiff(1, 1)), c_null_ptr)
+        !$omp end target data
+    end subroutine attenuate_hip_launch
+#endif
 
     !> The three transmissions of one pixel and model (attenuate_batch, and its adjoint in
     !> batch_backward): diffuse (tau_d, trans_d), birth cloud (tau_b, trans_birth) and the old

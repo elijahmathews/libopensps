@@ -2648,7 +2648,137 @@ __global__ void __launch_bounds__(256, 2) band_gemm_kernel(
 static float* g_band_A = nullptr;
 static size_t g_band_A_n = 0;
 
+
+// ---------------------------------------------------------------------------
+// Dust attenuation of the batch (attenuate_batch, FP32 kernels, dust types with the tabulated curves)
+//
+// The Fortran kernel read ~20 FP64 parameters of the model and formed ~35 FP64 operations (the DL07
+// interpolation) per (pixel, model): FP64 is 1/64 of the FP32 rate on the R9700 and this kernel was 13%
+// of the fixed-IMF forward call. Here the per-model parameters are FP32 (mp, mi: prepared once per model),
+// the arguments of the power laws, e ln(lambda / lambda_V), are formed as unevaluated sums of two FP32
+// numbers (hi + lo, the fma gives the product's rounding error) so that exp(p) (1 + r) is good to the
+// rounding of expf (rule 3 of doc/MIXED_PRECISION.md: no e L in FP32), and the DL07 template is the
+// convex combination of the 4 x 2 table values with FP32 weights (the shape is renormalised afterwards).
+// mp: 0 e_hi, 1 e_lo, 2 s1, 3 s2, 4 s3, 5 dust2, 6 dust1, 7 e1_hi, 8 e1_lo, 9 dust3, 10 frac_obrun,
+//     11 frac_nodust, 12-15 DL07 corner weights, 16 gamma
+// mi: 0 flags (1 has_ed, 2 birth, 4 old, 8 nodust, 16 emis, 32 agn), 1 iq (0-based), 2 iu (0-based)
+// ---------------------------------------------------------------------------
+__device__ inline float expdf(float ehi, float elo, float lhi, float llo) {
+    float p = ehi * lhi;
+    float r = fmaf(ehi, lhi, -p) + (ehi * llo + elo * lhi);
+    float ex = expf(p);
+    return fmaf(ex, r, ex);
+}
+
+__device__ inline float one_minus_trans_f(float x, float t) {
+    if (t == 1.0f) return x;
+    if (fabsf(x) < 1.0f) return (1.0f - t) * x / (-logf(t));
+    return 1.0f - t;
+}
+
+__global__ void split_ltab_kernel(int n, const double* __restrict__ l, float2* __restrict__ out) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float h = (float)l[i];
+    out[i] = make_float2(h, (float)(l[i] - (double)h));
+}
+
+__global__ void __launch_bounds__(256) attenuate_kernel(
+    int nspec, int n_mod, int nq,
+    const float* __restrict__ mp, const int* __restrict__ mi,
+    const float* __restrict__ ttab, const float2* __restrict__ ltf, const float2* __restrict__ dustem,
+    float* __restrict__ yo, float* __restrict__ total, float* __restrict__ absorbed, float* __restrict__ tdiff
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int m = blockIdx.y;
+    if (i >= nspec) return;
+    const float* p = mp + (size_t)m * 24;
+    const int fl = mi[m * 4];
+    const float young = yo[(size_t)m * nspec + i];
+    const float old = yo[(size_t)(n_mod + m) * nspec + i];
+    const float2 L = ltf[i];
+    const float frac_obrun = p[10], frac_nodust = p[11];
+
+    float curve = ttab[i] + p[2] * ttab[(size_t)nspec + i] + p[3] * ttab[(size_t)2 * nspec + i] + p[4] * ttab[(size_t)3 * nspec + i];
+    if (fl & 1) curve *= expdf(p[0], p[1], L.x, L.y);
+    const float tau_d = p[5] * curve;
+    const float trans_d = expf(-tau_d);
+    float tau_b = 0.f, trans_birth = 1.f, tau_o = 0.f, trans_old = 1.f;
+    if (fl & 2) { tau_b = p[6] * expdf(p[7], p[8], L.x, L.y); trans_birth = expf(-tau_b); }
+    if (fl & 4) { tau_o = p[9] * curve; trans_old = expf(-tau_o); }
+    if (tdiff != nullptr && (fl & 32)) tdiff[(size_t)m * nspec + i] = trans_d;
+
+    const float spec_sum = (young * trans_birth * (1.0f - frac_obrun) + young * frac_obrun) + old * trans_old;
+    total[(size_t)m * nspec + i] = (fl & 8) ? spec_sum * (trans_d * (1.0f - frac_nodust) + frac_nodust) : spec_sum;
+    if (fl & 16) {
+        const float one_m_tb = one_minus_trans_f(tau_b, trans_birth);
+        const float one_m_to = one_minus_trans_f(tau_o, trans_old);
+        const float one_m_td = (fl & 8) ? (1.0f - frac_nodust) * one_minus_trans_f(tau_d, trans_d) : 0.f;
+        const float a_young = trans_birth * (1.0f - frac_obrun) + frac_obrun;
+        absorbed[(size_t)m * nspec + i] = young * ((1.0f - frac_obrun) * one_m_tb + a_young * one_m_td) +
+                                          old * (one_m_to + trans_old * one_m_td);
+        yo[(size_t)m * nspec + i] = trans_d;
+        const int iq = mi[m * 4 + 1], iu = mi[m * 4 + 2];
+        const size_t plane = (size_t)nspec * nq;
+        const float2* d0 = dustem + (size_t)i + (size_t)iq * nspec + (size_t)(2 * iu) * plane;   // (i, iq, 2 iu - 1), 0-based
+        const float2* d1 = d0 + 2 * plane;                                                          // (i, iq, 2 (iu + 1) - 1)
+        // 4 corners x (lo, hi) of the table, each a hi + lo pair: the convex sums in FP32 from exact-ish inputs
+        float lo = 0.f, hi = 0.f, lo2 = 0.f, hi2 = 0.f;
+        {
+            const float2 a = d0[0], b = d0[nspec], c = d1[nspec], d = d1[0];
+            lo = fmaf(p[12], a.x, fmaf(p[13], b.x, fmaf(p[14], c.x, p[15] * d.x)));
+            lo2 = fmaf(p[12], a.y, fmaf(p[13], b.y, fmaf(p[14], c.y, p[15] * d.y)));
+        }
+        {
+            const float2 a = d0[plane], b = d0[nspec + plane], c = d1[nspec + plane], d = d1[plane];
+            hi = fmaf(p[12], a.x, fmaf(p[13], b.x, fmaf(p[14], c.x, p[15] * d.x)));
+            hi2 = fmaf(p[12], a.y, fmaf(p[13], b.y, fmaf(p[14], c.y, p[15] * d.y)));
+        }
+        lo += lo2; hi += hi2;
+        yo[(size_t)(n_mod + m) * nspec + i] = fmaxf((1.0f - p[16]) * lo + p[16] * hi, 1.17549435e-38f);
+    } else {
+        absorbed[(size_t)m * nspec + i] = 0.f;
+    }
+}
+
+__global__ void split_dustem_kernel(size_t n, const double* __restrict__ d, float2* __restrict__ out) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float h = (float)d[i];
+    out[i] = make_float2(h, (float)(d[i] - (double)h));
+}
+
+static float2* g_ltf = nullptr;
+static size_t g_ltf_n = 0;
+static float2* g_dust = nullptr;
+static size_t g_dust_n = 0;
+
 extern "C" {
+
+void opensps_hip_attenuate(int nspec, int n_mod, int nq, const float* d_mp, const int* d_mi, const float* d_ttab,
+                           const double* d_ltab, const double* d_dustem, size_t n_dustem, int any_emis,
+                           float* d_yo, float* d_total, float* d_absorbed, float* d_tdiff, void* stream) {
+    if (nspec <= 0 || n_mod <= 0) return;
+    hipStream_t s = (hipStream_t)stream;
+    if ((size_t)nspec > g_ltf_n) {
+        if (g_ltf) (void)hipFree(g_ltf);
+        if (hipMalloc((void**)&g_ltf, (size_t)nspec * sizeof(float2)) != hipSuccess) { g_ltf = nullptr; g_ltf_n = 0; return; }
+        g_ltf_n = nspec;
+    }
+    split_ltab_kernel<<<(nspec + 255) / 256, 256, 0, s>>>(nspec, d_ltab, g_ltf);
+    if (any_emis) {
+        // (the table as hi + lo pairs; formed per call: 0.3 ms, and no stale copy if the table is reloaded)
+        if (n_dustem > g_dust_n) {
+            if (g_dust) (void)hipFree(g_dust);
+            if (hipMalloc((void**)&g_dust, n_dustem * sizeof(float2)) != hipSuccess) { g_dust = nullptr; g_dust_n = 0; return; }
+            g_dust_n = n_dustem;
+        }
+        split_dustem_kernel<<<(unsigned)((n_dustem + 255) / 256), 256, 0, s>>>(n_dustem, d_dustem, g_dust);
+    }
+    attenuate_kernel<<<dim3((nspec + 255) / 256, n_mod), 256, 0, s>>>(nspec, n_mod, nq, d_mp, d_mi, d_ttab, g_ltf, g_dust,
+                                                                     d_yo, d_total, d_absorbed, d_tdiff);
+    (void)hipStreamSynchronize(s);
+}
 
 void opensps_hip_band_fluxes_sp(
     int n_mod,
