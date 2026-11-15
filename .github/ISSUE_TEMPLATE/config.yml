@@ -1,5 +1,3 @@
 blank_issues_enabled: true
-contact_links:
-  - name: Security vulnerability
-    url: https://github.com/elijahmathews/libopensps/blob/main/SECURITY.md
-    about: Please report security vulnerabilities privately following SECURITY.md rather than opening a public issue.
+# No contact link for security reports: GitHub adds its own "Report a security vulnerability" entry (pointing at
+# SECURITY.md) to the issue chooser whenever the repository has a security policy, and a link of ours listed it twice.
