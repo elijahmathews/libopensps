@@ -2002,6 +2002,83 @@ __global__ void __launch_bounds__(128, 8) imf_pieces_weights_f32_kernel(
     d_pps[pps_base + 2 * ldw] = ((double)sq + (double)cq_) * 1.2089258196146292e24;   // 2^80
 }
 
+
+// ---------------------------------------------------------------------------
+// Forward fold of the per-point weights into template weights (fold_multi, first loop)
+//
+// vp(j, 1..4, s) = young / old / young-EUV / old-EUV sums of segment s of virtual model j:
+// the sum over the segment's entries (template e, point p, value eff_val), grouped by the age t of
+// the point, of eff_val w(j, p) times wsfh(m, t) cz(m), split at the escape age tesc.
+// Per age the entries are summed in FP32 from exact products (eff_val as an FP32 hi + lo pair, fma
+// error terms, Neumaier) and widened to FP64: the same value as the FP64 sum to ~1e-14, with no FP64
+// work per entry (FP64 is 1/64 of the FP32 rate on the R9700). One block = 128 consecutive models of
+// one segment; the grid runs the segments fastest, so the blocks of one model range are neighbours in
+// time (the weights of 128 models, 54 MB, are reused by the ~7.6 segments sharing a point).
+// ---------------------------------------------------------------------------
+__global__ void __launch_bounds__(128, 8) fold_multi_kernel(
+    int m0_0based, int nc, int nt_neb, int ldw, int n_mod_ld, int ldv, int nseg_max,
+    const int*    __restrict__ d_perm,
+    const int*    __restrict__ d_viz,
+    const int*    __restrict__ d_n_seg,
+    const int*    __restrict__ d_pt_off,
+    const int*    __restrict__ d_seg_off,
+    const int*    __restrict__ d_pt_age,
+    const int*    __restrict__ d_eff_pt,
+    const int*    __restrict__ d_seg_ptr,
+    const float2* __restrict__ d_eff_f,
+    const double* __restrict__ d_wsfh,
+    const int*    __restrict__ d_it_tesc,
+    const double* __restrict__ d_fesc,
+    const double* __restrict__ d_cz,
+    const float*  __restrict__ d_w,
+    double*       __restrict__ d_vp
+) {
+    int s = blockIdx.x;                         // 0-based segment
+    int j = blockIdx.y * blockDim.x + threadIdx.x;
+    if (j >= nc) return;
+    int idx = m0_0based + j;
+    int iz0 = d_viz[idx] - 1;
+    if (s >= d_n_seg[iz0]) return;
+    int m = d_perm[idx] - 1;
+    int sg = d_seg_off[iz0] + s;                // 0-based index of the segment pointer
+    int tesc = d_it_tesc[m];
+    double f = d_fesc[m];
+    double cz = d_cz[m];
+    int k0 = d_seg_ptr[sg] - 1, k1 = d_seg_ptr[sg + 1] - 1;   // entries k0 .. k1 - 1 (0-based)
+    int po = d_pt_off[iz0];
+    double y = 0.0, o = 0.0, ye = 0.0, oe = 0.0;
+    int tc = 0;
+    float as = 0.f, ac = 0.f;
+    for (int k = k0; k <= k1; ++k) {
+        int t = -1, ep = 0;
+        if (k < k1) { ep = d_eff_pt[k] - 1; t = d_pt_age[po + ep]; }
+        if (t != tc) {
+            if (tc > 0) {
+                double a = (double)as + (double)ac;
+                double x = a * d_wsfh[m + (size_t)n_mod_ld * (tc - 1)] * cz;
+                double ae = (tc <= nt_neb) ? f * x : x;
+                if (tc <= tesc) { y += x; ye += ae; } else { o += x; oe += ae; }
+            }
+            tc = t; as = 0.f; ac = 0.f;
+        }
+        if (t > 0) {
+            float2 ev = d_eff_f[k];
+            float w = d_w[(size_t)ep * ldw + j];
+            float p1 = ev.x * w;
+            float e1 = fmaf(ev.x, w, -p1);
+            float tt = as + p1;
+            float bp = tt - as;
+            ac += (as - (tt - bp)) + (p1 - bp) + e1 + ev.y * w;
+            as = tt;
+        }
+    }
+    size_t base = (size_t)s * 4 * ldv + j;
+    d_vp[base] = y;
+    d_vp[base + ldv] = o;
+    d_vp[base + 2 * (size_t)ldv] = ye;
+    d_vp[base + 3 * (size_t)ldv] = oe;
+}
+
 extern "C" {
 
 void opensps_hip_imf_pieces_weights_sp(
@@ -2098,6 +2175,25 @@ void opensps_hip_imf_pieces_weights_dp(
         d_perm, d_viz, d_pm, d_tot, d_n_pc, d_pt_off, d_pc_off, d_pc_ptr,
         d_pt_mini, d_pt_m1, d_pt_m2, d_pt_llo, d_pt_dl, d_pt_first,
         d_pt_cm, d_pt_cl, d_pt_q, d_w, d_wk, d_pps
+    );
+    (void)hipStreamSynchronize(s);
+}
+
+void opensps_hip_fold_multi(
+    int m0_0based, int nc, int nt_neb, int ldw, int n_mod_ld, int ldv, int nseg_max,
+    const int* d_perm, const int* d_viz, const int* d_n_seg, const int* d_pt_off, const int* d_seg_off,
+    const int* d_pt_age, const int* d_eff_pt, const int* d_seg_ptr, const float* d_eff_f,
+    const double* d_wsfh, const int* d_it_tesc, const double* d_fesc, const double* d_cz,
+    const float* d_w, double* d_vp, void* stream
+) {
+    if (nc <= 0 || nseg_max <= 0) return;
+    dim3 block(128);
+    dim3 grid(nseg_max, (nc + 127) / 128);
+    hipStream_t s = (hipStream_t)stream;
+    fold_multi_kernel<<<grid, block, 0, s>>>(
+        m0_0based, nc, nt_neb, ldw, n_mod_ld, ldv, nseg_max,
+        d_perm, d_viz, d_n_seg, d_pt_off, d_seg_off, d_pt_age, d_eff_pt, d_seg_ptr,
+        reinterpret_cast<const float2*>(d_eff_f), d_wsfh, d_it_tesc, d_fesc, d_cz, d_w, d_vp
     );
     (void)hipStreamSynchronize(s);
 }

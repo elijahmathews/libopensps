@@ -84,6 +84,8 @@ module opensps_ssp_batch
         !> FP32 epsilon times its size), the coefficients cm, cl and q * 2^-80 (photon rates exceed the
         !> FP32 range), one pad
         real(c_float), allocatable :: pt_f(:,:)
+        !> The template entries' values eff_val as FP32 hi + lo pairs (the HIP fold's exact products), 2 per entry
+        real(c_float), allocatable :: eff_f(:,:)
         !> The template entries by point (the reverse pass's gathers): point gp (global index) has the
         !> entries pe_k(pe_ptr(gp) .. pe_ptr(gp + 1) - 1) (global entry indices), of templates pe_e (local)
         integer, allocatable :: pe_ptr(:), pe_k(:), pe_e(:)
@@ -149,6 +151,12 @@ contains
             end associate
         end do
         call imf_bin_logs(set%pt_m1, set%pt_m2, set%pt_llo, set%pt_dl)
+        allocate(set%eff_f(2, max(nen, 1)))
+        set%eff_f = 0.0_c_float
+        do i = 1, nen
+            set%eff_f(1, i) = real(set%eff_val(i), c_float)
+            set%eff_f(2, i) = real(set%eff_val(i) - real(set%eff_f(1, i), WP), c_float)
+        end do
         allocate(set%pt_f(8, max(np, 1)))
         set%pt_f = 0.0_c_float
         do i = 1, np
@@ -214,7 +222,7 @@ contains
             !$omp target exit data map(delete: set%n_pc, set%n_seg, set%n_eff, set%pt_off, set%pc_off, set%seg_off, &
             !$omp     set%ent_off, set%eff_off, set%pt_first, set%pt_age, set%pc_ptr, set%age_pc, set%pt_ptr, set%seg_ptr, &
             !$omp     set%seg_first, set%eff_pt, set%pt_mini, set%pt_m1, set%pt_m2, set%pt_cm, set%pt_cl, set%pt_q, &
-            !$omp     set%age_mmax, set%eff_val, set%pt_llo, set%pt_dl, set%pt_f, set%pe_ptr, set%pe_k, set%pe_e)
+            !$omp     set%age_mmax, set%eff_val, set%pt_llo, set%pt_dl, set%pt_f, set%eff_f, set%pe_ptr, set%pe_k, set%pe_e)
             set%on_device = .false.
         end if
 #endif
@@ -228,7 +236,7 @@ contains
                                             set%ent_off, set%eff_off)
         if (allocated(set%pt_first)) deallocate(set%pt_first, set%pt_age, set%pt_mini, set%pt_m1, set%pt_m2, set%pt_cm, &
                                                 set%pt_cl, set%pt_q, set%pc_ptr, set%seg_ptr, set%seg_first, set%eff_pt, &
-                                                set%eff_val, set%age_pc, set%pt_ptr, set%age_mmax, set%pt_llo, set%pt_dl, set%pt_f)
+                                                set%eff_val, set%age_pc, set%pt_ptr, set%age_mmax, set%pt_llo, set%pt_dl, set%pt_f, set%eff_f)
         if (allocated(set%pe_ptr)) deallocate(set%pe_ptr, set%pe_k, set%pe_e)
         set%nz = 0; set%nt = 0; set%n_pts_max = 0; set%n_eff_max = 0; set%n_seg_max = 0; set%n_pc_max = 0
     end subroutine ssp_opset_free
@@ -242,7 +250,7 @@ contains
         !$omp target enter data map(to: set%n_pc, set%n_seg, set%n_eff, set%pt_off, set%pc_off, set%seg_off, &
         !$omp     set%ent_off, set%eff_off, set%pt_first, set%pt_age, set%pc_ptr, set%age_pc, set%pt_ptr, set%seg_ptr, &
         !$omp     set%seg_first, set%eff_pt, set%pt_mini, set%pt_m1, set%pt_m2, set%pt_cm, set%pt_cl, set%pt_q, &
-        !$omp     set%age_mmax, set%eff_val, set%pt_llo, set%pt_dl, set%pt_f, set%pe_ptr, set%pe_k, set%pe_e)
+        !$omp     set%age_mmax, set%eff_val, set%pt_llo, set%pt_dl, set%pt_f, set%eff_f, set%pe_ptr, set%pe_k, set%pe_e)
         do iz = 1, set%nz
             call ssp_operator_to_device(set%ops(iz))   ! (the template matrices)
         end do
@@ -399,7 +407,7 @@ contains
                 call opensps_trace_push("fwd_fold_multi")
                 call fold_multi(m0, nc, set%n_eff_max, set%n_seg_max, nt_neb, neb_cols, wsfh, it_tesc, fesc, &
                                 set%n_seg, set%n_eff, set%pt_off, set%seg_off, set%eff_off, set%ent_off, set%pt_age, &
-                                set%eff_pt, set%eff_val, set%seg_ptr, set%seg_first, perm, viz, cz, wk, vp, v, veuv)
+                                set%eff_pt, set%eff_val, set%seg_ptr, set%seg_first, perm, viz, cz, wk, vp, v, veuv, set%eff_f)
                 call opensps_trace_pop()
                 ! The template products, per run of one metallicity in the chunk
                 if (direct) then
@@ -1748,6 +1756,41 @@ contains
 #endif
     end subroutine run_hip_adj_lq
 
+    !> The HIP fold of the weights into the segments' sums vp (the first loop of fold_multi)
+    subroutine run_hip_fold_multi(m0, nc, nt_neb, n_seg_max, wsfh, it_tesc, fesc, n_seg, pt_off, seg_off, pt_age, eff_pt, &
+                                  seg_ptr, perm, viz, cz, w, vp, eff_f)
+        use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
+        integer, intent(in) :: m0, nc, nt_neb, n_seg_max
+        real(WP), intent(in), target, contiguous :: wsfh(:,:), fesc(:), cz(:)
+        integer, intent(in), target, contiguous :: it_tesc(:), n_seg(:), pt_off(:), seg_off(:), pt_age(:), eff_pt(:), &
+                                                   seg_ptr(:), perm(:), viz(:)
+        real(KP), intent(in), target, contiguous :: w(:,:)
+        real(WP), intent(inout), target, contiguous :: vp(:,:,:)
+        real(c_float), intent(in), target, contiguous :: eff_f(:,:)
+        interface
+            subroutine opensps_hip_fold_multi(m0, nc, nt_neb, ldw, n_mod_ld, ldv, nseg_max, perm, viz, n_seg, pt_off, &
+                seg_off, pt_age, eff_pt, seg_ptr, eff_f, wsfh, it_tesc, fesc, cz, w, vp, stream) &
+                bind(C, name="opensps_hip_fold_multi")
+                import :: c_int, c_ptr
+                integer(c_int), value :: m0, nc, nt_neb, ldw, n_mod_ld, ldv, nseg_max
+                type(c_ptr), value :: perm, viz, n_seg, pt_off, seg_off, pt_age, eff_pt, seg_ptr, eff_f, wsfh, it_tesc, &
+                                      fesc, cz, w, vp, stream
+            end subroutine opensps_hip_fold_multi
+        end interface
+        ! fesc is a host array of the batch: mapped for the call
+        !$omp target data map(to: fesc) use_device_addr(perm, viz, n_seg, pt_off, seg_off, pt_age, eff_pt, seg_ptr, eff_f, &
+        !$omp& wsfh, it_tesc, cz, w, vp)
+        !$omp target data use_device_addr(fesc)
+        call opensps_hip_fold_multi(int(m0 - 1, c_int), int(nc, c_int), int(nt_neb, c_int), int(size(w, 1), c_int), &
+                                    int(size(wsfh, 1), c_int), int(size(vp, 1), c_int), int(n_seg_max, c_int), &
+                                    c_loc(perm(1)), c_loc(viz(1)), c_loc(n_seg(1)), c_loc(pt_off(1)), c_loc(seg_off(1)), &
+                                    c_loc(pt_age(1)), c_loc(eff_pt(1)), c_loc(seg_ptr(1)), c_loc(eff_f(1, 1)), &
+                                    c_loc(wsfh(1, 1)), c_loc(it_tesc(1)), c_loc(fesc(1)), c_loc(cz(1)), c_loc(w(1, 1)), &
+                                    c_loc(vp(1, 1, 1)), c_null_ptr)
+        !$omp end target data
+        !$omp end target data
+    end subroutine run_hip_fold_multi
+
     subroutine run_hip_imf_pieces_weights(m0, nc, n_pc_max, n_pts_max, ldw, imf_type, &
                                           perm, viz, pm, tot, n_pc, pt_off, pc_off, pc_ptr, &
                                           pt_mini, pt_m1, pt_m2, pt_llo, pt_dl, pt_first, &
@@ -2103,7 +2146,7 @@ contains
     !> virtual model) skips segments beyond its metallicity's; then (template e, virtual model).
     subroutine fold_multi(m0, nc, n_eff_max, n_seg_max, nt_neb, neb_cols, wsfh, it_tesc, fesc, n_seg, n_eff, pt_off, &
                           seg_off, eff_off, ent_off, pt_age, eff_pt, eff_val, seg_ptr, seg_first, perm, viz, cz, w, vp, v, &
-                          veuv)
+                          veuv, eff_f)
         integer, intent(in) :: m0, nc, n_eff_max, n_seg_max, nt_neb, neb_cols
         real(WP), intent(in), contiguous :: wsfh(:,:), fesc(:), eff_val(:), cz(:)
         real(KP), intent(in), contiguous :: w(:,:)
@@ -2111,8 +2154,15 @@ contains
                                             pt_age(:), eff_pt(:), seg_ptr(:), seg_first(:), perm(:), viz(:)
         real(WP), intent(inout), contiguous :: vp(:,:,:)
         real(KP), intent(inout), contiguous :: v(:,:), veuv(:,:)
+        !> The entries' values as FP32 hi + lo pairs (ssp_opset_t%eff_f), read by the HIP fold
+        real(c_float), intent(in), contiguous :: eff_f(:,:)
         integer  :: s, e, j, k, t, m, tesc, tc, iz, sg, eg
         real(WP) :: x, y, o, ye, oe, f, a, ae
+
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+        call run_hip_fold_multi(m0, nc, nt_neb, n_seg_max, wsfh, it_tesc, fesc, n_seg, pt_off, seg_off, pt_age, eff_pt, &
+                                seg_ptr, perm, viz, cz, w, vp, eff_f)
+#else
 
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(k, t, m, tesc, tc, x, y, o, ye, oe, f, a, ae, &
@@ -2161,6 +2211,7 @@ contains
                 vp(j, 4, s) = oe
             end do
         end do
+#endif
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(s, y, o, ye, oe, iz, eg)
 #elif defined(_OPENMP)
