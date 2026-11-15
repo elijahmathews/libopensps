@@ -132,7 +132,7 @@ program benchmark_csp_batch
     call set_int('compute_indices', merge(1, 0, full))
     if (full) then
         call set_float('dust1', 0.5_wp)
-        call set_int('add_neb_emission', 1)
+        call set_int('add_neb_emission', merge(0, 1, index(config, '_noneb') > 0))   ! _noneb: nebular emission off
         call set_int('add_igm_absorption', 1)
         call set_float('zred', 0.5_wp)
         call set_int('add_agn_dust', 1)
