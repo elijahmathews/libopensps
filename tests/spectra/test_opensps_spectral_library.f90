@@ -469,7 +469,9 @@ contains
         ! A corner at the 1e-70 filler of the converted libraries counts as missing (legacy tiny30 = 1e-30
         ! on the 5000 A flux; legacy stores single precision, where the filler is zero), so the star
         ! snaps back to the real corner instead of averaging with the filler
-        ctx%state%speclib(:, 1, 2, 2) = real(1.0e-70_wp, kind=kind(ctx%state%speclib))
+        ! (in an FP32 build 1e-70 is not representable: the filler is then the smallest normal number, which is
+        ! still far below that threshold; a literal conversion underflows to zero at compile time, with a warning)
+        ctx%state%speclib(:, 1, 2, 2) = real(max(1.0e-70_wp, real(tiny(1.0_KP), WP)), kind=kind(ctx%state%speclib))
         call get_stellar_spectrum(ctx, pset, mact, logt, lbol, logg, phase, ffco, lmdot, spec)
         call assert_relative_error(expected, real(spec(1), WP), 1.0e-6_wp, &
                                    "Filler corner (1e-70) is missing, not valid", total_tests, total_failures)
