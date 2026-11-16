@@ -153,6 +153,9 @@ elif accel_target == 'omp_gpu' and get_option('accel_hip')
     # ROCm needed. Opt-in: on the A100 the kernels pay off with cuBLAS (-Daccel_blas=cublas).
     nvcc_prog = find_program('nvcc', required : true)
     accel_defs += ['-DOPENSPS_HIP']
+    # --fmad=false: nvcc contracts a*b+c into an FMA by default and ignores the kernels'
+    # `#pragma clang fp contract(off)` (warning #20199), which would break the error-free sums
+    # (two-sum / exact products) that the FP32 kernels rely on.
     nvcc_args = []
     foreach arch : get_option('gpu_arch').split(',')
         sm = arch.strip().replace('cc', '')
@@ -163,7 +166,7 @@ elif accel_target == 'omp_gpu' and get_option('accel_hip')
             input : 'src/accel/hip/opensps_hip_kernels.hip',
             output : 'opensps_hip_kernels.o',
             command : [nvcc_prog, '-x', 'cu'] + nvcc_args + [
-                '-O3', '-Xcompiler', '-fPIC',
+                '-O3', '--fmad=false', '-Xcompiler', '-fPIC',
                 '-I', meson.current_source_dir() / 'src/accel/hip/cuda_shim',
                 '-c', '@INPUT@', '-o', '@OUTPUT@'])
     ]
