@@ -409,8 +409,8 @@ contains
         type(opensps_context_t), intent(inout) :: ctx
         real(WP), intent(in)                :: sigma, minl, maxl
         type(velocity_kernel_t) :: kern
-        integer :: nspec, i, k, il, ih, off
-        real(WP) :: x2, x2m
+        integer :: nspec, i, k, il, ih, off, ntot, pos
+        real(WP) :: x2, x2m, tc
         real(WP), allocatable :: ll(:)
 
         associate(g => ctx%state%batch)
@@ -418,12 +418,13 @@ contains
             if (g%sm_sigma == sigma .and. g%sm_minl == minl .and. g%sm_maxl == maxl) return
 #ifdef OMP_TARGET
             associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef, &
-                       d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef, d_sm_coef_f => g%sm_coef_f)
+                       d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef, d_sm_coef_f => g%sm_coef_f, d_sm_tptr => g%sm_tptr, &
+                       d_sm_tcoef_f => g%sm_tcoef_f)
                 !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef, &
-                !$omp&     d_sm_coef_f)
+                !$omp&     d_sm_coef_f, d_sm_tptr, d_sm_tcoef_f)
             end associate
 #endif
-            deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef, g%sm_t_lo, g%sm_t_hi, g%sm_dcoef, g%sm_coef_f)
+            deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef, g%sm_t_lo, g%sm_t_hi, g%sm_dcoef, g%sm_coef_f, g%sm_tptr, g%sm_tcoef_f)
             g%sm_ready = .false.
         end if
         nspec = ctx%state%nspec
@@ -473,10 +474,33 @@ contains
                 end do
             end if
         end do
+        ! The columns of the operator (the transposed smoothing of the reverse pass) as FP32 hi + lo pairs
+        allocate(g%sm_tptr(nspec))
+        ntot = 0
+        do k = 1, nspec
+            g%sm_tptr(k) = 0
+            if (g%sm_t_hi(k) >= g%sm_t_lo(k)) then
+                g%sm_tptr(k) = ntot
+                ntot = ntot + g%sm_t_hi(k) - g%sm_t_lo(k) + 1
+            end if
+        end do
+        allocate(g%sm_tcoef_f(2, max(ntot, 1)))
+        g%sm_tcoef_f = 0.0_c_float
+        do i = 1, nspec
+            if (g%sm_lo(i) <= 0) cycle
+            do k = g%sm_lo(i), g%sm_hi(i)
+                tc = g%sm_coef(g%sm_off(i) - g%sm_lo(i) + k)
+                pos = g%sm_tptr(k) + (i - g%sm_t_lo(k)) + 1
+                g%sm_tcoef_f(1, pos) = real(tc, c_float)
+                g%sm_tcoef_f(2, pos) = real(tc - real(g%sm_tcoef_f(1, pos), WP), c_float)
+            end do
+        end do
 #ifdef OMP_TARGET
         associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef, &
-                   d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef, d_sm_coef_f => g%sm_coef_f)
-            !$omp target enter data map(to: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef, d_sm_coef_f)
+                   d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef, d_sm_coef_f => g%sm_coef_f, &
+                   d_sm_tptr => g%sm_tptr, d_sm_tcoef_f => g%sm_tcoef_f)
+            !$omp target enter data map(to: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef, &
+            !$omp&     d_sm_coef_f, d_sm_tptr, d_sm_tcoef_f)
         end associate
 #endif
         g%sm_sigma = sigma
@@ -529,7 +553,8 @@ contains
         call ensure_smooth_work(ctx%state%nspec, n_col)
 #if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
         call smooth_kernel_hip(ctx%state%nspec, n_col, ctx%state%batch%sm_lo, ctx%state%batch%sm_hi, &
-                               ctx%state%batch%sm_off, ctx%state%batch%sm_coef_f, smooth_work, spec, hip_done)
+                               ctx%state%batch%sm_off, ctx%state%batch%sm_lo, 0, 1, ctx%state%batch%sm_coef_f, smooth_work, spec, &
+                               hip_done)
         if (hip_done) return   ! (otherwise the tile shape of the registry is not built: the portable kernel)
 #endif
         call smooth_kernel(ctx%state%nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
@@ -539,28 +564,29 @@ contains
 #if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
     !> smooth_kernel in FP32 (a HIP kernel, see opensps_hip_smooth): the smoothed spectra go to sm, then
     !> back into spec
-    subroutine smooth_kernel_hip(nspec, n_col, sm_lo, sm_hi, sm_off, cf, sm, spec, done)
+    subroutine smooth_kernel_hip(nspec, n_col, sm_lo, sm_hi, sm_off, plo, adj, cb1, cf, sm, spec, done)
         use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
-        integer, intent(in)                 :: nspec, n_col
-        integer, intent(in), target, contiguous :: sm_lo(:), sm_hi(:), sm_off(:)
+        integer, intent(in)                 :: nspec, n_col, adj, cb1
+        integer, intent(in), target, contiguous :: sm_lo(:), sm_hi(:), sm_off(:), plo(:)
         real(c_float), intent(in), target, contiguous :: cf(:,:)
         real(KP), intent(inout), target     :: sm(nspec, *), spec(nspec, *)
         logical, intent(out)                :: done
         integer :: m, i
         integer(c_int) :: rc
         interface
-            function opensps_hip_smooth(nspec, n_col, pb, kch, kb, lo, hi, off, cf, in, out, stream) result(rc) &
+            function opensps_hip_smooth(nspec, n_col, pb, kch, kb, adj, cb1, lo, hi, off, plo, cf, in, out, stream) result(rc) &
                 bind(C, name="opensps_hip_smooth")
                 import :: c_int, c_ptr
-                integer(c_int), value :: nspec, n_col, pb, kch, kb
-                type(c_ptr), value :: lo, hi, off, cf, in, out, stream
+                integer(c_int), value :: nspec, n_col, pb, kch, kb, adj, cb1
+                type(c_ptr), value :: lo, hi, off, plo, cf, in, out, stream
                 integer(c_int) :: rc
             end function opensps_hip_smooth
         end interface
-        !$omp target data use_device_addr(sm_lo, sm_hi, sm_off, cf, sm, spec)
+        !$omp target data use_device_addr(sm_lo, sm_hi, sm_off, plo, cf, sm, spec)
         rc = opensps_hip_smooth(int(nspec, c_int), int(n_col, c_int), int(TUNE_HIP_SMOOTH_PB, c_int), &
-                                int(TUNE_HIP_SMOOTH_KCH, c_int), int(TUNE_HIP_SMOOTH_KB, c_int), c_loc(sm_lo(1)), &
-                                c_loc(sm_hi(1)), c_loc(sm_off(1)), c_loc(cf(1, 1)), c_loc(spec(1, 1)), c_loc(sm(1, 1)), c_null_ptr)
+                                int(TUNE_HIP_SMOOTH_KCH, c_int), int(TUNE_HIP_SMOOTH_KB, c_int), int(adj, c_int), &
+                                int(cb1, c_int), c_loc(sm_lo(1)), c_loc(sm_hi(1)), c_loc(sm_off(1)), c_loc(plo(1)), &
+                                c_loc(cf(1, 1)), c_loc(spec(1, 1)), c_loc(sm(1, 1)), c_null_ptr)
         !$omp end target data
         done = rc == 0
         if (.not. done) return
@@ -580,8 +606,17 @@ contains
         type(opensps_context_t), intent(inout) :: ctx
         real(KP), intent(inout), contiguous :: spec_bar(:,:)
         integer, intent(in)                 :: n_col
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+        logical :: hip_done
+#endif
 
         call ensure_smooth_work(ctx%state%nspec, n_col)
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+        call smooth_kernel_hip(ctx%state%nspec, n_col, ctx%state%batch%sm_t_lo, ctx%state%batch%sm_t_hi, &
+                               ctx%state%batch%sm_tptr, ctx%state%batch%sm_lo, 1, 0, ctx%state%batch%sm_tcoef_f, smooth_work, &
+                               spec_bar, hip_done)
+        if (hip_done) return
+#endif
         call smooth_kernel_t(ctx%state%nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
                              ctx%state%batch%sm_off, ctx%state%batch%sm_coef, ctx%state%batch%sm_t_lo, &
                              ctx%state%batch%sm_t_hi, smooth_work, spec_bar)

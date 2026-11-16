@@ -2401,10 +2401,13 @@ __global__ void __launch_bounds__(256, 2) template_columns_kernel(
 // compensation (doc/MIXED_PRECISION.md, rule 1). A block of 256 threads = 64 pixels x 16 models (4 per
 // thread); the spectra of the tile's window are staged through shared memory, 256 pixels at a time.
 // ---------------------------------------------------------------------------
+// adj = 0: out(i) = sum of its window (pixels with no window pass through); adj = 1: the transposed operator,
+// out(k) = [forward window of k empty] in(k) + sum_i C(i, k) in(i), the windows (d_lo, d_hi) and coefficient
+// starts (d_off, 1-based when cb1 = 1) being those of the columns of C (d_plo: the forward windows' starts)
 template <int PB, int KCH>
 __global__ void __launch_bounds__(256) smooth_kernel_f32(
-    int nspec, int n_col, int kb,
-    const int* __restrict__ d_lo, const int* __restrict__ d_hi, const int* __restrict__ d_off,
+    int nspec, int n_col, int kb, int adj, int cb1,
+    const int* __restrict__ d_lo, const int* __restrict__ d_hi, const int* __restrict__ d_off, const int* __restrict__ d_plo,
     const float2* __restrict__ d_cf,
     const float* __restrict__ in, float* __restrict__ out
 ) {
@@ -2417,12 +2420,20 @@ __global__ void __launch_bounds__(256) smooth_kernel_f32(
     const int i = i0 + ip;
     if (tid == 0) { s_k0 = nspec + 1; s_k1 = 0; }
     __syncthreads();
-    int lo = 0, hi = -1, off = 0;
-    if (i < nspec) { lo = d_lo[i]; hi = d_hi[i]; off = d_off[i] - 1 - lo; }
-    if (lo > 0) { atomicMin(&s_k0, lo); atomicMax(&s_k1, hi); }
+    int lo = 0, hi = -1, off = 0, plo = 1;
+    if (i < nspec) { lo = d_lo[i]; hi = d_hi[i]; off = d_off[i] - cb1 - lo; plo = d_plo[i]; }
+    const bool has = lo > 0 && hi >= lo;
+    if (has) { atomicMin(&s_k0, lo); atomicMax(&s_k1, hi); }
     __syncthreads();
     const int k0 = s_k0, k1 = s_k1;
     float acc[4] = {0.f, 0.f, 0.f, 0.f}, cmp[4] = {0.f, 0.f, 0.f, 0.f}, blk[4] = {0.f, 0.f, 0.f, 0.f};
+    if (adj && plo == 0 && i < nspec) {
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+            int m = m0 + mq * 4 + q;
+            if (m < n_col) acc[q] = in[(size_t)m * nspec + i];
+        }
+    }
     for (int c0 = k0; c0 <= k1; c0 += KCH) {
         __syncthreads();
         for (int idx = tid; idx < KCH * MB; idx += 256) {
@@ -2431,9 +2442,9 @@ __global__ void __launch_bounds__(256) smooth_kernel_f32(
             sp[mc][row] = (k <= k1 && m < n_col) ? in[(size_t)m * nspec + (k - 1)] : 0.f;
         }
         __syncthreads();
-        if (lo > 0) {
-            int ka = max(lo, c0), kb = min(hi, c0 + KCH - 1);
-            for (int k = ka; k <= kb; ++k) {
+        if (has) {
+            int ka = max(lo, c0), kend = min(hi, c0 + KCH - 1);   // (not kb: that is the plain block's length)
+            for (int k = ka; k <= kend; ++k) {
                 float2 cf = d_cf[off + k];
                 int t = k - lo;
 #pragma unroll
@@ -2459,7 +2470,7 @@ __global__ void __launch_bounds__(256) smooth_kernel_f32(
 #pragma unroll
         for (int q = 0; q < 4; ++q) {
             int m = m0 + mq * 4 + q;
-            if (m < n_col) out[(size_t)m * nspec + i] = (lo > 0) ? acc[q] - cmp[q] : in[(size_t)m * nspec + i];
+            if (m < n_col) out[(size_t)m * nspec + i] = (adj || has) ? acc[q] - cmp[q] : in[(size_t)m * nspec + i];
         }
     }
 }
@@ -2602,8 +2613,8 @@ int opensps_hip_template_columns(int np, int nc, int k, int rm, int rn, int kc, 
 }
 
 // pb pixels per block and kch window pixels per stage; kb taps per plain block. Returns 1 if not supported
-int opensps_hip_smooth(int nspec, int n_col, int pb, int kch, int kb, const int* d_lo, const int* d_hi, const int* d_off,
-                       const float* d_cf, const float* d_in, float* d_out, void* stream) {
+int opensps_hip_smooth(int nspec, int n_col, int pb, int kch, int kb, int adj, int cb1, const int* d_lo, const int* d_hi,
+                       const int* d_off, const int* d_plo, const float* d_cf, const float* d_in, float* d_out, void* stream) {
     if (nspec <= 0 || n_col <= 0) return 0;
     if (kb < 1) return 1;
     hipStream_t s = (hipStream_t)stream;
@@ -2611,7 +2622,7 @@ int opensps_hip_smooth(int nspec, int n_col, int pb, int kch, int kb, const int*
 #define SM_CASE(PB, KCH) if (pb == PB && kch == KCH) { \
         constexpr int MB = 4 * (256 / PB); \
         smooth_kernel_f32<PB, KCH><<<dim3((nspec + PB - 1) / PB, (n_col + MB - 1) / MB), 256, 0, s>>>( \
-            nspec, n_col, kb, d_lo, d_hi, d_off, cf, d_in, d_out); \
+            nspec, n_col, kb, adj, cb1, d_lo, d_hi, d_off, d_plo, cf, d_in, d_out); \
         (void)hipStreamSynchronize(s); return 0; }
     SM_CASE(64, 256) SM_CASE(64, 128) SM_CASE(64, 512) SM_CASE(32, 256) SM_CASE(32, 128)
 #undef SM_CASE
