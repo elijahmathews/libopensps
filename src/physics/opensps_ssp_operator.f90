@@ -82,7 +82,7 @@ module opensps_ssp_operator
 
     use opensps_precision, only: WP, KP
     use opensps_tuning, only: TUNE_SEG_LEN, TUNE_PT_PIECE, TUNE_PIX_BLOCK
-    use opensps_constants, only: NM, SAFE_FLOOR, TIME_RES_INCR, C_LIGHT, H_PLANCK, L_SOL
+    use opensps_constants, only: NM, SAFE_FLOOR, TIME_RES_INCR, C_LIGHT, H_PLANCK, L_SOL, BHB_SBS_TIME
     use opensps_types, only: params
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings
     use opensps_imf, only: imf_integral_p, IMF_NPAR, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT, IMF_P_LOWER_BOUND, &
@@ -102,6 +102,7 @@ module opensps_ssp_operator
     public :: ssp_operator_t, ssp_operator_build, ssp_operator_evaluate, ssp_operator_free
     public :: ssp_op_model_weights, ssp_op_imf_weights, ssp_op_spmv, ssp_template_product
     public :: ssp_operator_to_device, ssp_operator_from_device, ssp_op_mod_signature, N_MOD_SIG
+    public :: ssp_mod_coefficients
 
     !> Row kinds (the order of the rows within an age)
     !> Entries per segment of an effective template's list (ssp_operator_t: seg_ptr)
@@ -120,11 +121,30 @@ module opensps_ssp_operator
     !> phase and mass cuts)
     integer, parameter :: N_MOD_SIG = 10
 
+    !> Modification groups (opensps_ssp_operator_build with `group`, and doc/ISO_MODS_PLAN.md): the stars of an
+    !> isochrone partitioned by which isochrone-modification factors scale their weight. With the factors free
+    !> per model the SSP is sum_g c_g(m) SSP_g, each SSP_g from the operator of its group (built at identity
+    !> modifications, or at the reference values below, with the reference factors divided out).
+    integer, parameter, public :: MOD_GRP_PLAIN = 0, &   !< native stars no factor touches (c = 1)
+                                  MOD_GRP_TPAGB = 1, &   !< TP-AGB (phase 5): c = agb * redgb
+                                  MOD_GRP_PAGB = 2, &    !< post-AGB (phase 6): c = pagb
+                                  MOD_GRP_RGB = 3, &     !< phases 2-4: c = redgb
+                                  MOD_GRP_HBA_R = 4, &   !< HB stars (ages >= BHB_SBS_TIME), own temperature, phases 2-4
+                                  MOD_GRP_HBA_N = 5, &   !< the same, other phases
+                                  MOD_GRP_HBB = 6, &     !< HB stars forced to the red-clump temperature (MIST, BaSTI)
+                                  MOD_GRP_BLUE = 7, &    !< blue HB stars
+                                  MOD_GRP_STRAG = 8, &   !< blue stragglers
+                                  MOD_NGRP = 9
+    !> The reference values of the groups built with the HB modification on (divided out of the entries)
+    real(WP), parameter, public :: MOD_FBHB_REF = 0.5_wp, MOD_SBSS_REF = 20.0_wp
+
     type :: ssp_operator_t
         integer :: zmet = 0, n_ages = 0, nspec = 0
         !> The parameters S was built with (ssp_op_mod_signature of the build pset): a batch with
         !> the IMF per model needs every model to have these values
         real(WP) :: mod_sig(N_MOD_SIG) = 0.0_wp
+        !> The modification group the operator holds (MOD_GRP_*); -1: all stars, as the parameters give them
+        integer :: mod_group = -1
         integer :: nt_lib = 0, n_main = 0, n_small = 0, n_dtpl = 0
         integer :: n_pts = 0, n_rows = 0, nnz = 0, n_slots = 0, n_direct = 0
         !> Native isochrone points (columns): initial mass and IMF bin edges; for the first point
@@ -195,18 +215,56 @@ contains
                pset%masscut, real(pset%evtype, WP)]
     end function ssp_op_mod_signature
 
+    !> The coefficients c_g of the modification groups (MOD_GRP_*) of a parameter set: the factors the isochrone
+    !> modifications (modify_horizontal_branch, apply_blue_stragglers, modify_giant_branch) put on each group's
+    !> weights. The ages below BHB_SBS_TIME, where the HB modification and the stragglers are off, are not in
+    !> these coefficients: the groups' operators have the HB stars of those ages in the plain and RGB groups.
+    !> pdva: Padova isochrones (the HB is detected; the original HB stars keep their template and their weight
+    !> is 1 - fbhb), otherwise MIST and BaSTI (the original HB stars are moved to the red-clump temperature).
+    pure function ssp_mod_coefficients(pset, pdva) result(c)
+        type(params), intent(in) :: pset
+        logical, intent(in) :: pdva
+        real(WP) :: c(0:MOD_NGRP - 1)
+        real(WP) :: ind
+
+        ind = merge(1.0_wp, 0.0_wp, pset%fbhb > merge(1.0e-3_wp, 1.0e-4_wp, pdva))
+        c(MOD_GRP_PLAIN) = 1.0_wp
+        c(MOD_GRP_TPAGB) = pset%agb * pset%redgb
+        c(MOD_GRP_PAGB) = pset%pagb
+        c(MOD_GRP_RGB) = pset%redgb
+        if (pdva) then
+            c(MOD_GRP_HBA_R) = (1.0_wp - ind * pset%fbhb) * pset%redgb
+            c(MOD_GRP_HBA_N) = 1.0_wp - ind * pset%fbhb
+            c(MOD_GRP_HBB) = 0.0_wp
+        else
+            c(MOD_GRP_HBA_R) = (1.0_wp - ind) * pset%redgb
+            c(MOD_GRP_HBA_N) = 1.0_wp - ind
+            c(MOD_GRP_HBB) = ind * (1.0_wp - pset%fbhb) * pset%redgb
+        end if
+        c(MOD_GRP_BLUE) = ind * pset%fbhb
+        c(MOD_GRP_STRAG) = merge(pset%sbss / 20.0_wp, 0.0_wp, pset%sbss > 1.0e-3_wp)
+    end function ssp_mod_coefficients
+
     !> @brief Builds the IMF-independent operator S of metallicity pset%zmet.
     !> @details The context must be set up (opensps_setup). pset supplies the non-IMF parameters
     !> listed in the module notes; its IMF parameters are not used.
-    subroutine ssp_operator_build(ctx, pset, op)
+    subroutine ssp_operator_build(ctx, pset, op, group)
         type(opensps_context_t), target, intent(inout) :: ctx
         type(params), intent(in)              :: pset
         type(ssp_operator_t), intent(inout)   :: op
+        !> The modification group to build (MOD_GRP_*): only its stars, from the reference modifications
+        !> (identity, or MOD_FBHB_REF and MOD_SBSS_REF for the groups of the HB modification and the
+        !> stragglers) with the reference factors divided out of the entries, and only the native points the
+        !> group's stars derive from. Absent: the operator of the parameters as they are (the batch paths'
+        !> default, unchanged).
+        integer, intent(in), optional         :: group
 
-        type(isochrone_buffer_t) :: buf
-        integer :: t, n_nat, n_all, n_after_hb, n_hb, j, k, i, nz, nspec, cap_pts
-        logical :: hb_flag(NM)
-        integer :: parent(NM)
+        type(isochrone_buffer_t) :: buf, buf1
+        type(params) :: pset_use, pset1
+        integer :: t, n_nat, n_all, n_after_hb, n_hb, j, k, i, nz, nspec, cap_pts, grp, nah1
+        logical :: hb_flag(NM), hb1(NM), age_ge, pdva
+        integer :: parent(NM), par1(NM)
+        real(WP) :: nrm
         real(WP) :: probe(NM), tlog, lin_l
         ! Per-age entries (unsorted), slots and direct stars
         integer(int64), allocatable :: e_key(:)
@@ -225,6 +283,26 @@ contains
 
         call ssp_operator_free(op)
         call opensps_context_sync_device_settings(ctx)
+        grp = -1
+        if (present(group)) grp = group
+        pset_use = pset
+        nrm = 1.0_wp
+        if (grp >= 0) then
+            ! The reference modifications of the group: identity, the HB groups and the stragglers with the HB
+            ! modification and the stragglers on at their reference values (divided out below)
+            pset_use%fbhb = 0.0_wp; pset_use%sbss = 0.0_wp
+            pset_use%agb = 1.0_wp; pset_use%pagb = 1.0_wp; pset_use%redgb = 1.0_wp
+            pset_use%delt = 0.0_wp; pset_use%dell = 0.0_wp
+            if (grp >= MOD_GRP_HBB) then
+                pset_use%fbhb = MOD_FBHB_REF
+                pset_use%sbss = MOD_SBSS_REF
+            end if
+            if (grp == MOD_GRP_HBB) nrm = 1.0_wp / (1.0_wp - MOD_FBHB_REF)
+            if (grp == MOD_GRP_BLUE) nrm = 1.0_wp / MOD_FBHB_REF
+            if (grp == MOD_GRP_STRAG) nrm = 20.0_wp / MOD_SBSS_REF
+        end if
+        pdva = trim(ctx%state%isoc_type) == 'pdva'
+        op%mod_group = grp
         if (trim(ctx%state%isoc_type) == 'bpss') then
             write(*,*) 'SSP_OPERATOR ERROR: BPASS SSPs are tabulated, there is no operator to build.'
             stop
@@ -260,6 +338,7 @@ contains
         op%n_pts = 0; op%n_rows = 0; op%nnz = 0; op%n_slots = 0; op%n_direct = 0
 
         call init_isochrone_buffer(buf)
+        call init_isochrone_buffer(buf1)
         do t = 1, op%n_ages
             op%pt_ptr(t) = op%n_pts + 1
             op%age_row_ptr(t) = op%n_rows + 1
@@ -301,15 +380,32 @@ contains
             buf%weights(1:n_nat) = 1.0_wp
             hb_flag = .false.
             parent = 0
-            call apply_isochrone_modifications(ctx, pset, tlog, buf, hb_flag, parent, n_after_hb)
+            call apply_isochrone_modifications(ctx, pset_use, tlog, buf, hb_flag, parent, n_after_hb)
             n_all = buf%n_stars
             op%age_nstars(t) = n_all
             probe(1:n_all) = buf%weights(1:n_all)
             n_hb = count(hb_flag(1:n_nat))
+            ! Which native stars are on the horizontal branch (their group at ages with the HB modification):
+            ! the groups built without it take the flags from a reference with it on
+            age_ge = tlog >= BHB_SBS_TIME
+            if (grp >= 0 .and. grp < MOD_GRP_HBB) then
+                call load_timestep_data(ctx, nz, t, buf1)
+                buf1%weights(1:n_nat) = 1.0_wp
+                hb1 = .false.
+                par1 = 0
+                pset1 = pset_use
+                pset1%fbhb = MOD_FBHB_REF
+                call apply_isochrone_modifications(ctx, pset1, tlog, buf1, hb1, par1, nah1)
+            else
+                hb1 = hb_flag
+            end if
 
             ne = 0
             ns_age = 0
             do j = 1, n_all
+                if (grp >= 0) then
+                    if (.not. in_group(j)) cycle
+                end if
                 ! Contributions of the native points to star j's weight
                 if (j <= n_nat) then
                     nc = 1; c_k(1) = j; c_f(1) = probe(j)
@@ -330,6 +426,7 @@ contains
                     end if
                 end if
                 if (nc == 0) cycle
+                if (grp >= 0) c_f(1:nc) = c_f(1:nc) * nrm
 
                 ! Mass and L_bol (all stars)
                 lin_l = exp(buf%log_lum(j) * LN10)
@@ -351,6 +448,7 @@ contains
         op%age_row_ptr(op%n_ages + 1) = op%n_rows + 1
         op%age_slot_ptr(op%n_ages + 1) = op%n_slots + 1
         call free_isochrone_buffer(buf)
+        call free_isochrone_buffer(buf1)
 
         allocate(op%pt_mini(op%n_pts), op%pt_m1(op%n_pts), op%pt_m2(op%n_pts), op%pt_first(op%n_pts))
         op%pt_mini = g_mini(1:op%n_pts); op%pt_m1 = g_m1(1:op%n_pts); op%pt_m2 = g_m2(1:op%n_pts)
@@ -368,6 +466,42 @@ contains
         call build_effective_templates(ctx, op)
 
     contains
+
+        !> Whether star j of the age being built belongs to the group being built (grp >= 0): native stars by
+        !> phase and, at ages with the HB modification, by whether they are on the horizontal branch; the stars the
+        !> HB modification and the straggler step add by their kind.
+        logical function in_group(j)
+            integer, intent(in) :: j
+            real(WP) :: ph
+
+            in_group = .false.
+            select case (grp)
+            case (MOD_GRP_PLAIN:MOD_GRP_HBA_N)
+                if (j > n_nat) return
+                ph = buf%phase(j)
+                if (age_ge .and. hb1(j)) then
+                    if (ph >= 2.0_wp .and. ph <= 4.0_wp) then
+                        in_group = grp == MOD_GRP_HBA_R
+                    else
+                        in_group = grp == MOD_GRP_HBA_N
+                    end if
+                else if (ph == 5.0_wp) then
+                    in_group = grp == MOD_GRP_TPAGB
+                else if (ph == 6.0_wp) then
+                    in_group = grp == MOD_GRP_PAGB
+                else if (ph >= 2.0_wp .and. ph <= 4.0_wp) then
+                    in_group = grp == MOD_GRP_RGB
+                else
+                    in_group = grp == MOD_GRP_PLAIN
+                end if
+            case (MOD_GRP_HBB)
+                in_group = j <= n_nat .and. age_ge .and. hb1(j) .and. .not. pdva
+            case (MOD_GRP_BLUE)
+                in_group = j > n_nat .and. j <= n_after_hb
+            case (MOD_GRP_STRAG)
+                in_group = j > n_after_hb
+            end select
+        end function in_group
 
         !> The template terms of star j (accumulate_by_templates, step 1) for its contributions.
         subroutine star_terms(j)
@@ -480,8 +614,8 @@ contains
         !> Sorts this age's entries by (row, point), merges duplicates and appends the rows.
         subroutine flush_age(t)
             integer, intent(in) :: t
-            integer, allocatable :: perm(:)
-            integer :: m, r0, kind, idx, k
+            integer, allocatable :: perm(:), keep_id(:)
+            integer :: m, r0, kind, idx, k, n_keep, i
             integer(int64) :: rkey, prev_rkey, prev_key
             integer(int64), parameter :: COL_MASK = 2_int64**KEY_COL_BITS - 1, IDX_MASK = 2_int64**KEY_IDX_BITS - 1
 
@@ -491,8 +625,32 @@ contains
                 if (op%n_slots > size(g_slot_key, 2)) call grow_i2(g_slot_key, op%n_slots - 1, 2 * size(g_slot_key, 2))
                 g_slot_key(:, op%n_slots) = s_key(:, m)
             end do
+            ! A group's operator keeps only the native points its entries use (the IMF weights are computed per
+            ! column); the points keep their own bin edges. The plain group keeps one point of any non-empty
+            ! isochrone, so that it carries the remnants of the age.
+            n_keep = n_nat
+            if (grp >= 0) then
+                allocate(keep_id(max(n_nat, 1)))
+                keep_id = 0
+                do m = 1, ne
+                    keep_id(int(iand(e_key(m), 2_int64**KEY_COL_BITS - 1))) = 1
+                end do
+                if (grp == MOD_GRP_PLAIN .and. n_nat > 0) keep_id(1) = 1
+                n_keep = 0
+                do k = 1, n_nat
+                    if (keep_id(k) == 1) then
+                        n_keep = n_keep + 1
+                        keep_id(k) = n_keep
+                        i = op%n_pts + n_keep
+                        g_mini(i) = g_mini(op%n_pts + k)
+                        g_m1(i) = g_m1(op%n_pts + k)
+                        g_m2(i) = g_m2(op%n_pts + k)
+                        g_first(i) = g_first(op%n_pts + k)
+                    end if
+                end do
+            end if
             if (ne == 0) then
-                op%n_pts = op%n_pts + n_nat
+                op%n_pts = op%n_pts + n_keep
                 return
             end if
             allocate(perm(ne))
@@ -527,6 +685,7 @@ contains
                     prev_rkey = rkey
                 end if
                 k = int(iand(e_key(perm(m)), COL_MASK))
+                if (grp >= 0) k = keep_id(k)
                 op%nnz = op%nnz + 1
                 if (op%nnz > size(g_col)) then
                     call grow_i1(g_col, op%nnz - 1, 2 * size(g_col))
@@ -537,7 +696,7 @@ contains
                 g_row_ptr(op%n_rows + 1) = op%nnz + 1
                 prev_key = e_key(perm(m))
             end do
-            op%n_pts = op%n_pts + n_nat
+            op%n_pts = op%n_pts + n_keep
         end subroutine flush_age
 
     end subroutine ssp_operator_build
