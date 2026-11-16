@@ -621,6 +621,15 @@ contains
 #if defined(OMP_TARGET)
         host_w = (.not. given_w) .and. n_mod < HOST_SFH_MAX
 #endif
+        ! Without operators the SSPs are the context's resident basis, built with the context's isochrone modifications:
+        ! a model with others would silently get the basis's (the C API refuses such parameters; this guards the Fortran one)
+        if (.not. imf) then
+            do m = 1, n_mod
+                if (any(ssp_op_mod_signature(psets(m)) /= ssp_op_mod_signature(ctx%pset))) then
+                    status = 2; return
+                end if
+            end do
+        end if
         ! IMF per model: one metallicity (the operator's)
         if (imf) then
             do m = 1, n_mod

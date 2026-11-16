@@ -270,7 +270,7 @@ void opensps_context_compute_csp_batch_grad(
 );
 ```
 
-* `params_bar`: `[NBGRAD, n]` column-major array receiving exact analytical gradients of the loss $L$ with respect to physical parameters. Indexed by `OPENSPS_BGRAD_*` (0 to `OPENSPS_NBGRAD - 1`). The library writes every row and takes no capacity argument: **allocate it with `opensps_get_nbgrad()` rows, not a constant** (`OPENSPS_NBGRAD` grew from 33 to 37 in 0.2.0, and may grow in any minor release).
+* `params_bar`: `[NBGRAD, n]` column-major array receiving exact analytical gradients of the loss $L$ with respect to physical parameters. Indexed by `OPENSPS_BGRAD_*` (0 to `OPENSPS_NBGRAD - 1`). `opensps_context_compute_csp_batch_grad` writes every row and takes no capacity argument: **allocate it with `opensps_get_nbgrad()` rows, not a constant** (`OPENSPS_NBGRAD` grew from 33 to 37 in 0.2.0, and may grow in any minor release). `opensps_context_compute_csp_batch_grad_rows` (same arguments plus `int params_bar_rows` after `params_bar`: its leading dimension) writes the first `OPENSPS_NBGRAD` rows of each column and leaves the rows beyond alone; with fewer rows than `opensps_get_nbgrad()` returns it computes and writes nothing and returns status 3 (the message names the rows needed), so a binding built for fewer rows gets a status, not a heap overrun. Prefer it in new code.
 * `weights_bar`: `[ntfull, n]` receiving $dL / d(weights)$ when `ssp_weights` is used.
 * `weights_z_bar`: `[ntfull, nz, n]` receiving $dL / d(weights\_z)$ when `ssp_weights_z` is used.
 * `mags_bar`, `spec_bar`, `mass_bar`, `lbol_bar`: incoming cotangents (derivatives of loss with respect to outputs). Any may be `NULL`.
@@ -278,7 +278,7 @@ void opensps_context_compute_csp_batch_grad(
   * `opensps_get_nbgrad(int *nbgrad);` returns 37.
   * `opensps_get_grad_param_name(int grad_idx, char *name, int max_len, int *status);` returns the parameter name for each row.
 
-A struct-based entry point `opensps_context_compute_csp_batch_ext` is also provided for clean C/C++ usage:
+A struct-based entry point `opensps_context_compute_csp_batch_ext` is also provided for clean C/C++ usage (it calls the `_rows` entry point, with `opts.params_bar_rows`, or `OPENSPS_NBGRAD` of the header it was compiled with when that is 0):
 ```c
 opensps_batch_options_t opts = {
     .n = n, .n_params = n_params, .names = names, .values = values,

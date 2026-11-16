@@ -9,6 +9,15 @@ major version is 0, a minor release may change the API, and each such change is 
 
 ### Added
 
+- **`opensps_context_compute_csp_batch_grad_rows`**: the gradient entry point with the row count of the caller's
+  `params_bar`. With fewer rows than `opensps_get_nbgrad()` it returns status 3 and writes nothing, instead of the
+  heap overrun that a binding sized for fewer rows gets from `opensps_context_compute_csp_batch_grad` (#98).
+  `opensps_batch_options_t` gains `params_bar_rows` (0: the header's `OPENSPS_NBGRAD`), and
+  `opensps_context_compute_csp_batch_ext` uses the new entry point. Bindings should move to it.
+- **`compute_csp_batch` refuses models whose isochrone modifications differ from the context's** (status 2) when the
+  SSPs come from the context's resident basis, which has the context's: the Fortran entry point used to ignore
+  them silently (the C API already refused them).
+
 - **`-Dtuning_overrides=NAME=VALUE,...`** builds with other values of the compile-time tuning parameters
   (`SEG_LEN`, `PT_PIECE`, the tile sizes, ...), for sweeps and tuners, not for releases (`doc/TUNING.md`). A name the
   registry does not define is refused at configuration. Every build lists its compile-time parameters
