@@ -11,7 +11,7 @@ extern "C" {
 // Batch Gradient Parameter Indices (params_bar rows, 0-indexed in C)
 // Corresponds to BGRAD_* in opensps_csp_batch.f90
 // ----------------------------------------------------------------------------
-#define OPENSPS_NBGRAD 37
+#define OPENSPS_NBGRAD 42
 
 typedef enum {
     OPENSPS_BGRAD_FAGN = 0,
@@ -50,7 +50,13 @@ typedef enum {
     OPENSPS_BGRAD_GAS_LOGN = 33,
     OPENSPS_BGRAD_GAS_LOGNO = 34,
     OPENSPS_BGRAD_GAS_LOGCO = 35,
-    OPENSPS_BGRAD_AFE = 36
+    OPENSPS_BGRAD_AFE = 36,
+    // The isochrone modification factors free per model (opensps_context_build_ssp_ops_free_mods); zero otherwise
+    OPENSPS_BGRAD_FBHB = 37,
+    OPENSPS_BGRAD_SBSS = 38,
+    OPENSPS_BGRAD_AGB = 39,
+    OPENSPS_BGRAD_PAGB = 40,
+    OPENSPS_BGRAD_REDGB = 41
 } opensps_bgrad_param_t;
 
 // ----------------------------------------------------------------------------
@@ -103,7 +109,7 @@ const char *opensps_get_version_string(void);
 const char *opensps_get_build_id(void);
 // Rows of params_bar (opensps_context_compute_csp_batch_grad writes every one, with no capacity argument:
 // use opensps_context_compute_csp_batch_grad_rows, which takes the rows of the caller's array): allocate with
-// this, not with OPENSPS_NBGRAD; the number may grow in any minor release (33 in 0.1.0, 37 in 0.2.0).
+// this, not with OPENSPS_NBGRAD; the number may grow in any minor release (33 in 0.1.0, 37 in 0.2.0, 42 with the modification factors).
 void opensps_get_nbgrad(int *nbgrad);
 void opensps_get_grad_param_name(int grad_idx, char *name, int max_len, int *status);
 void opensps_validate_params(int *status); // Note: Checks legacy global state context
@@ -410,6 +416,13 @@ static inline void opensps_context_compute_csp_batch_ext(
 // operator for every metallicity in the context (allowing both IMF and logzsol
 // to vary per model in compute_csp_batch).
 void opensps_context_build_ssp_ops(int handle, int all_metallicities, int *status);
+
+// The same with the operators of the isochrone modification groups: fbhb, sbss, agb, pagb and redgb may then vary per model in
+// compute_csp_batch (with the IMF, and with logzsol when all_metallicities != 0), with gradient rows OPENSPS_BGRAD_FBHB ..
+// OPENSPS_BGRAD_REDGB (one-sided where a factor jumps: fbhb at its threshold, 1e-4 (1e-3 for Padova), and sbss at 1e-3).
+// delt and dell must stay 0 (status 2); so must agb_dust, masscut and evtype be those of the context. Where the horizontal-branch
+// stars would not fit the isochrone arrays (legacy FSPS stops there) fbhb and sbss above their thresholds give status 2.
+void opensps_context_build_ssp_ops_free_mods(int handle, int all_metallicities, int *status);
 
 // Free context-managed SSP operators
 void opensps_context_free_ssp_ops(int handle, int *status);

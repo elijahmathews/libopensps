@@ -9,6 +9,11 @@ major version is 0, a minor release may change the API, and each such change is 
 
 ### Added
 
+- **Isochrone modification factors free per model** (#45): `opensps_context_build_ssp_ops_free_mods` builds the operators of
+  the modification groups, with which `fbhb`, `sbss`, `agb`, `pagb` and `redgb` vary per model in a batch (with the IMF and the
+  metallicity), forward and with gradients (rows `OPENSPS_BGRAD_FBHB` .. `OPENSPS_BGRAD_REDGB`; **`OPENSPS_NBGRAD` is now
+  42**, size `params_bar` from `opensps_get_nbgrad()` or use the `_rows` entry point). The paths without it are unchanged.
+  `doc/ISO_MODS_PLAN.md`, `doc/C_API.md`.
 - **`opensps_context_compute_csp_batch_grad_rows`**: the gradient entry point with the row count of the caller's
   `params_bar`. With fewer rows than `opensps_get_nbgrad()` it returns status 3 and writes nothing, instead of the
   heap overrun that a binding sized for fewer rows gets from `opensps_context_compute_csp_batch_grad` (#98).

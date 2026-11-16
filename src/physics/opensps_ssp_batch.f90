@@ -43,7 +43,8 @@ module opensps_ssp_batch
     private
 
     public :: ssp_batch_age_sums_z, ssp_batch_age_sums_adjoint, NIMFG, dot_lanes
-    public :: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods, ssp_batch_age_sums_mods
+    public :: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods, ssp_batch_age_sums_mods, &
+               ssp_batch_age_sums_adjoint_mods
 
     !> The IMF parameters of the gradients (imf1, imf2, imf3, vdmc, mdave)
     integer, parameter :: NIMFG = 5
@@ -702,7 +703,7 @@ contains
     !> fold's templates share ages and points.
     subroutine ssp_batch_age_sums_adjoint(imf_type, remnants, n_mod, nt, nspec, set, zlo, zhi, dz, pm, wsfh, it_tesc, &
                                           nt_neb, whl, fesc, gw, slum, lsum_bar, qbar, wbar, imf_bar, fesc_bar, zbar, &
-                                          smass, msum_bar)
+                                          smass, msum_bar, cg, cbar, lfac)
         logical, intent(in)  :: remnants
         integer, intent(in)  :: imf_type, n_mod, nt, nspec, nt_neb, whl
         type(ssp_opset_t), intent(inout) :: set
@@ -714,6 +715,14 @@ contains
         !> cotangent (scaled as lsum_bar): mass = sum over ages of wsfh smass, smass = sum over the two
         !> metallicities of cz (stars + remnants), each a function of the IMF parameters
         real(WP), intent(in), contiguous :: smass(:,:), msum_bar(:)
+        !> A set with free modifications (ssp_opset_build_mods): the groups' coefficients per model, and out the
+        !> cotangent of each coefficient (MOD_NGRP, n_mod); the reverse pass is then ssp_batch_age_sums_adjoint_mods
+        real(WP), intent(in), optional, contiguous :: cg(:,:)
+        real(WP), intent(out), optional, contiguous :: cbar(:,:)
+        !> L_bol's cotangent of the point weights supplied (nt, n_mod, 2: the passes of zlo and zhi): the factor of cl_p in
+        !> wsfh(t) lfac(t, m, pass) instead of lsum_bar wsfh(t) L(t) cz / sl (the sum over groups of a batch with free
+        !> modifications has another L(t) / sl); used by ssp_batch_age_sums_adjoint_mods
+        real(WP), intent(in), optional, contiguous :: lfac(:,:,:)
 
         integer, parameter :: CHG = TUNE_IMF_GRAD_CHG
         integer, parameter :: PROWS(NIMFG) = [IMF_P_ALPHA, IMF_P_ALPHA + 1, IMF_P_ALPHA + 2, IMF_P_VDMC, IMF_P_MDAVE]
@@ -722,9 +731,25 @@ contains
         real(WP), allocatable :: cz1(:), cz2(:), zsg1(:), zsg2(:), fe1(:), fe2(:), ones(:), w(:,:), wm(:,:), tot(:), &
                                  pps(:,:,:), slz(:,:), sqz(:,:), wpb(:,:), vb(:,:,:), dsm(:,:), dsl(:,:), dsq(:,:), &
                                  pmp(:,:), part(:,:), dsp(:,:), sxa(:,:), sea(:,:), apt(:,:), amp(:,:,:), dtt(:,:), &
-                                 remp(:,:), remm(:,:), agt(:,:,:)
+                                 remp(:,:), remm(:,:), agt(:,:,:), lfd(:,:,:)
         real(KP), allocatable :: wk(:,:)
+        logical :: use_lfx
 
+        use_lfx = present(lfac)
+        if (use_lfx) then
+            allocate(lfd(size(lfac, 1), size(lfac, 2), 2))
+            lfd = lfac
+        else
+            allocate(lfd(1, 1, 2))
+        end if
+        if (set%free_mods) then
+            if (.not. present(cg) .or. .not. present(cbar)) &
+                error stop 'ssp_batch_age_sums_adjoint: a set with free modifications needs cg and cbar'
+            call ssp_batch_age_sums_adjoint_mods(imf_type, remnants, n_mod, nt, nspec, set, cg, zlo, zhi, dz, pm, wsfh, &
+                                                 it_tesc, nt_neb, whl, fesc, gw, slum, lsum_bar, qbar, wbar, imf_bar, &
+                                                 fesc_bar, zbar, smass, msum_bar, cbar)
+            return
+        end if
         nz = set%nz
         call ssp_opset_to_device(set)
         neb_cols = 0
@@ -783,7 +808,7 @@ contains
         !$omp target data map(alloc: w, wm, wk, tot, pps, slz, sqz, wpb, vb, dsm, dsl, dsq, part, dsp, sxa, sea) &
         !$omp& map(alloc: apt, amp, dtt, remp, remm, agt, pmp) &
         !$omp& map(to: pm, ones, msum_bar, perm1, viz1, cz1, zsg1, it1, fe1, perm2, viz2, cz2, zsg2, it2, fe2) &
-        !$omp& map(to: wsfh, slum, lsum_bar, qbar) &
+        !$omp& map(to: wsfh, slum, lsum_bar, qbar, lfd) &
         !$omp& map(from: wbar, imf_bar, fesc_bar, zbar)
 #endif
 #if defined(OMP_TARGET)
@@ -802,16 +827,16 @@ contains
             fesc_bar(m) = 0.0_wp
             zbar(m) = 0.0_wp
         end do
-        call run_pass_adj(np1, perm1, viz1, cz1, zsg1, it1, fe1)
-        if (nz > 1) call run_pass_adj(np2, perm2, viz2, cz2, zsg2, it2, fe2)
+        call run_pass_adj(np1, perm1, viz1, cz1, zsg1, it1, fe1, 1)
+        if (nz > 1) call run_pass_adj(np2, perm2, viz2, cz2, zsg2, it2, fe2, 2)
 #ifdef OMP_TARGET
         !$omp end target data
 #endif
 
     contains
 
-        subroutine run_pass_adj(np, perm, viz, cz, zsg, it, fe)
-            integer, intent(in) :: np
+        subroutine run_pass_adj(np, perm, viz, cz, zsg, it, fe, ip)
+            integer, intent(in) :: np, ip
             integer, intent(in), contiguous :: perm(:), viz(:), it(:)
             real(WP), intent(in), contiguous :: cz(:), zsg(:), fe(:)
             integer :: m0, nc, j0, jr, iz, ky, j, ig, isg, m, i
@@ -864,7 +889,7 @@ contains
                 call opensps_trace_push("adj_lq")
                 call adj_lq(m0, nc, nt, nt_neb, set%n_pc_max, set%n_pc, set%pt_off, set%pc_off, set%pc_ptr, set%pt_ptr, &
                             set%pt_age, set%pt_cl, set%pt_q, perm, viz, cz, zsg, wsfh, slum, lsum_bar, qbar, ntq, &
-                            slz, sqz, wpb, zbar)
+                            slz, sqz, wpb, zbar, lfd(:, :, ip), use_lfx)
                 call opensps_trace_pop()
                 ! The IMF parameters: Kroupa and Dave (power-law slopes and break) analytically
                 ! (adj_imf_analytic); otherwise central differences of the point weights (only those the
@@ -924,6 +949,164 @@ contains
         end subroutine run_pass_adj
 
     end subroutine ssp_batch_age_sums_adjoint
+
+    !> The reverse pass of ssp_batch_age_sums_mods. The batch is sum_g cg(g, m) F_g with F_g the age sums, surviving
+    !> mass, ionizing photon rate and linear L_bol sums of the group operators of the model (functions of the IMF, the
+    !> SFH weights, the escaping fraction and the metallicity weight dz), and L_bol the logarithmic blend over the two
+    !> metallicities of the sum over groups. Each group's outputs (SFH weights, IMF parameters, escaping fraction, dz) are
+    !> those of the unchanged ssp_batch_age_sums_adjoint of its set, for the cotangents as given except L_bol's, weighted
+    !> by the coefficient; the cotangent of each coefficient is the group's forward (recomputed) against the cotangents.
+    !> L_bol's part is formed once from the groups' sl of the forward (set%slp), by d L / d sl(g, z) = L cz_z cg_g / L_z with
+    !> L_z = sum_g cg_g sl(g, z): the SFH weights' lsum_bar L(t); dz's lsum_bar wsfh L ln 10 (log10 L_hi - log10 L_lo) (the
+    !> passes the forward ran); and the point weights' lsum_bar L cz / L_z of the group's pass (lfac). The surviving
+    !> mass's cotangent of the SFH weights is that of the total mass, given to the plain group's pass.
+    subroutine ssp_batch_age_sums_adjoint_mods(imf_type, remnants, n_mod, nt, nspec, set, cg, zlo, zhi, dz, pm, wsfh, &
+                                               it_tesc, nt_neb, whl, fesc, gw, slum, lsum_bar, qbar, wbar, imf_bar, &
+                                               fesc_bar, zbar, smass, msum_bar, cbar)
+        logical, intent(in)  :: remnants
+        integer, intent(in)  :: imf_type, n_mod, nt, nspec, nt_neb, whl
+        type(ssp_opset_t), intent(inout) :: set
+        real(WP), intent(in), contiguous :: cg(:,:)
+        integer, intent(in), contiguous  :: zlo(:), zhi(:), it_tesc(:)
+        real(WP), intent(in), contiguous :: dz(:), pm(:,:), wsfh(:,:), fesc(:), slum(:,:), lsum_bar(:), qbar(:,:)
+        real(KP), intent(in), contiguous :: gw(:,:)
+        real(WP), intent(out), contiguous :: wbar(:,:), imf_bar(:,:), fesc_bar(:), zbar(:), cbar(:,:)
+        real(WP), intent(in), contiguous :: smass(:,:), msum_bar(:)
+
+        integer :: g, m, t, p, k, ntq, ni
+        real(KP), allocatable :: yg(:,:)
+        real(WP), allocatable :: sm_g(:,:), sl_g(:,:), q_g(:,:), sm_zero(:,:), wb_g(:,:), ib_g(:,:), fe_g(:), zb_g(:), &
+                                 lfac(:,:,:), slp_l(:,:,:,:), zl(:), cb(:), lzero(:)
+        real(WP) :: lzp(2), czp(2), sx, ltot, acc, ac2
+        logical :: used(MOD_NGRP)
+
+        if (.not. allocated(set%slp)) error stop 'ssp_batch_age_sums_adjoint_mods: no forward pass of this batch'
+        ntq = size(qbar, 1)
+        ni = size(imf_bar, 1)
+        do g = 1, MOD_NGRP
+            used(g) = any(cg(g, 1:n_mod) /= 0.0_wp)
+        end do
+        allocate(slp_l, source=set%slp)
+        allocate(lfac(nt, n_mod, 2), zl(n_mod), cb(n_mod), lzero(n_mod), sm_zero(nt, n_mod))
+        allocate(yg(nspec, 2 * n_mod), sm_g(nt, n_mod), sl_g(nt, n_mod), q_g(ntq, n_mod))
+        allocate(wb_g(nt, n_mod), ib_g(ni, n_mod), fe_g(n_mod), zb_g(n_mod))
+        lzero = 0.0_wp
+        sm_zero = 0.0_wp
+        wbar = 0.0_wp
+        imf_bar = 0.0_wp
+        fesc_bar = 0.0_wp
+        zbar = 0.0_wp
+        cbar = 0.0_wp
+
+        ! L_bol: the total L(t) of the forward, the point weights' factor, and the SFH weights' initial cotangent
+        do m = 1, n_mod
+            do t = 1, nt
+                czp(1) = 1.0_wp - dz(m)
+                czp(2) = dz(m)
+                sx = 0.0_wp
+                do p = 1, 2
+                    lzp(p) = 0.0_wp
+                    do g = 1, MOD_NGRP
+                        lzp(p) = lzp(p) + cg(g, m) * slp_l(t, m, p, g)
+                    end do
+                    if (czp(p) /= 0.0_wp) sx = sx + czp(p) * log10(max(lzp(p), SAFE_FLOOR))
+                end do
+                ltot = 10.0_wp**sx
+                do p = 1, 2
+                    lfac(t, m, p) = 0.0_wp
+                    if (czp(p) /= 0.0_wp .and. lzp(p) > SAFE_FLOOR) lfac(t, m, p) = lsum_bar(m) * ltot * czp(p) / lzp(p)
+                end do
+                wbar(t, m) = lsum_bar(m) * ltot
+            end do
+        end do
+
+#ifdef OMP_TARGET
+        !$omp target data map(alloc: yg, sm_g, sl_g, q_g) map(to: lfac, slp_l, cg, lsum_bar, msum_bar, qbar, sm_zero, lzero) &
+        !$omp& map(from: zl, cb)
+#endif
+        ! d / d dz of L_bol's blend: the passes the forward ran, as adj_lq's (the log of the groups' sum, once)
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(t, p, g, czp, lzp, sx, ltot, acc)
+#elif defined(_OPENMP)
+        !$omp parallel do private(t, p, g, czp, lzp, sx, ltot, acc)
+#endif
+        do m = 1, n_mod
+            acc = 0.0_wp
+            do t = 1, nt
+                czp(1) = 1.0_wp - dz(m)
+                czp(2) = dz(m)
+                sx = 0.0_wp
+                do p = 1, 2
+                    lzp(p) = 0.0_wp
+                    do g = 1, MOD_NGRP
+                        lzp(p) = lzp(p) + cg(g, m) * slp_l(t, m, p, g)
+                    end do
+                    if (czp(p) /= 0.0_wp) sx = sx + czp(p) * log10(max(lzp(p), SAFE_FLOOR))
+                end do
+                ltot = 10.0_wp**sx
+                do p = 1, 2
+                    if (czp(p) /= 0.0_wp .and. lzp(p) > SAFE_FLOOR) &
+                        acc = acc + merge(-1.0_wp, 1.0_wp, p == 1) * lsum_bar(m) * wsfh(m, t) * ltot * log(10.0_wp) * &
+                                    log10(lzp(p))
+                end do
+            end do
+            zl(m) = acc
+        end do
+        do g = 0, MOD_NGRP - 1
+            if (.not. used(g + 1)) cycle
+            if (g > 0) then
+                ! The group's forward again, for the cotangent of its coefficient
+                call ssp_batch_age_sums_z(imf_type, .false., n_mod, nt, nspec, set%grp(g), zlo, zhi, dz, pm, wsfh, it_tesc, &
+                                          nt_neb, whl, fesc, yg, sm_g, sl_g, q_g)
+#if defined(OMP_TARGET)
+                !$omp target teams distribute parallel do private(k, t, p, acc, ac2)
+#elif defined(_OPENMP)
+                !$omp parallel do private(k, t, p, acc, ac2)
+#endif
+                do m = 1, n_mod
+                    acc = 0.0_wp
+                    do k = 1, nspec
+                        acc = acc + real(gw(k, m), WP) * real(yg(k, m), WP) + &
+                                    real(gw(k, n_mod + m), WP) * real(yg(k, n_mod + m), WP)
+                    end do
+                    ac2 = 0.0_wp
+                    do t = 1, nt
+                        ac2 = ac2 + msum_bar(m) * wsfh(m, t) * sm_g(t, m)
+                        do p = 1, 2
+                            ac2 = ac2 + wsfh(m, t) * lfac(t, m, p) * slp_l(t, m, p, g + 1)
+                        end do
+                    end do
+                    do t = 1, ntq
+                        ac2 = ac2 + qbar(t, m) * q_g(t, m)
+                    end do
+                    cb(m) = acc + ac2
+                end do
+#ifdef OMP_TARGET
+                !$omp target update from(cb)
+#endif
+                cbar(g + 1, 1:n_mod) = cb(1:n_mod)
+            end if
+            if (g == 0) then
+                call ssp_batch_age_sums_adjoint(imf_type, remnants, n_mod, nt, nspec, set%grp(g), zlo, zhi, dz, pm, wsfh, &
+                                                it_tesc, nt_neb, whl, fesc, gw, slum, lzero, qbar, wb_g, ib_g, fe_g, zb_g, &
+                                                smass, msum_bar, lfac=lfac)
+            else
+                call ssp_batch_age_sums_adjoint(imf_type, .false., n_mod, nt, nspec, set%grp(g), zlo, zhi, dz, pm, wsfh, &
+                                                it_tesc, nt_neb, whl, fesc, gw, slum, lzero, qbar, wb_g, ib_g, fe_g, zb_g, &
+                                                sm_zero, msum_bar, lfac=lfac)
+            end if
+            do m = 1, n_mod
+                wbar(:, m) = wbar(:, m) + cg(g + 1, m) * wb_g(:, m)
+                imf_bar(:, m) = imf_bar(:, m) + cg(g + 1, m) * ib_g(:, m)
+                fesc_bar(m) = fesc_bar(m) + cg(g + 1, m) * fe_g(m)
+                zbar(m) = zbar(m) + cg(g + 1, m) * zb_g(m)
+            end do
+        end do
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+        zbar = zbar + zl
+    end subroutine ssp_batch_age_sums_adjoint_mods
 
     !> The IMF rows of Kroupa and Dave analytically: dw/d theta of each point weight w = N / M (N the
     !> bin's number integral, M the IMF's mass integral between its limits) is
@@ -2147,19 +2330,26 @@ contains
     !> L_bol and Q per point: w_p bar += lsum_bar wsfh(t) L(t) cz cl_p / sl_z + qbar(t) cz q_p; and their
     !> d / d dz (zbar: L in log, Q linearly).
     subroutine adj_lq(m0, nc, nt, nt_neb, n_pc_max, n_pc, pt_off, pc_off, pc_ptr, pt_ptr, pt_age, pt_cl, pt_q, perm, viz, cz, &
-                      zsg, wsfh, slum, lsum_bar, qbar, ntq, slz, sqz, wpb, zbar)
+                      zsg, wsfh, slum, lsum_bar, qbar, ntq, slz, sqz, wpb, zbar, lfx, use_lfx)
         integer, intent(in) :: m0, nc, nt, nt_neb, n_pc_max, ntq
         integer, intent(in), contiguous :: n_pc(:), pt_off(:), pc_off(:), pc_ptr(:), pt_ptr(:), pt_age(:), perm(:), viz(:)
         real(WP), intent(in), contiguous :: pt_cl(:), pt_q(:), cz(:), zsg(:), wsfh(:,:), slum(:,:), lsum_bar(:), &
                                             qbar(:,:), slz(:,:), sqz(:,:)
         real(WP), intent(inout), contiguous :: wpb(:,:), zbar(:)
+        !> use_lfx: the factor of cl_p is wsfh(m, t) lfx(t, m) (the L_bol of a batch with free modifications, see
+        !> ssp_batch_age_sums_adjoint_mods) in place of lsum_bar wsfh L cz / sl; the zbar term then comes from lsum_bar
+        !> alone (which that caller zeroes). The accelerated kernel does not take it
+        real(WP), intent(in) :: lfx(:,:)
+        logical, intent(in) :: use_lfx
         integer :: q, j, k, k0, n, iz, m, o, t
         real(WP) :: lf, qf, zs
 #if defined(OPENSPS_HIP)
-        call run_hip_adj_lq(m0, nc, nt, nt_neb, ntq, size(wpb, 2), size(wsfh, 1), size(wpb, 1), &
-                            perm, viz, cz, zsg, pt_off, pt_ptr, pt_age, pt_cl, pt_q, &
-                            wsfh, slum, lsum_bar, qbar, slz, sqz, wpb, zbar)
-        return
+        if (.not. use_lfx) then
+            call run_hip_adj_lq(m0, nc, nt, nt_neb, ntq, size(wpb, 2), size(wsfh, 1), size(wpb, 1), &
+                                perm, viz, cz, zsg, pt_off, pt_ptr, pt_age, pt_cl, pt_q, &
+                                wsfh, slum, lsum_bar, qbar, slz, sqz, wpb, zbar)
+            return
+        end if
 #endif
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(k, k0, n, iz, m, o, t, lf, qf)
@@ -2177,7 +2367,11 @@ contains
                 do k = k0, k0 + n - 1
                     t = pt_age(k)
                     lf = 0.0_wp
-                    if (slz(t, j) > SAFE_FLOOR) lf = lsum_bar(m) * wsfh(m, t) * slum(t, m) * cz(m0 + j - 1) / slz(t, j)
+                    if (use_lfx) then
+                        lf = wsfh(m, t) * lfx(t, m)
+                    else if (slz(t, j) > SAFE_FLOOR) then
+                        lf = lsum_bar(m) * wsfh(m, t) * slum(t, m) * cz(m0 + j - 1) / slz(t, j)
+                    end if
                     qf = 0.0_wp
                     if (t <= nt_neb .and. t <= ntq) qf = qbar(t, m) * cz(m0 + j - 1)
                     wpb(j, k - o) = wpb(j, k - o) + lf * pt_cl(k) + qf * pt_q(k)

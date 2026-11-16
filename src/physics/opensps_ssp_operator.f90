@@ -102,7 +102,7 @@ module opensps_ssp_operator
     public :: ssp_operator_t, ssp_operator_build, ssp_operator_evaluate, ssp_operator_free
     public :: ssp_op_model_weights, ssp_op_imf_weights, ssp_op_spmv, ssp_template_product
     public :: ssp_operator_to_device, ssp_operator_from_device, ssp_op_mod_signature, N_MOD_SIG
-    public :: ssp_mod_coefficients
+    public :: ssp_mod_coefficients, ssp_mod_coefficient_derivatives
 
     !> Row kinds (the order of the rows within an age)
     !> Entries per segment of an effective template's list (ssp_operator_t: seg_ptr)
@@ -145,6 +145,10 @@ module opensps_ssp_operator
         real(WP) :: mod_sig(N_MOD_SIG) = 0.0_wp
         !> The modification group the operator holds (MOD_GRP_*); -1: all stars, as the parameters give them
         integer :: mod_group = -1
+        !> A group's operator: at some age the isochrone with the horizontal-branch modification (a blue star per HB star, the
+        !> stragglers) would not fit the isochrone arrays (NM; legacy FSPS stops there): the operator is then built without
+        !> the HB modification at that age, and a batch that needs it (fbhb or sbss above their thresholds) is refused
+        logical :: hb_blocked = .false.
         integer :: nt_lib = 0, n_main = 0, n_small = 0, n_dtpl = 0
         integer :: n_pts = 0, n_rows = 0, nnz = 0, n_slots = 0, n_direct = 0
         !> Native isochrone points (columns): initial mass and IMF bin edges; for the first point
@@ -245,6 +249,34 @@ contains
         c(MOD_GRP_STRAG) = merge(pset%sbss / 20.0_wp, 0.0_wp, pset%sbss > 1.0e-3_wp)
     end function ssp_mod_coefficients
 
+    !> d c_g / d theta of the coefficients of ssp_mod_coefficients, for theta = fbhb, sbss, agb, pagb, redgb (columns 1-5),
+    !> on the side of the thresholds the parameter set is on (the coefficients jump where fbhb passes its threshold
+    !> and where sbss passes 1e-3: those derivatives are those of the one-sided function).
+    pure function ssp_mod_coefficient_derivatives(pset, pdva) result(dc)
+        type(params), intent(in) :: pset
+        logical, intent(in) :: pdva
+        real(WP) :: dc(0:MOD_NGRP - 1, 5)
+        real(WP) :: ind
+
+        dc = 0.0_wp
+        ind = merge(1.0_wp, 0.0_wp, pset%fbhb > merge(1.0e-3_wp, 1.0e-4_wp, pdva))
+        if (pdva) then
+            dc(MOD_GRP_HBA_R, 1) = -ind * pset%redgb
+            dc(MOD_GRP_HBA_N, 1) = -ind
+            dc(MOD_GRP_HBA_R, 5) = 1.0_wp - ind * pset%fbhb
+        else
+            dc(MOD_GRP_HBB, 1) = -ind * pset%redgb
+            dc(MOD_GRP_HBA_R, 5) = 1.0_wp - ind
+            dc(MOD_GRP_HBB, 5) = ind * (1.0_wp - pset%fbhb)
+        end if
+        dc(MOD_GRP_BLUE, 1) = ind
+        dc(MOD_GRP_STRAG, 2) = merge(1.0_wp / 20.0_wp, 0.0_wp, pset%sbss > 1.0e-3_wp)
+        dc(MOD_GRP_TPAGB, 3) = pset%redgb
+        dc(MOD_GRP_TPAGB, 5) = pset%agb
+        dc(MOD_GRP_PAGB, 4) = 1.0_wp
+        dc(MOD_GRP_RGB, 5) = 1.0_wp
+    end function ssp_mod_coefficient_derivatives
+
     !> @brief Builds the IMF-independent operator S of metallicity pset%zmet.
     !> @details The context must be set up (opensps_setup). pset supplies the non-IMF parameters
     !> listed in the module notes; its IMF parameters are not used.
@@ -263,8 +295,10 @@ contains
         type(params) :: pset_use, pset1
         integer :: t, n_nat, n_all, n_after_hb, n_hb, j, k, i, nz, nspec, cap_pts, grp, nah1
         logical :: hb_flag(NM), hb1(NM), age_ge, pdva
-        integer :: parent(NM), par1(NM)
+        integer :: parent(NM), par1(NM), n_extra
         real(WP) :: nrm
+        logical :: hb_cap_ok
+        integer, parameter :: N_STRAGGLERS = 20, N_BLUE_PDVA = 10, N_HB_PDVA_MAX = 150
         real(WP) :: probe(NM), tlog, lin_l
         ! Per-age entries (unsorted), slots and direct stars
         integer(int64), allocatable :: e_key(:)
@@ -380,7 +414,26 @@ contains
             buf%weights(1:n_nat) = 1.0_wp
             hb_flag = .false.
             parent = 0
-            call apply_isochrone_modifications(ctx, pset_use, tlog, buf, hb_flag, parent, n_after_hb)
+            ! The horizontal-branch modification adds stars (MIST, BaSTI: one per HB star; Padova: ten per HB star, of which a
+            ! bound is taken; the stragglers): where they would not fit the arrays it is left out of the group operators
+            hb_cap_ok = .true.
+            if (grp >= 0) then
+                if (pdva) then
+                    n_extra = N_BLUE_PDVA * min(n_nat, N_HB_PDVA_MAX)
+                else
+                    n_extra = count(buf%phase(1:n_nat) == 3.0_wp)
+                end if
+                hb_cap_ok = n_nat + n_extra + N_STRAGGLERS <= NM
+                if (.not. hb_cap_ok) op%hb_blocked = .true.
+            end if
+            if (grp >= MOD_GRP_HBB .and. .not. hb_cap_ok) then
+                pset1 = pset_use
+                pset1%fbhb = 0.0_wp
+                pset1%sbss = 0.0_wp
+                call apply_isochrone_modifications(ctx, pset1, tlog, buf, hb_flag, parent, n_after_hb)
+            else
+                call apply_isochrone_modifications(ctx, pset_use, tlog, buf, hb_flag, parent, n_after_hb)
+            end if
             n_all = buf%n_stars
             op%age_nstars(t) = n_all
             probe(1:n_all) = buf%weights(1:n_all)
@@ -388,7 +441,9 @@ contains
             ! Which native stars are on the horizontal branch (their group at ages with the HB modification):
             ! the groups built without it take the flags from a reference with it on
             age_ge = tlog >= BHB_SBS_TIME
-            if (grp >= 0 .and. grp < MOD_GRP_HBB) then
+            if (grp >= 0 .and. grp < MOD_GRP_HBB .and. .not. hb_cap_ok) then
+                hb1 = .false.
+            else if (grp >= 0 .and. grp < MOD_GRP_HBB) then
                 call load_timestep_data(ctx, nz, t, buf1)
                 buf1%weights(1:n_nat) = 1.0_wp
                 hb1 = .false.
