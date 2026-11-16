@@ -4695,27 +4695,26 @@ contains
         real(KP), intent(inout)          :: total(nspec, n_mod)
 
         integer  :: m, i
+#if defined(OMP_TARGET)
         real(KP), allocatable :: rn(:)
+#else
+        real(KP) :: rn
+#endif
 
         ! The normalization s_abs / s_esc once per model (zero where there is no emission), in KP: an FP64 division
         ! and comparison per (pixel, model) cost more than the rest of this kernel on GPUs with slow FP64; the
-        ! rounding of the scale is that of one KP product
-        allocate(rn(n_mod))
+        ! rounding of the scale is that of one KP product. On the device the ratios are a mapped array, so that the
+        ! (pixel, model) loop can be collapsed; on the host each model forms its own, as a scalar, before its pixel
+        ! loop (the array form fails the dust regressions and oracles under Intel ifx 2026.1 on the CPU)
 #if defined(OMP_TARGET)
+        allocate(rn(n_mod))
         !$omp target data map(alloc: rn)
         !$omp target teams distribute parallel do
-#elif defined(_OPENMP)
-        !$omp parallel do
-#endif
         do m = 1, n_mod
             rn(m) = 0.0_KP
             if (emis(m) .and. s_esc(m) > SAFE_FLOOR) rn(m) = real(s_abs(m) / s_esc(m), KP)
         end do
-#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2)
-#elif defined(_OPENMP)
-        !$omp parallel do collapse(2)
-#endif
         do m = 1, n_mod
             do i = 1, nspec
                 if (rn(m) /= 0.0_KP) then
@@ -4724,8 +4723,23 @@ contains
                 end if
             end do
         end do
-#if defined(OMP_TARGET)
         !$omp end target data
+#else
+#if defined(_OPENMP)
+        !$omp parallel do private(rn, i)
+#endif
+        do m = 1, n_mod
+            rn = 0.0_KP
+            if (emis(m)) then
+                if (s_esc(m) > SAFE_FLOOR) rn = real(s_abs(m) / s_esc(m), KP)
+            end if
+            if (rn /= 0.0_KP) then
+                do i = 1, nspec
+                    ! As dust_emission_final in opensps_dust: shape * transmission, then * norm
+                    total(i, m) = total(i, m) + yo(i, n_mod + m) * yo(i, m) * rn
+                end do
+            end if
+        end do
 #endif
     end subroutine add_dust_emission
 
