@@ -4695,22 +4695,7 @@ contains
         real(KP), intent(inout)          :: total(nspec, n_mod)
 
         integer  :: m, i
-        real(KP), allocatable :: rn(:)
 
-        ! The normalization s_abs / s_esc once per model (zero where there is no emission), in KP: an FP64 division
-        ! and comparison per (pixel, model) cost more than the rest of this kernel on GPUs with slow FP64; the
-        ! rounding of the scale is that of one KP product
-        allocate(rn(n_mod))
-#if defined(OMP_TARGET)
-        !$omp target data map(alloc: rn)
-        !$omp target teams distribute parallel do
-#elif defined(_OPENMP)
-        !$omp parallel do
-#endif
-        do m = 1, n_mod
-            rn(m) = 0.0_KP
-            if (emis(m) .and. s_esc(m) > SAFE_FLOOR) rn(m) = real(s_abs(m) / s_esc(m), KP)
-        end do
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2)
 #elif defined(_OPENMP)
@@ -4718,15 +4703,12 @@ contains
 #endif
         do m = 1, n_mod
             do i = 1, nspec
-                if (rn(m) /= 0.0_KP) then
-                    ! As dust_emission_final in opensps_dust: shape * transmission, then * norm
-                    total(i, m) = total(i, m) + yo(i, n_mod + m) * yo(i, m) * rn(m)
+                if (emis(m) .and. s_esc(m) > SAFE_FLOOR) then
+                    ! As dust_emission_final in opensps_dust: shape * transmission (KP), then * norm (WP)
+                    total(i, m) = total(i, m) + real(yo(i, n_mod + m) * yo(i, m) * (s_abs(m) / s_esc(m)), KP)
                 end if
             end do
         end do
-#if defined(OMP_TARGET)
-        !$omp end target data
-#endif
     end subroutine add_dust_emission
 
 
