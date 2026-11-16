@@ -26,7 +26,8 @@ module opensps_ssp_batch
     use, intrinsic :: iso_c_binding, only: c_float
     use opensps_precision, only: WP, KP
     use opensps_tuning, only: TUNE_P_SSP_BATCH_CHUNK, TUNE_TEMPLATE_MT, TUNE_TEMPLATE_PT, TUNE_TEMPLATE_PIX_BLOCK, &
-                              TUNE_TEMPLATE_KB, TUNE_GEMM_KB, TUNE_GEMM_NC_BATCHED, TUNE_IMF_GRAD_CHG, TUNE_HIP_GEMM_RM, TUNE_HIP_GEMM_RN, &
+                              TUNE_TEMPLATE_KB, TUNE_GEMM_KB, TUNE_GEMM_NC_BATCHED, TUNE_IMF_GRAD_CHG, TUNE_HIP_GEMM_RM, &
+                              TUNE_HIP_GEMM_RN, &
                               TUNE_HIP_GEMM_KC, TUNE_HIP_FOLD_JB, TUNE_HIP_WEIGHTS_PIECES, tuning_get
     use opensps_constants, only: SAFE_FLOOR
     use opensps_imf, only: imf_integral_p, imf_bin_weights_tab, imf_bin_logs, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT, &
@@ -237,7 +238,8 @@ contains
                                             set%ent_off, set%eff_off)
         if (allocated(set%pt_first)) deallocate(set%pt_first, set%pt_age, set%pt_mini, set%pt_m1, set%pt_m2, set%pt_cm, &
                                                 set%pt_cl, set%pt_q, set%pc_ptr, set%seg_ptr, set%seg_first, set%eff_pt, &
-                                                set%eff_val, set%age_pc, set%pt_ptr, set%age_mmax, set%pt_llo, set%pt_dl, set%pt_f, set%eff_f)
+                                                set%eff_val, set%age_pc, set%pt_ptr, set%age_mmax, set%pt_llo, set%pt_dl, &
+                                                set%pt_f, set%eff_f)
         if (allocated(set%pe_ptr)) deallocate(set%pe_ptr, set%pe_k, set%pe_e)
         set%nz = 0; set%nt = 0; set%n_pts_max = 0; set%n_eff_max = 0; set%n_seg_max = 0; set%n_pc_max = 0
     end subroutine ssp_opset_free
@@ -1783,7 +1785,8 @@ contains
         !$omp& wsfh, it_tesc, cz, w, vp)
         !$omp target data use_device_addr(fesc)
         call opensps_hip_fold_multi(int(m0 - 1, c_int), int(nc, c_int), int(nt_neb, c_int), int(size(w, 1), c_int), &
-                                    int(size(wsfh, 1), c_int), int(size(vp, 1), c_int), int(n_seg_max, c_int), int(TUNE_HIP_FOLD_JB, c_int), &
+                                    int(size(wsfh, 1), c_int), int(size(vp, 1), c_int), int(n_seg_max, c_int), &
+                                    int(TUNE_HIP_FOLD_JB, c_int), &
                                     c_loc(perm(1)), c_loc(viz(1)), c_loc(n_seg(1)), c_loc(pt_off(1)), c_loc(seg_off(1)), &
                                     c_loc(pt_age(1)), c_loc(eff_pt(1)), c_loc(seg_ptr(1)), c_loc(eff_f(1, 1)), &
                                     c_loc(wsfh(1, 1)), c_loc(it_tesc(1)), c_loc(fesc(1)), c_loc(cz(1)), c_loc(w(1, 1)), &
@@ -1811,7 +1814,8 @@ contains
         end interface
         !$omp target data use_device_addr(etpl, v, yo)
         rc = opensps_hip_template_columns(int(np, c_int), int(nc, c_int), int(k, c_int), int(TUNE_HIP_GEMM_RM, c_int), &
-                                          int(TUNE_HIP_GEMM_RN, c_int), int(TUNE_HIP_GEMM_KC, c_int), int(TUNE_TEMPLATE_KB, c_int), &
+                                          int(TUNE_HIP_GEMM_RN, c_int), int(TUNE_HIP_GEMM_KC, c_int), int(TUNE_TEMPLATE_KB, &
+                                          c_int), &
                                           int(size(etpl, 1), c_int), int(size(v, 1), c_int), int(size(yo, 1), c_int), &
                                           c_loc(etpl(1, 1)), c_loc(v(1, v0 + 1)), c_loc(yo(1, c0 + 1)), c_null_ptr)
         !$omp end target data
@@ -1872,7 +1876,8 @@ contains
         end if
 #ifdef KERNEL_SINGLE_PRECISION
         call opensps_hip_imf_pieces_weights_sp(int(m0 - 1, c_int), int(nc, c_int), int(n_pc_max, c_int), &
-                                               int(n_pts_max, c_int), int(ldw, c_int), int(imf_type, c_int), int(TUNE_HIP_WEIGHTS_PIECES, c_int), &
+                                               int(n_pts_max, c_int), int(ldw, c_int), int(imf_type, c_int), &
+                                               int(TUNE_HIP_WEIGHTS_PIECES, c_int), &
                                                c_loc(perm(1)), c_loc(viz(1)), c_loc(pm(1, 1)), c_loc(tot(1)), &
                                                c_loc(n_pc(1)), c_loc(pt_off(1)), c_loc(pc_off(1)), c_loc(pc_ptr(1)), &
                                                c_loc(pt_mini(1)), c_loc(pt_m1(1)), c_loc(pt_m2(1)), c_loc(pt_llo(1)), &
@@ -1881,7 +1886,8 @@ contains
                                                pf, c_null_ptr)
 #else
         call opensps_hip_imf_pieces_weights_dp(int(m0 - 1, c_int), int(nc, c_int), int(n_pc_max, c_int), &
-                                               int(n_pts_max, c_int), int(ldw, c_int), int(imf_type, c_int), int(TUNE_HIP_WEIGHTS_PIECES, c_int), &
+                                               int(n_pts_max, c_int), int(ldw, c_int), int(imf_type, c_int), &
+                                               int(TUNE_HIP_WEIGHTS_PIECES, c_int), &
                                                c_loc(perm(1)), c_loc(viz(1)), c_loc(pm(1, 1)), c_loc(tot(1)), &
                                                c_loc(n_pc(1)), c_loc(pt_off(1)), c_loc(pc_off(1)), c_loc(pc_ptr(1)), &
                                                c_loc(pt_mini(1)), c_loc(pt_m1(1)), c_loc(pt_m2(1)), c_loc(pt_llo(1)), &
