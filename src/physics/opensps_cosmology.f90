@@ -26,7 +26,7 @@ module opensps_cosmology
 
     ! Public Interface
     public :: air_to_vacuum
-    public :: igm_tau_pixel_terms, igm_tau_z_terms, IGM_NTERM
+    public :: igm_tau_pixel_terms, igm_tau_z_terms, igm_tau_z_terms_dz, IGM_NTERM
     public :: vacuum_to_air
     public :: get_universe_age
     public :: get_luminosity_distance
@@ -505,6 +505,21 @@ contains
         b(5) = one_plus_z**(3.0_wp - MADAU_P3)
         b(6) = one_plus_z**MADAU_P4
     end subroutine igm_tau_z_terms
+
+    !> d b_k / d (1 + z) of the redshift factors of igm_tau_z_terms: d tau / d z = sum_k a_k (igm_tau_pixel_terms) bd_k
+    subroutine igm_tau_z_terms_dz(one_plus_z, bd)
+#ifdef OMP_TARGET
+        !$omp declare target
+#endif
+        real(WP), intent(in)  :: one_plus_z
+        real(WP), intent(out) :: bd(IGM_NTERM)
+        bd(1) = 3.46_wp * one_plus_z**2.46_wp
+        bd(2) = 1.68_wp * one_plus_z**0.68_wp
+        bd(3) = (3.0_wp + MADAU_P1) * one_plus_z**(2.0_wp + MADAU_P1)
+        bd(4) = (1.5_wp + MADAU_P2) * one_plus_z**(0.5_wp + MADAU_P2)
+        bd(5) = (3.0_wp - MADAU_P3) * one_plus_z**(2.0_wp - MADAU_P3)
+        bd(6) = MADAU_P4 * one_plus_z**(MADAU_P4 - 1.0_wp)
+    end subroutine igm_tau_z_terms_dz
 
     !> d igm_tau / d(1 + z) at a rest-frame wavelength (the gradients of compute_csp_batch): the
     !> Lyman-series power laws and Madau's continuum terms differentiated term by term.

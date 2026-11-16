@@ -117,6 +117,7 @@ module opensps_cue
         real(KP), allocatable :: m0c(:), mnc(:) !< M_1 = m0c(1) M_2 + m0c(2) M_3; likewise at the end
         integer, allocatable  :: k(:)
         real(KP), allocatable :: t(:), hh6(:)
+        real(KP), allocatable :: rh6(:)  !< 6 / h (n - 1) in KP: the forward sweep's slopes without FP64 divisions
         !> The pixels of each knot interval (first and last; none: kst = nout + 1, ken = 0): the
         !> transpose gathers over them (cue_spline_adjoint)
         integer, allocatable  :: kst(:), ken(:)
@@ -1398,7 +1399,8 @@ contains
             rdw(j) = 1.0_wp / den
             cpw(j) = c(j) * rdw(j)
         end do
-        allocate(sp%cp(nr), sp%rden(nr), sp%aa(nr), sp%m0c(2), sp%mnc(2))
+        allocate(sp%cp(nr), sp%rden(nr), sp%aa(nr), sp%m0c(2), sp%mnc(2), sp%rh6(n - 1))
+        sp%rh6 = real(6.0_wp / sp%h, KP)
         sp%cp = real(cpw, KP)
         sp%rden = real(rdw, KP)
         sp%aa = real(a, KP)
@@ -1428,7 +1430,7 @@ contains
             sp%ken(k) = max(sp%ken(k), j)
         end do
 #ifdef OMP_TARGET
-        !$omp target enter data map(to: sp%h, sp%cp, sp%rden, sp%aa, sp%m0c, sp%mnc, sp%k, sp%t, sp%hh6, sp%kst, sp%ken)
+        !$omp target enter data map(to: sp%h, sp%cp, sp%rden, sp%aa, sp%m0c, sp%mnc, sp%k, sp%t, sp%hh6, sp%kst, sp%ken, sp%rh6)
         sp%on_device = .true.
 #endif
     end subroutine cue_spline_build
@@ -1437,13 +1439,15 @@ contains
         type(cue_spline_t), intent(inout) :: sp
 #ifdef OMP_TARGET
         if (sp%on_device) then
-            !$omp target exit data map(delete: sp%h, sp%cp, sp%rden, sp%aa, sp%m0c, sp%mnc, sp%k, sp%t, sp%hh6, sp%kst, sp%ken)
+            !$omp target exit data map(delete: sp%h, sp%cp, sp%rden, sp%aa, sp%m0c, sp%mnc, sp%k, sp%t, sp%hh6, sp%kst, &
+            !$omp& sp%ken, sp%rh6)
         end if
 #endif
         sp%on_device = .false.
         if (allocated(sp%xout)) deallocate(sp%xout, sp%h)
         if (allocated(sp%cp)) deallocate(sp%cp, sp%rden, sp%aa, sp%m0c, sp%mnc)
         if (allocated(sp%k)) deallocate(sp%k, sp%t, sp%hh6, sp%kst, sp%ken)
+        if (allocated(sp%rh6)) deallocate(sp%rh6)
         sp%n = 0
         sp%nout = 0
     end subroutine spline_free
@@ -1486,14 +1490,45 @@ contains
     !> The spline's second derivatives mm(nk, n) of n spectra v(nk, n) (one thread per spectrum: the
     !> Thomas sweeps of the factored not-a-knot system; latency-bound by the recurrence, whatever the
     !> layout, so the knots are the leading dimension, as the evaluation reads them).
-    subroutine cue_spline_solve(nk, n, h, cp, rden, aa, m0c, mnc, v, mm)
+    subroutine cue_spline_solve(nk, n, h, cp, rden, aa, m0c, mnc, v, mm, rh6)
         integer, intent(in)   :: nk, n
         real(WP), intent(in)  :: h(nk - 1)
         real(KP), intent(in)  :: cp(nk - 2), rden(nk - 2), aa(nk - 2), m0c(2), mnc(2)
         real(KP), intent(in)  :: v(nk, n)
         real(KP), intent(inout) :: mm(nk, n)
+        !> 6 / h in KP (cue_spline_t%rh6): the slopes' scaling in KP, without FP64 divisions (an FP64 division per
+        !> knot and spectrum was the cost of this kernel on GPUs with slow FP64). The differences v(i + 1) - v(i)
+        !> of KP values are exact where the values are within a factor of two, so the slopes carry one rounding
+        !> each, of the order of the KP values themselves
+        real(KP), intent(in), optional :: rh6(nk - 1)
         integer  :: m, j, i
         real(KP) :: r
+
+        if (present(rh6)) then
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do private(j, i, r)
+#elif defined(_OPENMP)
+            !$omp parallel do private(j, i, r)
+#endif
+            do m = 1, n
+                do j = 1, nk - 2
+                    i = j + 1
+                    r = (v(i + 1, m) - v(i, m)) * rh6(i) - (v(i, m) - v(i - 1, m)) * rh6(i - 1)
+                    if (j == 1) then
+                        mm(i, m) = r * rden(1)
+                    else
+                        mm(i, m) = (r - aa(j) * mm(i - 1, m)) * rden(j)
+                    end if
+                end do
+                do j = nk - 3, 1, -1
+                    i = j + 1
+                    mm(i, m) = mm(i, m) - cp(j) * mm(i + 1, m)
+                end do
+                mm(1, m) = m0c(1) * mm(2, m) + m0c(2) * mm(3, m)
+                mm(nk, m) = mnc(1) * mm(nk - 1, m) + mnc(2) * mm(nk - 2, m)
+            end do
+            return
+        end if
 
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do private(j, i, r)

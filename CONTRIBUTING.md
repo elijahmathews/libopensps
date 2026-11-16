@@ -80,6 +80,12 @@ GitHub workflow files are checked with `actionlint`.
   kinds.
 - **No magic numbers:** physical constants and model parameters are named constants, with
   their source in a comment.
+- **Hardware tuning:** a number whose best value depends on the machine (a chunk or block size, a
+  batch-size crossover, a team or tile size, a summation chunk) never appears as a literal in a
+  kernel or a driver. It is a named parameter of `src/core/opensps_tuning.f90`, read from there, and
+  a value for one device is a *profile entry* in that module with its measurement cited
+  (`doc/TUNING.md`: what to measure, how to cite it). `tools/check_tuning_literals.py` (the
+  `unit_tuning_literals` test) fails on the known names defined as literals outside the module.
 - **Documentation:** `!>` comments (Doxygen style) on modules and public procedures. A physics
   choice gets a comment that says why, with a reference.
 - **Floating point:** never `-ffast-math`, nvfortran `-fast`, or any flag that reassociates

@@ -3,6 +3,10 @@
 Running log of the GPU sessions (plan: `doc/GPU_PLAN.md`). Newest status at the top; dated
 entries below. The A100 session (2026-10-16) is first; the P100 session's status and entries follow.
 
+> **The P100 entries are history.** They were measured with the OpenACC build, which was removed (#23);
+> nvfortran 25.1's OpenMP offload needs `cc70` or newer, so the P100 cannot build the current code and
+> those numbers cannot be reproduced with this tree (`doc/GPU_PLAN.md`, "P100 and V100").
+
 ## Questions for Elijah
 
 (Decisions that are yours; the agent took the conservative option and kept working.) All five

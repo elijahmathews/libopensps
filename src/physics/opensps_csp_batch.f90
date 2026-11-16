@@ -80,6 +80,13 @@ module opensps_csp_batch
     !> (summation order differs).
 
     use opensps_precision, only: WP, KP, kahan_add
+    use opensps_tuning, only: TUNE_NCHG, TUNE_CSP_PT, &
+                              TUNE_AGE_SUMS_Z4_FLANG_MT, TUNE_AGE_SUMS_Z4_FLANG_PT, TUNE_AGE_SUMS_Z_FLANG_MT, &
+                              TUNE_AGE_SUMS_Z_FLANG_PT, TUNE_AGE_SUMS_Z_NVF_MT, TUNE_AGE_SUMS_Z4_NVF_MT, &
+                              TUNE_AGE_SUMS_MT, TUNE_AGE_SUMS_PT, TUNE_NCH, &
+                              TUNE_P_HOST_SFH_MAX, TUNE_P_PINNED_CHUNK_BYTES, TUNE_HIP_GEMM_RM, TUNE_HIP_GEMM_RN, &
+                              TUNE_HIP_GEMM_KC, TUNE_TEMPLATE_KB, TUNE_HIP_ATT_THREADS, TUNE_HIP_OBS_THREADS, &
+                              TUNE_BAND_PIX_PER_THREAD, tuning_get
     use opensps_constants, only: SAFE_FLOOR, PI, NEMLINE, NEBNAGE, NEBNZ, NEBNIP, H_PLANCK, L_SOL
     use opensps_types, only: params, params_core
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings, batch_out_reserve, &
@@ -91,7 +98,7 @@ module opensps_csp_batch
     use opensps_sfh, only: get_sfh_properties_at_age
     use opensps_dust, only: compute_attenuation_curve_point, one_minus_trans
     use opensps_interpolation, only: find_interval, find_interval_with_hint
-    use opensps_cosmology, only: igm_tau, igm_tau_dz, igm_tau_pixel_terms, igm_tau_z_terms, IGM_NTERM, &
+    use opensps_cosmology, only: igm_tau, igm_tau_dz, igm_tau_pixel_terms, igm_tau_z_terms, igm_tau_z_terms_dz, IGM_NTERM, &
                                  refresh_cosmology
     use opensps_offload, only: offload_on_host, offload_host_unusable
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
@@ -183,7 +190,7 @@ module opensps_csp_batch
     !> Nebular continuum adjoint: at most this many ages per run (ages in one CLOUDY interval)
     integer, parameter :: NEB_RUN = 4
     !> Pixel chunks per model of the attenuation adjoint (each thread takes every NCHG-th pixel)
-    integer, parameter :: NCHG = 64
+    integer, parameter :: NCHG = TUNE_NCHG
 
 #if defined(__flang__)
 #define PBUF_ARG pbuf
@@ -238,11 +245,12 @@ module opensps_csp_batch
             type(c_ptr), value :: tab, ia, wa, dwa, newr, cy, co, lns, iz, wz, iu, wu, yo, stream
         end subroutine opensps_hip_nebular_continuum_dp
 
-        subroutine opensps_hip_adj_nebular_continuum_sp(n_mod, nspec, ntab, ntn, nrun, tab, gw, it_tesc, ia, wa, &
+        subroutine opensps_hip_adj_nebular_continuum_sp(n_mod, nspec, ntab, ntot, ntn, nrun, tab, gw, it_tesc, ia, wa, &
                                                         rs, rl, iz, wz, iu, wu, fabs, qzt, lref, csum, stream) &
             bind(C, name="opensps_hip_adj_nebular_continuum_sp")
-            import :: c_ptr, c_int
+            import :: c_ptr, c_int, c_size_t
             integer(c_int), value :: n_mod, nspec, ntab, ntn, nrun
+            integer(c_size_t), value :: ntot
             type(c_ptr), value :: tab, gw, it_tesc, ia, wa, rs, rl, iz, wz, iu, wu, fabs, qzt, lref, csum, stream
         end subroutine opensps_hip_adj_nebular_continuum_sp
 
@@ -399,7 +407,7 @@ contains
         !> model's SFH integral is one serial thread (~0.3 ms on the A100, the same on the P100),
         !> on the host ~20 us per model. (Hardware note: the crossover depends on the host core
         !> and on the GPU's single-thread FP64 speed; measured on the A100 node.)
-        integer, parameter :: HOST_SFH_MAX = 16
+        integer :: HOST_SFH_MAX
         real(WP), allocatable :: wh(:,:), t1h(:), t2h(:)
         integer  :: nzb, nw, nzw, z
 
@@ -608,6 +616,7 @@ contains
                 end if
             end do
         end if
+        HOST_SFH_MAX = tuning_get(TUNE_P_HOST_SFH_MAX)
         host_w = .false.
 #if defined(OMP_TARGET)
         host_w = (.not. given_w) .and. n_mod < HOST_SFH_MAX
@@ -1239,21 +1248,36 @@ contains
         ! ------------------------------------------------------------------
         ! (fbk: the band fluxes, allocated only for the gradients; unallocated, the argument is absent)
         if (grad) allocate(fbk(nbands, n_mod))
+        ! keep_maggies = 1: the linear AB fluxes of this batch stay in the context (opensps_context_get_batch_maggies)
+        if (ctx%keep_maggies_val == 1) then
+            if (allocated(ctx%state%last_maggies)) then
+                if (any(shape(ctx%state%last_maggies) /= [nbands, n_mod])) deallocate(ctx%state%last_maggies)
+            end if
+            if (.not. allocated(ctx%state%last_maggies)) allocate(ctx%state%last_maggies(nbands, n_mod))
+        else if (allocated(ctx%state%last_maggies)) then
+            deallocate(ctx%state%last_maggies)
+        end if
         if (present(zred_mags) .and. allocated(psets(1)%mag_compute)) then
             call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, psets(1)%mag_compute, &
-                                            zred_col=zred_mags(1:n_mod), fband_out=fbk)
+                                            zred_col=zred_mags(1:n_mod), fband_out=fbk, &
+                                            maggies_out=ctx%state%last_maggies)
         else if (present(zred_mags)) then
             call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, &
-                                            zred_col=zred_mags(1:n_mod), fband_out=fbk)
+                                            zred_col=zred_mags(1:n_mod), fband_out=fbk, &
+                                            maggies_out=ctx%state%last_maggies)
         else if (zvar .and. allocated(psets(1)%mag_compute)) then
             call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, psets(1)%mag_compute, &
-                                            zred_col=zcol, fband_out=fbk)
+                                            zred_col=zcol, fband_out=fbk, &
+                                            maggies_out=ctx%state%last_maggies)
         else if (zvar) then
-            call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, zred_col=zcol, fband_out=fbk)
+            call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, zred_col=zcol, fband_out=fbk, &
+                                            maggies_out=ctx%state%last_maggies)
         else if (allocated(psets(1)%mag_compute)) then
-            call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, psets(1)%mag_compute, fband_out=fbk)
+            call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, psets(1)%mag_compute, &
+                                            fband_out=fbk, maggies_out=ctx%state%last_maggies)
         else
-            call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, fband_out=fbk)
+            call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, fband_out=fbk, &
+                                            maggies_out=ctx%state%last_maggies)
         end if
         if (present(indx)) call compute_spectral_indices_columns(ctx, ctx%state%spec_lambda, total, n_mod, indx)
         ! ------------------------------------------------------------------
@@ -1549,7 +1573,7 @@ contains
         !> (The kernels are synchronous, so the data is ready when the copy starts; hardware note:
         !> ~16 MB chunks measured best on the A100 node, PCIe 3 host: large enough to reach the DMA
         !> rate, small enough to overlap most of the conversion)
-        integer, parameter :: CHUNK_BYTES = 16 * 1024 * 1024
+        integer :: CHUNK_BYTES
         integer :: cw, nch, c, q, kb, st
         type(c_ptr) :: dbase
 
@@ -1563,6 +1587,7 @@ contains
             dbase = c_loc(sp)
             !$omp end target data
             kb = storage_size(sp) / 8
+            CHUNK_BYTES = tuning_get(TUNE_P_PINNED_CHUNK_BYTES)
             cw = max(1, CHUNK_BYTES / (nspec * kb))
             nch = (n_mod + cw - 1) / cw
             if (issue(1, min(cw, n_mod), 1)) then
@@ -2090,7 +2115,8 @@ contains
 
         integer  :: nion, ncw, ch, c0, nc, m, i, k, j, map(NEMLINE)
         real(WP), allocatable :: lam_ion(:), ion(:,:), theta(:,:), logq(:), qy(:), qo(:), line_log(:,:), cont_log(:,:)
-        real(KP), allocatable :: sion(:,:), v(:,:), mm(:,:)
+        real(WP), allocatable :: lqy(:), lqo(:), lqt(:)
+        real(KP), allocatable :: sion(:,:), v(:,:), mm(:,:), fyv(:)
         real(KP) :: fy, fo, tt, u, c
         integer  :: kk
         real(WP) :: e
@@ -2111,10 +2137,11 @@ contains
 
         ch = max(1, min(n_mod, cue_batch_chunk))
         allocate(sion(nion, ch), ion(CUE_NION, ch), theta(CUE_NIN, ch), logq(ch), qy(ch), qo(ch), &
-                 line_log(cue_w%nlines, ch), cont_log(ncw, ch), v(ncw, ch), mm(ncw, ch))
+                 line_log(cue_w%nlines, ch), cont_log(ncw, ch), v(ncw, ch), mm(ncw, ch), &
+                 lqy(ch), lqo(ch), lqt(ch), fyv(ch))
 #ifdef OMP_TARGET
         !$omp target data map(to: lam_ion, map, gas) map(alloc: sion, ion, theta, logq, qy, qo, line_log, cont_log, &
-        !$omp&  v, mm)
+        !$omp&  v, mm, lqy, lqo, lqt, fyv)
 #endif
         do c0 = 0, n_mod - 1, ch
             nc = min(ch, n_mod - c0)
@@ -2125,6 +2152,23 @@ contains
             call cue_ionizing_params(nc, nion, lam_ion, sion, ion)
             call cue_inputs(nc, ion, gas(1, c0 + 1), theta, logq)
             call cue_forward(cue_w, nc, theta, line_log, cont_log, fp64=ctx%cue_fp64_val == 1)
+            ! Per model, once: the logarithms of the absorbed photons (qy = 0: log -> 0, the value is then not used)
+            ! and the young fraction of the continuum (FP64 logarithms and a division per (line, model),
+            ! (pixel, model) otherwise, at 1/64 of the FP32 rate on some GPUs)
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do
+#elif defined(_OPENMP)
+            !$omp parallel do
+#endif
+            do m = 1, nc
+                lqy(m) = 0.0_wp; lqo(m) = 0.0_wp; lqt(m) = 0.0_wp; fyv(m) = 0.0_KP
+                if (qy(m) > 0.0_wp) lqy(m) = log(qy(m))
+                if (qo(m) > 0.0_wp) lqo(m) = log(qo(m))
+                if (qy(m) + qo(m) > 0.0_wp) then
+                    lqt(m) = log(qy(m) + qo(m))
+                    fyv(m) = real(qy(m) / (qy(m) + qo(m)), KP)
+                end if
+            end do
             ! Lines: cue's L for its Q(U, n_H), scaled to the absorbed photons (FP64 exponent)
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do collapse(2) private(k, e)
@@ -2139,8 +2183,8 @@ contains
                         e = (line_log(k, m) - logq(m) - CUE_LOG_LSUN) * LN10
                         lum(i, c0 + m) = 0.0_KP
                         lum(i, n_mod + c0 + m) = 0.0_KP
-                        if (qy(m) > 0.0_wp) lum(i, c0 + m) = exp_kp(e + log(qy(m)))
-                        if (qo(m) > 0.0_wp) lum(i, n_mod + c0 + m) = exp_kp(e + log(qo(m)))
+                        if (qy(m) > 0.0_wp) lum(i, c0 + m) = exp_kp(e + lqy(m))
+                        if (qo(m) > 0.0_wp) lum(i, n_mod + c0 + m) = exp_kp(e + lqo(m))
                     else
                         lum(i, c0 + m) = 0.0_KP
                         lum(i, n_mod + c0 + m) = 0.0_KP
@@ -2159,13 +2203,14 @@ contains
             do m = 1, nc
                 do i = 1, ncw
                     if (qy(m) + qo(m) > 0.0_wp) then
-                        v(i, m) = exp_kp((cont_log(i, m) - logq(m) - CUE_LOG_LSUN) * LN10 + log(qy(m) + qo(m)))
+                        v(i, m) = exp_kp((cont_log(i, m) - logq(m) - CUE_LOG_LSUN) * LN10 + lqt(m))
                     else
                         v(i, m) = 0.0_KP
                     end if
                 end do
             end do
-            call cue_spline_solve(ncw, nc, cue_sp%h, cue_sp%cp, cue_sp%rden, cue_sp%aa, cue_sp%m0c, cue_sp%mnc, v, mm)
+            call cue_spline_solve(ncw, nc, cue_sp%h, cue_sp%cp, cue_sp%rden, cue_sp%aa, cue_sp%m0c, cue_sp%mnc, v, mm, &
+                                 cue_sp%rh6)
             ! The spline at each pixel, added to the young and old sums (in one pass)
             associate (sk => cue_sp%k, st => cue_sp%t, sh6 => cue_sp%hh6)
 #if defined(OMP_TARGET)
@@ -2182,8 +2227,7 @@ contains
                     u = 1.0_KP - tt
                     c = u * v(kk, m) + tt * v(kk + 1, m) + &
                         sh6(j) * ((u * u * u - u) * mm(kk, m) + (tt * tt * tt - tt) * mm(kk + 1, m))
-                    fy = 0.0_KP
-                    if (qy(m) + qo(m) > 0.0_wp) fy = real(qy(m) / (qy(m) + qo(m)), KP)
+                    fy = fyv(m)
                     fo = 1.0_KP - fy
                     yo(j, c0 + m) = yo(j, c0 + m) + fy * c
                     yo(j, n_mod + c0 + m) = yo(j, n_mod + c0 + m) + fo * c
@@ -2986,7 +3030,7 @@ contains
         logical, intent(in)     :: newr(nt_neb)
         real(KP), intent(inout), target :: yo(nspec, 2 * n_mod)
 
-        integer, parameter :: PT = 4
+        integer, parameter :: PT = TUNE_CSP_PT
         real(WP), parameter :: LN10 = log(10.0_wp)
         integer  :: m, ip, npt
 #if defined(OPENSPS_HIP)
@@ -3477,10 +3521,96 @@ contains
 #endif
     end subroutine age_sums_w
 
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+    !> age_sums_z with the HIP kernel (opensps_hip_age_sums_z): the models sorted by the lower slab of their
+    !> metallicity pair and cut into tiles of 16 HIP_GEMM_RN models of one pair. done is false if the kernel is not
+    !> built for the registry's tile shape (the caller then runs its portable kernel)
+    subroutine age_sums_z_hip(nspec, nt, nz, n_mod, basis, w2flat, it_tesc, zlo, dz, yo, done)
+        use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
+        integer, intent(in)  :: nspec, nt, nz, n_mod
+        integer, intent(in), target  :: it_tesc(n_mod), zlo(n_mod)
+        real(KP), intent(in), target :: basis(nspec, nt, nz), w2flat(nt * 2 * n_mod)
+        real(WP), intent(in), target :: dz(n_mod)
+        real(KP), intent(out), target :: yo(nspec, 2 * n_mod)
+        logical, intent(out) :: done
+        integer, allocatable, target :: zord(:), starts(:), tfirst(:), tcnt(:), tzl(:), fill(:)
+        integer :: m, key, nzk, ntile, g, c, j, tm
+        integer(c_int) :: rc
+        interface
+            function opensps_hip_age_sums_z(nspec, nt, n_mod, ntile, rm, rn, kc, kb, zord, tfirst, tcnt, tzl, basis, w2, it, dz, &
+                                            yo, stream) result(rc) bind(C, name="opensps_hip_age_sums_z")
+                import :: c_int, c_ptr
+                integer(c_int), value :: nspec, nt, n_mod, ntile, rm, rn, kc, kb
+                type(c_ptr), value :: zord, tfirst, tcnt, tzl, basis, w2, it, dz, yo, stream
+                integer(c_int) :: rc
+            end function opensps_hip_age_sums_z
+        end interface
+
+        tm = 16 * TUNE_HIP_GEMM_RN       ! models per tile
+
+        nzk = maxval(zlo(1:n_mod))
+        allocate(zord(n_mod), starts(nzk + 2), fill(nzk + 1))
+        starts = 0
+        do m = 1, n_mod
+            starts(zlo(m) + 1) = starts(zlo(m) + 1) + 1
+        end do
+        starts(1) = 1
+        do key = 2, nzk + 2
+            starts(key) = starts(key) + starts(key - 1)
+        end do
+        fill(1:nzk + 1) = starts(1:nzk + 1)
+        do m = 1, n_mod
+            zord(fill(zlo(m))) = m
+            fill(zlo(m)) = fill(zlo(m)) + 1
+        end do
+        ntile = 0
+        do g = 1, nzk
+            c = starts(g + 1) - starts(g)
+            ntile = ntile + (c + tm - 1) / tm
+        end do
+        allocate(tfirst(max(ntile, 1)), tcnt(max(ntile, 1)), tzl(max(ntile, 1)))
+        j = 0
+        do g = 1, nzk
+            c = starts(g + 1) - starts(g)
+            do m = 0, c - 1, tm
+                j = j + 1
+                tfirst(j) = starts(g) - 1 + m
+                tcnt(j) = min(tm, c - m)
+                tzl(j) = g
+            end do
+        end do
+        !$omp target data map(to: zord, tfirst, tcnt, tzl) use_device_addr(basis, w2flat, it_tesc, dz, yo)
+        !$omp target data use_device_addr(zord, tfirst, tcnt, tzl)
+        rc = opensps_hip_age_sums_z(int(nspec, c_int), int(nt, c_int), int(n_mod, c_int), int(ntile, c_int), &
+                                    int(TUNE_HIP_GEMM_RM, c_int), int(TUNE_HIP_GEMM_RN, c_int), int(TUNE_HIP_GEMM_KC, c_int), &
+                                    int(TUNE_TEMPLATE_KB, c_int), c_loc(zord), c_loc(tfirst), c_loc(tcnt), c_loc(tzl), &
+                                    c_loc(basis), c_loc(w2flat), c_loc(it_tesc), c_loc(dz), c_loc(yo), c_null_ptr)
+        !$omp end target data
+        !$omp end target data
+        done = rc == 0
+    end subroutine age_sums_z_hip
+#endif
+
     !> Age sums with per-model metallicity: each model's basis is (1 - dz) basis(:, :, zlo) +
     !> dz basis(:, :, zhi), formed at kernel precision term by term (portable kernel; also used in
     !> cuBLAS builds). One pass over the ages (young or old per model), 4 models per thread.
     subroutine age_sums_z(nspec, nt, nz, n_mod, basis, w2, w2flat, it_tesc, zlo, zhi, dz, yo)
+        integer, intent(in)              :: nspec, nt, nz, n_mod, it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
+        real(KP), intent(in)             :: basis(nspec, nt, nz), w2(nt, 2 * n_mod), w2flat(nt * 2 * n_mod)
+        real(WP), intent(in)             :: dz(n_mod)
+        real(KP), intent(out)            :: yo(nspec, 2 * n_mod)
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+        logical :: hip_done
+        ! The two slabs of every model's pair adjacent (always, with the metallicity interval): a product per pair
+        if (all(zhi(1:n_mod) == zlo(1:n_mod) + 1)) then
+            call age_sums_z_hip(nspec, nt, nz, n_mod, basis, w2flat, it_tesc, zlo, dz, yo, hip_done)
+            if (hip_done) return
+        end if
+#endif
+        call age_sums_z_generic(nspec, nt, nz, n_mod, basis, w2, w2flat, it_tesc, zlo, zhi, dz, yo)
+    end subroutine age_sums_z
+
+    subroutine age_sums_z_generic(nspec, nt, nz, n_mod, basis, w2, w2flat, it_tesc, zlo, zhi, dz, yo)
         ! Explicit-shape dummies (no array descriptors in the kernel)
         integer, intent(in)              :: nspec, nt, nz, n_mod, it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
         real(KP), intent(in)             :: basis(nspec, nt, nz), w2(nt, 2 * n_mod), w2flat(nt * 2 * n_mod)
@@ -3495,7 +3625,7 @@ contains
         ! is unchanged (same results bit for bit).
         ! Tile of PT pixels x MT models per thread. FP64 on the 780M: 4 pixels spill registers (890 ms at
         ! N = 10^4; 658 ms with 2; 8 models x 1-4 pixels is the best range, 16 or more models 6-8 s)
-        integer, parameter :: MT = 8, PT = merge(2, 4, KP == WP)
+        integer, parameter :: MT = TUNE_AGE_SUMS_Z_FLANG_MT, PT = TUNE_AGE_SUMS_Z_FLANG_PT
         integer  :: m, mq, ip, npt, key, nzk
         integer, allocatable :: zord(:), starts(:)
 
@@ -3592,7 +3722,7 @@ contains
             end do
         end do
 #elif defined(OMP_TARGET)
-        integer, parameter :: MT = 4
+        integer, parameter :: MT = TUNE_AGE_SUMS_Z_NVF_MT
         integer  :: mq, i, k, l, mm(MT)
         real(KP) :: bk, y(MT), o(MT), d(MT)
 
@@ -3659,7 +3789,7 @@ contains
             end do
         end do
 #endif
-    end subroutine age_sums_z
+    end subroutine age_sums_z_generic
 
     !> Age sums with per-model metallicity and [alpha/Fe]: each model's basis is the bilinear blend of four
     !> slabs, (1 - da) [(1 - dz) b(zlo) + dz b(zlo + 1)] + da [(1 - dz) b(zlo + nzs) + dz b(zlo + nzs + 1)]
@@ -3674,7 +3804,7 @@ contains
         ! LLVM flang / AMD: as age_sums_z (models sorted by their cell so that a tile shares its four slabs;
         ! PT pixels per thread, MT models per tile). Measured on the R9700 against age_sums_z (N = 1e4, 107
         ! ages): 1.4x at 5994 pixels with MT = 8, PT = 2; the tile shape matters (spills)
-        integer, parameter :: MT = 8, PT = 2
+        integer, parameter :: MT = TUNE_AGE_SUMS_Z4_FLANG_MT, PT = TUNE_AGE_SUMS_Z4_FLANG_PT
         integer  :: m, mq, ip, npt, key, ncell
         integer, allocatable :: zord(:), starts(:)
 
@@ -3781,7 +3911,7 @@ contains
             end do
         end do
 #elif defined(OMP_TARGET)
-        integer, parameter :: MT = 4
+        integer, parameter :: MT = TUNE_AGE_SUMS_Z4_NVF_MT
         integer  :: mq, i, k, l, mm(MT), s0
         real(KP) :: bk, y(MT), o(MT), c0(MT), c1(MT), c2(MT), c3(MT)
 
@@ -4045,7 +4175,7 @@ contains
         ! running sum per (pixel, model), stored as the young sum at the model's last young age
         ! (it_tesc) and restarted for the old ages. Same sums, in the same order, as two separate
         ! products.
-        integer, parameter :: MT = 8, PT = 4
+        integer, parameter :: MT = TUNE_AGE_SUMS_MT, PT = TUNE_AGE_SUMS_PT
         integer  :: mq, ip, npt, i, k, l, p, mm(MT), it(MT), ii(PT)
         real(KP) :: bk(PT), wk(MT), acc(PT, MT), yy(PT, MT)
 
@@ -4214,6 +4344,13 @@ contains
         type(params_core), pointer :: pl
 
         dt = ctx%dust_type_val
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION) && defined(__flang__)
+        ! The tabulated curves (not types 3 and 5, whose curve is computed per pixel): the FP32 HIP kernel
+        if (dt /= 3 .and. dt /= 5) then
+            call attenuate_hip(ctx, pbuf, n_mod, nspec, dt, iq, iu, wq, wu, gam, emis, agn_on, yo, total, absorbed, tdiff)
+            return
+        end if
+#endif
         ! The grid-only curve tables of the context (attenuation_tables_cached, built once per dust type)
         associate (ttab => ctx%state%att_tab, ltab => ctx%state%att_ltab)
 #if defined(OMP_TARGET)
@@ -4269,6 +4406,105 @@ contains
         end do
         end associate
     end subroutine attenuate_batch
+
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION) && defined(__flang__)
+    !> attenuate_batch with the HIP kernel (opensps_hip_attenuate): the per-model parameters of the
+    !> transmissions and of the DL07 interpolation are formed once per model in FP32 (mp, mi: layout in the kernel's
+    !> header; the products that need FP64 are the interpolation weights and the power-law arguments, which the
+    !> kernel forms from hi + lo pairs), then every (pixel, model) is a short FP32 expression
+    subroutine attenuate_hip(ctx, pbuf, n_mod, nspec, dt, iq, iu, wq, wu, gam, emis, agn_on, yo, total, absorbed, tdiff)
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)              :: n_mod, nspec, dt
+        integer(int64), intent(in), target :: pbuf(NPW, n_mod)
+        integer, intent(in)              :: iq(n_mod), iu(n_mod)
+        real(WP), intent(in)             :: wq(n_mod), wu(n_mod), gam(n_mod)
+        logical, intent(in)              :: emis(n_mod), agn_on(n_mod)
+        real(KP), intent(inout), target  :: yo(nspec, 2 * n_mod)
+        real(KP), intent(out), target    :: total(nspec, n_mod), absorbed(nspec, n_mod)
+        real(KP), intent(inout), target  :: tdiff(:,:)
+        real(KP), allocatable, target :: mp(:,:)
+        integer, allocatable, target  :: mi(:,:)
+        type(params_core), pointer :: pl
+        integer  :: m, fl
+        real(WP) :: ed, e1
+        real(KP) :: ehi, elo, e1hi, e1lo
+
+        allocate(mp(24, n_mod), mi(4, n_mod))
+        !$omp target data map(alloc: mp, mi)
+        !$omp target teams distribute parallel do private(pl, fl, ed, e1, ehi, elo, e1hi, e1lo)
+        do m = 1, n_mod
+            call c_f_pointer(c_loc(pbuf(1, m)), pl)
+            fl = 0
+            ed = 0.0_wp
+            mp(3, m) = 0.0_KP; mp(4, m) = 0.0_KP; mp(5, m) = 0.0_KP
+            if (dt == 0) then
+                ed = pl%dust_index
+            else if (dt == 1) then
+                mp(3, m) = 1.0_KP / real(pl%mwr, KP)
+                mp(4, m) = real(pl%uvb, KP)
+                mp(5, m) = mp(4, m) * mp(3, m)
+            else if (dt == 4) then
+                ed = pl%dust_index
+                mp(3, m) = real(ed, KP)
+            end if
+            if (ed /= 0.0_wp) fl = fl + 1
+            ehi = real(ed, KP);  elo = real(ed - real(ehi, WP), KP)
+            mp(1, m) = ehi; mp(2, m) = elo
+            mp(6, m) = real(pl%dust2, KP)
+            mp(7, m) = real(pl%dust1, KP)
+            e1 = pl%dust1_index
+            e1hi = real(e1, KP); e1lo = real(e1 - real(e1hi, WP), KP)
+            mp(8, m) = e1hi; mp(9, m) = e1lo
+            mp(10, m) = real(pl%dust3, KP)
+            mp(11, m) = real(pl%frac_obrun, KP)
+            mp(12, m) = real(pl%frac_nodust, KP)
+            if (.not. (pl%dust1 <= SAFE_FLOOR .or. 1.0_wp - pl%frac_obrun <= SAFE_FLOOR)) fl = fl + 2
+            if (abs(pl%dust3) > SAFE_FLOOR) fl = fl + 4
+            if (1.0_wp - pl%frac_nodust > SAFE_FLOOR) fl = fl + 8
+            if (emis(m)) fl = fl + 16
+            if (agn_on(m)) fl = fl + 32
+            mp(13, m) = real((1 - wq(m)) * (1 - wu(m)), KP)
+            mp(14, m) = real(wq(m) * (1 - wu(m)), KP)
+            mp(15, m) = real(wq(m) * wu(m), KP)
+            mp(16, m) = real((1 - wq(m)) * wu(m), KP)
+            mp(17, m) = real(gam(m), KP)
+            mi(1, m) = fl
+            mi(2, m) = iq(m) - 1
+            mi(3, m) = iu(m) - 1
+            mi(4, m) = 0
+        end do
+        call attenuate_hip_launch(nspec, n_mod, size(ctx%state%dustem2_dustem, 2), emis, mp, mi, ctx%state%att_tab, &
+                                  ctx%state%att_ltab, ctx%state%dustem2_dustem, yo, total, absorbed, tdiff)
+        !$omp end target data
+    end subroutine attenuate_hip
+
+    subroutine attenuate_hip_launch(nspec, n_mod, nq, emis_h, mp, mi, ttab, ltab, dustem, yo, total, absorbed, tdiff)
+        use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr, c_size_t
+        integer, intent(in) :: nspec, n_mod, nq
+        logical, intent(in) :: emis_h(:)
+        real(KP), intent(in), target, contiguous :: mp(:,:), ttab(:,0:)
+        integer, intent(in), target, contiguous  :: mi(:,:)
+        real(WP), intent(in), target, contiguous :: ltab(:), dustem(:,:,:)
+        real(KP), intent(inout), target, contiguous :: yo(:,:), tdiff(:,:)
+        real(KP), intent(out), target, contiguous :: total(:,:), absorbed(:,:)
+        interface
+            subroutine opensps_hip_attenuate(nspec, n_mod, nq, mp, mi, ttab, ltab, dustem, ndust, any_emis, yo, total, &
+                                             absorbed, tdiff, threads, stream) bind(C, name="opensps_hip_attenuate")
+                import :: c_int, c_ptr, c_size_t
+                integer(c_int), value :: nspec, n_mod, nq, any_emis, threads
+                integer(c_size_t), value :: ndust
+                type(c_ptr), value :: mp, mi, ttab, ltab, dustem, yo, total, absorbed, tdiff, stream
+            end subroutine opensps_hip_attenuate
+        end interface
+        !$omp target data use_device_addr(mp, mi, ttab, ltab, dustem, yo, total, absorbed, tdiff)
+        call opensps_hip_attenuate(int(nspec, c_int), int(n_mod, c_int), int(nq, c_int), c_loc(mp(1, 1)), c_loc(mi(1, 1)), &
+                                   c_loc(ttab(1, 0)), c_loc(ltab(1)), c_loc(dustem(1, 1, 1)), int(size(dustem), c_size_t), &
+                                   int(merge(1, 0, any(emis_h)), c_int), c_loc(yo(1, 1)), &
+                                   c_loc(total(1, 1)), c_loc(absorbed(1, 1)), c_loc(tdiff(1, 1)), int(TUNE_HIP_ATT_THREADS, &
+                                   c_int), c_null_ptr)
+        !$omp end target data
+    end subroutine attenuate_hip_launch
+#endif
 
     !> The three transmissions of one pixel and model (attenuate_batch, and its adjoint in
     !> batch_backward): diffuse (tau_d, trans_d), birth cloud (tau_b, trans_birth) and the old
@@ -4379,7 +4615,7 @@ contains
         real(KP) :: sa, sn, se, ca, cn, ce
 #if defined(OMP_TARGET) && defined(__flang__)
         !> Partial sums per model: each takes every NCH-th pixel (consecutive threads, consecutive pixels)
-        integer, parameter :: NCH = 64
+        integer, parameter :: NCH = TUNE_NCH
         real(KP), allocatable :: part(:,:,:)
         integer  :: c
 
@@ -4459,20 +4695,52 @@ contains
         real(KP), intent(inout)          :: total(nspec, n_mod)
 
         integer  :: m, i
-
 #if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2)
-#elif defined(_OPENMP)
-        !$omp parallel do collapse(2)
+        real(KP), allocatable :: rn(:)
+#else
+        real(KP) :: rn
 #endif
+
+        ! The normalization s_abs / s_esc once per model (zero where there is no emission), in KP: an FP64 division
+        ! and comparison per (pixel, model) cost more than the rest of this kernel on GPUs with slow FP64; the
+        ! rounding of the scale is that of one KP product. On the device the ratios are a mapped array, so that the
+        ! (pixel, model) loop can be collapsed; on the host each model forms its own, as a scalar, before its pixel
+        ! loop (the array form fails the dust regressions and oracles under Intel ifx 2026.1 on the CPU)
+#if defined(OMP_TARGET)
+        allocate(rn(n_mod))
+        !$omp target data map(alloc: rn)
+        !$omp target teams distribute parallel do
+        do m = 1, n_mod
+            rn(m) = 0.0_KP
+            if (emis(m) .and. s_esc(m) > SAFE_FLOOR) rn(m) = real(s_abs(m) / s_esc(m), KP)
+        end do
+        !$omp target teams distribute parallel do collapse(2)
         do m = 1, n_mod
             do i = 1, nspec
-                if (emis(m) .and. s_esc(m) > SAFE_FLOOR) then
-                    ! As dust_emission_final in opensps_dust: shape * transmission (KP), then * norm (WP)
-                    total(i, m) = total(i, m) + real(yo(i, n_mod + m) * yo(i, m) * (s_abs(m) / s_esc(m)), KP)
+                if (rn(m) /= 0.0_KP) then
+                    ! As dust_emission_final in opensps_dust: shape * transmission, then * norm
+                    total(i, m) = total(i, m) + yo(i, n_mod + m) * yo(i, m) * rn(m)
                 end if
             end do
         end do
+        !$omp end target data
+#else
+#if defined(_OPENMP)
+        !$omp parallel do private(rn, i)
+#endif
+        do m = 1, n_mod
+            rn = 0.0_KP
+            if (emis(m)) then
+                if (s_esc(m) > SAFE_FLOOR) rn = real(s_abs(m) / s_esc(m), KP)
+            end if
+            if (rn /= 0.0_KP) then
+                do i = 1, nspec
+                    ! As dust_emission_final in opensps_dust: shape * transmission, then * norm
+                    total(i, m) = total(i, m) + yo(i, n_mod + m) * yo(i, m) * rn
+                end do
+            end if
+        end do
+#endif
     end subroutine add_dust_emission
 
 
@@ -4861,6 +5129,53 @@ contains
         end if
     end subroutine batch_backward
 
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+    !> backward_observed_frame with the HIP kernels (opensps_hip_obs_backward): the observed-frame cotangent gw(:, m),
+    !> d L / d z (dzo) and the rest-frame cotangent gw(:, n_mod + m)
+    subroutine backward_observed_hip(n_mod, nspec, nbands, fb_bar, bp, bi, bk, wl, lam, zcm, total, have_s, sbar, gw, dzon, &
+                                     dzo, done)
+        use, intrinsic :: iso_c_binding, only: c_int, c_double, c_ptr, c_loc, c_null_ptr
+        integer, intent(in)     :: n_mod, nspec, nbands
+        real(WP), intent(in), target, contiguous :: fb_bar(:,:), lam(:), zcm(:)
+        integer, intent(in), target, contiguous  :: bp(:), bi(:)
+        real(KP), intent(in), target, contiguous :: bk(:), wl(:), total(:,:), sbar(:,:)
+        logical, intent(in)     :: have_s, dzon
+        real(KP), intent(inout), target, contiguous :: gw(:,:)
+        real(WP), intent(out), target, contiguous :: dzo(:)
+        logical, intent(out)    :: done
+        integer(c_int) :: rc
+        type(c_ptr) :: ps
+        interface
+            function opensps_hip_obs_backward(n_mod, nspec, nbands, threads, ch, zfloor, dzon, have_s, fb_bar, zc, lambda, wl, &
+                                              bp, bi, bk, total, sbar, ld_sbar, gw, dzo, stream) result(rc) &
+                bind(C, name="opensps_hip_obs_backward")
+                import :: c_int, c_double, c_ptr
+                integer(c_int), value :: n_mod, nspec, nbands, threads, ch, dzon, have_s, ld_sbar
+                real(c_double), value :: zfloor
+                type(c_ptr), value :: fb_bar, zc, lambda, wl, bp, bi, bk, total, sbar, gw, dzo, stream
+                integer(c_int) :: rc
+            end function opensps_hip_obs_backward
+        end interface
+
+        ps = c_null_ptr
+        !$omp target data use_device_addr(fb_bar, lam, zcm, bp, bi, bk, wl, total, gw, dzo)
+        if (have_s) then
+            !$omp target data use_device_addr(sbar)
+            ps = c_loc(sbar(1, 1))
+            !$omp end target data
+        end if
+        rc = opensps_hip_obs_backward(int(n_mod, c_int), int(nspec, c_int), int(nbands, c_int), &
+                                      int(TUNE_HIP_OBS_THREADS, c_int), int(TUNE_BAND_PIX_PER_THREAD, c_int), &
+                                      real(SAFE_FLOOR, c_double), &
+                                      int(merge(1, 0, dzon), c_int), int(merge(1, 0, have_s), c_int), c_loc(fb_bar(1, 1)), &
+                                      c_loc(zcm(1)), c_loc(lam(1)), c_loc(wl(1)), c_loc(bp(1)), c_loc(bi(1)), c_loc(bk(1)), &
+                                      c_loc(total(1, 1)), ps, int(size(sbar, 1), c_int), c_loc(gw(1, 1)), c_loc(dzo(1)), &
+                                      c_null_ptr)
+        !$omp end target data
+        done = rc == 0
+    end subroutine backward_observed_hip
+#endif
+
     !> Adjoint of the observed-frame interpolation and of the band integrals: gw(:, m) = d L /
     !> d fobs (per pixel j, the band weights of the trapezoid rule, as band_fluxes sums them), then
     !> gw(:, N + m) = spec_bar + the transposed interpolation (one thread per model, serial over the
@@ -4888,6 +5203,15 @@ contains
         real(KP) :: vk
         logical  :: zsame
         real(KP) :: gk, tk
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+        logical  :: hip_done
+
+        ! The FP32 HIP kernels (opensps_hip_obs_backward): the intervals and weights of the forward pass, no FP64
+        ! bisections; false if a scratch buffer could not be allocated (the portable kernels below then run)
+        call backward_observed_hip(n_mod, nspec, nbands, fb_bar, bp, bi, bk, wl, lam, zcm, total, have_s, sbar, gw, dzon, &
+                                   dzo, hip_done)
+        if (hip_done) return
+#endif
 
         zsame = all(zcm(1:n_mod) == zcm(1))
 
@@ -5095,7 +5419,7 @@ contains
         integer, parameter :: NCK = 32
         integer  :: m, j, c, jl, nb, j0, j1
         real(WP) :: tmax, tj
-        real(WP), allocatable :: cmx(:,:)
+        real(WP), allocatable :: cmx(:,:), ta(:,:), tb(:,:)
         integer, allocatable  :: cjx(:,:)
         type(params_core), pointer :: pl
 
@@ -5110,9 +5434,36 @@ contains
         ! Per model the first maximum over NCK contiguous blocks (one thread per block and model),
         ! then over the blocks in order
         nb = (jl + NCK - 1) / NCK
-        allocate(cmx(NCK, n_mod), cjx(NCK, n_mod))
+        allocate(cmx(NCK, n_mod), cjx(NCK, n_mod), ta(IGM_NTERM, jl), tb(IGM_NTERM, n_mod))
+        ta = 0.0_wp
+        tb = 0.0_wp
 #if defined(OMP_TARGET)
-        !$omp target data map(alloc: cmx, cjx)
+        !$omp target data map(alloc: cmx, cjx, ta, tb)
+#endif
+        ! The optical depth as the sum of IGM_NTERM products (a wavelength table over the pixels below Ly-alpha, a
+        ! redshift factor per model: the forward's form, ~20 FP64 powers per (pixel, model) otherwise)
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do
+#elif defined(_OPENMP)
+        !$omp parallel do
+#endif
+        do j = 1, jl
+            call igm_tau_pixel_terms(lam(j), ta(:, j))
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(pl)
+#elif defined(_OPENMP)
+        !$omp parallel do private(pl)
+#endif
+        do m = 1, n_mod
+#if !defined(__flang__)
+            pl => pbuf(m)%params_core
+#else
+            call c_f_pointer(c_loc(pbuf(1, m)), pl)
+#endif
+            if (pl%zred > SAFE_FLOOR) call igm_tau_z_terms(1.0_wp + pl%zred, tb(:, m))
+        end do
+#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(j, j0, j1, tmax, tj, pl)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(j, j0, j1, tmax, tj, pl)
@@ -5130,7 +5481,8 @@ contains
                     j0 = (c - 1) * nb + 1
                     j1 = min(c * nb, jl)
                     do j = j0, j1
-                        tj = igm_tau(lam(j), 1.0_wp + pl%zred)
+                        tj = ta(1, j) * tb(1, m) + ta(2, j) * tb(2, m) + ta(3, j) * tb(3, m) + ta(4, j) * tb(4, m) + &
+                             ta(5, j) * tb(5, m) + ta(6, j) * tb(6, m)
                         if (tj > tmax) then
                             tmax = tj
                             cjx(c, m) = j
@@ -5522,11 +5874,54 @@ contains
         real(KP), intent(out)            :: part(NDP, NCHG, n_mod)
         real(WP), intent(out)            :: dpar(NDP, n_mod)
 
-        integer  :: m, c, dt, q
+        integer  :: m, c, dt, q, j, jtop
         real(WP) :: sw
+        real(WP), allocatable :: ta(:,:), tb(:,:), tbd(:,:)
         type(params_core), pointer :: pl
 
         dt = ctx%dust_type_val
+        ! The IGM's optical depth and its redshift derivative at the pixels below Ly-alpha as sums of IGM_NTERM products
+        ! (a wavelength table, a redshift factor per model: the forward's form; ~20 FP64 powers per (pixel, model)
+        ! otherwise, for every pixel)
+        jtop = 0
+        if (igm) then
+            do j = 1, nspec
+                if (ctx%state%spec_lambda(j) < 1215.67_wp) jtop = j
+            end do
+        end if
+        allocate(ta(IGM_NTERM, max(jtop, 1)), tb(IGM_NTERM, n_mod), tbd(IGM_NTERM, n_mod))
+        ta = 0.0_wp
+        tb = 0.0_wp
+        tbd = 0.0_wp
+#if defined(OMP_TARGET)
+        !$omp target data map(alloc: ta, tb, tbd)
+#endif
+        if (jtop > 0) then
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda)
+#elif defined(_OPENMP)
+            !$omp parallel do
+#endif
+            do j = 1, jtop
+                call igm_tau_pixel_terms(ctx%state%spec_lambda(j), ta(:, j))
+            end do
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do private(pl)
+#elif defined(_OPENMP)
+            !$omp parallel do private(pl)
+#endif
+            do m = 1, n_mod
+#if !defined(__flang__)
+                pl => pbuf(m)%params_core
+#else
+                call c_f_pointer(c_loc(pbuf(1, m)), pl)
+#endif
+                if (pl%zred > SAFE_FLOOR) then
+                    call igm_tau_z_terms(1.0_wp + pl%zred, tb(:, m))
+                    call igm_tau_z_terms_dz(1.0_wp + pl%zred, tbd(:, m))
+                end if
+            end do
+        end if
         associate (ttab => ctx%state%att_tab, ltab => ctx%state%att_ltab)
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(pl) &
@@ -5542,6 +5937,7 @@ contains
                 call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
                 call atten_adjoint_chunk(ctx, pl, n_mod, nspec, ntau, m, c, dt, ttab, ltab, igm, zvar, igm_t, tau, yo, &
+                                         jtop, ta, tb, tbd, &
                                          agn_on(m), ita(m), wta(m), lsum(m), agndust_spec, wt, emis(m), iq(m), iu(m), &
                                          wq(m), wu(m), gam(m), eb, jmx(m), gw, part)
             end do
@@ -5561,6 +5957,9 @@ contains
                 dpar(q, m) = sw
             end do
         end do
+#if defined(OMP_TARGET)
+        !$omp end target data
+#endif
     end subroutine backward_attenuation
 
     !> One chunk of backward_attenuation: pixels c, c + NCHG, ... of model m. Per pixel, with
@@ -5580,6 +5979,7 @@ contains
     !> fractions; shape_bar is carried to the template's interpolation weights (dl07_shape_grad).
     !> Sums compensated at FP32 kernel precision.
     subroutine atten_adjoint_chunk(ctx, pl, n_mod, nspec, ntau, m, c, dt, ttab, ltab, igm, zvar, igm_t, tau, yo, &
+                                   jtop, igm_a, igm_b, igm_bd, &
                                    agn_m, ita_m, wta_m, lsum_m, agndust_spec, wt, emis_m, iq_m, iu_m, wq_m, wu_m, gam_m, &
                                    eb, jmx_m, gw, part)
 #ifdef OMP_TARGET
@@ -5587,7 +5987,8 @@ contains
 #endif
         type(opensps_context_t), intent(in) :: ctx
         type(params_core), intent(in)    :: pl
-        integer, intent(in)              :: n_mod, nspec, ntau, m, c, dt, ita_m
+        integer, intent(in)              :: n_mod, nspec, ntau, m, c, dt, ita_m, jtop
+        real(WP), intent(in)             :: igm_a(IGM_NTERM, max(jtop, 1)), igm_b(IGM_NTERM, n_mod), igm_bd(IGM_NTERM, n_mod)
         real(KP), intent(in)             :: ttab(nspec, 0:3)
         real(WP), intent(in)             :: ltab(nspec), wta_m, lsum_m, agndust_spec(nspec, ntau)
         logical, intent(in)              :: igm, zvar, agn_m
@@ -5605,7 +6006,8 @@ contains
         real(KP) :: y, o, gs, ga, tau_d, td, tau_b, tb, tau_o, to, curve, fo, fn, dfac, ay, gd, gtd, gtb, gto
         real(KP) :: lk, pb, dc_idx, dc_mwr, dc_uvb, s1, dust2k, dust3k, term, tsum, tmpl, lagn
         real(KP) :: cwt, shape, gshape, gab, rk, sabk, sesk, omtd, gy, go, dsq, dsu, dsg, apre
-        real(WP) :: dtz
+        real(WP) :: dtz, tauc
+        integer  :: pp
         real(WP) :: lb
         logical  :: nodust, em
 
@@ -5633,7 +6035,8 @@ contains
             gs = gw(i, n_mod + m)
             ga = gs
             if (igm .and. zvar) then
-                if (pl%zred > SAFE_FLOOR) ga = gs * real(exp(-real(tau(i, m), WP) * pl%igm_factor), KP)
+                if (pl%zred > SAFE_FLOOR .and. tau(i, m) /= 0.0_KP) &
+                    ga = gs * real(exp(-real(tau(i, m), WP) * pl%igm_factor), KP)
             else if (igm) then
                 ga = gs * igm_t(i)
             end if
@@ -5691,10 +6094,20 @@ contains
             if (igm .and. pl%zred > SAFE_FLOOR) then
                 apre = (y * ay + o * to) * dfac
                 if (em) apre = apre + shape * td * rk
-                dtz = igm_tau_dz(ctx%state%spec_lambda(max(i, jmx_m)), 1.0_wp + pl%zred)
+                pp = max(i, jmx_m)
+                dtz = 0.0_wp
+                tauc = 0.0_wp
+                if (pp <= jtop) then
+                    dtz = igm_a(1, pp) * igm_bd(1, m) + igm_a(2, pp) * igm_bd(2, m) + igm_a(3, pp) * igm_bd(3, m) + igm_a(4, &
+                    pp) * igm_bd(4, m) + &
+                          igm_a(5, pp) * igm_bd(5, m) + igm_a(6, pp) * igm_bd(6, m)
+                    tauc = igm_a(1, pp) * igm_b(1, m) + igm_a(2, pp) * igm_b(2, m) + igm_a(3, pp) * igm_b(3, m) + igm_a(4, &
+                    pp) * igm_b(4, m) + &
+                           igm_a(5, pp) * igm_b(5, m) + igm_a(6, pp) * igm_b(6, m)
+                end if
                 d(13) = -ga * apre * real(pl%igm_factor * dtz, KP)
                 ! igm_factor: d T_IGM / d factor = -tau T_IGM, tau as the forward (capped below jmx)
-                d(14) = -ga * apre * real(igm_tau(ctx%state%spec_lambda(max(i, jmx_m)), 1.0_wp + pl%zred), KP)
+                d(14) = -ga * apre * real(tauc, KP)
             end if
             ! The curve's derivatives
             lk = real(ltab(i), KP)
@@ -6191,7 +6604,7 @@ contains
                     c_loc(fabs), c_loc(qzt), c_loc(lref), c_loc(csum), c_null_ptr)
             else
                 call opensps_hip_adj_nebular_continuum_sp(int(n_mod, c_int), int(nspec, c_int), &
-                    int(size(ctab, 1), c_int), int(ntn, c_int), int(nrun, c_int), &
+                    int(size(ctab, 1), c_int), int(size(ctab), c_size_t), int(ntn, c_int), int(nrun, c_int), &
                     c_loc(ctab), c_loc(gw), c_loc(it_tesc), c_loc(ia), c_loc(wa), &
                     c_loc(rs), c_loc(rl), c_loc(iz), c_loc(wz), c_loc(iu), c_loc(wu), &
                     c_loc(fabs), c_loc(qzt), c_loc(lref), c_loc(csum), c_null_ptr)

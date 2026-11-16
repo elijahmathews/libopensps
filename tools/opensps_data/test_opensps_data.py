@@ -26,6 +26,7 @@ import fetch_data  # noqa: E402
 if HAVE_NUMPY:
     from opensps_data import Library, LibraryWriter, ListReader, fortran_float
     from convert_legacy import Converter
+    import filters_tool
 
 FAILED = []
 
@@ -267,10 +268,88 @@ def test_fetch_retry(tmp):
     check(not fetch_data.is_transient(OSError("disk full")), "local I/O errors not retried")
 
 
+VOTABLE = """<?xml version="1.0"?>
+<VOTABLE version="1.3" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+ <RESOURCE name="SVO Filter Profile Service">
+  <TABLE name="Test/Test.%(name)s">
+   <PARAM name="filterID" value="Test/Test.%(name)s" datatype="char" arraysize="*"/>
+   <PARAM name="DetectorType" value="%(det)s" datatype="int"/>
+   <PARAM name="WavelengthRef" value="%(ref)s" unit="Angstrom" datatype="double"/>
+   <PARAM name="ZeroPoint" value="3631" unit="Jy" datatype="double"/>
+   <FIELD name="Wavelength" unit="%(unit)s" datatype="double"/>
+   <FIELD name="Transmission" unit="" datatype="double"/>
+   <DATA><TABLEDATA>
+%(rows)s
+   </TABLEDATA></DATA>
+  </TABLE>
+ </RESOURCE>
+</VOTABLE>
+"""
+
+
+def write_votable(path, name, det, unit, lam, trans, ref=5500.0, binary=False):
+    rows = "\n".join(f"<TR><TD>{float(x)!r}</TD><TD>{float(y)!r}</TD></TR>" for x, y in zip(lam, trans))
+    text = VOTABLE % dict(name=name, det=det, unit=unit, ref=ref, rows=rows)
+    if binary:
+        text = text.replace("<TABLEDATA>", "<BINARY>").replace("</TABLEDATA>", "</BINARY>")
+    with open(path, "w") as f:
+        f.write(text)
+
+
+def test_filters(tmp):
+    lam = np.array([4000.0, 4500.0, 5000.0, 5500.0, 6000.0])
+    trans = np.array([0.0, 0.4, 1.0, 0.4, 0.0])
+    # SVO DetectorType 1 = photon counter, 0 = energy counter; nm converted to Angstrom
+    write_votable(os.path.join(tmp, "a.xml"), "A", 1, "Angstrom", lam, trans)
+    write_votable(os.path.join(tmp, "b.xml"), "B", 0, "nm", lam / 10.0, trans)
+    with open(os.path.join(tmp, "c.txt"), "w") as f:
+        f.write("# wavelength [um] transmission\n0.60 0.0\n0.65 0.5\n0.70 1.0\n0.75 0.0\n")
+    root = os.path.join(tmp, "root")
+    os.makedirs(root)
+    curves = [filters_tool.curve_from_file(os.path.join(tmp, "a.xml"), 0, "angstrom"),
+              filters_tool.curve_from_file(os.path.join(tmp, "b.xml"), 0, "angstrom"),
+              filters_tool.curve_from_file(os.path.join(tmp, "c.txt"), 1, "um", {"c": (7000.0, -1.0)})]
+    man = filters_tool.pack(root, "unit_test", curves, "unit test filters")
+    lib = Library.open(root, "filters", "unit_test")
+    info = lib.manifest["metadata"]["filters"]
+    check([e["name"] for e in info] == ["Test/Test.A", "Test/Test.B", "c"], "filters: labels from the VOTable IDs and file names")
+    check([e["detector"] for e in info] == ["photon", "energy", "energy"],
+          "filters: SVO DetectorType 1 is photon counting, 0 energy counting; --detector for text files")
+    check(np.allclose(lib.array("wavelength")[:5], lam) and np.allclose(lib.array("wavelength")[5:10], lam),
+          "filters: nm converted to Angstrom")
+    check(np.allclose(lib.array("wavelength")[10:], [6000.0, 6500.0, 7000.0, 7500.0]), "filters: um text file converted")
+    check(list(lib.array("npoints")) == [5, 5, 4], "filters: npoints")
+    check(info[2]["calibration"] == {"lambda_ref": 7000.0, "exponent": -1.0}, "filters: calibration recorded")
+    check(info[0]["source"]["svo_ZeroPoint"] == "3631", "filters: the provider's own zero point kept as provenance only")
+    # The hash: a function of the cleaned curve, detector and calibration, not of tabulation order or repeats
+    h = filters_tool.filter_hash(lam, trans, 0)
+    check(h == info[0]["hash"] and len(h) == 64, "filters: the manifest hash is the content hash")
+    check(filters_tool.filter_hash(lam[::-1], trans[::-1], 0) == h, "filters: hash is the same for the reversed curve")
+    check(filters_tool.filter_hash(np.insert(lam, 3, lam[2]), np.insert(trans, 3, 0.123), 0) == h,
+          "filters: hash is the same with a repeated wavelength (the first value is kept)")
+    check(filters_tool.filter_hash(lam, trans, 1) != h and filters_tool.filter_hash(lam, trans, 0, (5500.0, -1.0)) != h,
+          "filters: detector and calibration enter the hash")
+    # Refusals
+    for bad, why in ((([1.0, float("nan"), 3.0], [1, 1, 1]), "NaN"), (([1.0, 3.0, 2.0], [1, 1, 1]), "non-monotonic"),
+                     (([0.0, 3.0], [1, 1]), "wavelength 0"), (([5.0, 5.0], [1, 1]), "one distinct point")):
+        try:
+            filters_tool.clean(*bad)
+            check(False, f"filters: {why} refused")
+        except filters_tool.FilterError:
+            check(True, f"filters: {why} refused")
+    write_votable(os.path.join(tmp, "bin.xml"), "X", 1, "Angstrom", lam, trans, binary=True)
+    try:
+        filters_tool.read_votable(os.path.join(tmp, "bin.xml"))
+        check(False, "filters: BINARY VOTable refused")
+    except filters_tool.FilterError:
+        check(True, "filters: BINARY VOTable refused with a message")
+
+
 def main():
     tests = [test_fetch_retry]
     if HAVE_NUMPY:
-        tests += [test_round_trip, test_list_reader, test_upstream_mist, test_upstream_c3k, test_bibliography]
+        tests += [test_round_trip, test_list_reader, test_upstream_mist, test_upstream_c3k, test_bibliography,
+                  test_filters]
     with tempfile.TemporaryDirectory() as tmp:
         for t in tests:
             d = os.path.join(tmp, t.__name__)

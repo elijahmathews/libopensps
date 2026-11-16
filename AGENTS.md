@@ -98,6 +98,10 @@ format, conversion, packing; format and workflows in `doc/DATA_FORMAT.md`).
   - `target teams loop` only where it is measured faster and the tests pass in FP32 and FP64:
     with nvfortran 25.1 it is 2x faster than `teams distribute parallel do` on some kernels,
     5x slower or wrong on others.
+  - hardware-dependent sizes (chunks, blocks, crossovers, tile and team sizes) are parameters of
+    `src/core/opensps_tuning.f90`, never literals in a kernel or driver; a value for one device is a
+    profile entry in that module with its measurement cited. Never put a device-specific number in
+    the other sources, and never invent a profile entry: no measurement, no entry (`doc/TUNING.md`).
   More in `doc/GPU_PLAN.md` ("Rules learned so far").
 - The CSP physics has one implementation, `compute_csp_batch`; `compute_csp_scenario` runs as a
   batch (one model per output age). A physics change goes there, and is checked by the
@@ -128,8 +132,10 @@ format, conversion, packing; format and workflows in `doc/DATA_FORMAT.md`).
 
 ## Machines
 
-- Penn State ICDS cluster: `module load nvhpc/25.1` (CUDA 12; P100 is `cc60`, A100 `cc80`).
-  HPC SDK 26 dropped Pascal and Volta.
+- Penn State ICDS cluster: `module load nvhpc/25.1` (CUDA 12). The supported GPUs there are the
+  A100 (`cc80`) and the A40 (`cc86`; first measurements pending). The P100 (`cc60`) cannot be
+  built for: nvfortran's OpenMP offload needs `cc70` or newer, and OpenACC is gone (#23). The V100
+  (`cc70`) is not supported: HPC SDK 26 dropped Pascal and Volta.
 - User `elijahmathews`'s laptop has an AMD Radeon 780M iGPU (gfx1103) that also drives the
   display. A GPU fault or hang there resets the GPU and kills the desktop session. Do not
   run GPU offload tests on it without the user's go-ahead; debug with host runs

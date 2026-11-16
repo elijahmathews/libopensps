@@ -491,6 +491,7 @@ contains
         allocate (cache%bands(nspec, ctx%state%nbands))
         allocate (cache%magsun(ctx%state%nbands), cache%magvega(ctx%state%nbands), &
                   cache%filter_leff(ctx%state%nbands))
+        allocate (cache%filter_info)
         allocate (cache%vega_spec(nspec), cache%sun_spec(nspec))
         allocate (cache%spec_lambda(nspec), cache%spec_nu(nspec))
         allocate (cache%spec_res(nspec))
@@ -1018,6 +1019,7 @@ contains
         ctx%state%magsun => cache%magsun
         ctx%state%magvega => cache%magvega
         ctx%state%filter_leff => cache%filter_leff
+        ctx%state%filter_info => cache%filter_info
         ctx%state%vega_spec => cache%vega_spec
         ctx%state%sun_spec => cache%sun_spec
         ctx%state%spec_lambda => cache%spec_lambda

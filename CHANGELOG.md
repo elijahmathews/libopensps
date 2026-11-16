@@ -5,6 +5,40 @@ carries the release's version (`OPENSPS_API_VERSION_*`, `opensps_get_api_version
 major version is 0, a minor release may change the API, and each such change is listed here under
 "Breaking". Pull request numbers refer to <https://github.com/elijahmathews/libopensps>.
 
+## Unreleased
+
+### Added
+
+- **`-Dtuning_overrides=NAME=VALUE,...`** builds with other values of the compile-time tuning parameters
+  (`SEG_LEN`, `PT_PIECE`, the tile sizes, ...), for sweeps and tuners, not for releases (`doc/TUNING.md`). A name the
+  registry does not define is refused at configuration. Every build lists its compile-time parameters
+  (`tuning_report`, and `tuning_ct_<NAME>` lines of `benchmark_csp_batch`). No change to the defaults.
+
+- **One module for the hardware tuning parameters** (`src/core/opensps_tuning.f90`, `doc/TUNING.md`). The sizes that
+  were literals in ten places are named constants there. Three run-time ones (`SSP_BATCH_CHUNK`, `HOST_SFH_MAX`,
+  `PINNED_CHUNK_BYTES`) can be set with `OPENSPS_TUNE_<NAME>`. Defaults are the previous values: no change in
+  results or speed unless a variable is set.
+- **Device profiles for the tuning parameters** (`OPENSPS_TUNE_PROFILE`, `doc/TUNING.md`): per-architecture values
+  measured on the device and cited in the document, chosen from the build's `-Dgpu_arch` (`cc80`, `gfx1201`).
+  Built for the R9700, batches below 160 models form the SFH weights on the host (the host path measured
+  up to 1.4x faster there; the default is 16, measured on the A100). `OPENSPS_BENCH_SIZES` sets the batch sizes of
+  `benchmark_csp_batch`. The register tiles and other kernel sizes that were literals are named
+  constants of the registry; `unit_tuning_literals` fails on a literal tuning parameter outside it.
+- **Bandpass curves of your own** (`doc/FILTERS_PLAN.md`). A filter set (name, curve in Angstrom, photon- or
+  energy-counting detector, optional calibration) is built with `opensps_filterset_*` and installed in a set-up
+  context with `opensps_context_set_filters`, at any time and without a new setup; `opensps_context_set_filters_library`
+  installs any `filters/<name>` library. Curves are cleaned and checked, resampled onto the model grid so that the
+  integral of the response is conserved on any grid (the legacy point interpolation stays for the legacy list),
+  normalized and calibrated; a filter that lies beyond the model wavelength range or has no throughput is refused
+  by default instead of being truncated and renormalized silently. Each filter has a SHA-256 content hash
+  (`opensps_context_get_filter_report`, with coverage, points across the passband and the resampling used), verified against a
+  library's manifest. `tools/opensps_data/filters_tool.py` packs SVO Filter Profile Service VOTables or text
+  files into such a library. The default list is bit-identical to before. New status codes 320-324.
+- **Linear fluxes**: with `keep_maggies = 1`, `opensps_context_get_batch_maggies` returns the batch's AB fluxes in
+  maggies (10^(-0.4 m), no logarithm and back). Magnitudes stay AB by default.
+- The Vega system of a user filter set can have no reference band (Vega is magnitude 0 in every band);
+  the default list keeps the legacy anchor on band 1.
+
 ## 0.2.1
 
 A bug-fix release: no C API entry point or signature changes (the one new status value, 5, is returned only where

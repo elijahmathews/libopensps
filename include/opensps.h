@@ -153,6 +153,55 @@ void opensps_context_get_emlambda(int handle, double *emlambda, int *status);
 void opensps_context_get_filter_data(int handle, double *wave_eff, double *mag_vega,
                                   double *mag_sun, int *status);
 
+// Bandpass (filter) curves supplied by the caller (doc/FILTERS_PLAN.md). Wavelengths are in
+// Angstrom (the wrappers convert other units). A filter set is built with opensps_filterset_add and
+// installed in a set-up context, replacing its filters, with opensps_context_set_filters (no new
+// setup: the set is copied, and the shared setup data and other contexts are untouched).
+// Detector: 0 photon counting (response per photon: FSPS, sedpy's default, SVO "photon counter"),
+// 1 energy counting (response per unit energy; used as T/lambda). A calibration (cal_lambda_ref > 0)
+// divides the normalized response by integral (lambda/cal_lambda_ref)^cal_exponent T/lambda dlambda
+// (exponent -1: flat nu f_nu, -2: beta = 2 blackbody); cal_lambda_ref <= 0: none.
+// Status 1 bad handle, 3 bad argument.
+#define OPENSPS_DETECTOR_PHOTON 0
+#define OPENSPS_DETECTOR_ENERGY 1
+#define OPENSPS_RESAMPLE_LINEAR 0       // the legacy FSPS point interpolation (the legacy list's behaviour)
+#define OPENSPS_RESAMPLE_CONSERVING 1   // conserves integral T dlambda on any grid (recommended)
+#define OPENSPS_GRID_POLICY_ERROR 0     // a filter beyond the model wavelength range (< 99.9% of its
+                                        // response inside) or without throughput is an error
+#define OPENSPS_GRID_POLICY_WARN 1      // reported in the filter report, not an error
+#define OPENSPS_GRID_POLICY_ALLOW 2
+void opensps_filterset_create(int *fset, int *status);
+void opensps_filterset_add(int fset, const char *name, int n, const double *lambda_aa,
+                           const double *response, int detector, double cal_lambda_ref,
+                           double cal_exponent, int *status);
+void opensps_filterset_count(int fset, int *n, int *status);
+void opensps_filterset_free(int fset, int *status);
+
+// Replaces the filters of a set-up context. resample, grid_policy as above; vega_ref_band: 0 =
+// Vega is magnitude 0 in every band when compute_vega_mags = 1, k > 0 = the legacy convention
+// anchored on band k (1-based; that band stays AB; legacy FSPS: 1, V). The number of bands, the
+// magnitude outputs and the band mask follow the new set (the mask is reset to all bands).
+// Status 301 not set up, 320 unusable curve (not finite, not monotonic, fewer than 2 distinct
+// wavelengths), 321 a filter lies (partly) beyond the model wavelength range, 322 no throughput on
+// the grid, 323 content hash mismatch; opensps_get_last_error names the filter. On an error the
+// context keeps its filters.
+void opensps_context_set_filters(int handle, int fset, int resample, int grid_policy,
+                                 int vega_ref_band, int *status);
+// The standard-format filter library filters/<name> (manifest: per filter name, detector, optional
+// calibration and hash) as the filters of the context. Status 324: no such library.
+void opensps_context_set_filters_library(int handle, const char *name, int resample, int grid_policy,
+                                         int vega_ref_band, int *status);
+// What the active filters are (nbands each; any pointer may be NULL). names, hashes: NUL-terminated
+// strings of 65 bytes per filter (hash: SHA-256 of the cleaned curve with its detector and calibration,
+// 64 hex characters; the same curve has the same hash whatever its source and name); coverage: fraction of
+// the response inside the model wavelength range; n_fwhm: grid points above half the maximum; flags: 1 =
+// truncated by the grid (coverage < 0.999), 2 = undersampled (n_fwhm < 5), 4 = no throughput;
+// detector as given. grid_hash (65 bytes): SHA-256 of the model wavelength grid; resample and
+// grid_policy: those used (the default list: linear, allow). Status 1 bad handle, 301 not set up.
+void opensps_context_get_filter_report(int handle, char *names, char *hashes, double *coverage,
+                                       int *n_fwhm, int *flags, int *detector, char *grid_hash,
+                                       int *resample, int *grid_policy, int *status);
+
 // The bands a context computes: mask[0..n_bands-1], nonzero = computed, bands beyond n_bands are not
 // (a NULL mask computes all). The photometry costs in proportion to the bands computed; the magnitudes of
 // the others are NaN. status 1 bad handle, 3 n_bands out of range (1 to nbands).
@@ -227,6 +276,17 @@ void opensps_context_compute_csp_batch_parts(int handle, int n, int n_params, co
                                           double *young, double *old, double *mass_young,
                                           double *mass_old, double *lbol_young, double *lbol_old,
                                           int *status);
+
+// Linear fluxes instead of magnitudes. Magnitudes are AB by default (compute_vega_mags = 0); the Vega
+// system is opt-in. After opensps_context_set_int(handle, "keep_maggies", 1), every batch (also the
+// batch_parts and batch_grad entry points, and compute_csp, which runs as a batch) keeps its linear AB
+// fluxes in maggies: maggies = f_nu / 3631 Jy = 10^(-0.4 m_AB) of the magnitude it returns with
+// compute_vega_mags = 0, distance term and redshift included, and independent of the Vega setting. They
+// are formed from the band flux directly (no logarithm and back), so they are finite where the flux is
+// zero or negative and the magnitude NaN; bands masked out by set_mag_compute are NaN. This call copies
+// them: maggies is nbands x n, column-major, may be NULL for the dimensions only. Status 1 bad handle, 302
+// no batch has run with keep_maggies = 1. f_nu in Jy = 3631 x maggies, in mJy 3.631e6 x maggies.
+void opensps_context_get_batch_maggies(int handle, double *maggies, int *n_bands, int *n, int *status);
 
 // The last batch's spectra where they were computed, for callers that keep working on the GPU
 // (pass spec = NULL to the batch to skip the copy to the host): *ptr is a device address (host

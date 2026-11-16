@@ -13,7 +13,8 @@ module opensps_context_types
         NEMLINE, NEBNZ, NEBNAGE, NEBNIP, NAGNDUST, NTABMAX
     use opensps_types, only: PARAMS, COMPSPOUT, TLSF, OBSDAT
     use opensps_cache, only: opensps_setup_cache_t
-    use, intrinsic :: iso_c_binding, only: c_int, c_size_t, c_loc, c_ptr
+    use opensps_filter_types, only: filter_info_t, filter_info_clear
+    use, intrinsic :: iso_c_binding, only: c_int, c_size_t, c_loc, c_ptr, c_float
 
     implicit none
     private
@@ -21,6 +22,7 @@ module opensps_context_types
     public :: opensps_context_state_t
     public :: opensps_context_t
     public :: opensps_context_state_destroy
+    public :: opensps_context_state_release_filters
     public :: set_spectral_grid
     public :: isoc_is_mist
     public :: opensps_context_sync_device_settings
@@ -49,6 +51,12 @@ module opensps_context_types
         real(WP) :: sm_sigma = 0.0_wp, sm_minl = 0.0_wp, sm_maxl = 0.0_wp
         integer,  allocatable :: sm_lo(:), sm_hi(:), sm_off(:), sm_t_lo(:), sm_t_hi(:)
         real(WP), allocatable :: sm_coef(:), sm_dcoef(:)
+        !> sm_coef as FP32 hi + lo pairs (2 x ncoef): the FP32 kernels' smoothing (exact to ~1e-14 per coefficient)
+        real(c_float), allocatable :: sm_coef_f(:,:)
+        !> The operator's columns (the transposed smoothing): column k's coefficients C(i, k), i = sm_t_lo(k) .. sm_t_hi(k),
+        !> as FP32 hi + lo pairs from sm_tcoef_f(:, sm_tptr(k) + 1) on (sm_tptr 0-based; the FP32 reverse pass)
+        integer, allocatable :: sm_tptr(:)
+        real(c_float), allocatable :: sm_tcoef_f(:,:)
     end type batch_grid_t
 
     !> Spectra of the last batched CSP (kernel precision, nspec x models), kept on the device
@@ -123,6 +131,16 @@ module opensps_context_types
         real(WP), pointer, contiguous :: magsun(:) => null()
         real(WP), pointer, contiguous :: magvega(:) => null()
         real(WP), pointer, contiguous :: filter_leff(:) => null()
+        !> Names, content hashes and diagnostics of the active filters
+        type(filter_info_t), pointer :: filter_info => null()
+        !> The Vega system is anchored on this band (legacy FSPS: band 1, V, which stays AB); 0: Vega is
+        !> magnitude 0 in every band (filter sets supplied by the user, opensps_context_filters)
+        integer :: vega_ref_band = 1
+        !> True when bands, magsun, magvega, filter_leff and filter_info are owned by this context
+        !> (a filter set installed after setup) instead of the shared setup cache
+        logical :: filters_owned = .false.
+        !> Linear AB fluxes (maggies, nbands x models) of the last batch run with keep_maggies = 1
+        real(WP), allocatable :: last_maggies(:, :)
         real(WP), pointer, contiguous :: vega_spec(:) => null()
         real(WP), pointer, contiguous :: sun_spec(:) => null()
         real(WP), pointer, contiguous :: spec_lambda(:) => null()
@@ -301,7 +319,11 @@ module opensps_context_types
         integer :: add_agb_dust_model_val = 0
         integer :: dust_type_val = 0
         integer :: add_dust_emission_val = 0
+        !> 0 (default): magnitudes are AB. 1: Vega system (see state%vega_ref_band)
         integer :: compute_vega_mags_val = 0
+        !> 1: every batch keeps its linear AB fluxes (maggies) in state%last_maggies, for
+        !> opensps_context_get_batch_maggies; 0 (default): not computed
+        integer :: keep_maggies_val = 0
         integer :: vactoair_flag_val = 0
         integer :: add_agn_dust_val = 0
         integer :: use_wr_spectra_val = 0
@@ -406,12 +428,16 @@ contains
         if (g%sm_ready) then
 #ifdef OMP_TARGET
             associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef, &
-                       d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef)
-                !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef)
+                       d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef, d_sm_coef_f => g%sm_coef_f, &
+                       d_sm_tptr => g%sm_tptr, &
+                       d_sm_tcoef_f => g%sm_tcoef_f)
+                !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef, &
+                !$omp&     d_sm_coef_f, d_sm_tptr, d_sm_tcoef_f)
             end associate
 #endif
         end if
-        if (allocated(g%sm_lo)) deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef, g%sm_t_lo, g%sm_t_hi, g%sm_dcoef)
+        if (allocated(g%sm_lo)) deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef, g%sm_t_lo, g%sm_t_hi, g%sm_dcoef, &
+                                           g%sm_coef_f, g%sm_tptr, g%sm_tcoef_f)
         g%sm_ready = .false.
     end subroutine batch_grid_release
 
@@ -471,6 +497,27 @@ contains
         deallocate(o%spec)
     end subroutine batch_out_release
 
+    !> @brief Frees the filter arrays a context owns (a set installed after setup); the arrays of the
+    !> shared setup cache are left alone. Afterwards the state's pointers are dangling or null: the
+    !> caller repoints them.
+    subroutine opensps_context_state_release_filters(state)
+        type(opensps_context_state_t), intent(inout) :: state
+
+        if (state%filters_owned) then
+            if (associated(state%bands)) deallocate (state%bands)
+            if (associated(state%magsun)) deallocate (state%magsun)
+            if (associated(state%magvega)) deallocate (state%magvega)
+            if (associated(state%filter_leff)) deallocate (state%filter_leff)
+            if (associated(state%filter_info)) then
+                call filter_info_clear(state%filter_info)
+                deallocate (state%filter_info)
+            end if
+            nullify (state%bands, state%magsun, state%magvega, state%filter_leff, state%filter_info)
+        end if
+        state%filters_owned = .false.
+        state%vega_ref_band = 1
+    end subroutine opensps_context_state_release_filters
+
     !> @brief Release pointer members in a context state object.
     !> @param[inout] state State to detach from shared cache arrays.
     subroutine opensps_context_state_destroy(state)
@@ -478,6 +525,9 @@ contains
 
         call batch_grid_release(state%batch)
         call batch_out_release(state%batch_out, .false.)
+
+        call opensps_context_state_release_filters(state)
+        nullify (state%filter_info)
 
         if (associated(state%indexdefined)) nullify (state%indexdefined)
         if (associated(state%wgdust)) nullify (state%wgdust)

@@ -27,7 +27,6 @@ module opensps_photometry
     ! ------------------------------------------------------------------------
     real(WP), parameter :: AB_ZEROPOINT   = 48.60_wp   !< CGS to AB Mag constant
     real(WP), parameter :: LOG10_FACTOR   = 2.5_wp     !< Magnitude scaling factor
-    integer, parameter  :: IDX_V_BAND     = 1          !< Index of V-band (for Vega norm)
 
 contains
 
@@ -52,7 +51,7 @@ contains
         integer, dimension(:), intent(in), optional :: mag_compute
 
         ! Local variables
-        integer :: i, j, n_spec, n_bands
+        integer :: i, j, n_spec, n_bands, vref
         integer, allocatable :: work_flags(:)
         
         ! Scratch arrays allocated on host.
@@ -92,7 +91,7 @@ contains
         
         if (present(mag_compute)) then
             work_flags = mag_compute
-            if (do_vega) work_flags(IDX_V_BAND) = 1
+            if (do_vega .and. ctx%state%vega_ref_band > 0) work_flags(ctx%state%vega_ref_band) = 1
         else
             work_flags = 1 
         end if
@@ -140,13 +139,21 @@ contains
                         dist_mod_term
         end do
 
-        ! 6. Vega System Correction
+        ! 6. Vega System Correction: every band but the reference band (legacy: band 1, V, which stays AB)
+        ! is shifted by its Vega offset relative to the reference band; without a reference band
+        ! (vega_ref_band = 0, filter sets of the user) Vega is magnitude 0 in every band
         if (do_vega) then
-            do i = 2, n_bands
-                if (mags(IDX_V_BAND) == mags(IDX_V_BAND)) then
-                    mags(i) = mags(i) - ctx%state%magvega(i) + ctx%state%magvega(IDX_V_BAND)
+            vref = ctx%state%vega_ref_band
+            do i = 1, n_bands
+                if (i == vref) cycle
+                if (vref > 0) then
+                    if (mags(vref) == mags(vref)) then
+                        mags(i) = mags(i) - ctx%state%magvega(i) + ctx%state%magvega(vref)
+                    else
+                        mags(i) = get_quiet_nan()
+                    end if
                 else
-                    mags(i) = get_quiet_nan()
+                    mags(i) = mags(i) - ctx%state%magvega(i)
                 end if
             end do
         end if

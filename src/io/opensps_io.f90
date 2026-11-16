@@ -49,12 +49,16 @@ module opensps_io
     use opensps_types, only: params, compspout
     use opensps_cosmology, only: vacuum_to_air
     use opensps_integration, only: integrate_trapezoid_array
+    use opensps_filter_types, only: filter_info_t
+    use opensps_filters, only: filter_set_t, filter_set_init_bulk, filter_set_clear, filters_build, &
+                               filter_calibrate_band, filter_pivot, filters_zero_points, &
+                               RESAMPLE_LINEAR, GRID_POLICY_ALLOW, DETECTOR_PHOTON, DETECTOR_ENERGY, FILTER_OK
     use opensps_interpolation, only: find_interval, interpolate_linear
     use opensps_datalib, only: datalib_t, datalib_available, datalib_open, datalib_axis_values, &
                             datalib_axis_len, datalib_has_array, datalib_check_array, datalib_read_real, &
                             datalib_read_int, datalib_array_len, datalib_meta_real, datalib_meta_string, &
                             datalib_meta_node, datalib_has_meta, datalib_has_axis
-    use opensps_json, only: json_len, json_item, json_child, json_real
+    use opensps_json, only: json_len, json_item, json_child, json_real, json_string
     use, intrinsic :: iso_fortran_env, only: real32, int64, iostat_end, error_unit, file_storage_size
 
     implicit none
@@ -71,6 +75,7 @@ module opensps_io
     public :: load_nebular_grid
     public :: load_agn_dust_models
     public :: load_filter_definitions
+    public :: read_filter_library
     public :: apply_legacy_filter_norm
     public :: load_standard_sed
     public :: load_index_definitions
@@ -1178,10 +1183,11 @@ contains
         type(opensps_context_t), intent(inout) :: ctx
         character(len=*), intent(in), optional :: alt_filename
 
-        integer :: i_filt, i_point, i_grid, n_points, start_idx, end_idx, first
-        real(WP), allocatable :: all_lam(:), all_trans(:), raw_lam(:), raw_trans(:)
+        type(filter_set_t) :: set
+        type(filter_info_t) :: info
+        real(WP), allocatable :: all_lam(:), all_trans(:)
         integer, allocatable :: npts(:)
-        real(WP) :: val_lam, norm_fac
+        integer :: i_filt, j, status, bad
         logical :: use_alt
 
         ! 1. Raw curves: (wavelength, transmission) points of every filter, as tabulated
@@ -1191,109 +1197,130 @@ contains
         if (use_alt) then
             call read_filters_legacy(ctx, trim(ctx%sps_home) // '/data/' // trim(alt_filename), &
                                      all_lam, all_trans, npts)
+            call filter_set_init_bulk(set, npts, all_lam, all_trans)
         else if (use_standard_library(ctx, 'filters', 'allfilters')) then
-            call read_filters_standard(ctx, all_lam, all_trans, npts)
+            call read_filter_library(ctx, 'allfilters', set, ctx%state%nbands)
         else
             call read_filters_legacy(ctx, trim(ctx%sps_home) // '/data/allfilters.dat', all_lam, all_trans, npts)
+            call filter_set_init_bulk(set, npts, all_lam, all_trans)
+            ! The calibration of the legacy list (applied by apply_legacy_filter_norm) is part of the
+            ! definition of those filters
+            do j = 1, size(FILTER_IND_IR)
+                i_filt = FILTER_IND_IR(j)
+                if (i_filt > set%n) cycle
+                set%has_cal(i_filt) = .true.
+                set%cal_lref(i_filt) = FILTER_LAM_IR(j)
+                set%cal_expo(i_filt) = -1.0_wp
+            end do
+            do j = 1, size(FILTER_IND_MIPS)
+                i_filt = FILTER_IND_MIPS(j)
+                if (i_filt > set%n) cycle
+                set%has_cal(i_filt) = .true.
+                set%cal_lref(i_filt) = FILTER_LAM_MIPS(j)
+                set%cal_expo(i_filt) = -2.0_wp
+            end do
         end if
 
-        allocate(raw_lam(maxval(npts)), raw_trans(maxval(npts)))
+        ! 2. Resample onto the master grid and normalize (integral T/lambda = 1): the legacy
+        ! point interpolation, with no coverage policy (the legacy lists' behaviour)
+        ! ------------------------------------------------------------------------------
+        call filters_build(set, ctx%state%spec_lambda, RESAMPLE_LINEAR, GRID_POLICY_ALLOW, .false., &
+                           ctx%state%bands, info, status, bad)
+        if (status /= FILTER_OK) then
+            write(error_unit, '(A,I0,A,I0)') '[OPENSPS_IO] Error: filter ', bad, ': status ', status
+            error stop 1
+        end if
+        call filter_set_clear(set)
+        if (associated(ctx%state%filter_info)) ctx%state%filter_info = info
 
-        ! 2. Filter Loop
-        ! --------------
-        first = 0
+        ! 3. Effective wavelengths (Pivot Lambda); the calibration of the legacy lists follows
+        ! (apply_legacy_filter_norm), after the zero points, as in FSPS
+        ! ------------------------------------------------------------------------------
         do i_filt = 1, ctx%state%nbands
-
-            ! Repeated wavelengths are dropped and negative transmissions clamped
-            n_points = 0
-            do i_point = first + 1, first + npts(i_filt)
-                if (n_points > 0) then
-                    if (abs(all_lam(i_point) - raw_lam(n_points)) < SAFE_FLOOR) cycle
-                end if
-                n_points = n_points + 1
-                raw_lam(n_points) = all_lam(i_point)
-                raw_trans(n_points) = max(all_trans(i_point), 0.0_wp)
-            end do
-            first = first + npts(i_filt)
-
-            ! 3. Interpolate onto Master Grid
-            ! -------------------------------
-            if (n_points > 1) then
-                ! Initialize to 0.0 to ensure no "phantom" throughput outside defined range
-                ctx%state%bands(:, i_filt) = 0.0_wp
-
-                ! Only interpolate within the valid range of the raw filter data
-                ! This preserves Legacy behavior and prevents linear extrapolation artifacts
-                call find_bounds(ctx%state%spec_lambda, raw_lam(1), raw_lam(n_points), start_idx, end_idx)
-                
-                ! Restore strict legacy check (start_idx < end_idx)
-                if (end_idx > start_idx) then
-                    do i_grid = start_idx, end_idx
-                        ctx%state%bands(i_grid, i_filt) = interpolate_linear( &
-                            raw_lam(1:n_points), &
-                            raw_trans(1:n_points), &
-                            ctx%state%spec_lambda(i_grid))
-                    end do
-                end if
-            end if
-
-            ! The first grid point can lie just below the filter's first wavelength, where the
-            ! interpolation extrapolates the rising edge to a negative value. Clamp before
-            ! normalizing (legacy FSPS clamps after, so its integral of T/lambda exceeds 1 by up
-            ! to 0.4% and a flat f_nu source is not at M_AB = 0 in those bands).
-            where (ctx%state%bands(:, i_filt) < 0.0_wp)
-                ctx%state%bands(:, i_filt) = 0.0_wp
-            end where
-
-            ! 4a. Normalize (Integral T/lambda dlambda = 1)
-            ! --------------------------------------------
-            ! We integrate (T / lambda)
-            ! Avoid division by zero with SAFE_FLOOR
-            norm_fac = integrate_trapezoid_array( &
-                ctx%state%spec_lambda, &
-                ctx%state%bands(:, i_filt) / (ctx%state%spec_lambda + SAFE_FLOOR) )
-            
-            ! Normalize
-            if (norm_fac > SAFE_FLOOR) then
-                ctx%state%bands(:, i_filt) = ctx%state%bands(:, i_filt) / norm_fac
-            else
-                ctx%state%bands(:, i_filt) = 0.0_wp ! Dead filter
-            end if
-
-        end do
-
-        deallocate(raw_lam, raw_trans)
-
-        ! ! 4b. IR Filter Renormalization (Legacy Compatibility)
-        ! ! ----------------------------------------------------
-        ! ! Only apply if using the standard filter list (not custom)
-        ! if (.not. present(alt_filename) .or. (present(alt_filename) .and. len_trim(alt_filename) == 0)) then
-        !     call apply_legacy_filter_norm(ctx)
-        ! end if
-
-        ! 5. Calculate Effective Wavelengths (Pivot Lambda)
-        ! -------------------------------------------------
-        
-        do i_filt = 1, ctx%state%nbands
-             val_lam = integrate_trapezoid_array( &
-                 ctx%state%spec_lambda, &
-                 ctx%state%spec_lambda * ctx%state%bands(:, i_filt) )
-             
-             ! Calculate denominator (integral of T/lambda)
-             ! Even though bands are normalized, re-calculating ensures consistency
-             ! and matches legacy behavior for re-normalized bands.
-             norm_fac = integrate_trapezoid_array( &
-                 ctx%state%spec_lambda, &
-                 ctx%state%bands(:, i_filt) / (ctx%state%spec_lambda + SAFE_FLOOR) )
-             
-             if (norm_fac > SAFE_FLOOR) then
-                 ctx%state%filter_leff(i_filt) = sqrt(val_lam / norm_fac)
-             else
-                 ctx%state%filter_leff(i_filt) = 0.0_wp
-             end if
+            ctx%state%filter_leff(i_filt) = filter_pivot(ctx%state%spec_lambda, ctx%state%bands(:, i_filt))
         end do
 
     end subroutine load_filter_definitions
+
+    !> @brief A filter library `filters/<name>` as a filter set: curves, labels, detector
+    !> ("photon" or "energy", default photon), calibration and, when given, the expected content hash
+    !> of each filter (metadata "filters"). The curves are as tabulated (not yet cleaned or resampled).
+    subroutine read_filter_library(ctx, name, set, nfilters)
+        type(opensps_context_t), intent(in) :: ctx
+        character(len=*), intent(in) :: name
+        type(filter_set_t), intent(inout) :: set
+        integer, intent(in), optional :: nfilters   !< expected number of filters (setup's nbands)
+
+        type(datalib_t) :: lib
+        integer :: n, flist, entry, cal, node, i
+        integer, allocatable :: npts(:)
+        real(WP), allocatable :: all_lam(:), all_trans(:)
+        integer(int64) :: off, ntot
+        logical :: ok1, ok2
+        character(len=:), allocatable :: str
+
+        call datalib_open(lib, ctx%sps_home, 'filters', name)
+        n = datalib_axis_len(lib, 'filter')
+        if (present(nfilters)) then
+            if (n /= nfilters) then
+                write(error_unit, '(A)') '[OPENSPS_IO] Error: filters/' // trim(name) // ': wrong number of filters'
+                error stop 1
+            end if
+        end if
+        allocate(npts(n))
+        call datalib_check_array(lib, 'npoints', ['filter'], [n], off)
+        call datalib_read_int(lib, 'npoints', int(n, int64), npts, off)
+        ntot = sum(int(npts, int64))
+        if (any(npts < 0) .or. datalib_array_len(lib, 'wavelength') /= ntot .or. &
+            datalib_array_len(lib, 'transmission') /= ntot) then
+            write(error_unit, '(A)') '[OPENSPS_IO] Error: filters/' // trim(name) // ': wavelength and transmission ' // &
+                'must have sum(npoints) values'
+            error stop 1
+        end if
+        allocate(all_lam(ntot), all_trans(ntot))
+        call datalib_read_real(lib, 'wavelength', ntot, all_lam)
+        call datalib_read_real(lib, 'transmission', ntot, all_trans)
+        call filter_set_init_bulk(set, npts, all_lam, all_trans)
+
+        flist = datalib_meta_node(lib, 'filters')
+        if (flist == 0) return
+        if (json_len(lib%doc, flist) /= n) then
+            write(error_unit, '(A)') '[OPENSPS_IO] Error: filters/' // trim(name) // &
+                ': metadata "filters" must have one entry per filter'
+            error stop 1
+        end if
+        do i = 1, n
+            entry = json_item(lib%doc, flist, i)
+            node = json_child(lib%doc, entry, 'name')
+            if (node /= 0) set%name(i) = json_string(lib%doc, node)
+            node = json_child(lib%doc, entry, 'detector')
+            if (node /= 0) then
+                str = json_string(lib%doc, node)
+                select case (str)
+                case ('photon')
+                    set%detector(i) = DETECTOR_PHOTON
+                case ('energy')
+                    set%detector(i) = DETECTOR_ENERGY
+                case default
+                    write(error_unit, '(A,I0,A)') '[OPENSPS_IO] Error: filters/' // trim(name) // ': filter ', i, &
+                        ': detector must be "photon" or "energy"'
+                    error stop 1
+                end select
+            end if
+            node = json_child(lib%doc, entry, 'hash')
+            if (node /= 0) set%expect_hash(i) = json_string(lib%doc, node)
+            cal = json_child(lib%doc, entry, 'calibration')
+            if (cal /= 0) then
+                set%cal_lref(i) = json_real(lib%doc, json_child(lib%doc, cal, 'lambda_ref'), ok1)
+                set%cal_expo(i) = json_real(lib%doc, json_child(lib%doc, cal, 'exponent'), ok2)
+                if (.not. (ok1 .and. ok2) .or. set%cal_lref(i) <= 0.0_wp) then
+                    write(error_unit, '(A,I0)') '[OPENSPS_IO] Error: filters/' // trim(name) // ': bad calibration of filter ', i
+                    error stop 1
+                end if
+                set%has_cal(i) = .true.
+            end if
+        end do
+    end subroutine read_filter_library
 
     !> @brief Filter curves from a legacy filter file: one header line, then per filter a `#`
     !> line and (wavelength, transmission) rows. Returns the points as tabulated.
@@ -1364,29 +1391,6 @@ contains
         close(u_file)
     end subroutine read_filters_legacy
 
-    !> @brief Filter curves from the standard library filters/allfilters.
-    subroutine read_filters_standard(ctx, all_lam, all_trans, npts)
-        type(opensps_context_t), intent(in) :: ctx
-        real(WP), allocatable, intent(out) :: all_lam(:), all_trans(:)
-        integer, allocatable, intent(out) :: npts(:)
-        type(datalib_t) :: lib
-        integer(int64) :: off, ntot
-
-        call datalib_open(lib, ctx%sps_home, 'filters', 'allfilters')
-        allocate(npts(ctx%state%nbands))
-        call datalib_check_array(lib, 'npoints', ['filter'], [ctx%state%nbands], off)
-        call datalib_read_int(lib, 'npoints', int(ctx%state%nbands, int64), npts, off)
-        ntot = sum(int(npts, int64))
-        if (any(npts < 0) .or. datalib_array_len(lib, 'wavelength') /= ntot .or. &
-            datalib_array_len(lib, 'transmission') /= ntot) then
-            write(error_unit, '(A)') '[OPENSPS_IO] Error: filters/allfilters: wavelength and transmission ' // &
-                'must have sum(npoints) values'
-            error stop 1
-        end if
-        allocate(all_lam(ntot), all_trans(ntot))
-        call datalib_read_real(lib, 'wavelength', ntot, all_lam)
-        call datalib_read_real(lib, 'transmission', ntot, all_trans)
-    end subroutine read_filters_standard
 
     !> @brief Applies frequency-dependent normalization to Infrared (IR) filter transmission curves.
     !>
@@ -1486,24 +1490,7 @@ contains
                 write(error_unit, '(A,I0)') '[OPENSPS_IO] Error: filters/allfilters: bad calibration of filter ', i_filt
                 error stop 1
             end if
-            ! The exponents of the legacy list are written as the same literals as in
-            ! apply_legacy_filter_norm, so that both layouts give identical bands
-            if (expo == -1.0_wp) then
-                d = integrate_trapezoid_array(ctx%state%spec_lambda, &
-                    (ctx%state%spec_lambda / lam0)**(-1.0_wp) * &
-                    ctx%state%bands(:, i_filt) / (ctx%state%spec_lambda + SAFE_FLOOR))
-            else if (expo == -2.0_wp) then
-                d = integrate_trapezoid_array(ctx%state%spec_lambda, &
-                    (ctx%state%spec_lambda / lam0)**(-2.0_wp) * &
-                    ctx%state%bands(:, i_filt) / (ctx%state%spec_lambda + SAFE_FLOOR))
-            else
-                d = integrate_trapezoid_array(ctx%state%spec_lambda, &
-                    (ctx%state%spec_lambda / lam0)**expo * &
-                    ctx%state%bands(:, i_filt) / (ctx%state%spec_lambda + SAFE_FLOOR))
-            end if
-            if (d > SAFE_FLOOR) then
-                ctx%state%bands(:, i_filt) = ctx%state%bands(:, i_filt) / d
-            end if
+            call filter_calibrate_band(ctx%state%spec_lambda, ctx%state%bands(:, i_filt), lam0, expo)
         end do
     end subroutine apply_standard_filter_calibration
 
@@ -1580,31 +1567,8 @@ contains
         ! We can calculate the magnitudes of Vega and Sun in every filter now.
         ! This saves time during runtime.
         
-        do i = 1, ctx%state%nbands
-            ! Mag = -2.5 * log10( Integral(F_nu * T / lam) ) - 48.60
-            
-            ! Vega Zero Point
-            ctx%state%magvega(i) = integrate_trapezoid_array( &
-                ctx%state%spec_lambda, &
-                ctx%state%vega_spec * ctx%state%bands(:, i) / ctx%state%spec_lambda )
-            
-            if (ctx%state%magvega(i) > SAFE_FLOOR) then
-                ctx%state%magvega(i) = -2.5_wp * log10(ctx%state%magvega(i)) - 48.60_wp
-            else
-                ctx%state%magvega(i) = 99.0_wp
-            end if
-
-            ! Sun Magnitude
-            ctx%state%magsun(i) = integrate_trapezoid_array( &
-                ctx%state%spec_lambda, &
-                ctx%state%sun_spec * ctx%state%bands(:, i) / ctx%state%spec_lambda )
-
-            if (ctx%state%magsun(i) > SAFE_FLOOR) then
-                ctx%state%magsun(i) = -2.5_wp * log10(ctx%state%magsun(i)) - 48.60_wp
-            else
-                ctx%state%magsun(i) = 99.0_wp
-            end if
-        end do
+        call filters_zero_points(ctx%state%spec_lambda, ctx%state%vega_spec, ctx%state%sun_spec, &
+                                 ctx%state%bands, ctx%state%magvega, ctx%state%magsun)
 
         if (env_flag_true('FSPS_DEBUG_IO')) then
             call debug_stats_1d('[DEBUG_IO] vega_spec', ctx%state%vega_spec)

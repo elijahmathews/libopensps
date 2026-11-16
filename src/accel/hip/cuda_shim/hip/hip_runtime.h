@@ -11,3 +11,4 @@ typedef cudaStream_t hipStream_t;
 #define hipMemcpy cudaMemcpy
 #define hipMemcpyHostToDevice cudaMemcpyHostToDevice
 #define hipMemcpyDeviceToHost cudaMemcpyDeviceToHost
+#define hipSuccess cudaSuccess

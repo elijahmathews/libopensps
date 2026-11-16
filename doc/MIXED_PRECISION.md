@@ -162,6 +162,25 @@ These came out of the measurements; a GPU port must follow them.
    optical depth is a sum of six wavelength x redshift terms, a table over the pixels below Lyman-alpha and six
    powers per model, instead of ~20 FP64 powers per (pixel, model) (agrees with `igm_tau` to 2e-13).
 
+9. **Error-free transforms need contraction off.** The compiler fuses `a * b + c` into one fma. In an
+   error-free product (`p = a * b; e = fma(a, b, -p)`) that counts the rounding of `p` twice: the first
+   version of the observed-frame kernel was off by 1.5e-4 of a pixel in the interpolation fraction at the
+   first pixel of every chunk (`lambda_j - P` fused with the product that defines `P`). Every HIP function
+   that forms such a pair starts with `#pragma clang fp contract(off)` (explicit `fmaf` is unaffected) and forms the
+   product with `__fmul_rn`. The pragma is what holds under hipcc/clang (there `__fmul_rn` does not prevent the
+   fusion); nvcc ignores the pragma and never merges `__fmul_rn`. The test `c_hip_eft` (every HIP build, needs a device)
+   runs the observed-frame numerator and the fold's product-and-sum against FP64: 0 failures with the guard, ~2e6 of
+   2.1e6 without it (checked on the R9700 with the pragma removed). If it fails on a compiler, add `--fmad=false` to
+   that compiler's command (nvcc: ~10% on the free-IMF gradient on an A100). On an A100 (nvcc 12.6, cc80) `c_hip_eft`
+   passes in the FP64, FP32 and FP32 + cuBLAS HIP builds without the flag: the `__fmul_rn` guard holds under nvcc.
+10. **A difference of nearly equal numbers is formed from hi + lo pairs.** The arguments of exponentials
+   (rule 3's ln m, e ln m), the wavelength offsets of the redshifted pixels and the DL07 table are carried as
+   an FP32 value plus its FP32 remainder (the remainder of the FP64 value), the product's rounding error comes
+   from an fma, and the result is good to the rounding of the final FP32 operation, not to the size of the
+   argument times eps. Interpolations between nodes use the two weights `num / (num - numu)`,
+   `-numu / (num - numu)`, each accurate on its own and summing to one, not `f0 + t (f1 - f0)` (which
+   carries the error of `t` into a value that is orders of magnitude below `f0` at a Lyman break).
+
 ## What this means for a GPU port
 
 The kernels above are fused multiply-adds, exponentials and reductions over spectra with
@@ -209,6 +228,59 @@ integrals that give the IMF parameters' gradients use a relative step of 1e-3 in
 (error ~1e-4, the weights' rounding ~1e-7 over the step) and 1e-6 in FP64 builds (~1e-10). The tests' tolerances follow the
 kernel precision (`test_opensps_imf`: 16 ulp of FP32 per bin; `test_csp_batch`: 1e-6 for mass and
 L_bol with the IMF per model).
+
+## The forward kernels of the HIP backend in FP32 arithmetic
+
+The R9700's FP64 rate is 1/64 of its FP32 rate, so every FP64 operation in a per-(pixel, model) or
+per-(point, model) loop was a cost (rules 8-10). `perf/forward-bottlenecks` moves these loops to FP32
+arithmetic where the measurements below allow it; each kernel states its arithmetic in its header comment
+(`src/accel/hip/opensps_hip_kernels.hip`). All are FP32-kernel builds only; FP64 builds and the reverse pass
+keep their FP64 kernels. Measured against the host FP64 build on the 35 `compare_builds` cases and on 64-model
+`imf_batch_dump` sets (IMF types 0, 2, 4; free metallicity; per-model redshift 0-3; cue):
+
+| kernel | arithmetic | measured |
+|---|---|---|
+| IMF point weights (`imf_pieces_weights_f32_kernel`), forward only | exp(e ln m1), expm1(e ln(m2/m1)) from hi + lo arguments (1-2 ulp), independent bins, Neumaier sums of exact products for mass, L_bol, Q (Q scaled by 2^-80); first bins and bins straddling an IMF break stay FP64 | per weight 2.8e-7 worst (none > 5e-7); per-age L_bol sums 4.7e-8; end to end mass 5.8e-8, L_bol 2.4e-8 dex |
+| fold of the weights into template weights (`fold_multi_kernel`) | eff_val as hi + lo, exact products (fma), Neumaier per (segment, age), FP64 for the SFH weighting and the young/old split | equal to the FP64 sum to ~1e-14 (spectra identical to the previous kernel's) |
+| template products, age sums with metallicity, band fluxes | blocks of 4 plain multiply-adds (terms >= 0), blocks added with compensation | template products bit-identical to the Fortran kernel; age sums and band fluxes within the FP32 envelope (worst pixel 5.9e-7, magnitude 4.7e-7 / 5.1e-7 with per-model z) |
+| velocity smoothing (`smooth_kernel_f32`) | coefficients as hi + lo, blocks of 4, compensation, `acc - cmp` | csp_smooth worst pixel 1.65e-7 -> 2.5e-7 |
+| dust attenuation (`attenuate_kernel`) | per-model parameters in FP32, power laws from hi + lo, DL07 table as hi + lo | mean magnitude error 1.73e-7 -> 1.90e-7; worst 4.9e-7 -> 5.5e-7 (csp_nebular) |
+| observed frame, per-model redshift (`observed_frame_kernel`) | rule 10's weights; pixels outside the rest-frame grid in FP64 | worst magnitude 3.9e-7 / 5.5e-7 / 4.0e-7 (types 0, 2, 4; old 4.0 / 4.9 / 3.5e-7) |
+| cue: spline solve, per-model logs and young fraction, dust-emission normalization | 6/h in KP; logs, ratios once per model | pixel rms 6.32e-7 -> 6.30e-7 (cue at 4e-5 worst pixel is the FP32 networks' own level) |
+
+### The reverse pass (gradients)
+
+Same procedure for `params_bar` (FP32 build, `OPENSPS_BENCH_DUMP` + `tools/compare_builds/compare_grad_dump.py`: 100 models
+of `full_smooth_z_fit_grad`, 37 parameters, worst |error| per parameter relative to the largest |gradient| of that
+parameter, against the host FP64 build; the base build of this branch is the reference level: worst 6.3e-7, median 1.1e-7):
+
+| reverse kernel | arithmetic | measured |
+|---|---|---|
+| observed-frame resampling (`obs_bwd_*`) | the forward's hi + lo numerators and two-sided weights; ties on a rest-frame node resolved as the FP64 code's rounded division did; `d L / d z` partial sums in FP64 | `d L / d z` agrees with the portable path to 1e-8; 18.9 -> 3.2 ms per call at 1000 models |
+| nebular continuum (`adj_nebular_continuum_f32_kernel`) | table as hi + lo, corner differences, exponent as a double-float sum, two-constant ln2 reduction (rule 10) | gas_logz 6.9e-8 -> 4.7e-7, tage 1.4e-7 -> 5.9e-7, tau 1.3e-7 -> 6.3e-7; 20.0 -> 7.2 ms |
+| transposed smoothing (`smooth_kernel_f32`, adjoint mode) | the operator's columns as hi + lo, blocks of `HIP_SMOOTH_KB` taps | worst parameter 7.8e-7 (the forward's smoothing block length also fixed); 3.5 -> 0.36 ms |
+| IGM optical depth and its derivative (Fortran) | the forward's six-term table form (`igm_tau_z_terms_dz` new) | bit-identical gradients; igm cap 2.25 -> 0.14 ms, attenuation adjoint 7.6 -> 3.1 ms |
+
+Worst parameter of the matrix after these: 7.8e-7 (zred) of its scale; median over parameters 2.1e-7. The cue gradient is
+unchanged (1.25e-5 worst, the FP32 networks' level).
+
+Not converted, on purpose: the IMF-per-model reverse pass (`adj_imf_analytic_kernel`, `adj_fold_gather_kernel`,
+`imf_pieces_weights_kernel`, 60% of the free-IMF gradient step) is FP64 because the gradient of a normalized weight is a
+sum of `(dv - w D) cot` over ~1e5 points whose terms cancel (rule 2): an FP32 version loses the signal at the level of
+the cotangents' FP32 noise; and cue's reverse pass (hidden layers, spline adjoint, ionizing-spectrum fit) keeps its FP64
+activations by the design of `doc/MIXED_PRECISION.md`, "cue's networks". On a GPU with fast FP64 (A100) neither costs
+what it does on the R9700.
+
+The attenuation and age-sum changes put the worst magnitude of the matrix at 5.5e-7, above the 5e-7 level
+quoted under "What the FP32 results are gated on": the DL07 table, the power-law exponentials (an FP64 `exp`
+substituted as a test) and the curve were ruled out as the cause (the errors did not change to the printed
+digit), so it is a different rounding pattern of the same FP32 expressions, not a loss by construction. The mean
+error moves by +10%.
+
+Block and tile sizes of these kernels are parameters of the registry (`TUNE_HIP_*`, `TUNE_TEMPLATE_KB`; doc/TUNING.md,
+"The HIP kernels"): the Fortran caller passes them, a shape the kernel is not built for runs the portable kernel
+instead. The defaults were measured on the R9700 only (M4): a 128 x 128 template tile ran at 0.63 of the speed of
+128 x 64; 64 and 32 models per fold block at 0.75 and 0.40.
 
 ## cue's networks (`nebular_model = 1`)
 

@@ -13,6 +13,9 @@ option('enable_stress_testing', type: 'boolean', value: false,
 option('kernel_precision', type: 'combo', choices: ['double', 'single'], value: 'double',
   description: 'Precision of the per-pixel kernels (spectral templates, SSP/CSP sums, dust, nebular, photometry, and the batched SSP\'s per-model IMF bin weights); setup, isochrones and the other weights stay double')
 
+option('tuning_overrides', type: 'string', value: '',
+  description: 'Compile-time tuning parameters of src/core/opensps_tuning.f90 to override, NAME=INTEGER[,NAME=INTEGER...] (e.g. SEG_LEN=128,PT_PIECE=16): for sweeps and tuners (doc/TUNING.md), not for releases; the summation parameters change the rounding of the results')
+
 option('gpu_arch', type: 'string', value: 'cc80,cc90',
   description: 'Offload targets for -Daccel=omp_gpu: nvfortran -gpu= (cc80 = A100, cc90 = H100; cc70 for V100 with HPC SDK < 26) or an LLVM offload arch (gfx1103, gfx942)')
 

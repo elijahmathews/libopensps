@@ -17,6 +17,8 @@ module opensps_c_api
                         api_compute_ssp => opensps_compute_ssp, api_compute_csp => opensps_compute_csp
     use opensps_csp, only: compute_csp_scenario
     use opensps_io, only: load_tabular_sfh, write_isochrone_cmd
+    use opensps_filters, only: filter_set_t, filter_set_add, filter_set_clear
+    use opensps_context_filters, only: opensps_context_set_filters, opensps_context_set_filters_library
     use opensps_ssp, only: generate_ssp_grid, compute_interpolated_ssp, configure_imf_parameters
     use opensps_spectral_library, only: get_stellar_spectrum
     use opensps_stellar_modifications, only: apply_blue_stragglers, modify_giant_branch, &
@@ -66,6 +68,12 @@ module opensps_c_api
     end type ctx_slot_t
     type(ctx_slot_t), allocatable :: ctx_pool(:)
     logical, allocatable :: ctx_inuse(:)
+    !> Filter sets under construction (opensps_filterset_*), by handle; a slot is reused after its set is freed
+    type :: fset_slot_t
+        type(filter_set_t), pointer :: s => null()
+    end type fset_slot_t
+    type(fset_slot_t), allocatable :: fset_pool(:)
+    logical, allocatable :: fset_inuse(:)
     !> Per handle, for opensps_context_compute_csp: the SSP grids computed so far (one per
     !> metallicity, kept until an SSP parameter changes) and the last single CSP's outputs
     type :: ctx_store_t
@@ -1633,13 +1641,288 @@ contains
             call c_f_pointer(c_wave_eff, f, [nb]); f = ctx%state%filter_leff(1:nb)
         end if
         if (c_associated(c_mag_vega)) then
-            call c_f_pointer(c_mag_vega, f, [nb]); f = ctx%state%magvega(1:nb) - ctx%state%magvega(1)
+            call c_f_pointer(c_mag_vega, f, [nb])
+            f = ctx%state%magvega(1:nb)
+            if (ctx%state%vega_ref_band > 0) f = f - ctx%state%magvega(ctx%state%vega_ref_band)
         end if
         if (c_associated(c_mag_sun)) then
             call c_f_pointer(c_mag_sun, f, [nb]); f = ctx%state%magsun(1:nb)
         end if
         end associate
     end subroutine opensps_context_get_filter_data_handle
+
+    ! -------------------------------------------------------------------------
+    ! Filter sets (doc/FILTERS_PLAN.md): bandpass curves supplied by the caller
+    ! -------------------------------------------------------------------------
+
+    !> True for a handle of a filter set in use.
+    logical function fset_ok(handle)
+        integer(c_int), intent(IN) :: handle
+        fset_ok = .false.
+        if (.not. ALLOCATED(fset_pool)) return
+        if (handle < 1 .or. handle > SIZE(fset_pool)) return
+        fset_ok = fset_inuse(handle)
+    end function fset_ok
+
+    !> A new, empty filter set (handle >= 1).
+    subroutine opensps_filterset_create_handle(handle, status) bind(C, name="opensps_filterset_create")
+        integer(c_int), intent(OUT) :: handle
+        integer(c_int), intent(OUT) :: status
+        type(fset_slot_t), allocatable :: new_pool(:)
+        logical, allocatable :: new_inuse(:)
+        integer :: i, n
+
+        if (.not. ALLOCATED(fset_pool)) then
+            allocate (fset_pool(4), fset_inuse(4))
+            fset_inuse = .false.
+        end if
+        handle = 0
+        do i = 1, SIZE(fset_pool)
+            if (.not. fset_inuse(i)) then
+                handle = i
+                exit
+            end if
+        end do
+        if (handle == 0) then
+            n = SIZE(fset_pool)
+            allocate (new_pool(2*n), new_inuse(2*n))
+            new_pool(1:n) = fset_pool
+            new_inuse = .false.
+            new_inuse(1:n) = fset_inuse
+            call MOVE_ALLOC(new_pool, fset_pool)
+            call MOVE_ALLOC(new_inuse, fset_inuse)
+            handle = n + 1
+        end if
+        if (.not. ASSOCIATED(fset_pool(handle)%s)) allocate (fset_pool(handle)%s)
+        call filter_set_clear(fset_pool(handle)%s)
+        fset_inuse(handle) = .true.
+        status = 0
+    end subroutine opensps_filterset_create_handle
+
+    !> Adds a filter: n points of wavelength [A] (strictly increasing, or decreasing) and response;
+    !> detector 0 = photon counting (response per photon), 1 = energy counting. cal_lambda_ref > 0
+    !> attaches a calibration (the response is divided by integral (lambda/cal_lambda_ref)^cal_exponent
+    !> T/lambda after normalization: exponent -1 flat nu f_nu, -2 beta = 2 blackbody); <= 0: none.
+    !> Status 1 bad handle, 3 bad argument (n < 2, detector, calibration, NULL pointer).
+    subroutine opensps_filterset_add_handle(handle, c_name, n, c_lambda, c_response, detector, &
+                                            cal_lambda_ref, cal_exponent, status) bind(C, name="opensps_filterset_add")
+        integer(c_int), value :: handle, n, detector
+        character(KIND=c_char), dimension(*), intent(IN) :: c_name
+        type(c_ptr), value :: c_lambda, c_response
+        real(c_double), value :: cal_lambda_ref, cal_exponent
+        integer(c_int), intent(OUT) :: status
+        real(c_double), pointer :: lam(:), resp(:)
+        character(LEN=64) :: name
+        integer :: st
+
+        status = 0
+        if (.not. fset_ok(handle)) then
+            status = 1
+            return
+        end if
+        if (n < 2 .or. .not. c_associated(c_lambda) .or. .not. c_associated(c_response)) then
+            status = 3
+            call opensps_set_error(3, 'opensps_filterset_add: need n >= 2 and non-NULL arrays')
+            return
+        end if
+        call c_to_f_string(c_name, name)
+        call c_f_pointer(c_lambda, lam, [n])
+        call c_f_pointer(c_response, resp, [n])
+        call filter_set_add(fset_pool(handle)%s, name, lam, resp, detector, cal_lambda_ref > 0.0_c_double, &
+                            cal_lambda_ref, cal_exponent, st)
+        if (st /= 0) then
+            status = 3
+            call opensps_set_error(3, 'opensps_filterset_add: bad detector or calibration')
+        end if
+    end subroutine opensps_filterset_add_handle
+
+    subroutine opensps_filterset_count_handle(handle, n, status) bind(C, name="opensps_filterset_count")
+        integer(c_int), value :: handle
+        integer(c_int), intent(OUT) :: n, status
+        n = 0
+        status = 0
+        if (.not. fset_ok(handle)) then
+            status = 1
+            return
+        end if
+        n = fset_pool(handle)%s%n
+    end subroutine opensps_filterset_count_handle
+
+    subroutine opensps_filterset_free_handle(handle, status) bind(C, name="opensps_filterset_free")
+        integer(c_int), value :: handle
+        integer(c_int), intent(OUT) :: status
+        status = 0
+        if (.not. fset_ok(handle)) then
+            status = 1
+            return
+        end if
+        call filter_set_clear(fset_pool(handle)%s)
+        fset_inuse(handle) = .false.
+    end subroutine opensps_filterset_free_handle
+
+    !> Installs a filter set as the filters of a set-up context (the set is copied: it may be freed or
+    !> reused afterwards). resample: 1 conserving (the default of the wrappers), 0 legacy point
+    !> interpolation; grid_policy: 0 error (default), 1 warn, 2 allow; vega_ref_band: 0 Vega is
+    !> magnitude 0 in every band (default), k > 0 anchored on band k (legacy FSPS: 1).
+    !> Status 1 bad handle, 3 bad argument, 301 not set up, 320 unusable curve, 321 filter beyond the
+    !> model wavelength range, 322 no throughput, 323 hash mismatch; opensps_get_last_error names the
+    !> filter. On any error the context keeps its filters.
+    subroutine opensps_context_set_filters_handle(handle, fset, resample, grid_policy, vega_ref_band, status) &
+        bind(C, name="opensps_context_set_filters")
+        integer(c_int), value :: handle, fset, resample, grid_policy, vega_ref_band
+        integer(c_int), intent(OUT) :: status
+        character(LEN=256) :: msg
+        integer :: st
+
+        status = 0
+        if (.not. handle_ok(handle) .or. .not. fset_ok(fset)) then
+            status = 1
+            return
+        end if
+        call opensps_context_set_filters(ctx_pool(handle)%c, fset_pool(fset)%s, st, msg, resample, grid_policy, &
+                                         vega_ref_band)
+        status = st
+        if (st /= 0) call opensps_set_error(st, '[OPENSPS-C] ' // trim(msg))
+    end subroutine opensps_context_set_filters_handle
+
+    !> Installs the standard-format filter library filters/<name> (see opensps_context_set_filters).
+    !> Status 324: no such library.
+    subroutine opensps_context_set_filters_library_handle(handle, c_name, resample, grid_policy, vega_ref_band, &
+                                                          status) bind(C, name="opensps_context_set_filters_library")
+        integer(c_int), value :: handle, resample, grid_policy, vega_ref_band
+        character(KIND=c_char), dimension(*), intent(IN) :: c_name
+        integer(c_int), intent(OUT) :: status
+        character(LEN=64) :: name
+        character(LEN=256) :: msg
+        integer :: st
+
+        status = 0
+        if (.not. handle_ok(handle)) then
+            status = 1
+            return
+        end if
+        call c_to_f_string(c_name, name)
+        call opensps_context_set_filters_library(ctx_pool(handle)%c, name, st, msg, resample, grid_policy, &
+                                                 vega_ref_band)
+        status = st
+        if (st /= 0) call opensps_set_error(st, '[OPENSPS-C] ' // trim(msg))
+    end subroutine opensps_context_set_filters_library_handle
+
+    !> What the context's active filters are (nbands each; any pointer may be NULL): names and content
+    !> hashes as NUL-terminated strings of 65 bytes per filter (hash: 64 hex characters of SHA-256 of
+    !> the cleaned curve, detector and calibration; the name is cut at 64), coverage (fraction of the
+    !> response inside the model wavelength range), n_fwhm (grid points above half maximum), flags
+    !> (1 truncated by the grid, 2 undersampled, 4 no throughput), detector (0 photon, 1 energy). The
+    !> grid_hash (65 bytes) is the SHA-256 of the model wavelength grid; resample and grid_policy are
+    !> those used. Status 1 bad handle, 301 not set up.
+    subroutine opensps_context_get_filter_report_handle(handle, c_names, c_hashes, c_coverage, c_n_fwhm, c_flags, &
+                                                        c_detector, c_grid_hash, resample, grid_policy, status) &
+        bind(C, name="opensps_context_get_filter_report")
+        integer(c_int), value :: handle
+        type(c_ptr), value :: c_names, c_hashes, c_coverage, c_n_fwhm, c_flags, c_detector, c_grid_hash
+        integer(c_int), intent(OUT) :: resample, grid_policy, status
+        character(KIND=c_char), pointer :: cs(:)
+        real(c_double), pointer :: fd(:)
+        integer(c_int), pointer :: fi(:)
+        integer :: nb, i
+
+        status = 0
+        resample = 0
+        grid_policy = 2
+        if (.not. handle_ok(handle)) then
+            status = 1
+            return
+        end if
+        associate (ctx => ctx_pool(handle)%c)
+        if (.not. ASSOCIATED(ctx%state%filter_info)) then
+            status = 301
+            return
+        end if
+        if (.not. ALLOCATED(ctx%state%filter_info%hash)) then
+            status = 301
+            return
+        end if
+        nb = ctx%state%nbands
+        resample = ctx%state%filter_info%resample
+        grid_policy = ctx%state%filter_info%grid_policy
+        if (c_associated(c_names)) then
+            call c_f_pointer(c_names, cs, [65*nb])
+            do i = 1, nb
+                call put_c_string(ctx%state%filter_info%name(i), cs(65*(i - 1) + 1:65*i))
+            end do
+        end if
+        if (c_associated(c_hashes)) then
+            call c_f_pointer(c_hashes, cs, [65*nb])
+            do i = 1, nb
+                call put_c_string(ctx%state%filter_info%hash(i), cs(65*(i - 1) + 1:65*i))
+            end do
+        end if
+        if (c_associated(c_grid_hash)) then
+            call c_f_pointer(c_grid_hash, cs, [65])
+            call put_c_string(ctx%state%filter_info%grid_hash, cs)
+        end if
+        if (c_associated(c_coverage)) then
+            call c_f_pointer(c_coverage, fd, [nb]); fd = ctx%state%filter_info%coverage(1:nb)
+        end if
+        if (c_associated(c_n_fwhm)) then
+            call c_f_pointer(c_n_fwhm, fi, [nb]); fi = ctx%state%filter_info%n_fwhm(1:nb)
+        end if
+        if (c_associated(c_flags)) then
+            call c_f_pointer(c_flags, fi, [nb]); fi = ctx%state%filter_info%flags(1:nb)
+        end if
+        if (c_associated(c_detector)) then
+            call c_f_pointer(c_detector, fi, [nb]); fi = ctx%state%filter_info%detector(1:nb)
+        end if
+        end associate
+    end subroutine opensps_context_get_filter_report_handle
+
+    !> The last batch's linear AB fluxes in maggies (nbands x n, column-major; maggies = f_nu / 3631 Jy =
+    !> 10^(-0.4 m_AB) of the magnitude the batch returned with compute_vega_mags = 0, whatever that setting
+    !> is: the distance term and redshift included, the Vega system never applied). Needs
+    !> opensps_context_set_int(handle, "keep_maggies", 1) before the batch (0, the default, computes none).
+    !> Unlike the magnitudes they are 0 (not NaN) where the band has no flux, and NaN for bands masked
+    !> out by opensps_context_set_mag_compute. maggies may be NULL (the dimensions are returned either
+    !> way). Status 1 bad handle, 302 no batch with keep_maggies = 1 has run on the handle.
+    subroutine opensps_context_get_batch_maggies_handle(handle, c_maggies, n_bands, n, status) &
+        bind(C, name="opensps_context_get_batch_maggies")
+        integer(c_int), value :: handle
+        type(c_ptr), value :: c_maggies
+        integer(c_int), intent(OUT) :: n_bands, n, status
+        real(c_double), pointer :: f(:, :)
+
+        status = 0
+        n_bands = 0
+        n = 0
+        if (.not. handle_ok(handle)) then
+            status = 1
+            return
+        end if
+        associate (ctx => ctx_pool(handle)%c)
+        if (.not. ALLOCATED(ctx%state%last_maggies)) then
+            status = 302
+            call opensps_set_error(302, '[OPENSPS-C] get_batch_maggies: no batch ran with keep_maggies = 1')
+            return
+        end if
+        n_bands = SIZE(ctx%state%last_maggies, 1)
+        n = SIZE(ctx%state%last_maggies, 2)
+        if (c_associated(c_maggies)) then
+            call c_f_pointer(c_maggies, f, [n_bands, n])
+            f = ctx%state%last_maggies
+        end if
+        end associate
+    end subroutine opensps_context_get_batch_maggies_handle
+
+    !> A Fortran string as a NUL-terminated C string in a 65-byte field
+    subroutine put_c_string(f, c)
+        character(LEN=*), intent(IN) :: f
+        character(KIND=c_char), intent(OUT) :: c(65)
+        integer :: i, n
+        n = min(LEN_TRIM(f), 64)
+        do i = 1, n
+            c(i) = f(i:i)
+        end do
+        c(n + 1:65) = c_null_char
+    end subroutine put_c_string
 
     !> Tabular SFH for sfh = 3: ntab points of age [Gyr since the start of star formation],
     !> SFR [M_sun/yr] and, used with zcontinuous = 3, metallicity Z (met may be NULL: zeros).

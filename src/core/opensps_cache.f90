@@ -7,6 +7,7 @@ module opensps_cache
     !> can be reused across contexts to reduce I/O and allocation costs.
 
     use opensps_precision, only: WP, KP
+    use opensps_filter_types, only: filter_info_t, filter_info_clear
     use opensps_constants, only: ndim_logt, ndim_logg, ndim_wmb_logt, ndim_wmb_logg, &
                               n_agb_o, n_agb_c, n_agb_car, ndim_pagb, ndim_wr, ntau_dagb, nteff_dagb, &
                               nemline, nebnz, nebnage, nebnip, nagndust, nm
@@ -104,6 +105,8 @@ module opensps_cache
         real(WP), pointer :: magsun(:) => null()
         real(WP), pointer :: magvega(:) => null()
         real(WP), pointer :: filter_leff(:) => null()
+        !> Names, content hashes and diagnostics of the filters (opensps_filters)
+        type(filter_info_t), pointer :: filter_info => null()
         real(WP), pointer :: vega_spec(:) => null()
         real(WP), pointer :: sun_spec(:) => null()
         real(WP), pointer :: spec_lambda(:) => null()
@@ -247,6 +250,10 @@ contains
         if (associated(entry%magsun)) deallocate (entry%magsun)
         if (associated(entry%magvega)) deallocate (entry%magvega)
         if (associated(entry%filter_leff)) deallocate (entry%filter_leff)
+        if (associated(entry%filter_info)) then
+            call filter_info_clear(entry%filter_info)
+            deallocate (entry%filter_info)
+        end if
         if (associated(entry%vega_spec)) deallocate (entry%vega_spec)
         if (associated(entry%sun_spec)) deallocate (entry%sun_spec)
         if (associated(entry%spec_lambda)) deallocate (entry%spec_lambda)
