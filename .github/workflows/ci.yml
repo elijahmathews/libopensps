@@ -64,6 +64,13 @@ jobs:
             full_data: true
             coverage: true
             setup_args: -Db_coverage=true
+            # gcc makes every gcov counter update a locked atomic instruction when it is given -pthread (the build is), and
+            # the coverage build has no OpenMP threads: that cost the instrumented tests 4x on AMD EPYC 7763 and 10-11x on EPYC 9V45
+            # and Intel Xeon 6 runners (physics_oracles 21 -> 88, 13 -> 128, 19 -> 214 s; plain counters: 28, 16, 20 s),
+            # which timed out csp_batch_grad on the Intel runners. Plain counters make a threaded test's counts approximate,
+            # not its covered/uncovered lines.
+            fflags: -fprofile-update=single
+            cflags: -fprofile-update=single
 
           - name: gfortran / Linux arm64
             os: ubuntu-24.04-arm
@@ -125,6 +132,7 @@ jobs:
 
     env:
       FFLAGS: ${{ matrix.fflags }}
+      CFLAGS: ${{ matrix.cflags }}
       DATA_RELEASE: ${{ vars.OPENSPS_DATA_RELEASE }}
 
     steps:
