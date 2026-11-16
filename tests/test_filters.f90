@@ -476,7 +476,7 @@ contains
 
     ! ---------------------------------------------------------------------------------------------
     subroutine test_context()
-        type(opensps_context_t), allocatable :: ctx, ctx2
+        type(opensps_context_t), allocatable :: ctx, ctx2, ctx3
         type(filter_set_t) :: set, bad_set
         real(WP), allocatable :: bands0(:, :), mv0(:), ms0(:), le0(:), lam(:), spec(:), mags(:), mags0(:), &
                                  mags_ab(:), mags_vg(:), vega_spec(:), col(:, :), mcol(:, :), mag_lin(:, :), mag_lin2(:, :)
@@ -643,6 +643,49 @@ contains
                                total_tests, total_failures)
         call opensps_context_set_filters_library(ctx, 'nonesuch', st, msg)
         call assert_int_equals(FILTERS_ERR_LIBRARY, st, "no such library: 324", total_tests, total_failures)
+
+        ! 6b. The other refusals, each leaving the filters as they were
+        call filter_set_clear(bad_set)
+        call opensps_context_set_filters(ctx, bad_set, st, msg)
+        call assert_true(st == FILTERS_ERR_ARGUMENT .and. ctx%state%nbands == 1, "an empty set is refused", &
+                         total_tests, total_failures)
+        call opensps_context_set_filters(ctx, set, st, msg, resample=7)
+        call assert_int_equals(FILTERS_ERR_ARGUMENT, st, "an unknown resampling is refused", total_tests, total_failures)
+        call opensps_context_set_filters(ctx, set, st, msg, grid_policy=3)
+        call assert_int_equals(FILTERS_ERR_ARGUMENT, st, "an unknown grid policy is refused", total_tests, total_failures)
+        call opensps_context_set_filters(ctx, set, st, msg, grid_policy=-1)
+        call assert_int_equals(FILTERS_ERR_ARGUMENT, st, "a negative grid policy is refused", total_tests, total_failures)
+        call filter_set_add(bad_set, 'half_beyond', [5000.0_wp, 2.0e11_wp], [1.0_wp, 1.0_wp], DETECTOR_PHOTON, .false., &
+                            0.0_wp, 0.0_wp, st)
+        call opensps_context_set_filters(ctx, bad_set, st, msg)
+        call assert_true(st == FILTERS_ERR_COVERAGE .and. index(msg, 'half_beyond') > 0 .and. &
+                         index(msg, 'wavelength range') > 0 .and. ctx%state%nbands == 1, &
+                         "a filter partly beyond the model range: coverage error, named: " // trim(msg), &
+                         total_tests, total_failures)
+        call opensps_context_set_filters(ctx, bad_set, st, msg, grid_policy=GRID_POLICY_WARN)
+        call assert_true(st == 0 .and. iand(ctx%state%filter_info%flags(1), FILTER_FLAG_TRUNCATED) /= 0, &
+                         "with the warn policy it is installed and flagged truncated", total_tests, total_failures)
+        call filter_set_clear(bad_set)
+        call filter_set_add(bad_set, 'wrong_hash', [4000.0_wp, 5000.0_wp, 6000.0_wp], [0.0_wp, 1.0_wp, 0.0_wp], &
+                            DETECTOR_PHOTON, .false., 0.0_wp, 0.0_wp, st)
+        bad_set%expect_hash(1) = repeat('0', 64)
+        call opensps_context_set_filters(ctx, bad_set, st, msg)
+        call assert_true(st == FILTERS_ERR_HASH .and. index(msg, 'hash') > 0 .and. index(msg, 'wrong_hash') > 0, &
+                         "a content hash that does not match: refused, named: " // trim(msg), total_tests, total_failures)
+        bad_set%expect_hash(1) = ''
+        call opensps_context_set_filters(ctx, bad_set, st, msg, legacy_order=.true.)
+        call assert_true(st == 0 .and. ctx%state%nbands == 1 .and. ctx%state%filter_leff(1) > 4000.0_wp .and. &
+                         ctx%state%filter_leff(1) < 6000.0_wp, "the legacy order of normalization and calibration is accepted", &
+                         total_tests, total_failures)
+        call opensps_context_set_filters(ctx, set, st, msg)
+
+        ! 6c. A context that has not been set up
+        allocate (ctx3)
+        call opensps_create(ctx3)
+        call opensps_context_set_filters(ctx3, set, st, msg)
+        call assert_true(st == FILTERS_ERR_NOT_SETUP .and. index(msg, 'not been set up') > 0, &
+                         "a context that was not set up: refused", total_tests, total_failures)
+        call opensps_destroy(ctx3)
 
         call assert_true(ctx2%state%nbands == nb0 .and. all(ctx2%state%bands == bands0) .and. &
                          .not. ctx2%state%filters_owned, "another context of the same setup is untouched", &
