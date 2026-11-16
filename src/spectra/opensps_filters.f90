@@ -401,7 +401,7 @@ contains
         type(filter_info_t), intent(inout) :: info
         integer, intent(out) :: status, bad
 
-        real(WP), allocatable :: lc(:), rc(:)
+        real(WP), allocatable :: lc(:), rc(:), lt(:), rt(:)
         real(WP) :: norm
         integer :: i, first, nc, st, ng, k, p
 
@@ -424,8 +424,12 @@ contains
 
         first = 0
         do i = 1, set%n
-            call filter_clean(set%lam(first + 1:first + set%npts(i)), set%resp(first + 1:first + set%npts(i)), &
-                              strict, lc, rc, nc, st)
+            ! Copies, not the array sections of set%lam and set%resp: nvfortran 25.1 miscompiles filter_clean
+            ! inlined into this routine at -O2/-O3 when it is passed sections of the allocatable components
+            ! (valid curves are rejected as unusable, codes 2 and 3). Correct at -O0/-O1 and with -Mnoinline.
+            lt = set%lam(first + 1:first + set%npts(i))
+            rt = set%resp(first + 1:first + set%npts(i))
+            call filter_clean(lt, rt, strict, lc, rc, nc, st)
             first = first + set%npts(i)
             if (st /= FILTER_OK) then
                 status = st
