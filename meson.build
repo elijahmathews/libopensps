@@ -1000,6 +1000,20 @@ if python3.found()
         timeout : 300
     )
 endif
+# Malformed filter libraries stop the reader with a message (each in its own process)
+test_c_filters_malformed_exe = executable('test_c_filters_malformed', 'tests/test_c_filters_malformed.c',
+    dependencies : opensps_dep,
+    include_directories : include_directories('include')
+)
+if python3.found()
+    test('unit_c_filters_malformed', python3,
+        args : [join_paths(meson.project_source_root(), 'tests/run_filters_malformed_test.py'), test_c_filters_malformed_exe,
+                join_paths(meson.project_source_root(), 'tests/data/opensps-test-data'), meson.current_build_dir()],
+        env : unit_env,
+        suite : 'unit',
+        timeout : 300
+    )
+endif
 # Filter-set handles and their statuses through the C API; needs no data
 test_c_filterset_exe = executable('test_c_filterset', 'tests/test_c_filterset.c',
     dependencies : [opensps_dep, meson.get_compiler('c').find_library('m', required : false)],
