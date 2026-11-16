@@ -243,6 +243,29 @@ keep their FP64 kernels. Measured against the host FP64 build on the 35 `compare
 | observed frame, per-model redshift (`observed_frame_kernel`) | rule 10's weights; pixels outside the rest-frame grid in FP64 | worst magnitude 3.9e-7 / 5.5e-7 / 4.0e-7 (types 0, 2, 4; old 4.0 / 4.9 / 3.5e-7) |
 | cue: spline solve, per-model logs and young fraction, dust-emission normalization | 6/h in KP; logs, ratios once per model | pixel rms 6.32e-7 -> 6.30e-7 (cue at 4e-5 worst pixel is the FP32 networks' own level) |
 
+### The reverse pass (gradients)
+
+Same procedure for `params_bar` (FP32 build, `OPENSPS_BENCH_DUMP` + `tools/compare_builds/compare_grad_dump.py`: 100 models
+of `full_smooth_z_fit_grad`, 37 parameters, worst |error| per parameter relative to the largest |gradient| of that
+parameter, against the host FP64 build; the base build of this branch is the reference level: worst 6.3e-7, median 1.1e-7):
+
+| reverse kernel | arithmetic | measured |
+|---|---|---|
+| observed-frame resampling (`obs_bwd_*`) | the forward's hi + lo numerators and two-sided weights; ties on a rest-frame node resolved as the FP64 code's rounded division did; `d L / d z` partial sums in FP64 | `d L / d z` agrees with the portable path to 1e-8; 18.9 -> 3.2 ms per call at 1000 models |
+| nebular continuum (`adj_nebular_continuum_f32_kernel`) | table as hi + lo, corner differences, exponent as a double-float sum, two-constant ln2 reduction (rule 10) | gas_logz 6.9e-8 -> 4.7e-7, tage 1.4e-7 -> 5.9e-7, tau 1.3e-7 -> 6.3e-7; 20.0 -> 7.2 ms |
+| transposed smoothing (`smooth_kernel_f32`, adjoint mode) | the operator's columns as hi + lo, blocks of `HIP_SMOOTH_KB` taps | worst parameter 7.8e-7 (the forward's smoothing block length also fixed); 3.5 -> 0.36 ms |
+| IGM optical depth and its derivative (Fortran) | the forward's six-term table form (`igm_tau_z_terms_dz` new) | bit-identical gradients; igm cap 2.25 -> 0.14 ms, attenuation adjoint 7.6 -> 3.1 ms |
+
+Worst parameter of the matrix after these: 7.8e-7 (zred) of its scale; median over parameters 2.1e-7. The cue gradient is
+unchanged (1.25e-5 worst, the FP32 networks' level).
+
+Not converted, on purpose: the IMF-per-model reverse pass (`adj_imf_analytic_kernel`, `adj_fold_gather_kernel`,
+`imf_pieces_weights_kernel`, 60% of the free-IMF gradient step) is FP64 because the gradient of a normalized weight is a
+sum of `(dv - w D) cot` over ~1e5 points whose terms cancel (rule 2): an FP32 version loses the signal at the level of
+the cotangents' FP32 noise; and cue's reverse pass (hidden layers, spline adjoint, ionizing-spectrum fit) keeps its FP64
+activations by the design of `doc/MIXED_PRECISION.md`, "cue's networks". On a GPU with fast FP64 (A100) neither costs
+what it does on the R9700.
+
 The attenuation and age-sum changes put the worst magnitude of the matrix at 5.5e-7, above the 5e-7 level
 quoted under "What the FP32 results are gated on": the DL07 table, the power-law exponentials (an FP64 `exp`
 substituted as a test) and the curve were ruled out as the cause (the errors did not change to the printed
