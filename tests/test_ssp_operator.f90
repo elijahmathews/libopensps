@@ -247,11 +247,13 @@ contains
         dspec = 0.0_wp; dmass = 0.0_wp; dlbol = 0.0_wp
         do t = 1, nt
             do i = 1, ns
-                ! (every group's spectrum is floored at SAFE_FLOOR where it has no flux: pixels at the floor are not compared)
-                if (s_ref(i, t) > 100.0_wp * SAFE_FLOOR) then
+                ! (every group's spectrum is floored at SAFE_FLOOR where it has no flux, and kernel precision flushes or rounds
+                ! values near the smallest normal number: pixels below 1e3 of it are not compared relatively)
+                if (s_ref(i, t) > 1.0e3_wp * max(SAFE_FLOOR, real(tiny(1.0_KP), WP))) then
                     dspec = max(dspec, abs(s_sum(i, t) / s_ref(i, t) - 1.0_wp))
                 else
-                    dspec = max(dspec, merge(0.0_wp, abs(s_sum(i, t)), abs(s_sum(i, t)) < 100.0_wp * SAFE_FLOOR))
+                    dspec = max(dspec, merge(0.0_wp, abs(s_sum(i, t)), &
+                                             abs(s_sum(i, t)) < 1.0e4_wp * max(SAFE_FLOOR, real(tiny(1.0_KP), WP))))
                 end if
             end do
             if (m_ref(t) > 0.0_wp) then

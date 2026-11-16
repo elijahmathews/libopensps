@@ -259,7 +259,7 @@ contains
         end do
     end subroutine entries_by_point
 
-    subroutine ssp_opset_free(set)
+    recursive subroutine ssp_opset_free(set)
         type(ssp_opset_t), intent(inout) :: set
         integer :: iz, ig
         if (associated(set%grp)) then
@@ -325,7 +325,7 @@ contains
     !> photons are blended linearly and L_bol in its logarithm, as for a basis. One metallicity (nz = 1)
     !> is the one-pass special case, its products going straight into yo. Device (OpenMP target) and host
     !> (OpenMP loops) builds run the same code.
-    subroutine ssp_batch_age_sums_z(imf_type, remnants, n_mod, nt, nspec, set, zlo, zhi, dz, pm, wsfh, it_tesc, &
+    recursive subroutine ssp_batch_age_sums_z(imf_type, remnants, n_mod, nt, nspec, set, zlo, zhi, dz, pm, wsfh, it_tesc, &
                                     nt_neb, whl, fesc, yo, smass, slum, q0, cg, slpass)
         logical, intent(in)  :: remnants
         integer, intent(in)  :: imf_type, n_mod, nt, nspec, nt_neb, whl
@@ -554,7 +554,7 @@ contains
     !> group alone. L_bol is the linear sum of the groups' sl at each metallicity, blended in its logarithm over the two
     !> bracketing metallicities as a basis does, so with the factors at their defaults it is that of a basis of the
     !> modified isochrones. The groups' sl are kept (set%slp) for the reverse pass. Groups no model uses are skipped.
-    subroutine ssp_batch_age_sums_mods(imf_type, remnants, n_mod, nt, nspec, set, cg, zlo, zhi, dz, pm, wsfh, it_tesc, &
+    recursive subroutine ssp_batch_age_sums_mods(imf_type, remnants, n_mod, nt, nspec, set, cg, zlo, zhi, dz, pm, wsfh, it_tesc, &
                                        nt_neb, whl, fesc, yo, smass, slum, q0)
         logical, intent(in)  :: remnants
         integer, intent(in)  :: imf_type, n_mod, nt, nspec, nt_neb, whl
@@ -589,6 +589,17 @@ contains
         do col = 1, 2 * n_mod
             do k = 1, nspec
                 yo(k, col) = 0.0_KP
+            end do
+        end do
+        ! (a group's ssp_batch_age_sums_z leaves its q0 alone without nebular ages: it is read below)
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2)
+#endif
+        do m = 1, n_mod
+            do t = 1, ntq
+                q_g(t, m) = 0.0_wp
             end do
         end do
 #if defined(OMP_TARGET)
@@ -701,7 +712,7 @@ contains
     !>   blend them: linearly, L_bol in log).
     !> Chunks of CHG models (the point weights are chunk x points arrays); atomic adds where the
     !> fold's templates share ages and points.
-    subroutine ssp_batch_age_sums_adjoint(imf_type, remnants, n_mod, nt, nspec, set, zlo, zhi, dz, pm, wsfh, it_tesc, &
+    recursive subroutine ssp_batch_age_sums_adjoint(imf_type, remnants, n_mod, nt, nspec, set, zlo, zhi, dz, pm, wsfh, it_tesc, &
                                           nt_neb, whl, fesc, gw, slum, lsum_bar, qbar, wbar, imf_bar, fesc_bar, zbar, &
                                           smass, msum_bar, cg, cbar, lfac)
         logical, intent(in)  :: remnants
@@ -960,7 +971,7 @@ contains
     !> L_z = sum_g cg_g sl(g, z): the SFH weights' lsum_bar L(t); dz's lsum_bar wsfh L ln 10 (log10 L_hi - log10 L_lo) (the
     !> passes the forward ran); and the point weights' lsum_bar L cz / L_z of the group's pass (lfac). The surviving
     !> mass's cotangent of the SFH weights is that of the total mass, given to the plain group's pass.
-    subroutine ssp_batch_age_sums_adjoint_mods(imf_type, remnants, n_mod, nt, nspec, set, cg, zlo, zhi, dz, pm, wsfh, &
+    recursive subroutine ssp_batch_age_sums_adjoint_mods(imf_type, remnants, n_mod, nt, nspec, set, cg, zlo, zhi, dz, pm, wsfh, &
                                                it_tesc, nt_neb, whl, fesc, gw, slum, lsum_bar, qbar, wbar, imf_bar, &
                                                fesc_bar, zbar, smass, msum_bar, cbar)
         logical, intent(in)  :: remnants
@@ -1024,6 +1035,17 @@ contains
         !$omp target data map(alloc: yg, sm_g, sl_g, q_g) map(to: lfac, slp_l, cg, lsum_bar, msum_bar, qbar, sm_zero, lzero) &
         !$omp& map(from: zl, cb)
 #endif
+        ! (a group's ssp_batch_age_sums_z leaves its q0 alone without nebular ages: it is read below)
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2)
+#endif
+        do m = 1, n_mod
+            do t = 1, ntq
+                q_g(t, m) = 0.0_wp
+            end do
+        end do
         ! d / d dz of L_bol's blend: the passes the forward ran, as adj_lq's (the log of the groups' sum, once)
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do private(t, p, g, czp, lzp, sx, ltot, acc)
