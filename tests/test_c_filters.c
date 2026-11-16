@@ -133,6 +133,38 @@ int main(void) {
     int ok = 1;
     for (int m = 0; m < N_MOD; m++) { if (mg2[2 * m] != mg[2 * m] || mg2[2 * m + 1] == mg2[2 * m + 1]) ok = 0; }
     CHECK(ok, "a masked band is NaN in the linear fluxes, the others unchanged");
+    /* The other ways of computing the magnitudes (per-model magnitude redshifts, per-model "zred" parameters), each
+     * with a band masked out and without: the linear fluxes follow in every one */
+    double zm[N_MOD], zpar[N_MOD], *mg3 = malloc(sizeof(double) * nbands * N_MOD), *mag3 = malloc(sizeof(double) * nbands * N_MOD);
+    for (int m = 0; m < N_MOD; m++) { zm[m] = 0.05 * m; zpar[m] = 0.02 * m; }
+    const char *pnz[N_PAR + 1] = {"dust2", "logzsol", "zred"};
+    const double *pvz[N_PAR + 1] = {dust2, logz, zpar};
+    for (int variant = 0; variant < 4; variant++) {
+        int masked = variant % 2, per_param = variant / 2;
+        opensps_context_set_mag_compute(h, masked ? 1 : 0, masked ? mask : NULL, &status);
+        opensps_batch_options_t opts = {0};
+        opts.n = N_MOD; opts.n_params = per_param ? N_PAR + 1 : N_PAR;
+        opts.names = per_param ? pnz : pn; opts.values = per_param ? pvz : pv;
+        opts.ssp_weights = w; opts.zred_mags = per_param ? NULL : zm;
+        opensps_batch_results_t res = {0};
+        res.mags = mag3; res.mass = mass; res.lbol = lbol;
+        opensps_context_compute_csp_batch_ext(h, &opts, &res, &status);
+        CHECK(status == 0, "variant %d (masked %d, per-model %s): status %d", variant, masked,
+              per_param ? "zred" : "zred_mags", status);
+        opensps_context_get_batch_maggies(h, mg3, &nb1, &n1, &status);
+        int good = (status == 0 && nb1 == 2 && n1 == N_MOD);
+        for (int m = 0; m < N_MOD && good; m++) {
+            if (!(fabs(mg3[2 * m] - pow(10.0, -0.4 * mag3[2 * m])) <= 1e-9 * mg3[2 * m])) good = 0;
+            if (masked ? (mg3[2 * m + 1] == mg3[2 * m + 1]) : !(fabs(mg3[2 * m + 1] - pow(10.0, -0.4 * mag3[2 * m + 1])) <=
+                                                                1e-9 * mg3[2 * m + 1])) good = 0;
+        }
+        CHECK(good, "variant %d (masked %d, per-model %s): maggies = 10^(-0.4 m), a masked band is NaN", variant, masked,
+              per_param ? "zred" : "zred_mags");
+        int moved = 0;
+        for (int m = 1; m < N_MOD; m++) if (fabs(mag3[2 * m] - mags[2 * m]) > 1e-6) moved = 1;
+        CHECK(moved, "variant %d: the redshift changes the magnitudes", variant);
+    }
+    free(mg3); free(mag3);
     opensps_context_set_mag_compute(h, 0, NULL, &status);
     opensps_context_set_int(h, "keep_maggies", 0, &status);
 
