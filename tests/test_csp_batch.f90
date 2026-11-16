@@ -30,7 +30,7 @@ program test_csp_batch
 #endif
     use opensps_ssp, only: generate_ssp_grid
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_free
-    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free
+    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                             opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
                             opensps_context_set_param_int, opensps_context_set_param_float, &
@@ -115,6 +115,7 @@ program test_csp_batch
     call check_imf_many_models()
     call check_imf_unsupported()
     call check_basis_mods_guard()
+    call check_mods_free_forward()
     ! compute_csp_scenario: all-ages outputs against single-age calls, in each mode, on the
     ! one-metallicity basis
     call build_basis()
@@ -652,6 +653,86 @@ contains
         end do
         deallocate(mags)
     end subroutine check_basis_mods_guard
+
+    !> The isochrone modification factors fbhb, sbss, agb, pagb and redgb free per model (a set from ssp_opset_build_mods): every
+    !> model of one batch against the same model alone through the context's resident basis built with its factors (the
+    !> basis path, which generate_ssp_grid and legacy parity check), spectra, magnitudes, mass, L_bol and dust mass.
+    subroutine check_mods_free_forward()
+        integer, parameter :: NMOD = 12
+        real(WP), parameter :: fb(NMOD) = [0.0_wp, 0.2_wp, 0.5_wp, 0.0_wp, 1.0e-5_wp, 0.7_wp, 0.1_wp, 0.0_wp, 0.3_wp, 0.9_wp, &
+                                           0.05_wp, 0.4_wp]
+        real(WP), parameter :: sb(NMOD) = [0.0_wp, 0.0_wp, 5.0_wp, 12.0_wp, 0.0_wp, 20.0_wp, 2.0_wp, 5.0e-4_wp, 8.0_wp, 0.0_wp, &
+                                           3.0_wp, 15.0_wp]
+        real(WP), parameter :: ag(NMOD) = [1.0_wp, 0.5_wp, 2.0_wp, 0.8_wp, 0.0_wp, 1.5_wp, 1.0_wp, 1.0_wp, 0.3_wp, 1.2_wp, &
+                                           1.0_wp, 0.9_wp]
+        real(WP), parameter :: pa(NMOD) = [1.0_wp, 1.0_wp, 1.0_wp, 2.0_wp, 0.5_wp, 3.0_wp, 1.0_wp, 0.0_wp, 1.0_wp, 1.5_wp, &
+                                           0.7_wp, 1.0_wp]
+        real(WP), parameter :: rg(NMOD) = [1.0_wp, 1.1_wp, 0.8_wp, 1.0_wp, 1.5_wp, 0.6_wp, 1.0_wp, 2.0_wp, 1.0_wp, 0.9_wp, &
+                                           1.3_wp, 0.5_wp]
+        type(PARAMS) :: pset, psets(NMOD)
+        type(ssp_opset_t) :: op
+        real(WP), allocatable :: spec(:, :), mags(:, :), ref_spec(:, :), ref_mags(:, :), s1(:, :), g1(:, :)
+        real(WP) :: mass(NMOD), lbol(NMOD), mdust(NMOD), ref_mass(NMOD), ref_lbol(NMOD), ref_mdust(NMOD)
+        real(WP) :: d_spec, d_mag, d_scal
+        integer :: m, status, nspec, nbands
+
+        call print_group("Batched CSP: isochrone modification factors free per model (group operators)")
+        nspec = ctx%state%nspec
+        nbands = ctx%state%nbands
+        allocate(spec(nspec, NMOD), mags(nbands, NMOD), ref_spec(nspec, NMOD), ref_mags(nbands, NMOD), s1(nspec, 1), &
+                 g1(nbands, 1))
+        call set_int('imf_type', 1)
+        call set_factors(0.0_wp, 0.0_wp, 1.0_wp, 1.0_wp, 1.0_wp)
+        call set_model(1, 0.5_wp)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        call ssp_opset_build_mods(ctx, pset, .false., op)
+        do m = 1, NMOD
+            call set_model(m, 0.5_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
+            psets(m)%fbhb = fb(m); psets(m)%sbss = sb(m); psets(m)%agb = ag(m); psets(m)%pagb = pa(m); psets(m)%redgb = rg(m)
+        end do
+        call compute_csp_batch(ctx, psets, mags, status, spec=spec, mass=mass, lbol=lbol, mdust=mdust, ssp_ops=op)
+        call assert_true(status == 0, "free factors: status 0", total_tests, total_failures)
+
+        do m = 1, NMOD
+            call set_factors(fb(m), sb(m), ag(m), pa(m), rg(m))
+            call build_basis()
+            call compute_csp_batch(ctx, psets(m:m), g1, status, spec=s1, mass=ref_mass(m:m), lbol=ref_lbol(m:m), &
+                                   mdust=ref_mdust(m:m))
+            ref_spec(:, m) = s1(:, 1)
+            ref_mags(:, m) = g1(:, 1)
+        end do
+        call set_factors(0.0_wp, 0.0_wp, 1.0_wp, 1.0_wp, 1.0_wp)
+        call build_basis()
+        call max_differences(spec, mags, ref_spec, ref_mags, d_spec, d_mag)
+        d_scal = max(maxval(abs(mass / ref_mass - 1.0_wp)), maxval(abs(lbol - ref_lbol)))
+        write(*, '(A,4ES10.2)') "# max difference (spectrum, mag, mass/lbol, mdust): ", d_spec, d_mag, d_scal, &
+            maxval(abs(mdust / ref_mdust - 1.0_wp))
+        call assert_true(d_spec <= IMF_SPEC_RTOL, "free factors: spectra", total_tests, total_failures)
+        call assert_true(d_mag <= MAG_TOL, "free factors: magnitudes", total_tests, total_failures)
+        call assert_true(d_scal <= IMF_SCAL_TOL, "free factors: mass, L_bol", total_tests, total_failures)
+        call assert_true(maxval(abs(mdust / ref_mdust - 1.0_wp)) <= IMF_SCAL_TOL, "free factors: dust mass", &
+                         total_tests, total_failures)
+
+        ! A delt or dell on a model: not free yet (status 2); a model with agb_dust or masscut of its own likewise
+        psets(2)%delt = 0.05_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 2, "free factors: delt on a model, status 2", total_tests, total_failures)
+        psets(2)%delt = 0.0_wp
+        psets(2)%masscut = 50.0_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 2, "free factors: masscut on a model, status 2", total_tests, total_failures)
+        call ssp_opset_free(op)
+        deallocate(spec, mags, ref_spec, ref_mags, s1, g1)
+    end subroutine check_mods_free_forward
+
+    subroutine set_factors(fbhb, sbss, agb, pagb, redgb)
+        real(WP), intent(in) :: fbhb, sbss, agb, pagb, redgb
+        call set_float('fbhb', fbhb); call set_float('sbss', sbss); call set_float('agb', agb)
+        call set_float('pagb', pagb); call set_float('redgb', redgb)
+    end subroutine set_factors
 
     subroutine imf_case(label, imf_type, mlo, mhi)
         character(len=*), intent(in) :: label

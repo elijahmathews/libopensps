@@ -34,13 +34,16 @@ module opensps_ssp_batch
                            IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE, IMF_P_LOWER_BOUND, IMF_NPAR, imf_integral_dp, &
                            integrate_powerlaw, powerlaw_dj_de
     use opensps_stellar_modifications, only: add_remnant_mass_p
-    use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_to_device, ssp_operator_from_device
+    use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_to_device, ssp_operator_from_device, ssp_operator_build, &
+                                    MOD_NGRP
+    use opensps_types, only: params
+    use opensps_context_types, only: opensps_context_t
     use opensps_trace, only: opensps_trace_push, opensps_trace_pop
     implicit none
     private
 
     public :: ssp_batch_age_sums_z, ssp_batch_age_sums_adjoint, NIMFG, dot_lanes
-    public :: ssp_opset_t, ssp_opset_build, ssp_opset_free
+    public :: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods, ssp_batch_age_sums_mods
 
     !> The IMF parameters of the gradients (imf1, imf2, imf3, vdmc, mdave)
     integer, parameter :: NIMFG = 5
@@ -92,6 +95,13 @@ module opensps_ssp_batch
         !> entries pe_k(pe_ptr(gp) .. pe_ptr(gp + 1) - 1) (global entry indices), of templates pe_e (local)
         integer, allocatable :: pe_ptr(:), pe_k(:), pe_e(:)
         logical :: on_device = .false.
+        !> Free isochrone modifications (ssp_opset_build_mods): the set is a container of the operators of the modification
+        !> groups, one set (the metallicities' operators) per group, and a batch is the sum over the groups of the
+        !> coefficient of each model times the group's age sums (ssp_batch_age_sums_mods)
+        logical :: free_mods = .false.
+        type(ssp_opset_t), pointer :: grp(:) => null()
+        !> The linear L_bol sums sl of each group at each age, model and metallicity pass of the last batch (the reverse pass)
+        real(WP), allocatable :: slp(:,:,:,:)
     end type ssp_opset_t
 
 contains
@@ -174,6 +184,38 @@ contains
         call move_alloc(ops, set%ops)
     end subroutine ssp_opset_build
 
+    !> The operators of the modification groups of ctx at the context's current parameters (the non-factor ones: IMF type
+    !> and limits are not used, evtype, masscut, agb_dust, the TP-AGB normalisation are the operators'), for the
+    !> metallicity pset%zmet (all_z false) or every metallicity of the context (all_z true), as the container of a batch with
+    !> the factors fbhb, sbss, agb, pagb and redgb free per model.
+    subroutine ssp_opset_build_mods(ctx, pset, all_z, set)
+        type(opensps_context_t), target, intent(inout) :: ctx
+        type(params), intent(in) :: pset
+        logical, intent(in) :: all_z
+        type(ssp_opset_t), intent(inout) :: set
+        type(ssp_operator_t), allocatable :: ops(:)
+        type(params) :: p
+        integer :: g, z, nzo
+
+        call ssp_opset_free(set)
+        nzo = 1
+        if (all_z) nzo = ctx%state%nz
+        allocate(set%grp(0:MOD_NGRP - 1))
+        p = pset
+        do g = 0, MOD_NGRP - 1
+            allocate(ops(nzo))
+            do z = 1, nzo
+                if (all_z) p%zmet = z
+                call ssp_operator_build(ctx, p, ops(z), group=g)
+            end do
+            call ssp_opset_build(ops, set%grp(g))
+            if (allocated(ops)) deallocate(ops)
+        end do
+        set%free_mods = .true.
+        set%nz = set%grp(0)%nz
+        set%nt = set%grp(0)%nt
+    end subroutine ssp_opset_build_mods
+
     !> The template entries of each point (pe_ptr, pe_k, pe_e): counts, then a fill in template order.
     subroutine entries_by_point(set, np, nen)
         type(ssp_opset_t), intent(inout) :: set
@@ -218,7 +260,16 @@ contains
 
     subroutine ssp_opset_free(set)
         type(ssp_opset_t), intent(inout) :: set
-        integer :: iz
+        integer :: iz, ig
+        if (associated(set%grp)) then
+            do ig = lbound(set%grp, 1), ubound(set%grp, 1)
+                call ssp_opset_free(set%grp(ig))
+            end do
+            deallocate(set%grp)
+            nullify(set%grp)
+        end if
+        if (allocated(set%slp)) deallocate(set%slp)
+        set%free_mods = .false.
 #ifdef OMP_TARGET
         if (set%on_device) then
             !$omp target exit data map(delete: set%n_pc, set%n_seg, set%n_eff, set%pt_off, set%pc_off, set%seg_off, &
@@ -274,7 +325,7 @@ contains
     !> is the one-pass special case, its products going straight into yo. Device (OpenMP target) and host
     !> (OpenMP loops) builds run the same code.
     subroutine ssp_batch_age_sums_z(imf_type, remnants, n_mod, nt, nspec, set, zlo, zhi, dz, pm, wsfh, it_tesc, &
-                                    nt_neb, whl, fesc, yo, smass, slum, q0)
+                                    nt_neb, whl, fesc, yo, smass, slum, q0, cg, slpass)
         logical, intent(in)  :: remnants
         integer, intent(in)  :: imf_type, n_mod, nt, nspec, nt_neb, whl
         type(ssp_opset_t), intent(inout) :: set
@@ -282,14 +333,27 @@ contains
         real(WP), intent(in), contiguous :: dz(:), pm(:,:), wsfh(:,:), fesc(:)
         real(KP), intent(inout), contiguous :: yo(:,:)
         real(WP), intent(inout), contiguous :: smass(:,:), slum(:,:), q0(:,:)
+        !> The coefficients of the modification groups per model ((MOD_NGRP, n_mod); a set with free modifications,
+        !> ssp_opset_build_mods, needs them: the batch is then the sum over the groups, ssp_batch_age_sums_mods)
+        real(WP), intent(in), optional, contiguous :: cg(:,:)
+        !> Out: the linear L_bol sum of this set's operators at each age, model and metallicity pass (nt, n_mod, 2)
+        !> (the pass of zlo: 1, of zhi: 2; zero where the model has no weight in the pass), for the sum over groups
+        real(WP), intent(inout), optional, contiguous :: slpass(:,:,:)
 
         integer :: CHUNK
         integer :: nc_max, neb_cols, nz, pass, m, k, t, ntq
         integer, allocatable :: perm1(:), perm2(:), viz1(:), viz2(:), ptr1(:), ptr2(:), cnt(:)
-        real(WP), allocatable :: cz1(:), cz2(:), w(:,:), tot(:), vp(:,:,:), pps(:,:,:)
+        real(WP), allocatable :: cz1(:), cz2(:), w(:,:), tot(:), vp(:,:,:), pps(:,:,:), slz_l(:,:), sqz_l(:,:), slp_d(:,:,:)
         real(KP), allocatable :: wk(:,:), v(:,:), veuv(:,:), yz(:,:)
-        logical :: direct, fwd_w
+        logical :: direct, fwd_w, want_sl
 
+        if (set%free_mods) then
+            if (.not. present(cg)) error stop 'ssp_batch_age_sums_z: a set with free modifications needs the group coefficients'
+            call ssp_batch_age_sums_mods(imf_type, remnants, n_mod, nt, nspec, set, cg, zlo, zhi, dz, pm, wsfh, it_tesc, &
+                                         nt_neb, whl, fesc, yo, smass, slum, q0)
+            return
+        end if
+        want_sl = present(slpass)
         nz = set%nz
         ! One metallicity: the models in their own order, one pass, the products go straight into yo
         direct = nz == 1
@@ -326,13 +390,18 @@ contains
         allocate(wk(nc_max, set%n_pts_max), tot(nc_max), v(set%n_eff_max, 2 * nc_max))
         allocate(veuv(set%n_eff_max, max(1, neb_cols * 2 * nc_max)), vp(nc_max, 4, set%n_seg_max), &
                  pps(nc_max, 3, set%n_pc_max))
+        if (want_sl) then
+            allocate(slz_l(nt, nc_max), sqz_l(nt, nc_max))
+        else
+            allocate(slz_l(1, 1), sqz_l(1, 1))
+        end if
         if (direct) then
             allocate(yz(1, 1))
         else
             allocate(yz(nspec, 2 * nc_max))
         end if
 #ifdef OMP_TARGET
-        !$omp target data map(alloc: w, wk, tot, v, veuv, vp, pps, yz) map(to: perm1, perm2, viz1, viz2, cz1, cz2)
+        !$omp target data map(alloc: w, wk, tot, v, veuv, vp, pps, yz, slz_l, sqz_l) map(to: perm1, perm2, viz1, viz2, cz1, cz2)
 #endif
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2)
@@ -357,6 +426,19 @@ contains
                 end do
             end do
         end if
+        if (want_sl) then
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2)
+#endif
+            do m = 1, n_mod
+                do t = 1, nt
+                    slpass(t, m, 1) = 0.0_wp
+                    slpass(t, m, 2) = 0.0_wp
+                end do
+            end do
+        end if
         if (.not. direct) then
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do collapse(2)
@@ -371,9 +453,9 @@ contains
         end if
         do pass = 1, 2
             if (pass == 1) then
-                call run_pass(ptr1(nz + 1) - 1, perm1, viz1, cz1)
+                call run_pass(ptr1(nz + 1) - 1, perm1, viz1, cz1, 1)
             else
-                call run_pass(ptr2(nz + 1) - 1, perm2, viz2, cz2)
+                call run_pass(ptr2(nz + 1) - 1, perm2, viz2, cz2, 2)
             end if
         end do
 #if defined(OMP_TARGET)
@@ -393,8 +475,8 @@ contains
     contains
 
         !> The np virtual models (model perm(j), metallicity viz(j), sorted by viz) of a pass, in chunks
-        subroutine run_pass(np, perm, viz, cz)
-            integer, intent(in) :: np
+        subroutine run_pass(np, perm, viz, cz, ipass)
+            integer, intent(in) :: np, ipass
             integer, intent(in), contiguous :: perm(:), viz(:)
             real(WP), intent(in), contiguous :: cz(:)
             integer :: m0, nc, j, j0, jr, iz, ky, nrun
@@ -407,6 +489,10 @@ contains
                                       set%pt_llo, set%pt_dl, set%pt_first, set%pt_cm, set%pt_cl, set%pt_q, set%age_mmax, &
                                       size(wk, 1), set%n_pts_max, w, wk, tot, pps, perm, viz, cz, smass, slum, q0, fwd_w, set%pt_f)
                 call opensps_trace_pop()
+                if (want_sl) then
+                    call adj_age_sums_sl(m0, nc, nt, set%age_pc, viz, pps, slz_l, sqz_l)
+                    call scatter_sl(m0, nc, nt, perm, slz_l, slpass, ipass)
+                end if
                 call opensps_trace_push("fwd_fold_multi")
                 call fold_multi(m0, nc, set%n_eff_max, set%n_seg_max, nt_neb, neb_cols, wsfh, it_tesc, fesc, &
                                 set%n_seg, set%n_eff, set%pt_off, set%seg_off, set%eff_off, set%ent_off, set%pt_age, &
@@ -459,6 +545,142 @@ contains
         end subroutine products
 
     end subroutine ssp_batch_age_sums_z
+
+    !> The age sums of a batch with the isochrone modifications free per model (a set from ssp_opset_build_mods): the SSP
+    !> of model m is the sum over the modification groups g of cg(g, m) times the SSP of the group's operators, so the
+    !> young and old age sums, the surviving mass and the ionizing photon rate are the sums of the groups' (each from
+    !> ssp_batch_age_sums_z, unchanged), weighted; the remnants (which do not depend on the factors) are added by the plain
+    !> group alone. L_bol is the linear sum of the groups' sl at each metallicity, blended in its logarithm over the two
+    !> bracketing metallicities as a basis does, so with the factors at their defaults it is that of a basis of the
+    !> modified isochrones. The groups' sl are kept (set%slp) for the reverse pass. Groups no model uses are skipped.
+    subroutine ssp_batch_age_sums_mods(imf_type, remnants, n_mod, nt, nspec, set, cg, zlo, zhi, dz, pm, wsfh, it_tesc, &
+                                       nt_neb, whl, fesc, yo, smass, slum, q0)
+        logical, intent(in)  :: remnants
+        integer, intent(in)  :: imf_type, n_mod, nt, nspec, nt_neb, whl
+        type(ssp_opset_t), intent(inout) :: set
+        real(WP), intent(in), contiguous :: cg(:,:)
+        integer, intent(in), contiguous  :: zlo(:), zhi(:), it_tesc(:)
+        real(WP), intent(in), contiguous :: dz(:), pm(:,:), wsfh(:,:), fesc(:)
+        real(KP), intent(inout), contiguous :: yo(:,:)
+        real(WP), intent(inout), contiguous :: smass(:,:), slum(:,:), q0(:,:)
+
+        integer :: g, m, t, k, col, ntq, p
+        real(KP), allocatable :: yg(:,:)
+        real(WP), allocatable :: sm_g(:,:), sl_g(:,:), q_g(:,:), slp(:,:,:,:)
+        real(WP) :: lz, sx, czp
+        real(KP) :: ck
+        logical, allocatable :: used(:)
+
+        ntq = size(q0, 1)
+        allocate(used(MOD_NGRP))
+        do g = 1, MOD_NGRP
+            used(g) = any(cg(g, 1:n_mod) /= 0.0_wp)
+        end do
+        allocate(yg(nspec, 2 * n_mod), sm_g(nt, n_mod), sl_g(nt, n_mod), q_g(ntq, n_mod), slp(nt, n_mod, 2, MOD_NGRP))
+#ifdef OMP_TARGET
+        !$omp target data map(alloc: yg, sm_g, sl_g, q_g) map(from: slp) map(to: cg)
+#endif
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2)
+#endif
+        do col = 1, 2 * n_mod
+            do k = 1, nspec
+                yo(k, col) = 0.0_KP
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2)
+#endif
+        do m = 1, n_mod
+            do t = 1, nt
+                smass(t, m) = 0.0_wp
+                slp(t, m, 1, :) = 0.0_wp
+                slp(t, m, 2, :) = 0.0_wp
+            end do
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2)
+#endif
+        do m = 1, n_mod
+            do t = 1, ntq
+                q0(t, m) = 0.0_wp
+            end do
+        end do
+        do g = 0, MOD_NGRP - 1
+            if (.not. used(g + 1)) cycle
+            call ssp_batch_age_sums_z(imf_type, remnants .and. g == 0, n_mod, nt, nspec, set%grp(g), zlo, zhi, dz, pm, wsfh, &
+                                      it_tesc, nt_neb, whl, fesc, yg, sm_g, sl_g, q_g, slpass=slp(:, :, :, g + 1))
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2) private(m, ck)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2) private(m, ck)
+#endif
+            do col = 1, 2 * n_mod
+                do k = 1, nspec
+                    m = col
+                    if (col > n_mod) m = col - n_mod
+                    ck = real(cg(g + 1, m), KP)
+                    yo(k, col) = yo(k, col) + ck * yg(k, col)
+                end do
+            end do
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2)
+#endif
+            do m = 1, n_mod
+                do t = 1, nt
+                    smass(t, m) = smass(t, m) + cg(g + 1, m) * sm_g(t, m)
+                end do
+            end do
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2)
+#endif
+            do m = 1, n_mod
+                do t = 1, ntq
+                    q0(t, m) = q0(t, m) + cg(g + 1, m) * q_g(t, m)
+                end do
+            end do
+        end do
+        ! L_bol: the groups' sums at each metallicity, then the logarithmic blend of the passes (as a basis' L_bol)
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(sx, czp, lz, p, g)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(sx, czp, lz, p, g)
+#endif
+        do m = 1, n_mod
+            do t = 1, nt
+                sx = 0.0_wp
+                do p = 1, 2
+                    if (p == 1) then
+                        czp = 1.0_wp - dz(m)
+                    else
+                        czp = dz(m)
+                    end if
+                    if (czp /= 0.0_wp) then
+                        lz = 0.0_wp
+                        do g = 1, MOD_NGRP
+                            lz = lz + cg(g, m) * slp(t, m, p, g)
+                        end do
+                        sx = sx + czp * log10(max(lz, SAFE_FLOOR))
+                    end if
+                end do
+                slum(t, m) = 10.0_wp**sx
+            end do
+        end do
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+        call move_alloc(slp, set%slp)
+    end subroutine ssp_batch_age_sums_mods
 
     !> The reverse pass of ssp_batch_age_sums_z (the gradients of compute_csp_batch with ssp_ops).
     !> The age sums are T v (T: a metallicity's effective templates; v: the fold of the per-point IMF
@@ -1147,6 +1369,27 @@ contains
             end do
         end do
     end subroutine adj_zero
+
+    !> slpass(t, perm(m0 + j - 1), ipass) = slz(t, j): the linear L_bol sums of the chunk's virtual models
+    subroutine scatter_sl(m0, nc, nt, perm, slz, slpass, ipass)
+        integer, intent(in) :: m0, nc, nt, ipass
+        integer, intent(in), contiguous :: perm(:)
+        real(WP), intent(in), contiguous :: slz(:,:)
+        real(WP), intent(inout), contiguous :: slpass(:,:,:)
+        integer :: j, t, m
+
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(m)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(m)
+#endif
+        do j = 1, nc
+            do t = 1, nt
+                m = perm(m0 + j - 1)
+                slpass(t, m, ipass) = slz(t, j)
+            end do
+        end do
+    end subroutine scatter_sl
 
     !> Per age and chunk model: sl and sq of this metallicity (the pieces' sums, as imf_pieces_multi)
     subroutine adj_age_sums_sl(m0, nc, nt, age_pc, viz, pps, slz, sqz)
