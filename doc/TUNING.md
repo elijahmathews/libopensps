@@ -193,6 +193,23 @@ The other sizes (smoothing tile, `HIP_ATT_THREADS`, `HIP_OBS_THREADS`, `HIP_WEIG
 `HIP_BAND_SMALL_N`) are the values the kernels were written with and were not swept; their entries record that,
 not a measurement. The raw traces are not kept in the repository.
 
+
+**M5. `cc80` (NVIDIA A100-PCIE-40GB), the HIP kernels at their defaults.** Measured 2026-11-16 (the A100 agent, Penn State
+ICDS; nvhpc 25.1, nvcc 12.6, data-v4, `OMP_TARGET_OFFLOAD=MANDATORY`, `-Daccel_hip=true`, FP32 + cuBLAS), head 28dccbe against its
+parent c70ef1b (the OpenMP kernels), microseconds per model, three runs each (agreement ~2%), `benchmark_csp_batch`,
+config `full_smooth_z_imf`:
+
+| | N = 1000 | N = 10000 |
+|---|---|---|
+| forward, parent | 41.4 - 41.9 | 30.7 |
+| forward, 28dccbe | 32.8 - 33.6 | 23.2 |
+| gradient, parent | 339 | 299 |
+| gradient, 28dccbe | 207 - 209 | 184.5 |
+
+(Gradient: two runs each.) With the template products left to cuBLAS (the HIP kernel preempted it before 28dccbe: forward
+54 - 55 at N = 1000). This is a check that the R9700 defaults (M4) do not hurt on a second device, not a better value: no
+profile entry is added (rule 3: an entry needs a sweep of the parameter on that device).
+
 ## Where this is going
 
 Planned, in this order, each on top of the registry without touching the kernels again:

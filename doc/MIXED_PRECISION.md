@@ -171,7 +171,8 @@ These came out of the measurements; a GPU port must follow them.
    fusion); nvcc ignores the pragma and never merges `__fmul_rn`. The test `c_hip_eft` (every HIP build, needs a device)
    runs the observed-frame numerator and the fold's product-and-sum against FP64: 0 failures with the guard, ~2e6 of
    2.1e6 without it (checked on the R9700 with the pragma removed). If it fails on a compiler, add `--fmad=false` to
-   that compiler's command (nvcc: measured ~10% on the free-IMF gradient on an A100, one run).
+   that compiler's command (nvcc: ~10% on the free-IMF gradient on an A100). On an A100 (nvcc 12.6, cc80) `c_hip_eft`
+   passes in the FP64, FP32 and FP32 + cuBLAS HIP builds without the flag: the `__fmul_rn` guard holds under nvcc.
 10. **A difference of nearly equal numbers is formed from hi + lo pairs.** The arguments of exponentials
    (rule 3's ln m, e ln m), the wavelength offsets of the redshifted pixels and the DL07 table are carried as
    an FP32 value plus its FP32 remainder (the remainder of the FP64 value), the product's rounding error comes
