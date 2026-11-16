@@ -41,6 +41,8 @@ program test_filters
     call test_detectors()
     call test_coverage_policy()
     call test_calibration()
+    call test_validation_paths()
+    call test_grid_edges()
 
     call get_environment_variable('FSPS_TEST_LIBRARY', root)
     if (len_trim(root) > 0) then
@@ -326,6 +328,151 @@ contains
         d = integrate_trapezoid_array(g, (g/5500.0_wp)**0.5_wp*band/g)
         call assert_float_equals(1.0_wp, d, 1.0e-12_wp, "any other exponent", total_tests, total_failures)
     end subroutine test_calibration
+
+    ! ---------------------------------------------------------------------------------------------
+    subroutine test_validation_paths()
+        real(WP), allocatable :: lc(:), rc(:), g(:), bands(:, :), band(:)
+        real(WP) :: nan, inf
+        integer :: nc, st, bad
+        type(filter_set_t) :: set, bulk
+        type(filter_info_t) :: info
+
+        call print_group("argument validation: each refusal leaves the set unchanged")
+        nan = 0.0_wp
+        nan = nan/nan
+        inf = huge(1.0_wp)
+        inf = inf*2.0_wp
+        call filter_set_add(set, 'a', [1.0_wp, 2.0_wp, 3.0_wp], [1.0_wp, 1.0_wp], DETECTOR_PHOTON, .false., 0.0_wp, 0.0_wp, st)
+        call assert_true(st == FILTER_ERR_ARGUMENT .and. set%n == 0, "wavelengths and response of different lengths", &
+                         total_tests, total_failures)
+        call filter_set_add(set, 'a', [1.0_wp], [1.0_wp], DETECTOR_PHOTON, .false., 0.0_wp, 0.0_wp, st)
+        call assert_true(st == FILTER_ERR_ARGUMENT .and. set%n == 0, "one point", total_tests, total_failures)
+        call filter_set_add(set, 'a', [1.0_wp, 2.0_wp], [1.0_wp, 1.0_wp], 2, .false., 0.0_wp, 0.0_wp, st)
+        call assert_true(st == FILTER_ERR_ARGUMENT .and. set%n == 0, "a detector that is neither photon nor energy", &
+                         total_tests, total_failures)
+        call filter_set_add(set, 'a', [1.0_wp, 2.0_wp], [1.0_wp, 1.0_wp], DETECTOR_PHOTON, .true., 0.0_wp, -1.0_wp, st)
+        call assert_true(st == FILTER_ERR_ARGUMENT .and. set%n == 0, "a calibration at lref = 0", total_tests, total_failures)
+        call filter_set_add(set, 'a', [1.0_wp, 2.0_wp], [1.0_wp, 1.0_wp], DETECTOR_PHOTON, .true., nan, -1.0_wp, st)
+        call assert_true(st == FILTER_ERR_ARGUMENT .and. set%n == 0, "a calibration at lref = NaN", total_tests, total_failures)
+        call filter_set_add(set, 'a', [1.0_wp, 2.0_wp], [1.0_wp, 1.0_wp], DETECTOR_PHOTON, .true., 5000.0_wp, nan, st)
+        call assert_true(st == FILTER_ERR_ARGUMENT .and. set%n == 0, "a calibration exponent NaN", total_tests, total_failures)
+        call filter_set_add(set, 'a', [1.0_wp, 2.0_wp], [1.0_wp, 1.0_wp], DETECTOR_ENERGY, .false., nan, nan, st)
+        call assert_true(st == FILTER_OK .and. set%n == 1 .and. .not. set%has_cal(1) .and. set%cal_lref(1) == 1.0_wp, &
+                         "without calibration the reference is not looked at; a neutral one is stored", &
+                         total_tests, total_failures)
+        call filter_set_add(set, 'b', [1.0_wp, 2.0_wp, 3.0_wp], [0.0_wp, 1.0_wp, 0.0_wp], DETECTOR_PHOTON, .true., &
+                            2.0_wp, -2.0_wp, st)
+        call assert_true(st == FILTER_OK .and. set%n == 2 .and. set%has_cal(2) .and. set%cal_lref(2) == 2.0_wp .and. &
+                         set%cal_expo(2) == -2.0_wp .and. set%npts(1) == 2 .and. set%npts(2) == 3 .and. &
+                         set%detector(1) == DETECTOR_ENERGY, "a calibrated filter is appended to a non-empty set", &
+                         total_tests, total_failures)
+
+        call print_group("cleaning: each refusal on its own, and the lenient mode")
+        call filter_clean([1.0_wp, 2.0_wp, 3.0_wp], [1.0_wp, nan, 1.0_wp], .true., lc, rc, nc, st)
+        call assert_int_equals(FILTER_ERR_NONFINITE, st, "a NaN response", total_tests, total_failures)
+        call filter_clean([1.0_wp, 2.0_wp, inf], [1.0_wp, 1.0_wp, 1.0_wp], .true., lc, rc, nc, st)
+        call assert_int_equals(FILTER_ERR_NONFINITE, st, "an infinite wavelength", total_tests, total_failures)
+        call filter_clean([1.0_wp, 2.0_wp, 3.0_wp], [1.0_wp, inf, 1.0_wp], .true., lc, rc, nc, st)
+        call assert_int_equals(FILTER_ERR_NONFINITE, st, "an infinite response", total_tests, total_failures)
+        call filter_clean([0.0_wp, 2.0_wp, 3.0_wp], [1.0_wp, 1.0_wp, 1.0_wp], .true., lc, rc, nc, st)
+        call assert_int_equals(FILTER_ERR_NONFINITE, st, "a wavelength of zero", total_tests, total_failures)
+        call filter_clean([3.0_wp, 1.0_wp, 2.0_wp], [1.0_wp, 1.0_wp, 1.0_wp], .true., lc, rc, nc, st)
+        call assert_int_equals(FILTER_ERR_ORDER, st, "a curve that falls and then rises", total_tests, total_failures)
+        call filter_clean([7.0_wp, 7.0_wp], [1.0_wp, 1.0_wp], .true., lc, rc, nc, st)
+        call assert_int_equals(FILTER_ERR_FEW_POINTS, st, "one distinct wavelength is not a curve", &
+                               total_tests, total_failures)
+        call filter_clean([3.0_wp, 1.0_wp, 2.0_wp], [-1.0_wp, 2.0_wp, 1.0_wp], .false., lc, rc, nc, st)
+        call assert_true(st == FILTER_OK .and. nc == 3 .and. lc(1) == 3.0_wp .and. rc(1) == 0.0_wp .and. rc(2) == 2.0_wp, &
+                         "lenient: no check of the order, negative response clamped", total_tests, total_failures)
+        call filter_clean([4.0_wp, 4.0_wp], [1.0_wp, 2.0_wp], .false., lc, rc, nc, st)
+        call assert_true(st == FILTER_OK .and. nc == 1 .and. rc(1) == 1.0_wp, &
+                         "lenient: a repeated wavelength is dropped and one point is left without an error", &
+                         total_tests, total_failures)
+
+        call print_group("a curve of one distinct wavelength: a dead band, an error under the error policy")
+        g = uniform(4000.0_wp, 8000.0_wp, 4.0_wp)
+        allocate (bands(size(g), 1))
+        call filter_set_clear(set)
+        call filter_set_add(set, 'point', [5000.0_wp, 5000.0_wp], [1.0_wp, 1.0_wp], DETECTOR_PHOTON, .false., 0.0_wp, 0.0_wp, st)
+        call filters_build(set, g, RESAMPLE_CONSERVING, GRID_POLICY_ALLOW, .false., bands, info, st, bad)
+        call assert_true(st == FILTER_OK .and. iand(info%flags(1), FILTER_FLAG_DEAD) /= 0 .and. all(bands == 0.0_wp), &
+                         "allow policy: flagged dead, a zero band", total_tests, total_failures)
+        call filters_build(set, g, RESAMPLE_CONSERVING, GRID_POLICY_ERROR, .false., bands, info, st, bad)
+        call assert_true(st == FILTER_ERR_DEAD .and. bad == 1, "error policy: refused as dead", total_tests, total_failures)
+
+        call print_group("band helpers on a dead, a NaN and a live band")
+        allocate (band(size(g)))
+        band = 0.0_wp
+        call filter_calibrate_band(g, band, 5500.0_wp, -1.0_wp)
+        call assert_true(all(band == 0.0_wp), "calibrating a band without throughput leaves it zero", &
+                         total_tests, total_failures)
+        call assert_float_equals(0.0_wp, filter_pivot(g, band), 0.0_wp, "the pivot of a dead band is 0", &
+                                 total_tests, total_failures)
+        band = nan
+        call assert_float_equals(0.0_wp, filter_pivot(g, band), 0.0_wp, "the pivot of a NaN band is 0", &
+                                 total_tests, total_failures)
+        band = merge(1.0_wp, 0.0_wp, g >= 5000.0_wp .and. g <= 6000.0_wp)
+        call assert_true(filter_pivot(g, band) > 5000.0_wp .and. filter_pivot(g, band) < 6000.0_wp, &
+                         "the pivot of a band lies inside it", total_tests, total_failures)
+
+        call print_group("a set of concatenated curves (the readers' form), then one more added by hand")
+        call filter_set_init_bulk(bulk, [3, 2], [1.0_wp, 2.0_wp, 3.0_wp, 5000.0_wp, 6000.0_wp], &
+                                  [0.0_wp, 1.0_wp, 0.0_wp, 1.0_wp, 1.0_wp])
+        call assert_true(bulk%n == 2 .and. bulk%npts(1) == 3 .and. bulk%npts(2) == 2 .and. &
+                         all(bulk%detector == DETECTOR_PHOTON) .and. .not. any(bulk%has_cal), &
+                         "init_bulk: two photon-counting, uncalibrated curves", total_tests, total_failures)
+        call filter_set_add(bulk, 'third', [5000.0_wp, 7000.0_wp], [1.0_wp, 1.0_wp], DETECTOR_PHOTON, .false., &
+                            0.0_wp, 0.0_wp, st)
+        call assert_true(st == FILTER_OK .and. bulk%n == 3 .and. bulk%lam(4) == 5000.0_wp .and. bulk%lam(5) == 6000.0_wp &
+                         .and. bulk%lam(6) == 5000.0_wp .and. bulk%lam(7) == 7000.0_wp, &
+                         "the added curve follows the concatenated ones", total_tests, total_failures)
+        deallocate (bands)
+        allocate (bands(size(g), 3))
+        call filters_build(bulk, g, RESAMPLE_LINEAR, GRID_POLICY_ALLOW, .true., bands, info, st, bad)
+        call assert_true(st == FILTER_OK .and. info%hash(2) /= info%hash(3), "built with the linear resampling", &
+                         total_tests, total_failures)
+    end subroutine test_validation_paths
+
+    ! ---------------------------------------------------------------------------------------------
+    subroutine test_grid_edges()
+        real(WP), allocatable :: g(:), bands(:, :)
+        type(filter_set_t) :: set
+        type(filter_info_t) :: info
+        integer :: st, bad, mode
+
+        call print_group("curves at the edges of the grid, in both resamplings")
+        g = uniform(4000.0_wp, 8000.0_wp, 4.0_wp)
+        allocate (bands(size(g), 5))
+        do mode = RESAMPLE_LINEAR, RESAMPLE_CONSERVING
+            call filter_set_clear(set)
+            call filter_set_add(set, 'low', [3000.0_wp, 5000.0_wp], [1.0_wp, 1.0_wp], DETECTOR_PHOTON, .false., 0.0_wp, 0.0_wp, st)
+            call filter_set_add(set, 'high', [7000.0_wp, 9000.0_wp], [1.0_wp, 1.0_wp], DETECTOR_PHOTON, .false., 0.0_wp, 0.0_wp, st)
+            call filter_set_add(set, 'above', [9000.0_wp, 9500.0_wp], [1.0_wp, 1.0_wp], DETECTOR_PHOTON, .false., &
+                                0.0_wp, 0.0_wp, st)
+            call filter_set_add(set, 'cell', [5001.0_wp, 5003.0_wp], [1.0_wp, 1.0_wp], DETECTOR_PHOTON, .false., 0.0_wp, 0.0_wp, st)
+            call filter_set_add(set, 'wide', [3000.0_wp, 9000.0_wp], [1.0_wp, 1.0_wp], DETECTOR_PHOTON, .false., 0.0_wp, 0.0_wp, st)
+            call filters_build(set, g, mode, GRID_POLICY_ALLOW, .true., bands, info, st, bad)
+            call assert_int_equals(FILTER_OK, st, "build", total_tests, total_failures)
+            call assert_true(info%coverage(1) > 0.0_wp .and. info%coverage(1) < 0.999_wp .and. &
+                             iand(info%flags(1), FILTER_FLAG_TRUNCATED) /= 0, "a curve begun below the grid is truncated", &
+                             total_tests, total_failures)
+            call assert_true(info%coverage(2) > 0.0_wp .and. info%coverage(2) < 0.999_wp .and. &
+                             iand(info%flags(2), FILTER_FLAG_TRUNCATED) /= 0, "a curve that ends above the grid is truncated", &
+                             total_tests, total_failures)
+            call assert_true(info%coverage(3) == 0.0_wp .and. iand(info%flags(3), FILTER_FLAG_DEAD) /= 0 .and. &
+                             all(bands(:, 3) == 0.0_wp), "a curve entirely above the grid has no coverage and no throughput", &
+                             total_tests, total_failures)
+            call assert_float_equals(1.0_wp, integrate_trapezoid_array(g, bands(:, 1)/g), 1.0e-12_wp, &
+                                     "the low band is normalized", total_tests, total_failures)
+            call assert_float_equals(1.0_wp, integrate_trapezoid_array(g, bands(:, 2)/g), 1.0e-12_wp, &
+                                     "the high band is normalized", total_tests, total_failures)
+            call assert_true(all(bands(:, 4) >= 0.0_wp), "a curve inside one grid cell gives a non-negative band", &
+                             total_tests, total_failures)
+            call assert_true(info%coverage(5) > 0.5_wp .and. info%coverage(5) < 0.999_wp .and. &
+                             iand(info%flags(5), FILTER_FLAG_DEAD) == 0 .and. iand(info%flags(5), FILTER_FLAG_TRUNCATED) /= 0, &
+                             "a curve wider than the grid on both sides: live and truncated", total_tests, total_failures)
+        end do
+    end subroutine test_grid_edges
 
     ! ---------------------------------------------------------------------------------------------
     subroutine test_context()
