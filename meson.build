@@ -1000,6 +1000,16 @@ if python3.found()
         timeout : 300
     )
 endif
+# Filter-set handles and their statuses through the C API; needs no data
+test_c_filterset_exe = executable('test_c_filterset', 'tests/test_c_filterset.c',
+    dependencies : [opensps_dep, meson.get_compiler('c').find_library('m', required : false)],
+    include_directories : include_directories('include')
+)
+test('unit_c_filterset', test_c_filterset_exe,
+    env : unit_env,
+    suite : 'unit',
+    timeout : 120
+)
 test_c_two_contexts_exe = executable('test_c_two_contexts', 'tests/test_c_two_contexts.c',
     dependencies : opensps_dep,
     include_directories : include_directories('include')
