@@ -1232,6 +1232,197 @@ static int build_cell_groups(int n_mod, const int* d_iz, const int* d_iu, int ng
     return ngr;
 }
 
+
+__global__ void split_table_kernel(size_t n, const double* __restrict__ d, float2* __restrict__ out) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float h = (float)d[i];
+    out[i] = make_float2(h, (float)(d[i] - (double)h));
+}
+static float2* g_neb2 = nullptr;
+static size_t g_neb2_n = 0;
+
+
+// ---------------------------------------------------------------------------
+// Reverse pass of the nebular continuum, FP32 (adj_nebular_continuum_f32_kernel)
+//
+// The FP64 kernel above took ~40 FP64 operations per (pixel, model, run of ages) (the corner combinations, the
+// derivatives, the exponent and its range reduction): 20 of the 55 ms of the CLOUDY config's reverse pass at 1000
+// models (FP64 at 1/64 of the FP32 rate). Here the table is read as FP32 hi + lo pairs (split once per call,
+// split_dustem_kernel), the corner values enter as differences (exact in FP32 where the neighbouring cells'
+// values are within a factor of two, as log10 L of neighbouring cells are) and the exponent
+//   E = ln10 T00 + ln q + [offset of the model's (Z, U) in the cell] ln10 + w_a dl
+// is formed as a double-float sum (the product T00 ln10 by an fma, the sum by a two-sum) and range-reduced
+// E = n ln2 + r in FP32 with the two-constant (Cody-Waite) ln2: the same ~1 ulp as the FP64 reduction without
+// FP64 operations (rule 10 of doc/MIXED_PRECISION.md). The accumulations are those of the FP64 kernel
+// (Kahan, the reduction over the block's 256 threads in FP64).
+// ---------------------------------------------------------------------------
+__global__ void __launch_bounds__(256, 4) adj_nebular_continuum_f32_kernel(
+    int n_mod, int nspec, int ntab, int ntn, int nrun,
+    const float2* __restrict__ d_tab2,
+    const float* __restrict__ d_gw,
+    const int* __restrict__ d_it_tesc,
+    const int* __restrict__ d_ia,
+    const double* __restrict__ d_wa,
+    const int* __restrict__ d_rs,
+    const int* __restrict__ d_rl,
+    const int* __restrict__ d_iz,
+    const double* __restrict__ d_wz,
+    const int* __restrict__ d_iu,
+    const double* __restrict__ d_wu,
+    const double* __restrict__ d_fabs,
+    const double* __restrict__ d_qzt,
+    double* __restrict__ d_lref,
+    float* __restrict__ d_csum
+) {
+#pragma clang fp contract(off)
+    int r = blockIdx.x;
+    int m = blockIdx.y;
+    if (m >= n_mod || r >= nrun) return;
+
+    int ts = d_rs[r] - 1;
+    int tl = d_rl[r];
+    int a = d_ia[ts] - 1;
+    int z0 = d_iz[m] - 1;
+    int u0 = d_iu[m] - 1;
+    double wzm = d_wz[m];
+    double wum = d_wu[m];
+    double fabsm = fabs(d_fabs[m]);
+    int it_tesc_m = d_it_tesc[m];
+
+    const double SAFE_FLOOR = 1.0e-30;
+    double lnq = 1.0e30;
+    bool ok[4] = {false, false, false, false};
+    for (int step = 0; step < tl && step < 4; ++step) {
+        double q = d_qzt[ts + step + (size_t)m * ntn];
+        if (q * fabsm > SAFE_FLOOR) {
+            ok[step] = true;
+            if (lnq >= 1.0e30) lnq = log(q);
+        }
+    }
+    if (threadIdx.x == 0) d_lref[r + (size_t)m * nrun] = lnq;
+
+    float a_sum[20], k_comp[20];
+#pragma unroll
+    for (int i = 0; i < 20; ++i) { a_sum[i] = 0.f; k_comp[i] = 0.f; }
+
+    if (lnq < 1.0e30) {
+        const float c01 = (float)((1.0 - wzm) * wum), c10 = (float)(wzm * (1.0 - wum)), c11 = (float)(wzm * wum);
+        const float wzf = (float)wzm, wuf = (float)wum;
+        const float wz1 = (float)(1.0 - wzm), wu1 = (float)(1.0 - wum);
+        const float lq_hi = (float)lnq, lq_lo = (float)(lnq - (double)lq_hi);
+        const float wat = (float)d_wa[ts];
+        float dwf[4];
+        dwf[0] = 0.f;
+#pragma unroll
+        for (int st = 1; st < 4; ++st) dwf[st] = (st < tl) ? (float)(d_wa[ts + st] - d_wa[ts + st - 1]) : 0.f;
+        // the steps' dw are compared as in the FP64 kernel (a new factor only where dw changes)
+        bool newdw[4];
+        newdw[0] = false;
+        double dwp_h = 0.0;
+#pragma unroll
+        for (int st = 1; st < 4; ++st) {
+            double dwd = (st < tl) ? (d_wa[ts + st] - d_wa[ts + st - 1]) : 0.0;
+            newdw[st] = (dwd != dwp_h);
+            if (newdw[st]) dwp_h = dwd;
+        }
+        const float LN10H = 2.302585125f, LN10L = -3.2e-9f;      // ln10 = LN10H + LN10L (hi + lo)
+        const float LOG2E = 1.44269504088896f, LN2H = 0.693145751953125f, LN2L = 1.42860677e-06f;
+
+        const long long s_z = ntab, s_a = (long long)ntab * 11, s_u = (long long)ntab * 11 * 10;
+        const long long base_00 = s_z * z0 + s_a * a + s_u * u0;
+        const long long base_b = s_z * z0 + s_a * (a + 1) + s_u * u0;
+        const size_t off_gy = (size_t)m * nspec;
+        const size_t off_go = ((size_t)n_mod + m) * nspec;
+
+        for (int j = threadIdx.x; j < nspec; j += blockDim.x) {
+            const float gy = d_gw[j + off_gy];
+            const float go = d_gw[j + off_go];
+            if (gy == 0.f && go == 0.f) continue;
+
+            const long long ia0 = j + base_00, ib0 = j + base_b;
+            const float2 A00 = d_tab2[ia0], A01 = d_tab2[ia0 + s_u], A10 = d_tab2[ia0 + s_z], A11 = d_tab2[ia0 + s_z + s_u];
+            const float2 B00 = d_tab2[ib0], B01 = d_tab2[ib0 + s_u], B10 = d_tab2[ib0 + s_z], B11 = d_tab2[ib0 + s_z + s_u];
+            const float Da01 = (A01.x - A00.x) + (A01.y - A00.y), Da10 = (A10.x - A00.x) + (A10.y - A00.y),
+                        Da11 = (A11.x - A00.x) + (A11.y - A00.y);
+            const float Db01 = (B01.x - B00.x) + (B01.y - B00.y), Db10 = (B10.x - B00.x) + (B10.y - B00.y),
+                        Db11 = (B11.x - B00.x) + (B11.y - B00.y);
+            const float offa = c01 * Da01 + c10 * Da10 + c11 * Da11;
+            const float offb = c01 * Db01 + c10 * Db10 + c11 * Db11;
+            const float rz_a = wu1 * Da10 + wuf * (Da11 - Da01);
+            const float ru_a = wz1 * Da01 + wzf * (Da11 - Da10);
+            const float rz_b = wu1 * Db10 + wuf * (Db11 - Db01);
+            const float rbu_k = wz1 * Db01 + wzf * (Db11 - Db10);
+            const float dTab = (B00.x - A00.x) + (B00.y - A00.y);
+            const float dl = (dTab + (offb - offa)) * LN10H;
+
+            // E = ln10 T00 + ln q + offa ln10 + w_a dl, as a double-float
+            const float p = __fmul_rn(A00.x, LN10H);
+            const float pe = fmaf(A00.x, LN10H, -p) + (A00.x * LN10L + A00.y * LN10H);
+            const float s1 = p + lq_hi;
+            const float bb = s1 - p;
+            const float err = (p - (s1 - bb)) + (lq_hi - bb);
+            const float rest = ((err + pe) + lq_lo) + (offa * LN10H + wat * dl);
+            const float nf = rintf(s1 * LOG2E);
+            const int n = (int)nf;
+            float e;
+            if (n < -125) {
+                e = 0.f;
+            } else if (n >= 128) {
+                e = 3.402823466e+38f;
+            } else {
+                float r1 = fmaf(-nf, LN2H, s1);
+                r1 = fmaf(-nf, LN2L, r1);
+                e = ldexpf(expf(r1 + rest), n);
+            }
+            float rr = 1.f;
+#pragma unroll
+            for (int step = 0; step < 4; ++step) {
+                if (step < tl) {
+                    if (step > 0) {
+                        if (newdw[step]) rr = expf(dwf[step] * dl);
+                        e = e * rr;
+                    }
+                    if (ok[step]) {
+                        const float g = (ts + step + 1 <= it_tesc_m) ? (gy * e) : (go * e);
+                        const int b = step * 5;
+                        kahan_add(g, a_sum[b + 0], k_comp[b + 0]);
+                        kahan_add(g * rz_a, a_sum[b + 1], k_comp[b + 1]);
+                        kahan_add(g * rz_b, a_sum[b + 2], k_comp[b + 2]);
+                        kahan_add(g * ru_a, a_sum[b + 3], k_comp[b + 3]);
+                        kahan_add(g * rbu_k, a_sum[b + 4], k_comp[b + 4]);
+                    }
+                }
+            }
+        }
+    }
+
+    __shared__ double s_red[20][8];
+    const int lane = threadIdx.x % warpSize;
+    const int wave = threadIdx.x / warpSize;
+#pragma unroll
+    for (int i = 0; i < 20; ++i) {
+        double val = (double)a_sum[i];
+#pragma unroll
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) val += __shfl_down(val, offset, warpSize);
+        if (lane == 0) s_red[i][wave] = val;
+    }
+    __syncthreads();
+    if (threadIdx.x < 20) {
+        const int i = threadIdx.x;
+        const int step = i / 5;
+        const int q = i % 5;
+        if (step < tl) {
+            double total = 0.0;
+            if (ok[step]) {
+                const int num_waves = blockDim.x / warpSize;
+                for (int w = 0; w < num_waves; ++w) total += s_red[i][w];
+            }
+            d_csum[q + 5 * ((size_t)(ts + step) + (size_t)ntn * m)] = (float)total;
+        }
+    }
+}
+
 extern "C" {
 
 void opensps_hip_nebular_continuum_sp(
@@ -1313,6 +1504,7 @@ void opensps_hip_adj_nebular_continuum_sp(
     int n_mod,
     int nspec,
     int ntab,
+    size_t ntot,
     int ntn,
     int nrun,
     const double* __restrict__ d_tab,
@@ -1336,10 +1528,24 @@ void opensps_hip_adj_nebular_continuum_sp(
     dim3 block(256);
     dim3 grid(nrun, n_mod);
     hipStream_t s = (hipStream_t)stream;
-    adj_nebular_continuum_kernel<float><<<grid, block, 0, s>>>(
-        n_mod, nspec, ntab, ntn, nrun, d_tab, d_gw, d_it_tesc, d_ia, d_wa,
-        d_rs, d_rl, d_iz, d_wz, d_iu, d_wu, d_fabs, d_qzt, d_lref, d_csum
-    );
+    if (ntot > g_neb2_n) {
+        if (g_neb2) (void)hipFree(g_neb2);
+        if (hipMalloc((void**)&g_neb2, ntot * sizeof(float2)) != hipSuccess) { g_neb2 = nullptr; g_neb2_n = 0; }
+        else g_neb2_n = ntot;
+    }
+    if (g_neb2) {
+        // (the table as hi + lo pairs, formed per call: ~0.3 ms, no stale copy if the table is reloaded)
+        split_table_kernel<<<(unsigned)((ntot + 255) / 256), 256, 0, s>>>(ntot, d_tab, g_neb2);
+        adj_nebular_continuum_f32_kernel<<<grid, block, 0, s>>>(
+            n_mod, nspec, ntab, ntn, nrun, g_neb2, d_gw, d_it_tesc, d_ia, d_wa,
+            d_rs, d_rl, d_iz, d_wz, d_iu, d_wu, d_fabs, d_qzt, d_lref, d_csum
+        );
+    } else {
+        adj_nebular_continuum_kernel<float><<<grid, block, 0, s>>>(
+            n_mod, nspec, ntab, ntn, nrun, d_tab, d_gw, d_it_tesc, d_ia, d_wa,
+            d_rs, d_rl, d_iz, d_wz, d_iu, d_wu, d_fabs, d_qzt, d_lref, d_csum
+        );
+    }
     (void)hipDeviceSynchronize();
 }
 

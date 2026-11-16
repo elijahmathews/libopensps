@@ -244,11 +244,12 @@ module opensps_csp_batch
             type(c_ptr), value :: tab, ia, wa, dwa, newr, cy, co, lns, iz, wz, iu, wu, yo, stream
         end subroutine opensps_hip_nebular_continuum_dp
 
-        subroutine opensps_hip_adj_nebular_continuum_sp(n_mod, nspec, ntab, ntn, nrun, tab, gw, it_tesc, ia, wa, &
+        subroutine opensps_hip_adj_nebular_continuum_sp(n_mod, nspec, ntab, ntot, ntn, nrun, tab, gw, it_tesc, ia, wa, &
                                                         rs, rl, iz, wz, iu, wu, fabs, qzt, lref, csum, stream) &
             bind(C, name="opensps_hip_adj_nebular_continuum_sp")
-            import :: c_ptr, c_int
+            import :: c_ptr, c_int, c_size_t
             integer(c_int), value :: n_mod, nspec, ntab, ntn, nrun
+            integer(c_size_t), value :: ntot
             type(c_ptr), value :: tab, gw, it_tesc, ia, wa, rs, rl, iz, wz, iu, wu, fabs, qzt, lref, csum, stream
         end subroutine opensps_hip_adj_nebular_continuum_sp
 
@@ -6497,7 +6498,7 @@ contains
                     c_loc(fabs), c_loc(qzt), c_loc(lref), c_loc(csum), c_null_ptr)
             else
                 call opensps_hip_adj_nebular_continuum_sp(int(n_mod, c_int), int(nspec, c_int), &
-                    int(size(ctab, 1), c_int), int(ntn, c_int), int(nrun, c_int), &
+                    int(size(ctab, 1), c_int), int(size(ctab), c_size_t), int(ntn, c_int), int(nrun, c_int), &
                     c_loc(ctab), c_loc(gw), c_loc(it_tesc), c_loc(ia), c_loc(wa), &
                     c_loc(rs), c_loc(rl), c_loc(iz), c_loc(wz), c_loc(iu), c_loc(wu), &
                     c_loc(fabs), c_loc(qzt), c_loc(lref), c_loc(csum), c_null_ptr)
