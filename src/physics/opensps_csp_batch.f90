@@ -97,7 +97,7 @@ module opensps_csp_batch
     use opensps_sfh, only: get_sfh_properties_at_age
     use opensps_dust, only: compute_attenuation_curve_point, one_minus_trans
     use opensps_interpolation, only: find_interval, find_interval_with_hint
-    use opensps_cosmology, only: igm_tau, igm_tau_dz, igm_tau_pixel_terms, igm_tau_z_terms, IGM_NTERM, &
+    use opensps_cosmology, only: igm_tau, igm_tau_dz, igm_tau_pixel_terms, igm_tau_z_terms, igm_tau_z_terms_dz, IGM_NTERM, &
                                  refresh_cosmology
     use opensps_offload, only: offload_on_host, offload_host_unusable
     use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
@@ -5402,7 +5402,7 @@ contains
         integer, parameter :: NCK = 32
         integer  :: m, j, c, jl, nb, j0, j1
         real(WP) :: tmax, tj
-        real(WP), allocatable :: cmx(:,:)
+        real(WP), allocatable :: cmx(:,:), ta(:,:), tb(:,:)
         integer, allocatable  :: cjx(:,:)
         type(params_core), pointer :: pl
 
@@ -5417,9 +5417,36 @@ contains
         ! Per model the first maximum over NCK contiguous blocks (one thread per block and model),
         ! then over the blocks in order
         nb = (jl + NCK - 1) / NCK
-        allocate(cmx(NCK, n_mod), cjx(NCK, n_mod))
+        allocate(cmx(NCK, n_mod), cjx(NCK, n_mod), ta(IGM_NTERM, jl), tb(IGM_NTERM, n_mod))
+        ta = 0.0_wp
+        tb = 0.0_wp
 #if defined(OMP_TARGET)
-        !$omp target data map(alloc: cmx, cjx)
+        !$omp target data map(alloc: cmx, cjx, ta, tb)
+#endif
+        ! The optical depth as the sum of IGM_NTERM products (a wavelength table over the pixels below Ly-alpha, a
+        ! redshift factor per model: the forward's form, ~20 FP64 powers per (pixel, model) otherwise)
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do
+#elif defined(_OPENMP)
+        !$omp parallel do
+#endif
+        do j = 1, jl
+            call igm_tau_pixel_terms(lam(j), ta(:, j))
+        end do
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do private(pl)
+#elif defined(_OPENMP)
+        !$omp parallel do private(pl)
+#endif
+        do m = 1, n_mod
+#if !defined(__flang__)
+            pl => pbuf(m)%params_core
+#else
+            call c_f_pointer(c_loc(pbuf(1, m)), pl)
+#endif
+            if (pl%zred > SAFE_FLOOR) call igm_tau_z_terms(1.0_wp + pl%zred, tb(:, m))
+        end do
+#if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(j, j0, j1, tmax, tj, pl)
 #elif defined(_OPENMP)
         !$omp parallel do collapse(2) private(j, j0, j1, tmax, tj, pl)
@@ -5437,7 +5464,8 @@ contains
                     j0 = (c - 1) * nb + 1
                     j1 = min(c * nb, jl)
                     do j = j0, j1
-                        tj = igm_tau(lam(j), 1.0_wp + pl%zred)
+                        tj = ta(1, j) * tb(1, m) + ta(2, j) * tb(2, m) + ta(3, j) * tb(3, m) + ta(4, j) * tb(4, m) + &
+                             ta(5, j) * tb(5, m) + ta(6, j) * tb(6, m)
                         if (tj > tmax) then
                             tmax = tj
                             cjx(c, m) = j
@@ -5829,11 +5857,54 @@ contains
         real(KP), intent(out)            :: part(NDP, NCHG, n_mod)
         real(WP), intent(out)            :: dpar(NDP, n_mod)
 
-        integer  :: m, c, dt, q
+        integer  :: m, c, dt, q, j, jtop
         real(WP) :: sw
+        real(WP), allocatable :: ta(:,:), tb(:,:), tbd(:,:)
         type(params_core), pointer :: pl
 
         dt = ctx%dust_type_val
+        ! The IGM's optical depth and its redshift derivative at the pixels below Ly-alpha as sums of IGM_NTERM products
+        ! (a wavelength table, a redshift factor per model: the forward's form; ~20 FP64 powers per (pixel, model)
+        ! otherwise, for every pixel)
+        jtop = 0
+        if (igm) then
+            do j = 1, nspec
+                if (ctx%state%spec_lambda(j) < 1215.67_wp) jtop = j
+            end do
+        end if
+        allocate(ta(IGM_NTERM, max(jtop, 1)), tb(IGM_NTERM, n_mod), tbd(IGM_NTERM, n_mod))
+        ta = 0.0_wp
+        tb = 0.0_wp
+        tbd = 0.0_wp
+#if defined(OMP_TARGET)
+        !$omp target data map(alloc: ta, tb, tbd)
+#endif
+        if (jtop > 0) then
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do map(OMP_MAP_PRESENT_ALLOC: ctx%state%spec_lambda)
+#elif defined(_OPENMP)
+            !$omp parallel do
+#endif
+            do j = 1, jtop
+                call igm_tau_pixel_terms(ctx%state%spec_lambda(j), ta(:, j))
+            end do
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do private(pl)
+#elif defined(_OPENMP)
+            !$omp parallel do private(pl)
+#endif
+            do m = 1, n_mod
+#if !defined(__flang__)
+                pl => pbuf(m)%params_core
+#else
+                call c_f_pointer(c_loc(pbuf(1, m)), pl)
+#endif
+                if (pl%zred > SAFE_FLOOR) then
+                    call igm_tau_z_terms(1.0_wp + pl%zred, tb(:, m))
+                    call igm_tau_z_terms_dz(1.0_wp + pl%zred, tbd(:, m))
+                end if
+            end do
+        end if
         associate (ttab => ctx%state%att_tab, ltab => ctx%state%att_ltab)
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(pl) &
@@ -5849,6 +5920,7 @@ contains
                 call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
                 call atten_adjoint_chunk(ctx, pl, n_mod, nspec, ntau, m, c, dt, ttab, ltab, igm, zvar, igm_t, tau, yo, &
+                                         jtop, ta, tb, tbd, &
                                          agn_on(m), ita(m), wta(m), lsum(m), agndust_spec, wt, emis(m), iq(m), iu(m), &
                                          wq(m), wu(m), gam(m), eb, jmx(m), gw, part)
             end do
@@ -5868,6 +5940,9 @@ contains
                 dpar(q, m) = sw
             end do
         end do
+#if defined(OMP_TARGET)
+        !$omp end target data
+#endif
     end subroutine backward_attenuation
 
     !> One chunk of backward_attenuation: pixels c, c + NCHG, ... of model m. Per pixel, with
@@ -5887,6 +5962,7 @@ contains
     !> fractions; shape_bar is carried to the template's interpolation weights (dl07_shape_grad).
     !> Sums compensated at FP32 kernel precision.
     subroutine atten_adjoint_chunk(ctx, pl, n_mod, nspec, ntau, m, c, dt, ttab, ltab, igm, zvar, igm_t, tau, yo, &
+                                   jtop, igm_a, igm_b, igm_bd, &
                                    agn_m, ita_m, wta_m, lsum_m, agndust_spec, wt, emis_m, iq_m, iu_m, wq_m, wu_m, gam_m, &
                                    eb, jmx_m, gw, part)
 #ifdef OMP_TARGET
@@ -5894,7 +5970,8 @@ contains
 #endif
         type(opensps_context_t), intent(in) :: ctx
         type(params_core), intent(in)    :: pl
-        integer, intent(in)              :: n_mod, nspec, ntau, m, c, dt, ita_m
+        integer, intent(in)              :: n_mod, nspec, ntau, m, c, dt, ita_m, jtop
+        real(WP), intent(in)             :: igm_a(IGM_NTERM, max(jtop, 1)), igm_b(IGM_NTERM, n_mod), igm_bd(IGM_NTERM, n_mod)
         real(KP), intent(in)             :: ttab(nspec, 0:3)
         real(WP), intent(in)             :: ltab(nspec), wta_m, lsum_m, agndust_spec(nspec, ntau)
         logical, intent(in)              :: igm, zvar, agn_m
@@ -5912,7 +5989,8 @@ contains
         real(KP) :: y, o, gs, ga, tau_d, td, tau_b, tb, tau_o, to, curve, fo, fn, dfac, ay, gd, gtd, gtb, gto
         real(KP) :: lk, pb, dc_idx, dc_mwr, dc_uvb, s1, dust2k, dust3k, term, tsum, tmpl, lagn
         real(KP) :: cwt, shape, gshape, gab, rk, sabk, sesk, omtd, gy, go, dsq, dsu, dsg, apre
-        real(WP) :: dtz
+        real(WP) :: dtz, tauc
+        integer  :: pp
         real(WP) :: lb
         logical  :: nodust, em
 
@@ -5940,7 +6018,8 @@ contains
             gs = gw(i, n_mod + m)
             ga = gs
             if (igm .and. zvar) then
-                if (pl%zred > SAFE_FLOOR) ga = gs * real(exp(-real(tau(i, m), WP) * pl%igm_factor), KP)
+                if (pl%zred > SAFE_FLOOR .and. tau(i, m) /= 0.0_KP) &
+                    ga = gs * real(exp(-real(tau(i, m), WP) * pl%igm_factor), KP)
             else if (igm) then
                 ga = gs * igm_t(i)
             end if
@@ -5998,10 +6077,18 @@ contains
             if (igm .and. pl%zred > SAFE_FLOOR) then
                 apre = (y * ay + o * to) * dfac
                 if (em) apre = apre + shape * td * rk
-                dtz = igm_tau_dz(ctx%state%spec_lambda(max(i, jmx_m)), 1.0_wp + pl%zred)
+                pp = max(i, jmx_m)
+                dtz = 0.0_wp
+                tauc = 0.0_wp
+                if (pp <= jtop) then
+                    dtz = igm_a(1, pp) * igm_bd(1, m) + igm_a(2, pp) * igm_bd(2, m) + igm_a(3, pp) * igm_bd(3, m) + igm_a(4, pp) * igm_bd(4, m) + &
+                          igm_a(5, pp) * igm_bd(5, m) + igm_a(6, pp) * igm_bd(6, m)
+                    tauc = igm_a(1, pp) * igm_b(1, m) + igm_a(2, pp) * igm_b(2, m) + igm_a(3, pp) * igm_b(3, m) + igm_a(4, pp) * igm_b(4, m) + &
+                           igm_a(5, pp) * igm_b(5, m) + igm_a(6, pp) * igm_b(6, m)
+                end if
                 d(13) = -ga * apre * real(pl%igm_factor * dtz, KP)
                 ! igm_factor: d T_IGM / d factor = -tau T_IGM, tau as the forward (capped below jmx)
-                d(14) = -ga * apre * real(igm_tau(ctx%state%spec_lambda(max(i, jmx_m)), 1.0_wp + pl%zred), KP)
+                d(14) = -ga * apre * real(tauc, KP)
             end if
             ! The curve's derivatives
             lk = real(ltab(i), KP)
