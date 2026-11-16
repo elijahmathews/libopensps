@@ -9,7 +9,7 @@ name: CI
 
 on:
   push:
-    branches: [main, 'dev/**']
+    branches: [main]   # (dev/ci-timeout-debug only: no full matrix on pushes of this branch)
     paths-ignore:
       - '**.md'
       - 'doc/**'

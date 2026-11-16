@@ -1,0 +1,108 @@
+# Debugging only (branch dev/ci-timeout-debug; never merged): why does the instrumented (gcov) build time out on some runners?
+#
+# Every job dumps what the runner is (lscpu, vCPUs, cgroup limits, steal time), times a few instructions that differ between
+# CPU models (.github/debug/microbench.c), then builds the library three ways and times two of the slowest tests in each:
+#   plain      no instrumentation
+#   cov-atomic -Db_coverage=true, as CI does (gcc makes the counter updates atomic because of -pthread)
+#   cov-single -Db_coverage=true with -fprofile-update=single (plain counter increments; the tests are single threaded)
+# The matrix repeats the job so that runners land on different CPUs.
+name: CI timeout debug
+
+on:
+  push:
+    branches: ['dev/ci-timeout-debug']
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: probe ${{ matrix.rep }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        rep: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    env:
+      DATA_RELEASE: ${{ vars.OPENSPS_DATA_RELEASE }}
+    steps:
+      - name: Checkout (without the C3K library)
+        uses: actions/checkout@v7
+        with:
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/data/spectra/C3K/
+
+      - name: The runner
+        run: |
+          lscpu
+          echo "nproc: $(nproc)"
+          grep -c ^processor /proc/cpuinfo
+          grep -m1 -E 'cpu MHz' /proc/cpuinfo || true
+          grep -m1 flags /proc/cpuinfo | tr ' ' '\n' | grep -E '^(avx|avx2|avx512[a-z_0-9]*|amx[a-z_0-9]*|sse4_2|erms|fsrm)$' | tr '\n' ' '; echo
+          systemd-detect-virt || true
+          cat /sys/fs/cgroup/cpu.max 2>/dev/null || true
+          cat /proc/loadavg
+          head -1 /proc/stat
+          free -m
+          echo "RUNNER_CPU=$(lscpu | sed -n 's/^Model name: *//p' | head -1)" >> "$GITHUB_ENV"
+
+      - name: Microbenchmark
+        run: |
+          gcc -O1 -o "$RUNNER_TEMP/microbench" .github/debug/microbench.c
+          for i in 1 2 3; do echo "-- run $i: $RUNNER_CPU"; "$RUNNER_TEMP/microbench"; done
+
+      - name: Install gfortran, Meson, Ninja
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gfortran python3-numpy
+          pipx install meson
+          pipx install ninja
+          echo "FC=gfortran" >> "$GITHUB_ENV"
+          echo "CC=gcc" >> "$GITHUB_ENV"
+
+      - name: Fetch the data release
+        if: env.DATA_RELEASE != ''
+        run: |
+          python3 tools/fetch_data.py "$HOME/opensps-data" --release "$DATA_RELEASE"
+          echo "DATA_ARGS=-Ddata_home=$HOME/opensps-data" >> "$GITHUB_ENV"
+
+      - name: Build and time (plain, cov-atomic, cov-single)
+        run: |
+          set -x
+          declare -A ARGS=(
+            [plain]=""
+            [cov-atomic]="-Db_coverage=true"
+            [cov-single]="-Db_coverage=true"
+          )
+          declare -A FLAGS=(
+            [plain]=""
+            [cov-atomic]=""
+            [cov-single]="-fprofile-update=single"
+          )
+          for v in plain cov-atomic cov-single; do
+            echo "::group::build $v"
+            FFLAGS="${FLAGS[$v]}" CFLAGS="${FLAGS[$v]}" meson setup "build-$v" --buildtype=release ${ARGS[$v]} $DATA_ARGS
+            /usr/bin/time -v meson compile -C "build-$v" 2>&1 | grep -E "Elapsed|Maximum resident|^\[1?[0-9]*/" | tail -3
+            echo "::endgroup::"
+          done
+          for v in plain cov-atomic cov-single; do
+            echo "::group::tests $v"
+            head -1 /proc/stat
+            # one process at a time: no interference between tests, so the times are those of the code
+            meson test -C "build-$v" --num-processes 1 --no-rebuild physics_oracles param_regression_csp unit_filters \
+              --print-errorlogs 2>&1 | grep -E "opensps:|Ok:|Fail:|Timeout:" || true
+            head -1 /proc/stat
+            echo "::endgroup::"
+          done
+          echo "SUMMARY $RUNNER_CPU"
+          for v in plain cov-atomic cov-single; do
+            echo "== $v"
+            python3 - "build-$v/meson-logs/testlog.txt" <<'EOF'
+          import re, sys
+          t = open(sys.argv[1]).read()
+          for m in re.finditer(r'\d+/\d+ \S+ - opensps:(\S+)\s+(OK|FAIL|TIMEOUT|SKIP)\s+([\d.]+)s', t):
+              print('  %-24s %-6s %7.1f s' % (m.group(1), m.group(2), float(m.group(3))))
+          EOF
+          done
