@@ -3244,6 +3244,55 @@ __global__ void __launch_bounds__(128) obs_bwd_rest_kernel(
     gw[i + ((size_t)n_mod + m) * nspec] = vk;
 }
 
+
+// ---------------------------------------------------------------------------
+// Self-test of the error-free transforms (doc/MIXED_PRECISION.md, rule 9)
+//
+// The kernels' two-sums and exact products are only exact if the compiler does not fuse a rounded product into the
+// sum that uses it (it would count the product's rounding error twice). hipcc/clang is told so by
+// `#pragma clang fp contract(off)`, nvcc by __fmul_rn (a product it never merges into an fma; it ignores the pragma).
+// This runs the observed-frame numerator and the fold's product-and-sum on random inputs chosen so that the answer
+// is a small difference of large numbers, and compares them with FP64. Returns the number of failures (0: the guard
+// holds), -1 if it could not run.
+// ---------------------------------------------------------------------------
+__device__ inline void eft_sum_product(float x, float w, float s, float& tt, float& c) {
+#pragma clang fp contract(off)
+    float p1 = __fmul_rn(x, w);
+    float e1 = fmaf(x, w, -p1);
+    tt = s + p1;
+    float bp = tt - s;
+    c = (s - (tt - bp)) + (p1 - bp) + e1;
+}
+
+__global__ void eft_selftest_kernel(int n, unsigned long long seed, int* fails) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    unsigned long long st = seed + 0x9E3779B97F4A7C15ull * (unsigned long long)(i + 1);
+    auto rnd = [&]() {
+        st ^= st << 13; st ^= st >> 7; st ^= st << 17;
+        return (double)(st >> 11) * (1.0 / 9007199254740992.0);
+    };
+    int bad = 0;
+    {   // obs_num: lambda_j - a lambda_i with lambda_j within a few Angstroms of a lambda_i
+        const double li = 3000.0 + 6000.0 * rnd(), a = 1.05 + 2.5 * rnd();
+        const double lj = a * li + (rnd() - 0.5) * 10.0;
+        const float lih = (float)li, ljh = (float)lj;
+        const float2 L = make_float2(lih, (float)(li - (double)lih)), J = make_float2(ljh, (float)(lj - (double)ljh));
+        const float ahi = (float)a, alo = (float)(a - (double)ahi);
+        const float num = obs_num(J, L, ahi, alo);
+        const double ref = ((double)J.x + (double)J.y) - ((double)ahi + (double)alo) * ((double)L.x + (double)L.y);
+        if (fabs((double)num - ref) > 4e-6 + 2e-7 * fabs(ref)) ++bad;
+    }
+    {   // the fold's and the weights' product added to a running sum
+        const float x = (float)(0.01 + 3.0 * rnd()), w = (float)(2.0 * rnd()), s = (float)(5.0 * rnd());
+        float tt, c;
+        eft_sum_product(x, w, s, tt, c);
+        const double exact = (double)s + (double)x * (double)w, got = (double)tt + (double)c;
+        if (fabs(got - exact) > 1e-13 * fabs(exact)) ++bad;
+    }
+    if (bad) atomicAdd(fails, bad);
+}
+
 // ---------------------------------------------------------------------------
 // Age sums with per-model metallicity (age_sums_z, FP32 kernels), as a product per metallicity pair
 //
@@ -3393,6 +3442,19 @@ __global__ void __launch_bounds__(256, 2) age_sums_z_kernel(
 }
 
 extern "C" {
+
+int opensps_hip_selftest_eft(int n) {
+    int* d = nullptr;
+    if (n <= 0) return 0;
+    if (hipMalloc((void**)&d, sizeof(int)) != hipSuccess) return -1;
+    int zero = 0, bad = 0;
+    if (hipMemcpy(d, &zero, sizeof(int), hipMemcpyHostToDevice) != hipSuccess) { (void)hipFree(d); return -1; }
+    eft_selftest_kernel<<<(n + 255) / 256, 256>>>(n, 20261116ull, d);
+    (void)hipDeviceSynchronize();
+    if (hipMemcpy(&bad, d, sizeof(int), hipMemcpyDeviceToHost) != hipSuccess) bad = -1;
+    (void)hipFree(d);
+    return bad;
+}
 
 // Returns 1 if the tile shape is not supported (the caller then takes its portable kernel). Tiles hold up to
 // 16 rn models (the caller builds them)

@@ -166,8 +166,12 @@ These came out of the measurements; a GPU port must follow them.
    error-free product (`p = a * b; e = fma(a, b, -p)`) that counts the rounding of `p` twice: the first
    version of the observed-frame kernel was off by 1.5e-4 of a pixel in the interpolation fraction at the
    first pixel of every chunk (`lambda_j - P` fused with the product that defines `P`). Every HIP function
-   that forms such a pair starts with `#pragma clang fp contract(off)` (explicit `fmaf` is unaffected);
-   `__fmul_rn` does not prevent the fusion in HIP.
+   that forms such a pair starts with `#pragma clang fp contract(off)` (explicit `fmaf` is unaffected) and forms the
+   product with `__fmul_rn`. The pragma is what holds under hipcc/clang (there `__fmul_rn` does not prevent the
+   fusion); nvcc ignores the pragma and never merges `__fmul_rn`. The test `c_hip_eft` (every HIP build, needs a device)
+   runs the observed-frame numerator and the fold's product-and-sum against FP64: 0 failures with the guard, ~2e6 of
+   2.1e6 without it (checked on the R9700 with the pragma removed). If it fails on a compiler, add `--fmad=false` to
+   that compiler's command (nvcc: measured ~10% on the free-IMF gradient on an A100, one run).
 10. **A difference of nearly equal numbers is formed from hi + lo pairs.** The arguments of exponentials
    (rule 3's ln m, e ln m), the wavelength offsets of the redshifted pixels and the DL07 table are carried as
    an FP32 value plus its FP32 remainder (the remainder of the FP64 value), the product's rounding error comes

@@ -153,9 +153,10 @@ elif accel_target == 'omp_gpu' and get_option('accel_hip')
     # ROCm needed. Opt-in: on the A100 the kernels pay off with cuBLAS (-Daccel_blas=cublas).
     nvcc_prog = find_program('nvcc', required : true)
     accel_defs += ['-DOPENSPS_HIP']
-    # --fmad=false: nvcc contracts a*b+c into an FMA by default and ignores the kernels'
-    # `#pragma clang fp contract(off)` (warning #20199), which would break the error-free sums
-    # (two-sum / exact products) that the FP32 kernels rely on.
+    # nvcc contracts a*b+c into an FMA by default and ignores `#pragma clang fp contract(off)` (warning #20199): the
+    # products of the error-free sums are formed with __fmul_rn, which it never merges, and the test c_hip_eft
+    # checks that the guard holds on the device. (If it fails, add '--fmad=false' to the nvcc command below: it
+    # costs ~10% on the free-IMF gradient, measured on an A100.)
     nvcc_args = []
     foreach arch : get_option('gpu_arch').split(',')
         sm = arch.strip().replace('cc', '')
@@ -166,7 +167,7 @@ elif accel_target == 'omp_gpu' and get_option('accel_hip')
             input : 'src/accel/hip/opensps_hip_kernels.hip',
             output : 'opensps_hip_kernels.o',
             command : [nvcc_prog, '-x', 'cu'] + nvcc_args + [
-                '-O3', '--fmad=false', '-Xcompiler', '-fPIC',
+                '-O3', '-Xcompiler', '-fPIC',
                 '-I', meson.current_source_dir() / 'src/accel/hip/cuda_shim',
                 '-c', '@INPUT@', '-o', '@OUTPUT@'])
     ]
@@ -946,6 +947,17 @@ test('c_mag_compute', test_c_mag_compute_exe,
     suite : 'regression',
     timeout : 600
 )
+if accel_defs.contains('-DOPENSPS_HIP')
+    test_c_hip_eft_exe = executable('test_c_hip_eft', 'tests/test_c_hip_eft.c',
+        dependencies : [opensps_dep],
+        include_directories : include_directories('include')
+    )
+    test('c_hip_eft', test_c_hip_eft_exe,
+        env : regression_env,
+        suite : 'regression',
+        timeout : 120
+    )
+endif
 test_c_cue_exe = executable('test_c_cue', 'tests/test_c_cue.c',
     dependencies : [opensps_dep, meson.get_compiler('c').find_library('m', required : false)],
     include_directories : include_directories('include')

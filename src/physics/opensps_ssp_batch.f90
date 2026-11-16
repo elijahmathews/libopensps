@@ -2352,7 +2352,9 @@ contains
         end if
 
         if (dev) then
-#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+            ! (A build with an accelerated BLAS keeps it for the template products: the BLAS is an explicit choice of the
+            ! build, and cuBLAS' product beats the tiled kernel on an A100 (the HIP kernel took its place by mistake)
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION) && !defined(OPENSPS_ACCEL_BLAS)
             if (run_hip_template_columns(np, k, nc, etpl, v, v0, yo, c0)) return
 #endif
 #if defined(OPENSPS_ACCEL_BLAS)
