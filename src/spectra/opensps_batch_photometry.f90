@@ -12,7 +12,9 @@ module opensps_batch_photometry
 
     use, intrinsic :: iso_c_binding, only: c_float
     use opensps_precision, only: WP, KP
-    use opensps_tuning, only: TUNE_BAND_BLOCK, TUNE_GEMM_MIN_COLS, TUNE_NCH, TUNE_MBLK, TUNE_SMALL_N, TUNE_BAND_PIX_PER_THREAD
+    use opensps_tuning, only: TUNE_BAND_BLOCK, TUNE_GEMM_MIN_COLS, TUNE_NCH, TUNE_MBLK, TUNE_SMALL_N, TUNE_BAND_PIX_PER_THREAD, &
+                              TUNE_HIP_SMOOTH_PB, TUNE_HIP_SMOOTH_KCH, TUNE_HIP_SMOOTH_KB, TUNE_HIP_OBS_THREADS, &
+                              TUNE_HIP_GEMM_RN, TUNE_HIP_GEMM_KC, TUNE_TEMPLATE_KB, TUNE_HIP_BAND_SMALL_N
     use opensps_constants, only: SAFE_FLOOR, C_LIGHT, ABS_MAG_ZEROPOINT_LOG
     use opensps_context_types, only: opensps_context_t, batch_grid_release
     use opensps_offload, only: offload_on_host
@@ -518,40 +520,50 @@ contains
         type(opensps_context_t), intent(inout) :: ctx
         real(KP), intent(inout)             :: spec(:,:)
         integer, intent(in)                 :: n_col
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+        logical :: hip_done
+#endif
 
         ! The operator's arrays passed as arrays: device code does not refer to the cache's
         ! derived type, which is mapped only through its components
         call ensure_smooth_work(ctx%state%nspec, n_col)
 #if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
         call smooth_kernel_hip(ctx%state%nspec, n_col, ctx%state%batch%sm_lo, ctx%state%batch%sm_hi, &
-                               ctx%state%batch%sm_off, ctx%state%batch%sm_coef_f, smooth_work, spec)
-#else
+                               ctx%state%batch%sm_off, ctx%state%batch%sm_coef_f, smooth_work, spec, hip_done)
+        if (hip_done) return   ! (otherwise the tile shape of the registry is not built: the portable kernel)
+#endif
         call smooth_kernel(ctx%state%nspec, n_col, size(ctx%state%batch%sm_coef), ctx%state%batch%sm_lo, &
                            ctx%state%batch%sm_hi, ctx%state%batch%sm_off, ctx%state%batch%sm_coef, smooth_work, spec)
-#endif
     end subroutine smooth_columns
 
 #if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
     !> smooth_kernel in FP32 (a HIP kernel, see opensps_hip_smooth): the smoothed spectra go to sm, then
     !> back into spec
-    subroutine smooth_kernel_hip(nspec, n_col, sm_lo, sm_hi, sm_off, cf, sm, spec)
+    subroutine smooth_kernel_hip(nspec, n_col, sm_lo, sm_hi, sm_off, cf, sm, spec, done)
         use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
         integer, intent(in)                 :: nspec, n_col
         integer, intent(in), target, contiguous :: sm_lo(:), sm_hi(:), sm_off(:)
         real(c_float), intent(in), target, contiguous :: cf(:,:)
         real(KP), intent(inout), target     :: sm(nspec, *), spec(nspec, *)
+        logical, intent(out)                :: done
         integer :: m, i
+        integer(c_int) :: rc
         interface
-            subroutine opensps_hip_smooth(nspec, n_col, lo, hi, off, cf, in, out, stream) bind(C, name="opensps_hip_smooth")
+            function opensps_hip_smooth(nspec, n_col, pb, kch, kb, lo, hi, off, cf, in, out, stream) result(rc) &
+                bind(C, name="opensps_hip_smooth")
                 import :: c_int, c_ptr
-                integer(c_int), value :: nspec, n_col
+                integer(c_int), value :: nspec, n_col, pb, kch, kb
                 type(c_ptr), value :: lo, hi, off, cf, in, out, stream
-            end subroutine opensps_hip_smooth
+                integer(c_int) :: rc
+            end function opensps_hip_smooth
         end interface
         !$omp target data use_device_addr(sm_lo, sm_hi, sm_off, cf, sm, spec)
-        call opensps_hip_smooth(int(nspec, c_int), int(n_col, c_int), c_loc(sm_lo(1)), c_loc(sm_hi(1)), c_loc(sm_off(1)), &
-                                c_loc(cf(1, 1)), c_loc(spec(1, 1)), c_loc(sm(1, 1)), c_null_ptr)
+        rc = opensps_hip_smooth(int(nspec, c_int), int(n_col, c_int), int(TUNE_HIP_SMOOTH_PB, c_int), &
+                                int(TUNE_HIP_SMOOTH_KCH, c_int), int(TUNE_HIP_SMOOTH_KB, c_int), c_loc(sm_lo(1)), &
+                                c_loc(sm_hi(1)), c_loc(sm_off(1)), c_loc(cf(1, 1)), c_loc(spec(1, 1)), c_loc(sm(1, 1)), c_null_ptr)
         !$omp end target data
+        done = rc == 0
+        if (.not. done) return
         !$omp target teams distribute parallel do collapse(2)
         do m = 1, n_col
             do i = 1, nspec
@@ -864,10 +876,11 @@ contains
         logical, intent(out)    :: done
         integer(c_int) :: rc
         interface
-            function opensps_hip_observed_frame(n_col, nspec, npad, ch, ldf, zfloor, zc, lambda, wl, total, fobs, stream) result(rc) &
+            function opensps_hip_observed_frame(n_col, nspec, npad, ch, ldf, zfloor, zc, lambda, wl, total, fobs, threads, stream) &
+                result(rc) &
                 bind(C, name="opensps_hip_observed_frame")
                 import :: c_int, c_double, c_ptr
-                integer(c_int), value :: n_col, nspec, npad, ch, ldf
+                integer(c_int), value :: n_col, nspec, npad, ch, ldf, threads
                 real(c_double), value :: zfloor
                 type(c_ptr), value :: zc, lambda, wl, total, fobs, stream
                 integer(c_int) :: rc
@@ -876,7 +889,7 @@ contains
         !$omp target data use_device_addr(zc, lambda, wl, total, fobs)
         rc = opensps_hip_observed_frame(int(n_col, c_int), int(nspec, c_int), int(npad, c_int), int(ch, c_int), &
                                         int(size(fobs, 1), c_int), real(SAFE_FLOOR, c_double), c_loc(zc(1)), &
-                                        c_loc(lambda(1)), c_loc(wl(1)), c_loc(total(1, 1)), c_loc(fobs(1, 1)), c_null_ptr)
+                                        c_loc(lambda(1)), c_loc(wl(1)), c_loc(total(1, 1)), c_loc(fobs(1, 1)), int(TUNE_HIP_OBS_THREADS, c_int), c_null_ptr)
         !$omp end target data
         done = rc == 0
     end subroutine observed_frame_hip
@@ -1128,19 +1141,19 @@ contains
         real(WP), intent(out), target :: fband(nbands, n_mod)
 
         interface
-            subroutine opensps_hip_band_fluxes_sp(n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, &
+            subroutine opensps_hip_band_fluxes_sp(n_mod, nspec, nbands, small_n, rn, kc, kb, d_bands_t, d_j_lo, d_j_hi, d_do_band, &
                                                   d_wt, d_fobs_t, d_fband, stream) &
                 bind(C, name="opensps_hip_band_fluxes_sp")
                 import :: c_int, c_ptr
-                integer(c_int), value :: n_mod, nspec, nbands
+                integer(c_int), value :: n_mod, nspec, nbands, small_n, rn, kc, kb
                 type(c_ptr), value :: d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband, stream
             end subroutine opensps_hip_band_fluxes_sp
 
-            subroutine opensps_hip_band_fluxes_dp(n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, &
+            subroutine opensps_hip_band_fluxes_dp(n_mod, nspec, nbands, small_n, d_bands_t, d_j_lo, d_j_hi, d_do_band, &
                                                   d_wt, d_fobs_t, d_fband, stream) &
                 bind(C, name="opensps_hip_band_fluxes_dp")
                 import :: c_int, c_ptr
-                integer(c_int), value :: n_mod, nspec, nbands
+                integer(c_int), value :: n_mod, nspec, nbands, small_n
                 type(c_ptr), value :: d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband, stream
             end subroutine opensps_hip_band_fluxes_dp
         end interface
@@ -1149,11 +1162,13 @@ contains
         !$omp target data use_device_addr(bands_t, j_lo, j_hi, do_band, wt, fobs_t, fband)
 #endif
 #ifdef KERNEL_SINGLE_PRECISION
-        call opensps_hip_band_fluxes_sp(int(n_mod, c_int), int(nspec, c_int), int(nbands, c_int), &
+        call opensps_hip_band_fluxes_sp(int(n_mod, c_int), int(nspec, c_int), int(nbands, c_int), int(TUNE_HIP_BAND_SMALL_N, c_int), &
+                                        int(TUNE_HIP_GEMM_RN, c_int), &
+                                        int(TUNE_HIP_GEMM_KC, c_int), int(TUNE_TEMPLATE_KB, c_int), &
                                         c_loc(bands_t(1, 1)), c_loc(j_lo(1)), c_loc(j_hi(1)), c_loc(do_band(1)), &
                                         c_loc(wt(1)), c_loc(fobs_t(1, 1)), c_loc(fband(1, 1)), c_null_ptr)
 #else
-        call opensps_hip_band_fluxes_dp(int(n_mod, c_int), int(nspec, c_int), int(nbands, c_int), &
+        call opensps_hip_band_fluxes_dp(int(n_mod, c_int), int(nspec, c_int), int(nbands, c_int), int(TUNE_HIP_BAND_SMALL_N, c_int), &
                                         c_loc(bands_t(1, 1)), c_loc(j_lo(1)), c_loc(j_hi(1)), c_loc(do_band(1)), &
                                         c_loc(wt(1)), c_loc(fobs_t(1, 1)), c_loc(fband(1, 1)), c_null_ptr)
 #endif

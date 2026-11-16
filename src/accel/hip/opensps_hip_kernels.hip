@@ -2091,83 +2091,78 @@ __global__ void __launch_bounds__(128, 8) fold_multi_kernel(
 // The arithmetic of the Fortran device kernel: the templates in blocks of KB, each block summed with
 // plain multiply-adds (all terms are >= 0: a block loses at most ~KB eps of itself), the blocks added
 // to the total with compensation (rule 1 of doc/MIXED_PRECISION.md). The tile of a block is
-// 128 pixels x 64 columns, 8 x 4 per thread, the templates staged through shared memory 16 at a time
+// 16 RM pixels x 16 RN columns (RM x RN per thread), the templates staged through shared memory KC at a time
 // (each etpl element read once per column tile instead of once per 8 columns), the next stage's global
 // loads issued before the current stage's multiply-adds.
 // ---------------------------------------------------------------------------
-#define TC_BM 128
-#define TC_BN 64
-#define TC_KC 16
-#define TC_RM 8
-#define TC_RN 4
-
-template <int KB>
+template <int RM, int RN, int KC, int KB>
 __global__ void __launch_bounds__(256, 2) template_columns_kernel(
     int np, int nc, int k, int lda, int ldb, int ldc,
     const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ C
 ) {
-    __shared__ float As[TC_KC][TC_BM];
-    __shared__ float Bs[TC_KC][TC_BN];
+    constexpr int BM = 16 * RM, BN = 16 * RN;
+    __shared__ float As[KC][BM];
+    __shared__ float Bs[KC][BN];
     const int tid = threadIdx.x;
     const int tx = tid & 15, ty = tid >> 4;
-    const int i0 = blockIdx.x * TC_BM, j0 = blockIdx.y * TC_BN;
+    const int i0 = blockIdx.x * BM, j0 = blockIdx.y * BN;
 
-    float acc[TC_RM][TC_RN], cmp[TC_RM][TC_RN], blk[TC_RM][TC_RN];
+    float acc[RM][RN], cmp[RM][RN], blk[RM][RN];
 #pragma unroll
-    for (int r = 0; r < TC_RM; ++r)
+    for (int r = 0; r < RM; ++r)
 #pragma unroll
-        for (int c = 0; c < TC_RN; ++c) { acc[r][c] = 0.f; cmp[r][c] = 0.f; }
+        for (int c = 0; c < RN; ++c) { acc[r][c] = 0.f; cmp[r][c] = 0.f; }
 
-    float pa[TC_KC * TC_BM / 256], pb[TC_KC * TC_BN / 256];
+    float pa[KC * BM / 256], pb[KC * BN / 256];
     auto gload = [&](int e0) {
 #pragma unroll
-        for (int q = 0; q < TC_KC * TC_BM / 256; ++q) {
-            int idx = tid + q * 256, i = idx % TC_BM, e = idx / TC_BM;
+        for (int q = 0; q < KC * BM / 256; ++q) {
+            int idx = tid + q * 256, i = idx % BM, e = idx / BM;
             pa[q] = (i0 + i < np && e0 + e < k) ? A[(size_t)(e0 + e) * lda + i0 + i] : 0.f;
         }
 #pragma unroll
-        for (int q = 0; q < TC_KC * TC_BN / 256; ++q) {
-            int idx = tid + q * 256, e = idx % TC_KC, j = idx / TC_KC;
+        for (int q = 0; q < KC * BN / 256; ++q) {
+            int idx = tid + q * 256, e = idx % KC, j = idx / KC;
             pb[q] = (j0 + j < nc && e0 + e < k) ? B[(size_t)(j0 + j) * ldb + e0 + e] : 0.f;
         }
     };
     gload(0);
-    for (int e0 = 0; e0 < k; e0 += TC_KC) {
+    for (int e0 = 0; e0 < k; e0 += KC) {
         __syncthreads();
 #pragma unroll
-        for (int q = 0; q < TC_KC * TC_BM / 256; ++q) {
-            int idx = tid + q * 256; As[idx / TC_BM][idx % TC_BM] = pa[q];
+        for (int q = 0; q < KC * BM / 256; ++q) {
+            int idx = tid + q * 256; As[idx / BM][idx % BM] = pa[q];
         }
 #pragma unroll
-        for (int q = 0; q < TC_KC * TC_BN / 256; ++q) {
-            int idx = tid + q * 256; Bs[idx % TC_KC][idx / TC_KC] = pb[q];
+        for (int q = 0; q < KC * BN / 256; ++q) {
+            int idx = tid + q * 256; Bs[idx % KC][idx / KC] = pb[q];
         }
         __syncthreads();
-        if (e0 + TC_KC < k) gload(e0 + TC_KC);
+        if (e0 + KC < k) gload(e0 + KC);
 #pragma unroll
-        for (int g = 0; g < TC_KC / KB; ++g) {
+        for (int g = 0; g < KC / KB; ++g) {
             if (e0 + g * KB >= k) break;
 #pragma unroll
-            for (int r = 0; r < TC_RM; ++r)
+            for (int r = 0; r < RM; ++r)
 #pragma unroll
-                for (int c = 0; c < TC_RN; ++c) blk[r][c] = 0.f;
+                for (int c = 0; c < RN; ++c) blk[r][c] = 0.f;
 #pragma unroll
             for (int u = 0; u < KB; ++u) {
                 const int e = g * KB + u;
-                float av[TC_RM], bv[TC_RN];
+                float av[RM], bv[RN];
 #pragma unroll
-                for (int r = 0; r < TC_RM; ++r) av[r] = As[e][tx + 16 * r];
+                for (int r = 0; r < RM; ++r) av[r] = As[e][tx + 16 * r];
 #pragma unroll
-                for (int c = 0; c < TC_RN; ++c) bv[c] = Bs[e][ty + 16 * c];
+                for (int c = 0; c < RN; ++c) bv[c] = Bs[e][ty + 16 * c];
 #pragma unroll
-                for (int r = 0; r < TC_RM; ++r)
+                for (int r = 0; r < RM; ++r)
 #pragma unroll
-                    for (int c = 0; c < TC_RN; ++c) blk[r][c] = fmaf(av[r], bv[c], blk[r][c]);
+                    for (int c = 0; c < RN; ++c) blk[r][c] = fmaf(av[r], bv[c], blk[r][c]);
             }
 #pragma unroll
-            for (int r = 0; r < TC_RM; ++r)
+            for (int r = 0; r < RM; ++r)
 #pragma unroll
-                for (int c = 0; c < TC_RN; ++c) {
+                for (int c = 0; c < RN; ++c) {
                     float term = blk[r][c] - cmp[r][c];
                     float tsum = acc[r][c] + term;
                     cmp[r][c] = (tsum - acc[r][c]) - term;
@@ -2176,11 +2171,11 @@ __global__ void __launch_bounds__(256, 2) template_columns_kernel(
         }
     }
 #pragma unroll
-    for (int c = 0; c < TC_RN; ++c) {
+    for (int c = 0; c < RN; ++c) {
         int j = j0 + ty + 16 * c;
         if (j < nc) {
 #pragma unroll
-            for (int r = 0; r < TC_RM; ++r) {
+            for (int r = 0; r < RM; ++r) {
                 int i = i0 + tx + 16 * r;
                 if (i < np) C[(size_t)j * ldc + i] = acc[r][c];
             }
@@ -2200,22 +2195,19 @@ __global__ void __launch_bounds__(256, 2) template_columns_kernel(
 // compensation (doc/MIXED_PRECISION.md, rule 1). A block of 256 threads = 64 pixels x 16 models (4 per
 // thread); the spectra of the tile's window are staged through shared memory, 256 pixels at a time.
 // ---------------------------------------------------------------------------
-#define SM_KB 4
-#define SM_PB 64
-#define SM_MB 16
-#define SM_KCH 256
-
+template <int PB, int KCH>
 __global__ void __launch_bounds__(256) smooth_kernel_f32(
-    int nspec, int n_col,
+    int nspec, int n_col, int kb,
     const int* __restrict__ d_lo, const int* __restrict__ d_hi, const int* __restrict__ d_off,
     const float2* __restrict__ d_cf,
     const float* __restrict__ in, float* __restrict__ out
 ) {
-    __shared__ float sp[SM_MB][SM_KCH];
+    constexpr int MB = 4 * (256 / PB);   // models per block: 4 per thread, 256 / PB groups
+    __shared__ float sp[MB][KCH];
     __shared__ int s_k0, s_k1;
     const int tid = threadIdx.x;
-    const int ip = tid & (SM_PB - 1), mq = tid / SM_PB;
-    const int i0 = blockIdx.x * SM_PB, m0 = blockIdx.y * SM_MB;
+    const int ip = tid & (PB - 1), mq = tid / PB;
+    const int i0 = blockIdx.x * PB, m0 = blockIdx.y * MB;
     const int i = i0 + ip;
     if (tid == 0) { s_k0 = nspec + 1; s_k1 = 0; }
     __syncthreads();
@@ -2225,16 +2217,16 @@ __global__ void __launch_bounds__(256) smooth_kernel_f32(
     __syncthreads();
     const int k0 = s_k0, k1 = s_k1;
     float acc[4] = {0.f, 0.f, 0.f, 0.f}, cmp[4] = {0.f, 0.f, 0.f, 0.f}, blk[4] = {0.f, 0.f, 0.f, 0.f};
-    for (int c0 = k0; c0 <= k1; c0 += SM_KCH) {
+    for (int c0 = k0; c0 <= k1; c0 += KCH) {
         __syncthreads();
-        for (int idx = tid; idx < SM_KCH * SM_MB; idx += 256) {
-            int row = idx % SM_KCH, mc = idx / SM_KCH;
+        for (int idx = tid; idx < KCH * MB; idx += 256) {
+            int row = idx % KCH, mc = idx / KCH;
             int k = c0 + row, m = m0 + mc;
             sp[mc][row] = (k <= k1 && m < n_col) ? in[(size_t)m * nspec + (k - 1)] : 0.f;
         }
         __syncthreads();
         if (lo > 0) {
-            int ka = max(lo, c0), kb = min(hi, c0 + SM_KCH - 1);
+            int ka = max(lo, c0), kb = min(hi, c0 + KCH - 1);
             for (int k = ka; k <= kb; ++k) {
                 float2 cf = d_cf[off + k];
                 int t = k - lo;
@@ -2244,7 +2236,7 @@ __global__ void __launch_bounds__(256) smooth_kernel_f32(
                     blk[q] = fmaf(cf.x, x, blk[q]);
                     blk[q] = fmaf(cf.y, x, blk[q]);
                 }
-                if ((t + 1) % SM_KB == 0 || k == hi) {
+                if ((t + 1) % kb == 0 || k == hi) {
 #pragma unroll
                     for (int q = 0; q < 4; ++q) {
                         float term = blk[q] - cmp[q];
@@ -2266,6 +2258,22 @@ __global__ void __launch_bounds__(256) smooth_kernel_f32(
     }
 }
 
+// The tile shapes of the shared-memory products (template products, age sums, band fluxes): the registry's
+// HIP_GEMM_RM / RN / KC and TEMPLATE_KB reach the kernels as template arguments; a combination that is not
+// instantiated here is not supported and the caller takes its portable kernel (return value 1)
+template <int RM_, int RN_, int KC_, int KB_> struct GemmCfg {
+    static constexpr int RM = RM_, RN = RN_, KC = KC_, KB = KB_;
+};
+
+template <class F> static bool gemm_dispatch(int rm, int rn, int kc, int kb, F f) {
+    if (kc != 16) return false;
+#define GEMM_CASE(RM, RN, KB) if (rm == RM && rn == RN && kb == KB) { f(GemmCfg<RM, RN, 16, KB>()); return true; }
+    GEMM_CASE(8, 4, 4) GEMM_CASE(8, 4, 8) GEMM_CASE(4, 4, 4) GEMM_CASE(4, 4, 8)
+    GEMM_CASE(8, 8, 4) GEMM_CASE(8, 8, 8) GEMM_CASE(4, 8, 4) GEMM_CASE(4, 8, 8)
+#undef GEMM_CASE
+    return false;
+}
+
 extern "C" {
 
 void opensps_hip_imf_pieces_weights_sp(
@@ -2275,6 +2283,7 @@ void opensps_hip_imf_pieces_weights_sp(
     int n_pts_max,
     int ldw,
     int imf_type,
+    int pieces,
     const int*    d_perm,
     const int*    d_viz,
     const double* d_pm,
@@ -2299,9 +2308,11 @@ void opensps_hip_imf_pieces_weights_sp(
     void*         stream
 ) {
     if (nc <= 0 || n_pc_max <= 0) return;
-    dim3 block(32, 4);
+    if (pieces < 1) pieces = 1;
+    if (pieces > 4) pieces = 4;   // (the kernels' launch bounds: 32 models x 4 pieces)
+    dim3 block(32, pieces);
     int grid_j = (nc + 31) / 32;
-    int grid_q = (n_pc_max + 3) / 4;
+    int grid_q = (n_pc_max + pieces - 1) / pieces;
     dim3 grid(grid_j, grid_q);
     hipStream_t s = (hipStream_t)stream;
     if (d_w == nullptr) {   // forward only: FP32 arithmetic, no FP64 weights
@@ -2329,6 +2340,7 @@ void opensps_hip_imf_pieces_weights_dp(
     int n_pts_max,
     int ldw,
     int imf_type,
+    int pieces,
     const int*    d_perm,
     const int*    d_viz,
     const double* d_pm,
@@ -2352,9 +2364,11 @@ void opensps_hip_imf_pieces_weights_dp(
     void*         stream
 ) {
     if (nc <= 0 || n_pc_max <= 0) return;
-    dim3 block(32, 4);
+    if (pieces < 1) pieces = 1;
+    if (pieces > 4) pieces = 4;   // (the kernels' launch bounds: 32 models x 4 pieces)
+    dim3 block(32, pieces);
     int grid_j = (nc + 31) / 32;
-    int grid_q = (n_pc_max + 3) / 4;
+    int grid_q = (n_pc_max + pieces - 1) / pieces;
     dim3 grid(grid_j, grid_q);
     hipStream_t s = (hipStream_t)stream;
     imf_pieces_weights_kernel<double><<<grid, block, 0, s>>>(
@@ -2366,46 +2380,50 @@ void opensps_hip_imf_pieces_weights_dp(
     (void)hipStreamSynchronize(s);
 }
 
-// Returns 0 if run, 1 if kb is not supported (the caller then takes its own kernel)
-int opensps_hip_template_columns(int np, int nc, int k, int kb, int lda, int ldb, int ldc,
+// Returns 0 if run, 1 if the tile shape is not supported (the caller then takes its own kernel)
+int opensps_hip_template_columns(int np, int nc, int k, int rm, int rn, int kc, int kb, int lda, int ldb, int ldc,
                                  const float* d_A, const float* d_B, float* d_C, void* stream) {
     if (np <= 0 || nc <= 0 || k <= 0) return 0;
-    dim3 block(256);
-    dim3 grid((np + TC_BM - 1) / TC_BM, (nc + TC_BN - 1) / TC_BN);
     hipStream_t s = (hipStream_t)stream;
-    switch (kb) {
-        case 1: template_columns_kernel<1><<<grid, block, 0, s>>>(np, nc, k, lda, ldb, ldc, d_A, d_B, d_C); break;
-        case 2: template_columns_kernel<2><<<grid, block, 0, s>>>(np, nc, k, lda, ldb, ldc, d_A, d_B, d_C); break;
-        case 4: template_columns_kernel<4><<<grid, block, 0, s>>>(np, nc, k, lda, ldb, ldc, d_A, d_B, d_C); break;
-        case 8: template_columns_kernel<8><<<grid, block, 0, s>>>(np, nc, k, lda, ldb, ldc, d_A, d_B, d_C); break;
-        case 16: template_columns_kernel<16><<<grid, block, 0, s>>>(np, nc, k, lda, ldb, ldc, d_A, d_B, d_C); break;
-        default: return 1;
-    }
+    const bool ok = gemm_dispatch(rm, rn, kc, kb, [&](auto cfg) {
+        constexpr int RM = decltype(cfg)::RM, RN = decltype(cfg)::RN, KC = decltype(cfg)::KC, KB = decltype(cfg)::KB;
+        dim3 grid((np + 16 * RM - 1) / (16 * RM), (nc + 16 * RN - 1) / (16 * RN));
+        template_columns_kernel<RM, RN, KC, KB><<<grid, 256, 0, s>>>(np, nc, k, lda, ldb, ldc, d_A, d_B, d_C);
+    });
+    if (!ok) return 1;
     (void)hipStreamSynchronize(s);
     return 0;
 }
 
-void opensps_hip_smooth(int nspec, int n_col, const int* d_lo, const int* d_hi, const int* d_off,
-                        const float* d_cf, const float* d_in, float* d_out, void* stream) {
-    if (nspec <= 0 || n_col <= 0) return;
-    dim3 block(256);
-    dim3 grid((nspec + SM_PB - 1) / SM_PB, (n_col + SM_MB - 1) / SM_MB);
+// pb pixels per block and kch window pixels per stage; kb taps per plain block. Returns 1 if not supported
+int opensps_hip_smooth(int nspec, int n_col, int pb, int kch, int kb, const int* d_lo, const int* d_hi, const int* d_off,
+                       const float* d_cf, const float* d_in, float* d_out, void* stream) {
+    if (nspec <= 0 || n_col <= 0) return 0;
+    if (kb < 1) return 1;
     hipStream_t s = (hipStream_t)stream;
-    smooth_kernel_f32<<<grid, block, 0, s>>>(nspec, n_col, d_lo, d_hi, d_off,
-                                             reinterpret_cast<const float2*>(d_cf), d_in, d_out);
-    (void)hipStreamSynchronize(s);
+    const float2* cf = reinterpret_cast<const float2*>(d_cf);
+#define SM_CASE(PB, KCH) if (pb == PB && kch == KCH) { \
+        constexpr int MB = 4 * (256 / PB); \
+        smooth_kernel_f32<PB, KCH><<<dim3((nspec + PB - 1) / PB, (n_col + MB - 1) / MB), 256, 0, s>>>( \
+            nspec, n_col, kb, d_lo, d_hi, d_off, cf, d_in, d_out); \
+        (void)hipStreamSynchronize(s); return 0; }
+    SM_CASE(64, 256) SM_CASE(64, 128) SM_CASE(64, 512) SM_CASE(32, 256) SM_CASE(32, 128)
+#undef SM_CASE
+    return 1;
 }
 
 void opensps_hip_fold_multi(
-    int m0_0based, int nc, int nt_neb, int ldw, int n_mod_ld, int ldv, int nseg_max,
+    int m0_0based, int nc, int nt_neb, int ldw, int n_mod_ld, int ldv, int nseg_max, int jb,
     const int* d_perm, const int* d_viz, const int* d_n_seg, const int* d_pt_off, const int* d_seg_off,
     const int* d_pt_age, const int* d_eff_pt, const int* d_seg_ptr, const float* d_eff_f,
     const double* d_wsfh, const int* d_it_tesc, const double* d_fesc, const double* d_cz,
     const float* d_w, double* d_vp, void* stream
 ) {
     if (nc <= 0 || nseg_max <= 0) return;
-    dim3 block(128);
-    dim3 grid(nseg_max, (nc + 127) / 128);
+    if (jb < 32) jb = 32;
+    if (jb > 128) jb = 128;   // (the kernel's launch bounds)
+    dim3 block(jb);
+    dim3 grid(nseg_max, (nc + jb - 1) / jb);
     hipStream_t s = (hipStream_t)stream;
     fold_multi_kernel<<<grid, block, 0, s>>>(
         m0_0based, nc, nt_neb, ldw, n_mod_ld, ldv, nseg_max,
@@ -2414,9 +2432,6 @@ void opensps_hip_fold_multi(
     );
     (void)hipStreamSynchronize(s);
 }
-
-
-
 
 } // extern "C"
 
@@ -2484,9 +2499,8 @@ __global__ void __launch_bounds__(256, 4) band_fluxes_kernel(
 // order in LDS. The order of every addition depends only on the indices, never on the scheduling,
 // so identical batches give identical results, and the tree sum is as accurate as the serial one.
 #define BF_SMALL_THREADS 256
-// Batches of fewer models than this use the workgroup kernel (R9700, FP32, us per model: N = 32
+// (Batches of fewer models than HIP_BAND_SMALL_N use the workgroup kernel; R9700, FP32, us per model: N = 32
 // 64 vs 69 for the other kernel, N = 48 49 vs 47, N = 100 37 vs 26)
-#define BF_SMALL_N 40
 
 template <typename T_KP>
 __global__ void __launch_bounds__(BF_SMALL_THREADS) band_fluxes_small_kernel(
@@ -2564,72 +2578,72 @@ __global__ void band_matrix_kernel(int nspec, int nbands, const float* __restric
     A[(size_t)p * nbands + b] = v;
 }
 
-template <int RM>
+template <int RM, int RN, int KC, int KB>
 __global__ void __launch_bounds__(256, 2) band_gemm_kernel(
     int nbands, int n_mod, int nspec,
     const float* __restrict__ A, const float* __restrict__ F, double* __restrict__ out
 ) {
-    constexpr int BMT = 16 * RM;
-    __shared__ float As[16][BMT];
-    __shared__ float Bs[16][64];
+    constexpr int BMT = 16 * RM, BN = 16 * RN;
+    __shared__ float As[KC][BMT];
+    __shared__ float Bs[KC][BN];
     const int tid = threadIdx.x;
     const int tx = tid & 15, ty = tid >> 4;
-    const int i0 = blockIdx.y * BMT, m0 = blockIdx.x * 64;
-    float acc[RM][4], cmp[RM][4], blk[RM][4];
+    const int i0 = blockIdx.y * BMT, m0 = blockIdx.x * BN;
+    float acc[RM][RN], cmp[RM][RN], blk[RM][RN];
 #pragma unroll
     for (int r = 0; r < RM; ++r)
 #pragma unroll
-        for (int c = 0; c < 4; ++c) { acc[r][c] = 0.f; cmp[r][c] = 0.f; }
-    float pa[RM], pb[4];
+        for (int c = 0; c < RN; ++c) { acc[r][c] = 0.f; cmp[r][c] = 0.f; }
+    float pa[KC * BMT / 256], pb[KC * BN / 256];
     auto gload = [&](int e0) {
 #pragma unroll
-        for (int q = 0; q < RM; ++q) {
+        for (int q = 0; q < KC * BMT / 256; ++q) {
             int idx = tid + q * 256, i = idx % BMT, e = idx / BMT;
             pa[q] = (i0 + i < nbands && e0 + e < nspec) ? A[(size_t)(e0 + e) * nbands + i0 + i] : 0.f;
         }
 #pragma unroll
-        for (int q = 0; q < 4; ++q) {
-            int idx = tid + q * 256, i = idx & 63, e = idx >> 6;
+        for (int q = 0; q < KC * BN / 256; ++q) {
+            int idx = tid + q * 256, i = idx % BN, e = idx / BN;
             pb[q] = (m0 + i < n_mod && e0 + e < nspec) ? F[(size_t)(e0 + e) * n_mod + m0 + i] : 0.f;
         }
     };
     gload(0);
-    for (int e0 = 0; e0 < nspec; e0 += 16) {
+    for (int e0 = 0; e0 < nspec; e0 += KC) {
         __syncthreads();
 #pragma unroll
-        for (int q = 0; q < RM; ++q) {
+        for (int q = 0; q < KC * BMT / 256; ++q) {
             int idx = tid + q * 256; As[idx / BMT][idx % BMT] = pa[q];
         }
 #pragma unroll
-        for (int q = 0; q < 4; ++q) {
-            int idx = tid + q * 256; Bs[idx >> 6][idx & 63] = pb[q];
+        for (int q = 0; q < KC * BN / 256; ++q) {
+            int idx = tid + q * 256; Bs[idx / BN][idx % BN] = pb[q];
         }
         __syncthreads();
-        if (e0 + 16 < nspec) gload(e0 + 16);
+        if (e0 + KC < nspec) gload(e0 + KC);
 #pragma unroll
-        for (int g = 0; g < 4; ++g) {
-            if (e0 + g * 4 >= nspec) break;
+        for (int g = 0; g < KC / KB; ++g) {
+            if (e0 + g * KB >= nspec) break;
 #pragma unroll
             for (int r = 0; r < RM; ++r)
 #pragma unroll
-                for (int c = 0; c < 4; ++c) blk[r][c] = 0.f;
+                for (int c = 0; c < RN; ++c) blk[r][c] = 0.f;
 #pragma unroll
-            for (int u = 0; u < 4; ++u) {
-                const int e = g * 4 + u;
-                float av[RM], bv[4];
+            for (int u = 0; u < KB; ++u) {
+                const int e = g * KB + u;
+                float av[RM], bv[RN];
 #pragma unroll
                 for (int r = 0; r < RM; ++r) av[r] = As[e][tx + 16 * r];
 #pragma unroll
-                for (int c = 0; c < 4; ++c) bv[c] = Bs[e][ty + 16 * c];
+                for (int c = 0; c < RN; ++c) bv[c] = Bs[e][ty + 16 * c];
 #pragma unroll
                 for (int r = 0; r < RM; ++r)
 #pragma unroll
-                    for (int c = 0; c < 4; ++c) blk[r][c] = fmaf(av[r], bv[c], blk[r][c]);
+                    for (int c = 0; c < RN; ++c) blk[r][c] = fmaf(av[r], bv[c], blk[r][c]);
             }
 #pragma unroll
             for (int r = 0; r < RM; ++r)
 #pragma unroll
-                for (int c = 0; c < 4; ++c) {
+                for (int c = 0; c < RN; ++c) {
                     float term = blk[r][c] - cmp[r][c];
                     float tsum = acc[r][c] + term;
                     cmp[r][c] = (tsum - acc[r][c]) - term;
@@ -2638,7 +2652,7 @@ __global__ void __launch_bounds__(256, 2) band_gemm_kernel(
         }
     }
 #pragma unroll
-    for (int c = 0; c < 4; ++c) {
+    for (int c = 0; c < RN; ++c) {
         int m = m0 + ty + 16 * c;
         if (m < n_mod) {
 #pragma unroll
@@ -2857,35 +2871,37 @@ __global__ void __launch_bounds__(128) observed_frame_kernel(
 //   y(i) = sum_{k <= it} w_y(k) [(1 - d) B(i, k, zl) + d B(i, k, zl + 1)],   o(i) = same over k > it with w_o,
 // B(i, k, z) the basis spectra. The two slabs of a pair are adjacent columns of the basis seen as an
 // (nspec x nt nz) matrix, so for the models of one pair this is A times a coefficient matrix ((1 - d) w,
-// d w per column) formed while the tile is staged. A block computes 128 pixels x 64 models of the young sums
+// d w per column) formed while the tile is staged. A block computes 16 RM pixels x 16 RN models of the young sums
 // (blockIdx.z = 0: ages k <= the tile's largest it, in both slabs) or of the old sums (z = 1: ages above the
 // tile's smallest it); the zero coefficients outside are not multiplied. 8 x 4 per thread, templates 16 at
 // a time in shared memory; arithmetic as the template products: blocks of 4 terms with plain multiply-adds
 // (all terms >= 0), the blocks added with compensation (the Fortran kernel summed ~100 ages plainly).
-// tile t: models zord[first[t] .. first[t] + cnt[t] - 1] (1-based model numbers), all of metallicity pair zl[t]
+// tile t: models zord[first[t] .. first[t] + cnt[t] - 1] (1-based model numbers, cnt <= 16 RN), all of metallicity pair zl[t]
 // ---------------------------------------------------------------------------
+template <int RM, int RN, int KC, int KB>
 __global__ void __launch_bounds__(256, 2) age_sums_z_kernel(
     int nspec, int nt, int n_mod,
     const int* __restrict__ zord, const int* __restrict__ tfirst, const int* __restrict__ tcnt, const int* __restrict__ tzl,
     const float* __restrict__ basis, const float* __restrict__ w2, const int* __restrict__ it_tesc,
     const double* __restrict__ dz, float* __restrict__ yo
 ) {
-    __shared__ float As[TC_KC][TC_BM];
-    __shared__ float Bs[TC_KC][64];
-    __shared__ int   s_wb[64];     // offset of the column's weights in w2
-    __shared__ int   s_it[64];
-    __shared__ float s_d[64];
-    __shared__ int   s_out[64];    // model column of yo (-1: no model)
+    constexpr int BM = 16 * RM, BN = 16 * RN;   // pixels, models per block
+    __shared__ float As[KC][BM];
+    __shared__ float Bs[KC][BN];
+    __shared__ int   s_wb[BN];     // offset of the column's weights in w2
+    __shared__ int   s_it[BN];
+    __shared__ float s_d[BN];
+    __shared__ int   s_out[BN];    // model column of yo (-1: no model)
     __shared__ int   s_klo, s_khi;
     const int tid = threadIdx.x;
     const int tx = tid & 15, ty = tid >> 4;
-    const int i0 = blockIdx.x * TC_BM;
+    const int i0 = blockIdx.x * BM;
     const int t = blockIdx.y;
     const int old = blockIdx.z;
     const int first = tfirst[t], cnt = tcnt[t], zl = tzl[t];
     if (tid == 0) { s_klo = nt; s_khi = 0; }
     __syncthreads();
-    if (tid < 64) {
+    if (tid < BN) {
         if (tid < cnt) {
             const int m = zord[first + tid] - 1;
             s_wb[tid] = (old ? n_mod + m : m) * nt;
@@ -2905,17 +2921,17 @@ __global__ void __launch_bounds__(256, 2) age_sums_z_kernel(
     const int K = 2 * len;
     const float* Ab = basis + (size_t)(zl - 1) * nt * nspec;
 
-    float acc[TC_RM][TC_RN], cmp[TC_RM][TC_RN], blk[TC_RM][TC_RN];
+    float acc[RM][RN], cmp[RM][RN], blk[RM][RN];
 #pragma unroll
-    for (int r = 0; r < TC_RM; ++r)
+    for (int r = 0; r < RM; ++r)
 #pragma unroll
-        for (int c = 0; c < TC_RN; ++c) { acc[r][c] = 0.f; cmp[r][c] = 0.f; }
+        for (int c = 0; c < RN; ++c) { acc[r][c] = 0.f; cmp[r][c] = 0.f; }
 
-    float pa[TC_KC * TC_BM / 256], pb[TC_KC * 64 / 256];
+    float pa[KC * BM / 256], pb[KC * BN / 256];
     auto gload = [&](int e0) {
 #pragma unroll
-        for (int q = 0; q < TC_KC * TC_BM / 256; ++q) {
-            int idx = tid + q * 256, i = idx % TC_BM, e = e0 + idx / TC_BM;
+        for (int q = 0; q < KC * BM / 256; ++q) {
+            int idx = tid + q * 256, i = idx % BM, e = e0 + idx / BM;
             float v = 0.f;
             if (i0 + i < nspec && e < K) {
                 int half = e >= len;
@@ -2925,8 +2941,8 @@ __global__ void __launch_bounds__(256, 2) age_sums_z_kernel(
             pa[q] = v;
         }
 #pragma unroll
-        for (int q = 0; q < TC_KC * 64 / 256; ++q) {
-            int idx = tid + q * 256, el = idx % TC_KC, col = idx / TC_KC;
+        for (int q = 0; q < KC * BN / 256; ++q) {
+            int idx = tid + q * 256, el = idx % KC, col = idx / KC;
             int e = e0 + el;
             float v = 0.f;
             if (e < K && s_out[col] >= 0) {
@@ -2940,42 +2956,42 @@ __global__ void __launch_bounds__(256, 2) age_sums_z_kernel(
         }
     };
     gload(0);
-    for (int e0 = 0; e0 < K; e0 += TC_KC) {
+    for (int e0 = 0; e0 < K; e0 += KC) {
         __syncthreads();
 #pragma unroll
-        for (int q = 0; q < TC_KC * TC_BM / 256; ++q) {
-            int idx = tid + q * 256; As[idx / TC_BM][idx % TC_BM] = pa[q];
+        for (int q = 0; q < KC * BM / 256; ++q) {
+            int idx = tid + q * 256; As[idx / BM][idx % BM] = pa[q];
         }
 #pragma unroll
-        for (int q = 0; q < TC_KC * 64 / 256; ++q) {
-            int idx = tid + q * 256; Bs[idx % TC_KC][idx / TC_KC] = pb[q];
+        for (int q = 0; q < KC * BN / 256; ++q) {
+            int idx = tid + q * 256; Bs[idx % KC][idx / KC] = pb[q];
         }
         __syncthreads();
-        if (e0 + TC_KC < K) gload(e0 + TC_KC);
+        if (e0 + KC < K) gload(e0 + KC);
 #pragma unroll
-        for (int g = 0; g < TC_KC / 4; ++g) {
-            if (e0 + g * 4 >= K) break;
+        for (int g = 0; g < KC / KB; ++g) {
+            if (e0 + g * KB >= K) break;
 #pragma unroll
-            for (int r = 0; r < TC_RM; ++r)
+            for (int r = 0; r < RM; ++r)
 #pragma unroll
-                for (int c = 0; c < TC_RN; ++c) blk[r][c] = 0.f;
+                for (int c = 0; c < RN; ++c) blk[r][c] = 0.f;
 #pragma unroll
-            for (int u = 0; u < 4; ++u) {
-                const int e = g * 4 + u;
-                float av[TC_RM], bv[TC_RN];
+            for (int u = 0; u < KB; ++u) {
+                const int e = g * KB + u;
+                float av[RM], bv[RN];
 #pragma unroll
-                for (int r = 0; r < TC_RM; ++r) av[r] = As[e][tx + 16 * r];
+                for (int r = 0; r < RM; ++r) av[r] = As[e][tx + 16 * r];
 #pragma unroll
-                for (int c = 0; c < TC_RN; ++c) bv[c] = Bs[e][ty + 16 * c];
+                for (int c = 0; c < RN; ++c) bv[c] = Bs[e][ty + 16 * c];
 #pragma unroll
-                for (int r = 0; r < TC_RM; ++r)
+                for (int r = 0; r < RM; ++r)
 #pragma unroll
-                    for (int c = 0; c < TC_RN; ++c) blk[r][c] = fmaf(av[r], bv[c], blk[r][c]);
+                    for (int c = 0; c < RN; ++c) blk[r][c] = fmaf(av[r], bv[c], blk[r][c]);
             }
 #pragma unroll
-            for (int r = 0; r < TC_RM; ++r)
+            for (int r = 0; r < RM; ++r)
 #pragma unroll
-                for (int c = 0; c < TC_RN; ++c) {
+                for (int c = 0; c < RN; ++c) {
                     float term = blk[r][c] - cmp[r][c];
                     float tsum = acc[r][c] + term;
                     cmp[r][c] = (tsum - acc[r][c]) - term;
@@ -2984,11 +3000,11 @@ __global__ void __launch_bounds__(256, 2) age_sums_z_kernel(
         }
     }
 #pragma unroll
-    for (int c = 0; c < TC_RN; ++c) {
+    for (int c = 0; c < RN; ++c) {
         int col = ty + 16 * c;
         if (s_out[col] >= 0) {
 #pragma unroll
-            for (int r = 0; r < TC_RM; ++r) {
+            for (int r = 0; r < RM; ++r) {
                 int i = i0 + tx + 16 * r;
                 if (i < nspec) yo[(size_t)s_out[col] * nspec + i] = acc[r][c] - cmp[r][c];
             }
@@ -2998,27 +3014,36 @@ __global__ void __launch_bounds__(256, 2) age_sums_z_kernel(
 
 extern "C" {
 
-void opensps_hip_age_sums_z(int nspec, int nt, int n_mod, int ntile, const int* d_zord, const int* d_tfirst,
-                            const int* d_tcnt, const int* d_tzl, const float* d_basis, const float* d_w2,
-                            const int* d_it, const double* d_dz, float* d_yo, void* stream) {
-    if (nspec <= 0 || ntile <= 0) return;
+// Returns 1 if the tile shape is not supported (the caller then takes its portable kernel). Tiles hold up to
+// 16 rn models (the caller builds them)
+int opensps_hip_age_sums_z(int nspec, int nt, int n_mod, int ntile, int rm, int rn, int kc, int kb, const int* d_zord,
+                           const int* d_tfirst, const int* d_tcnt, const int* d_tzl, const float* d_basis,
+                           const float* d_w2, const int* d_it, const double* d_dz, float* d_yo, void* stream) {
+    if (nspec <= 0 || ntile <= 0) return 0;
     hipStream_t s = (hipStream_t)stream;
-    age_sums_z_kernel<<<dim3((nspec + TC_BM - 1) / TC_BM, ntile, 2), 256, 0, s>>>(
-        nspec, nt, n_mod, d_zord, d_tfirst, d_tcnt, d_tzl, d_basis, d_w2, d_it, d_dz, d_yo);
+    const bool ok = gemm_dispatch(rm, rn, kc, kb, [&](auto cfg) {
+        constexpr int RM = decltype(cfg)::RM, RN = decltype(cfg)::RN, KC = decltype(cfg)::KC, KB = decltype(cfg)::KB;
+        age_sums_z_kernel<RM, RN, KC, KB><<<dim3((nspec + 16 * RM - 1) / (16 * RM), ntile, 2), 256, 0, s>>>(
+            nspec, nt, n_mod, d_zord, d_tfirst, d_tcnt, d_tzl, d_basis, d_w2, d_it, d_dz, d_yo);
+    });
+    if (!ok) return 1;
     (void)hipStreamSynchronize(s);
+    return 0;
 }
 
 void opensps_hip_attenuate(int nspec, int n_mod, int nq, const float* d_mp, const int* d_mi, const float* d_ttab,
                            const double* d_ltab, const double* d_dustem, size_t n_dustem, int any_emis,
-                           float* d_yo, float* d_total, float* d_absorbed, float* d_tdiff, void* stream) {
+                           float* d_yo, float* d_total, float* d_absorbed, float* d_tdiff, int threads, void* stream) {
     if (nspec <= 0 || n_mod <= 0) return;
+    if (threads < 32) threads = 32;
+    if (threads > 256) threads = 256;   // (the kernel's launch bounds)
     hipStream_t s = (hipStream_t)stream;
     if ((size_t)nspec > g_ltf_n) {
         if (g_ltf) (void)hipFree(g_ltf);
         if (hipMalloc((void**)&g_ltf, (size_t)nspec * sizeof(float2)) != hipSuccess) { g_ltf = nullptr; g_ltf_n = 0; return; }
         g_ltf_n = nspec;
     }
-    split_ltab_kernel<<<(nspec + 255) / 256, 256, 0, s>>>(nspec, d_ltab, g_ltf);
+    split_ltab_kernel<<<(nspec + threads - 1) / threads, threads, 0, s>>>(nspec, d_ltab, g_ltf);
     if (any_emis) {
         // (the table as hi + lo pairs; formed per call: 0.3 ms, and no stale copy if the table is reloaded)
         if (n_dustem > g_dust_n) {
@@ -3026,17 +3051,19 @@ void opensps_hip_attenuate(int nspec, int n_mod, int nq, const float* d_mp, cons
             if (hipMalloc((void**)&g_dust, n_dustem * sizeof(float2)) != hipSuccess) { g_dust = nullptr; g_dust_n = 0; return; }
             g_dust_n = n_dustem;
         }
-        split_dustem_kernel<<<(unsigned)((n_dustem + 255) / 256), 256, 0, s>>>(n_dustem, d_dustem, g_dust);
+        split_dustem_kernel<<<(unsigned)((n_dustem + threads - 1) / threads), threads, 0, s>>>(n_dustem, d_dustem, g_dust);
     }
-    attenuate_kernel<<<dim3((nspec + 255) / 256, n_mod), 256, 0, s>>>(nspec, n_mod, nq, d_mp, d_mi, d_ttab, g_ltf, g_dust,
+    attenuate_kernel<<<dim3((nspec + threads - 1) / threads, n_mod), threads, 0, s>>>(nspec, n_mod, nq, d_mp, d_mi, d_ttab, g_ltf, g_dust,
                                                                      d_yo, d_total, d_absorbed, d_tdiff);
     (void)hipStreamSynchronize(s);
 }
 
 int opensps_hip_observed_frame(int n_col, int nspec, int npad, int ch, int ldf, double zfloor, const double* d_zc,
                                 const double* d_lambda, const float* d_wl, const float* d_total, float* d_fobs,
-                                void* stream) {
+                                int threads, void* stream) {
     if (n_col <= 0 || nspec <= 1) return 0;
+    if (threads < 32) threads = 32;
+    if (threads > 128) threads = 128;   // (the kernel's launch bounds)
     hipStream_t s = (hipStream_t)stream;
     if ((size_t)nspec > g_ltf_n) {
         if (g_ltf) (void)hipFree(g_ltf);
@@ -3044,7 +3071,7 @@ int opensps_hip_observed_frame(int n_col, int nspec, int npad, int ch, int ldf, 
         g_ltf_n = nspec;
     }
     split_ltab_kernel<<<(nspec + 255) / 256, 256, 0, s>>>(nspec, d_lambda, g_ltf);
-    observed_frame_kernel<<<dim3((n_col + 127) / 128, (npad + ch - 1) / ch), 128, 0, s>>>(
+    observed_frame_kernel<<<dim3((n_col + threads - 1) / threads, (npad + ch - 1) / ch), threads, 0, s>>>(
         n_col, nspec, npad, ch, ldf, zfloor, d_zc, g_ltf, d_wl, d_total, d_fobs);
     (void)hipStreamSynchronize(s);
     return 0;
@@ -3054,6 +3081,10 @@ void opensps_hip_band_fluxes_sp(
     int n_mod,
     int nspec,
     int nbands,
+    int small_n,
+    int rn,
+    int kc,
+    int kb,
     const float*  d_bands_t,
     const int*    d_j_lo,
     const int*    d_j_hi,
@@ -3065,11 +3096,8 @@ void opensps_hip_band_fluxes_sp(
 ) {
     if (n_mod <= 0 || nbands <= 0) return;
     hipStream_t s = (hipStream_t)stream;
-    if (n_mod < BF_SMALL_N) {
-        band_fluxes_small_kernel<float><<<dim3(n_mod, nbands), BF_SMALL_THREADS, 0, s>>>(
-            n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband
-        );
-    } else if (nbands > 0 && nspec > 0) {
+    bool done = false;
+    if (n_mod >= small_n && nspec > 0) {
         size_t need = (size_t)nspec * nbands;
         if (need > g_band_A_n) {
             if (g_band_A) (void)hipFree(g_band_A);
@@ -3077,26 +3105,31 @@ void opensps_hip_band_fluxes_sp(
             else g_band_A_n = need;
         }
         if (g_band_A) {
-            band_matrix_kernel<<<dim3((nspec + 255) / 256, nbands), 256, 0, s>>>(
-                nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, g_band_A);
-            if (nbands <= 16)
-                band_gemm_kernel<1><<<dim3((n_mod + 63) / 64, 1), 256, 0, s>>>(nbands, n_mod, nspec, g_band_A, d_fobs_t, d_fband);
-            else if (nbands <= 32)
-                band_gemm_kernel<2><<<dim3((n_mod + 63) / 64, (nbands + 31) / 32), 256, 0, s>>>(nbands, n_mod, nspec, g_band_A, d_fobs_t, d_fband);
-            else
-                band_gemm_kernel<4><<<dim3((n_mod + 63) / 64, (nbands + 63) / 64), 256, 0, s>>>(nbands, n_mod, nspec, g_band_A, d_fobs_t, d_fband);
+            // row tile of 16 / 32 / 64 bands by the number of bands (RMB), columns and stages from the registry
+            const int rmb = nbands <= 16 ? 1 : (nbands <= 32 ? 2 : 4);
+#define BAND_CASE(RMB, RN, KB) if (rmb == RMB && rn == RN && kb == KB && kc == 16) { \
+                band_matrix_kernel<<<dim3((nspec + 255) / 256, nbands), 256, 0, s>>>( \
+                    nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, g_band_A); \
+                band_gemm_kernel<RMB, RN, 16, KB><<<dim3((n_mod + 16 * RN - 1) / (16 * RN), (nbands + 16 * RMB - 1) / (16 * RMB)), 256, 0, s>>>( \
+                    nbands, n_mod, nspec, g_band_A, d_fobs_t, d_fband); done = true; }
+#define BAND_CASES(RMB) BAND_CASE(RMB, 4, 4) BAND_CASE(RMB, 4, 8) BAND_CASE(RMB, 8, 4) BAND_CASE(RMB, 8, 8)
+            BAND_CASES(1) BAND_CASES(2) BAND_CASES(4)
+#undef BAND_CASES
+#undef BAND_CASE
+        }
+    }
+    if (!done) {
+        if (n_mod < small_n) {
+            band_fluxes_small_kernel<float><<<dim3(n_mod, nbands), BF_SMALL_THREADS, 0, s>>>(
+                n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband
+            );
         } else {
             dim3 block(32, 1);
             dim3 grid((n_mod + 31) / 32, nbands);
             band_fluxes_kernel<float><<<grid, block, 0, s>>>(
-                n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband);
+                n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband
+            );
         }
-    } else {
-        dim3 block(32, 1);
-        dim3 grid((n_mod + 31) / 32, nbands);
-        band_fluxes_kernel<float><<<grid, block, 0, s>>>(
-            n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband
-        );
     }
     (void)hipStreamSynchronize(s);
 }
@@ -3105,6 +3138,7 @@ void opensps_hip_band_fluxes_dp(
     int n_mod,
     int nspec,
     int nbands,
+    int small_n,
     const double* d_bands_t,
     const int*    d_j_lo,
     const int*    d_j_hi,
@@ -3116,7 +3150,7 @@ void opensps_hip_band_fluxes_dp(
 ) {
     if (n_mod <= 0 || nbands <= 0) return;
     hipStream_t s = (hipStream_t)stream;
-    if (n_mod < BF_SMALL_N) {
+    if (n_mod < small_n) {
         band_fluxes_small_kernel<double><<<dim3(n_mod, nbands), BF_SMALL_THREADS, 0, s>>>(
             n_mod, nspec, nbands, d_bands_t, d_j_lo, d_j_hi, d_do_band, d_wt, d_fobs_t, d_fband
         );

@@ -35,6 +35,31 @@ Compile-time parameters (what each one is and what it changes: the comments in t
 `TUNE_IMF_GRAD_CHG`, `TUNE_SSP_STAR_BATCH`, the register tiles of the age sums
 (`TUNE_AGE_SUMS_*`) and of the template sums (`TUNE_TEMPLATE_*`).
 
+The native HIP kernels (`src/accel/hip`) take their tile and block sizes from the registry too: the Fortran
+caller passes the `TUNE_HIP_*` values to the wrapper, which instantiates the kernel for that shape (templates)
+or launches it with that block size. A kernel is built only for the shapes listed here; a value outside the list
+makes the wrapper return "not supported" and the caller runs its portable kernel (or, for the block sizes,
+clamps to the legal range), so a wrong override is slow, never wrong. `tools/check_tuning_literals.py` refuses a
+`#define` of these sizes in the HIP sources and a `TUNE_HIP_*` parameter that no source reads.
+
+| Parameter | Default | Supported | What it is |
+|---|---|---|---|
+| `HIP_GEMM_RM` | 8 | 4, 8 | rows per thread of the shared-memory products (template products, free-Z age sums, band fluxes): 16 RM pixels per block |
+| `HIP_GEMM_RN` | 4 | 4, 8 | columns (models) per thread: 16 RN per block (and RN x 16 models per tile of the age sums) |
+| `HIP_GEMM_KC` | 16 | 16 | templates, ages or pixels staged through shared memory per step |
+| `TEMPLATE_KB` | 4 | 4, 8 (HIP) | terms per plain block of the compensated sum (also read by the Fortran kernels): changes the rounding |
+| `HIP_FOLD_JB` | 128 | 32 to 128 | models per block of the fold of the point weights |
+| `HIP_SMOOTH_PB` / `HIP_SMOOTH_KCH` | 64 / 256 | 64 with 128, 256, 512; 32 with 128, 256 | output pixels per block / window pixels staged per step of the velocity smoothing |
+| `HIP_SMOOTH_KB` | 4 | any >= 1 | taps per plain block of the smoothing sum: changes the rounding |
+| `HIP_ATT_THREADS` / `HIP_OBS_THREADS` | 256 / 128 | 32 to 256 / 32 to 128 | threads per block of the dust attenuation / the observed-frame interpolation |
+| `HIP_WEIGHTS_PIECES` | 4 | 1 to 4 | pieces per block (with 32 models) of the IMF point weights |
+| `HIP_BAND_SMALL_N` | 40 | any | batches of fewer models use the one-workgroup-per-(model, band) band kernel |
+
+These defaults were measured on one device (M4, R9700); by rule 2 they stay defaults until a second device is
+measured. The legacy kernels of the HIP file keep literal block sizes (the nebular continuum, the cue dense layers
+`CUE_BU`/`CUE_BM`/`CUE_BK`, `BF_SMALL_THREADS`, the fixed 128 / 256 threads of the older kernels): they predate the
+rule and are the next ones to move.
+
 ### Overriding a compile-time parameter at build time (sweeps and tuners)
 
 `-Dtuning_overrides=NAME=VALUE[,NAME=VALUE...]` builds with other values of compile-time parameters, with the
@@ -147,6 +172,26 @@ spectra column gives the same shape (host faster up to 128, 1.31x slower at 256)
 for this GPU with this host CPU; a slower host core moves it down. Not covered: other AMD parts.
 Also confirmed on this machine (not an entry, equal to the default): `SSP_BATCH_CHUNK` at batch
 10^4, `full_imf`: 256 gives 54.0 us per model, 2048 gives 48.7, 16384 gives 58.4.
+
+
+**M4. `gfx1201` (AMD Radeon AI PRO R9700), the HIP kernels' tile and block sizes.** Measured 2026-11-15 on the
+desktop of the maintainer (Ryzen 9 9950X, Fedora 44, the ROCm 7.2.4 container `tools/containers`, amdflang,
+hipcc, FP32 kernels `-Dkernel_precision=single -Daccel=omp_gpu -Dgpu_arch=gfx1201 -Daccel_hip=true`), branch
+`perf/forward-bottlenecks`, `rocprofv3 --kernel-trace`, `benchmark_csp_batch 10000 0 full_smooth_z_imf_fit`,
+average kernel time per launch (the profiler's noise is ~5%; the clock ramps over the first calls):
+
+| kernel | variant | ms per launch |
+|---|---|---|
+| template products (`template_columns_kernel`) | 128 x 64 tile (RM 8, RN 4) | 1.12 |
+| | 128 x 128 tile (RM 8, RN 8) | 1.78 |
+| fold (`fold_multi_kernel`), models per block | 128 | 8.9 (8.9, 9.0) |
+| | 64 | 12.1 (11.7, 12.5) |
+| | 32 | 23.0 (22.6, 23.5) |
+| weights, expm1 as a degree-6 series for |y| < 1/8 | library expm1f / series | 6.78 / 6.57 (not adopted) |
+
+The other sizes (smoothing tile, `HIP_ATT_THREADS`, `HIP_OBS_THREADS`, `HIP_WEIGHTS_PIECES`,
+`HIP_BAND_SMALL_N`) are the values the kernels were written with and were not swept; their entries record that,
+not a measurement. The raw traces are not kept in the repository.
 
 ## Where this is going
 

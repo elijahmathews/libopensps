@@ -249,9 +249,10 @@ substituted as a test) and the curve were ruled out as the cause (the errors did
 digit), so it is a different rounding pattern of the same FP32 expressions, not a loss by construction. The mean
 error moves by +10%.
 
-Block sizes (128 x 64 tiles, 16 templates per stage, 128 models per fold block) are literals of these kernels,
-measured on the R9700 only (a 128 x 128 template tile ran at 0.63 of the speed of 128 x 64; 64 and 32 models per
-fold block at 0.75 and 0.40); they are not yet profile entries of `opensps_tuning.f90`.
+Block and tile sizes of these kernels are parameters of the registry (`TUNE_HIP_*`, `TUNE_TEMPLATE_KB`; doc/TUNING.md,
+"The HIP kernels"): the Fortran caller passes them, a shape the kernel is not built for runs the portable kernel
+instead. The defaults were measured on the R9700 only (M4): a 128 x 128 template tile ran at 0.63 of the speed of
+128 x 64; 64 and 32 models per fold block at 0.75 and 0.40.
 
 ## cue's networks (`nebular_model = 1`)
 

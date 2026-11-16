@@ -84,7 +84,8 @@ module opensps_csp_batch
                               TUNE_AGE_SUMS_Z4_FLANG_MT, TUNE_AGE_SUMS_Z4_FLANG_PT, TUNE_AGE_SUMS_Z_FLANG_MT, &
                               TUNE_AGE_SUMS_Z_FLANG_PT, TUNE_AGE_SUMS_Z_NVF_MT, TUNE_AGE_SUMS_Z4_NVF_MT, &
                               TUNE_AGE_SUMS_MT, TUNE_AGE_SUMS_PT, TUNE_NCH, &
-                              TUNE_P_HOST_SFH_MAX, TUNE_P_PINNED_CHUNK_BYTES, tuning_get
+                              TUNE_P_HOST_SFH_MAX, TUNE_P_PINNED_CHUNK_BYTES, TUNE_HIP_GEMM_RM, TUNE_HIP_GEMM_RN, &
+                              TUNE_HIP_GEMM_KC, TUNE_TEMPLATE_KB, TUNE_HIP_ATT_THREADS, tuning_get
     use opensps_constants, only: SAFE_FLOOR, PI, NEMLINE, NEBNAGE, NEBNZ, NEBNIP, H_PLANCK, L_SOL
     use opensps_types, only: params, params_core
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings, batch_out_reserve, &
@@ -3520,24 +3521,30 @@ contains
 
 #if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
     !> age_sums_z with the HIP kernel (opensps_hip_age_sums_z): the models sorted by the lower slab of their
-    !> metallicity pair and cut into tiles of 64 models of one pair
-    subroutine age_sums_z_hip(nspec, nt, nz, n_mod, basis, w2flat, it_tesc, zlo, dz, yo)
+    !> metallicity pair and cut into tiles of 16 HIP_GEMM_RN models of one pair. done is false if the kernel is not
+    !> built for the registry's tile shape (the caller then runs its portable kernel)
+    subroutine age_sums_z_hip(nspec, nt, nz, n_mod, basis, w2flat, it_tesc, zlo, dz, yo, done)
         use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_null_ptr
         integer, intent(in)  :: nspec, nt, nz, n_mod
         integer, intent(in), target  :: it_tesc(n_mod), zlo(n_mod)
         real(KP), intent(in), target :: basis(nspec, nt, nz), w2flat(nt * 2 * n_mod)
         real(WP), intent(in), target :: dz(n_mod)
         real(KP), intent(out), target :: yo(nspec, 2 * n_mod)
+        logical, intent(out) :: done
         integer, allocatable, target :: zord(:), starts(:), tfirst(:), tcnt(:), tzl(:), fill(:)
-        integer :: m, key, nzk, ntile, g, c, j
+        integer :: m, key, nzk, ntile, g, c, j, tm
+        integer(c_int) :: rc
         interface
-            subroutine opensps_hip_age_sums_z(nspec, nt, n_mod, ntile, zord, tfirst, tcnt, tzl, basis, w2, it, dz, yo, stream) &
-                bind(C, name="opensps_hip_age_sums_z")
+            function opensps_hip_age_sums_z(nspec, nt, n_mod, ntile, rm, rn, kc, kb, zord, tfirst, tcnt, tzl, basis, w2, it, dz, &
+                                            yo, stream) result(rc) bind(C, name="opensps_hip_age_sums_z")
                 import :: c_int, c_ptr
-                integer(c_int), value :: nspec, nt, n_mod, ntile
+                integer(c_int), value :: nspec, nt, n_mod, ntile, rm, rn, kc, kb
                 type(c_ptr), value :: zord, tfirst, tcnt, tzl, basis, w2, it, dz, yo, stream
-            end subroutine opensps_hip_age_sums_z
+                integer(c_int) :: rc
+            end function opensps_hip_age_sums_z
         end interface
+
+        tm = 16 * TUNE_HIP_GEMM_RN       ! models per tile
 
         nzk = maxval(zlo(1:n_mod))
         allocate(zord(n_mod), starts(nzk + 2), fill(nzk + 1))
@@ -3557,26 +3564,28 @@ contains
         ntile = 0
         do g = 1, nzk
             c = starts(g + 1) - starts(g)
-            ntile = ntile + (c + 63) / 64
+            ntile = ntile + (c + tm - 1) / tm
         end do
         allocate(tfirst(max(ntile, 1)), tcnt(max(ntile, 1)), tzl(max(ntile, 1)))
         j = 0
         do g = 1, nzk
             c = starts(g + 1) - starts(g)
-            do m = 0, c - 1, 64
+            do m = 0, c - 1, tm
                 j = j + 1
                 tfirst(j) = starts(g) - 1 + m
-                tcnt(j) = min(64, c - m)
+                tcnt(j) = min(tm, c - m)
                 tzl(j) = g
             end do
         end do
         !$omp target data map(to: zord, tfirst, tcnt, tzl) use_device_addr(basis, w2flat, it_tesc, dz, yo)
         !$omp target data use_device_addr(zord, tfirst, tcnt, tzl)
-        call opensps_hip_age_sums_z(int(nspec, c_int), int(nt, c_int), int(n_mod, c_int), int(ntile, c_int), c_loc(zord), &
-                                    c_loc(tfirst), c_loc(tcnt), c_loc(tzl), c_loc(basis), c_loc(w2flat), c_loc(it_tesc), &
-                                    c_loc(dz), c_loc(yo), c_null_ptr)
+        rc = opensps_hip_age_sums_z(int(nspec, c_int), int(nt, c_int), int(n_mod, c_int), int(ntile, c_int), &
+                                    int(TUNE_HIP_GEMM_RM, c_int), int(TUNE_HIP_GEMM_RN, c_int), int(TUNE_HIP_GEMM_KC, c_int), &
+                                    int(TUNE_TEMPLATE_KB, c_int), c_loc(zord), c_loc(tfirst), c_loc(tcnt), c_loc(tzl), &
+                                    c_loc(basis), c_loc(w2flat), c_loc(it_tesc), c_loc(dz), c_loc(yo), c_null_ptr)
         !$omp end target data
         !$omp end target data
+        done = rc == 0
     end subroutine age_sums_z_hip
 #endif
 
@@ -3589,10 +3598,11 @@ contains
         real(WP), intent(in)             :: dz(n_mod)
         real(KP), intent(out)            :: yo(nspec, 2 * n_mod)
 #if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+        logical :: hip_done
         ! The two slabs of every model's pair adjacent (always, with the metallicity interval): a product per pair
         if (all(zhi(1:n_mod) == zlo(1:n_mod) + 1)) then
-            call age_sums_z_hip(nspec, nt, nz, n_mod, basis, w2flat, it_tesc, zlo, dz, yo)
-            return
+            call age_sums_z_hip(nspec, nt, nz, n_mod, basis, w2flat, it_tesc, zlo, dz, yo, hip_done)
+            if (hip_done) return
         end if
 #endif
         call age_sums_z_generic(nspec, nt, nz, n_mod, basis, w2, w2flat, it_tesc, zlo, zhi, dz, yo)
@@ -4477,9 +4487,9 @@ contains
         real(KP), intent(out), target, contiguous :: total(:,:), absorbed(:,:)
         interface
             subroutine opensps_hip_attenuate(nspec, n_mod, nq, mp, mi, ttab, ltab, dustem, ndust, any_emis, yo, total, &
-                                             absorbed, tdiff, stream) bind(C, name="opensps_hip_attenuate")
+                                             absorbed, tdiff, threads, stream) bind(C, name="opensps_hip_attenuate")
                 import :: c_int, c_ptr, c_size_t
-                integer(c_int), value :: nspec, n_mod, nq, any_emis
+                integer(c_int), value :: nspec, n_mod, nq, any_emis, threads
                 integer(c_size_t), value :: ndust
                 type(c_ptr), value :: mp, mi, ttab, ltab, dustem, yo, total, absorbed, tdiff, stream
             end subroutine opensps_hip_attenuate
@@ -4488,7 +4498,7 @@ contains
         call opensps_hip_attenuate(int(nspec, c_int), int(n_mod, c_int), int(nq, c_int), c_loc(mp(1, 1)), c_loc(mi(1, 1)), &
                                    c_loc(ttab(1, 0)), c_loc(ltab(1)), c_loc(dustem(1, 1, 1)), int(size(dustem), c_size_t), &
                                    int(merge(1, 0, any(emis_h)), c_int), c_loc(yo(1, 1)), &
-                                   c_loc(total(1, 1)), c_loc(absorbed(1, 1)), c_loc(tdiff(1, 1)), c_null_ptr)
+                                   c_loc(total(1, 1)), c_loc(absorbed(1, 1)), c_loc(tdiff(1, 1)), int(TUNE_HIP_ATT_THREADS, c_int), c_null_ptr)
         !$omp end target data
     end subroutine attenuate_hip_launch
 #endif

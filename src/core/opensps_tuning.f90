@@ -264,29 +264,135 @@ module opensps_tuning
     integer, parameter, public :: TUNE_BAND_PIX_PER_THREAD = 16
     logical, parameter :: CT_OVR_BAND_PIX_PER_THREAD = .false.
 #endif
+    !> HIP shared-memory products (template products, free-Z age sums, band fluxes): output rows per thread; a block
+    !> has 16 RM pixels (rows). Supported by the kernels: 4, 8 (another value: the portable kernel runs). Measured on the
+    !> R9700 only (M4). Changes no sum.
+#ifdef TUNE_HIP_GEMM_RM_OVERRIDE
+    integer, parameter, public :: TUNE_HIP_GEMM_RM = TUNE_HIP_GEMM_RM_OVERRIDE
+    logical, parameter :: CT_OVR_HIP_GEMM_RM = .true.
+#else
+    integer, parameter, public :: TUNE_HIP_GEMM_RM = 8
+    logical, parameter :: CT_OVR_HIP_GEMM_RM = .false.
+#endif
+    !> HIP shared-memory products: output columns (models) per thread; a block has 16 RN columns. Supported: 4, 8
+    !> (8 x 8 spills registers on the R9700: M4). Changes no sum.
+#ifdef TUNE_HIP_GEMM_RN_OVERRIDE
+    integer, parameter, public :: TUNE_HIP_GEMM_RN = TUNE_HIP_GEMM_RN_OVERRIDE
+    logical, parameter :: CT_OVR_HIP_GEMM_RN = .true.
+#else
+    integer, parameter, public :: TUNE_HIP_GEMM_RN = 4
+    logical, parameter :: CT_OVR_HIP_GEMM_RN = .false.
+#endif
+    !> HIP shared-memory products: templates (or pixels, ages) staged through shared memory per step. Supported: 16.
+    !> Changes no sum.
+#ifdef TUNE_HIP_GEMM_KC_OVERRIDE
+    integer, parameter, public :: TUNE_HIP_GEMM_KC = TUNE_HIP_GEMM_KC_OVERRIDE
+    logical, parameter :: CT_OVR_HIP_GEMM_KC = .true.
+#else
+    integer, parameter, public :: TUNE_HIP_GEMM_KC = 16
+    logical, parameter :: CT_OVR_HIP_GEMM_KC = .false.
+#endif
+    !> HIP fold of the point weights (`fold_multi_kernel`): models per block (threads), 32 to 128: the weights of
+    !> the block's models are re-read by the segments that share a point, so a wider block reuses the cache better (M4).
+    !> Changes no sum.
+#ifdef TUNE_HIP_FOLD_JB_OVERRIDE
+    integer, parameter, public :: TUNE_HIP_FOLD_JB = TUNE_HIP_FOLD_JB_OVERRIDE
+    logical, parameter :: CT_OVR_HIP_FOLD_JB = .true.
+#else
+    integer, parameter, public :: TUNE_HIP_FOLD_JB = 128
+    logical, parameter :: CT_OVR_HIP_FOLD_JB = .false.
+#endif
+    !> HIP velocity smoothing (`smooth_kernel_f32`): output pixels per block (the block's 256 threads are PB pixels
+    !> x 256 / PB groups of 4 models). Supported: 64 with 128, 256 or 512; 32 with 128 or 256. Changes no sum.
+#ifdef TUNE_HIP_SMOOTH_PB_OVERRIDE
+    integer, parameter, public :: TUNE_HIP_SMOOTH_PB = TUNE_HIP_SMOOTH_PB_OVERRIDE
+    logical, parameter :: CT_OVR_HIP_SMOOTH_PB = .true.
+#else
+    integer, parameter, public :: TUNE_HIP_SMOOTH_PB = 64
+    logical, parameter :: CT_OVR_HIP_SMOOTH_PB = .false.
+#endif
+    !> HIP velocity smoothing: window pixels staged through shared memory per step. Supported: 128, 256, 512.
+    !> Changes no sum.
+#ifdef TUNE_HIP_SMOOTH_KCH_OVERRIDE
+    integer, parameter, public :: TUNE_HIP_SMOOTH_KCH = TUNE_HIP_SMOOTH_KCH_OVERRIDE
+    logical, parameter :: CT_OVR_HIP_SMOOTH_KCH = .true.
+#else
+    integer, parameter, public :: TUNE_HIP_SMOOTH_KCH = 256
+    logical, parameter :: CT_OVR_HIP_SMOOTH_KCH = .false.
+#endif
+    !> HIP velocity smoothing: taps per plain block of the compensated sum (blocks are added with compensation).
+    !> Changes the summation order (rule 1 of doc/MIXED_PRECISION.md).
+#ifdef TUNE_HIP_SMOOTH_KB_OVERRIDE
+    integer, parameter, public :: TUNE_HIP_SMOOTH_KB = TUNE_HIP_SMOOTH_KB_OVERRIDE
+    logical, parameter :: CT_OVR_HIP_SMOOTH_KB = .true.
+#else
+    integer, parameter, public :: TUNE_HIP_SMOOTH_KB = 4
+    logical, parameter :: CT_OVR_HIP_SMOOTH_KB = .false.
+#endif
+    !> HIP dust attenuation (`attenuate_kernel`): threads per block, 32 to 256. Changes no sum.
+#ifdef TUNE_HIP_ATT_THREADS_OVERRIDE
+    integer, parameter, public :: TUNE_HIP_ATT_THREADS = TUNE_HIP_ATT_THREADS_OVERRIDE
+    logical, parameter :: CT_OVR_HIP_ATT_THREADS = .true.
+#else
+    integer, parameter, public :: TUNE_HIP_ATT_THREADS = 256
+    logical, parameter :: CT_OVR_HIP_ATT_THREADS = .false.
+#endif
+    !> HIP observed-frame interpolation (`observed_frame_kernel`): threads (models) per block, 32 to 128.
+    !> Changes no sum.
+#ifdef TUNE_HIP_OBS_THREADS_OVERRIDE
+    integer, parameter, public :: TUNE_HIP_OBS_THREADS = TUNE_HIP_OBS_THREADS_OVERRIDE
+    logical, parameter :: CT_OVR_HIP_OBS_THREADS = .true.
+#else
+    integer, parameter, public :: TUNE_HIP_OBS_THREADS = 128
+    logical, parameter :: CT_OVR_HIP_OBS_THREADS = .false.
+#endif
+    !> HIP IMF point weights: pieces per block (the block is 32 models x this many pieces), 1 to 4.
+    !> Changes no sum.
+#ifdef TUNE_HIP_WEIGHTS_PIECES_OVERRIDE
+    integer, parameter, public :: TUNE_HIP_WEIGHTS_PIECES = TUNE_HIP_WEIGHTS_PIECES_OVERRIDE
+    logical, parameter :: CT_OVR_HIP_WEIGHTS_PIECES = .true.
+#else
+    integer, parameter, public :: TUNE_HIP_WEIGHTS_PIECES = 4
+    logical, parameter :: CT_OVR_HIP_WEIGHTS_PIECES = .false.
+#endif
+    !> HIP band fluxes: batches of fewer models than this use the one-workgroup-per-(model, band) kernel, the others
+    !> the shared-memory product (R9700, FP32: M4). Changes no sum beyond the kernels' own rounding.
+#ifdef TUNE_HIP_BAND_SMALL_N_OVERRIDE
+    integer, parameter, public :: TUNE_HIP_BAND_SMALL_N = TUNE_HIP_BAND_SMALL_N_OVERRIDE
+    logical, parameter :: CT_OVR_HIP_BAND_SMALL_N = .true.
+#else
+    integer, parameter, public :: TUNE_HIP_BAND_SMALL_N = 40
+    logical, parameter :: CT_OVR_HIP_BAND_SMALL_N = .false.
+#endif
 
     ! ---- The compile-time parameters as a table (the report, tests, the sweeps' provenance) ----------
-    integer, parameter :: N_CT = 27
+    integer, parameter :: N_CT = 38
     character(len=24), parameter :: ct_names(N_CT) = [character(len=24) :: &
         'SEG_LEN', 'PT_PIECE', 'PIX_BLOCK', 'BAND_BLOCK', 'GEMM_MIN_COLS', 'NCH', 'NCHG', 'MBLK', 'SMALL_N', &
         'CSP_PT', 'AGE_SUMS_Z4_FLANG_MT', 'AGE_SUMS_Z4_FLANG_PT', 'AGE_SUMS_MT', 'AGE_SUMS_PT', &
         'TEMPLATE_MT', 'TEMPLATE_PT', 'TEMPLATE_PIX_BLOCK', 'TEMPLATE_KB', 'AGE_SUMS_Z_FLANG_MT', &
         'AGE_SUMS_Z_FLANG_PT', 'AGE_SUMS_Z_NVF_MT', 'AGE_SUMS_Z4_NVF_MT', 'GEMM_KB', 'SSP_STAR_BATCH', &
-        'GEMM_NC_BATCHED', 'IMF_GRAD_CHG', 'BAND_PIX_PER_THREAD']
+        'GEMM_NC_BATCHED', 'IMF_GRAD_CHG', 'BAND_PIX_PER_THREAD', &
+        'HIP_GEMM_RM', 'HIP_GEMM_RN', 'HIP_GEMM_KC', 'HIP_FOLD_JB', 'HIP_SMOOTH_PB', &
+        'HIP_SMOOTH_KCH', 'HIP_SMOOTH_KB', 'HIP_ATT_THREADS', 'HIP_OBS_THREADS', 'HIP_WEIGHTS_PIECES', 'HIP_BAND_SMALL_N']
     integer, parameter :: ct_values(N_CT) = [ &
         TUNE_SEG_LEN, TUNE_PT_PIECE, TUNE_PIX_BLOCK, TUNE_BAND_BLOCK, TUNE_GEMM_MIN_COLS, TUNE_NCH, &
         TUNE_NCHG, TUNE_MBLK, TUNE_SMALL_N, TUNE_CSP_PT, TUNE_AGE_SUMS_Z4_FLANG_MT, &
         TUNE_AGE_SUMS_Z4_FLANG_PT, TUNE_AGE_SUMS_MT, TUNE_AGE_SUMS_PT, TUNE_TEMPLATE_MT, TUNE_TEMPLATE_PT, &
         TUNE_TEMPLATE_PIX_BLOCK, TUNE_TEMPLATE_KB, TUNE_AGE_SUMS_Z_FLANG_MT, TUNE_AGE_SUMS_Z_FLANG_PT, &
         TUNE_AGE_SUMS_Z_NVF_MT, TUNE_AGE_SUMS_Z4_NVF_MT, TUNE_GEMM_KB, TUNE_SSP_STAR_BATCH, &
-        TUNE_GEMM_NC_BATCHED, TUNE_IMF_GRAD_CHG, TUNE_BAND_PIX_PER_THREAD ]
+        TUNE_GEMM_NC_BATCHED, TUNE_IMF_GRAD_CHG, TUNE_BAND_PIX_PER_THREAD, &
+        TUNE_HIP_GEMM_RM, TUNE_HIP_GEMM_RN, TUNE_HIP_GEMM_KC, TUNE_HIP_FOLD_JB, TUNE_HIP_SMOOTH_PB, &
+        TUNE_HIP_SMOOTH_KCH, TUNE_HIP_SMOOTH_KB, TUNE_HIP_ATT_THREADS, TUNE_HIP_OBS_THREADS, TUNE_HIP_WEIGHTS_PIECES, TUNE_HIP_BAND_SMALL_N ]
     logical, parameter :: ct_over(N_CT) = [ &
         CT_OVR_SEG_LEN, CT_OVR_PT_PIECE, CT_OVR_PIX_BLOCK, CT_OVR_BAND_BLOCK, CT_OVR_GEMM_MIN_COLS, &
         CT_OVR_NCH, CT_OVR_NCHG, CT_OVR_MBLK, CT_OVR_SMALL_N, CT_OVR_CSP_PT, CT_OVR_AGE_SUMS_Z4_FLANG_MT, &
         CT_OVR_AGE_SUMS_Z4_FLANG_PT, CT_OVR_AGE_SUMS_MT, CT_OVR_AGE_SUMS_PT, CT_OVR_TEMPLATE_MT, &
         CT_OVR_TEMPLATE_PT, CT_OVR_TEMPLATE_PIX_BLOCK, CT_OVR_TEMPLATE_KB, CT_OVR_AGE_SUMS_Z_FLANG_MT, &
         CT_OVR_AGE_SUMS_Z_FLANG_PT, CT_OVR_AGE_SUMS_Z_NVF_MT, CT_OVR_AGE_SUMS_Z4_NVF_MT, CT_OVR_GEMM_KB, &
-        CT_OVR_SSP_STAR_BATCH, CT_OVR_GEMM_NC_BATCHED, CT_OVR_IMF_GRAD_CHG, CT_OVR_BAND_PIX_PER_THREAD ]
+        CT_OVR_SSP_STAR_BATCH, CT_OVR_GEMM_NC_BATCHED, CT_OVR_IMF_GRAD_CHG, CT_OVR_BAND_PIX_PER_THREAD, &
+        CT_OVR_HIP_GEMM_RM, CT_OVR_HIP_GEMM_RN, CT_OVR_HIP_GEMM_KC, CT_OVR_HIP_FOLD_JB, CT_OVR_HIP_SMOOTH_PB, &
+        CT_OVR_HIP_SMOOTH_KCH, CT_OVR_HIP_SMOOTH_KB, CT_OVR_HIP_ATT_THREADS, CT_OVR_HIP_OBS_THREADS, CT_OVR_HIP_WEIGHTS_PIECES, CT_OVR_HIP_BAND_SMALL_N ]
 
     ! ---- Run-time parameters ---------------------------------------------------------------------
     !> Models per chunk of the batched SSP.
