@@ -260,9 +260,13 @@ int main(void) {
             failures++;
         } else {
             int same = 1, kept = 1;
+            /* (two calls of the same batch: bit for bit on the host; on a device the reverse pass's atomic adds
+               differ in order, so to a few kernel-precision epsilons of the model's largest gradient) */
             for (int m = 0; m < N_MOD; m++) {
+                double gmax = 0.0;
+                for (int r = 0; r < OPENSPS_NBGRAD; r++) gmax = fmax(gmax, fabs(pb_ref[r + m * OPENSPS_NBGRAD]));
                 for (int r = 0; r < OPENSPS_NBGRAD; r++)
-                    if (pb_rows[r + m * ld] != pb_ref[r + m * OPENSPS_NBGRAD]) same = 0;
+                    if (fabs(pb_rows[r + m * ld] - pb_ref[r + m * OPENSPS_NBGRAD]) > 1e-4 * gmax) same = 0;
                 for (int r = OPENSPS_NBGRAD; r < ld; r++)
                     if (pb_rows[r + m * ld] != -777.0) kept = 0;
             }
