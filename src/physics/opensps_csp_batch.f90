@@ -85,7 +85,8 @@ module opensps_csp_batch
                               TUNE_AGE_SUMS_Z_FLANG_PT, TUNE_AGE_SUMS_Z_NVF_MT, TUNE_AGE_SUMS_Z4_NVF_MT, &
                               TUNE_AGE_SUMS_MT, TUNE_AGE_SUMS_PT, TUNE_NCH, &
                               TUNE_P_HOST_SFH_MAX, TUNE_P_PINNED_CHUNK_BYTES, TUNE_HIP_GEMM_RM, TUNE_HIP_GEMM_RN, &
-                              TUNE_HIP_GEMM_KC, TUNE_TEMPLATE_KB, TUNE_HIP_ATT_THREADS, TUNE_HIP_OBS_THREADS, TUNE_BAND_PIX_PER_THREAD, tuning_get
+                              TUNE_HIP_GEMM_KC, TUNE_TEMPLATE_KB, TUNE_HIP_ATT_THREADS, TUNE_HIP_OBS_THREADS, &
+                              TUNE_BAND_PIX_PER_THREAD, tuning_get
     use opensps_constants, only: SAFE_FLOOR, PI, NEMLINE, NEBNAGE, NEBNZ, NEBNIP, H_PLANCK, L_SOL
     use opensps_types, only: params, params_core
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings, batch_out_reserve, &
@@ -4499,7 +4500,8 @@ contains
         call opensps_hip_attenuate(int(nspec, c_int), int(n_mod, c_int), int(nq, c_int), c_loc(mp(1, 1)), c_loc(mi(1, 1)), &
                                    c_loc(ttab(1, 0)), c_loc(ltab(1)), c_loc(dustem(1, 1, 1)), int(size(dustem), c_size_t), &
                                    int(merge(1, 0, any(emis_h)), c_int), c_loc(yo(1, 1)), &
-                                   c_loc(total(1, 1)), c_loc(absorbed(1, 1)), c_loc(tdiff(1, 1)), int(TUNE_HIP_ATT_THREADS, c_int), c_null_ptr)
+                                   c_loc(total(1, 1)), c_loc(absorbed(1, 1)), c_loc(tdiff(1, 1)), int(TUNE_HIP_ATT_THREADS, &
+                                   c_int), c_null_ptr)
         !$omp end target data
     end subroutine attenuate_hip_launch
 #endif
@@ -5149,7 +5151,8 @@ contains
             !$omp end target data
         end if
         rc = opensps_hip_obs_backward(int(n_mod, c_int), int(nspec, c_int), int(nbands, c_int), &
-                                      int(TUNE_HIP_OBS_THREADS, c_int), int(TUNE_BAND_PIX_PER_THREAD, c_int), real(SAFE_FLOOR, c_double), &
+                                      int(TUNE_HIP_OBS_THREADS, c_int), int(TUNE_BAND_PIX_PER_THREAD, c_int), &
+                                      real(SAFE_FLOOR, c_double), &
                                       int(merge(1, 0, dzon), c_int), int(merge(1, 0, have_s), c_int), c_loc(fb_bar(1, 1)), &
                                       c_loc(zcm(1)), c_loc(lam(1)), c_loc(wl(1)), c_loc(bp(1)), c_loc(bi(1)), c_loc(bk(1)), &
                                       c_loc(total(1, 1)), ps, int(size(sbar, 1), c_int), c_loc(gw(1, 1)), c_loc(dzo(1)), &
@@ -6081,9 +6084,11 @@ contains
                 dtz = 0.0_wp
                 tauc = 0.0_wp
                 if (pp <= jtop) then
-                    dtz = igm_a(1, pp) * igm_bd(1, m) + igm_a(2, pp) * igm_bd(2, m) + igm_a(3, pp) * igm_bd(3, m) + igm_a(4, pp) * igm_bd(4, m) + &
+                    dtz = igm_a(1, pp) * igm_bd(1, m) + igm_a(2, pp) * igm_bd(2, m) + igm_a(3, pp) * igm_bd(3, m) + igm_a(4, &
+                    pp) * igm_bd(4, m) + &
                           igm_a(5, pp) * igm_bd(5, m) + igm_a(6, pp) * igm_bd(6, m)
-                    tauc = igm_a(1, pp) * igm_b(1, m) + igm_a(2, pp) * igm_b(2, m) + igm_a(3, pp) * igm_b(3, m) + igm_a(4, pp) * igm_b(4, m) + &
+                    tauc = igm_a(1, pp) * igm_b(1, m) + igm_a(2, pp) * igm_b(2, m) + igm_a(3, pp) * igm_b(3, m) + igm_a(4, &
+                    pp) * igm_b(4, m) + &
                            igm_a(5, pp) * igm_b(5, m) + igm_a(6, pp) * igm_b(6, m)
                 end if
                 d(13) = -ga * apre * real(pl%igm_factor * dtz, KP)

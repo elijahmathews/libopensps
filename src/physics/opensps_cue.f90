@@ -1439,7 +1439,8 @@ contains
         type(cue_spline_t), intent(inout) :: sp
 #ifdef OMP_TARGET
         if (sp%on_device) then
-            !$omp target exit data map(delete: sp%h, sp%cp, sp%rden, sp%aa, sp%m0c, sp%mnc, sp%k, sp%t, sp%hh6, sp%kst, sp%ken, sp%rh6)
+            !$omp target exit data map(delete: sp%h, sp%cp, sp%rden, sp%aa, sp%m0c, sp%mnc, sp%k, sp%t, sp%hh6, sp%kst, &
+            !$omp& sp%ken, sp%rh6)
         end if
 #endif
         sp%on_device = .false.

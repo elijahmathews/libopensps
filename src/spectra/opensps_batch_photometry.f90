@@ -418,13 +418,15 @@ contains
             if (g%sm_sigma == sigma .and. g%sm_minl == minl .and. g%sm_maxl == maxl) return
 #ifdef OMP_TARGET
             associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef, &
-                       d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef, d_sm_coef_f => g%sm_coef_f, d_sm_tptr => g%sm_tptr, &
+                       d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef, d_sm_coef_f => g%sm_coef_f, &
+                       d_sm_tptr => g%sm_tptr, &
                        d_sm_tcoef_f => g%sm_tcoef_f)
                 !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef, &
                 !$omp&     d_sm_coef_f, d_sm_tptr, d_sm_tcoef_f)
             end associate
 #endif
-            deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef, g%sm_t_lo, g%sm_t_hi, g%sm_dcoef, g%sm_coef_f, g%sm_tptr, g%sm_tcoef_f)
+            deallocate(g%sm_lo, g%sm_hi, g%sm_off, g%sm_coef, g%sm_t_lo, g%sm_t_hi, g%sm_dcoef, g%sm_coef_f, g%sm_tptr, &
+            g%sm_tcoef_f)
             g%sm_ready = .false.
         end if
         nspec = ctx%state%nspec
@@ -924,7 +926,8 @@ contains
         !$omp target data use_device_addr(zc, lambda, wl, total, fobs)
         rc = opensps_hip_observed_frame(int(n_col, c_int), int(nspec, c_int), int(npad, c_int), int(ch, c_int), &
                                         int(size(fobs, 1), c_int), real(SAFE_FLOOR, c_double), c_loc(zc(1)), &
-                                        c_loc(lambda(1)), c_loc(wl(1)), c_loc(total(1, 1)), c_loc(fobs(1, 1)), int(TUNE_HIP_OBS_THREADS, c_int), c_null_ptr)
+                                        c_loc(lambda(1)), c_loc(wl(1)), c_loc(total(1, 1)), c_loc(fobs(1, 1)), &
+                                        int(TUNE_HIP_OBS_THREADS, c_int), c_null_ptr)
         !$omp end target data
         done = rc == 0
     end subroutine observed_frame_hip
@@ -1197,13 +1200,15 @@ contains
         !$omp target data use_device_addr(bands_t, j_lo, j_hi, do_band, wt, fobs_t, fband)
 #endif
 #ifdef KERNEL_SINGLE_PRECISION
-        call opensps_hip_band_fluxes_sp(int(n_mod, c_int), int(nspec, c_int), int(nbands, c_int), int(TUNE_HIP_BAND_SMALL_N, c_int), &
+        call opensps_hip_band_fluxes_sp(int(n_mod, c_int), int(nspec, c_int), int(nbands, c_int), int(TUNE_HIP_BAND_SMALL_N, &
+        c_int), &
                                         int(TUNE_HIP_GEMM_RN, c_int), &
                                         int(TUNE_HIP_GEMM_KC, c_int), int(TUNE_TEMPLATE_KB, c_int), &
                                         c_loc(bands_t(1, 1)), c_loc(j_lo(1)), c_loc(j_hi(1)), c_loc(do_band(1)), &
                                         c_loc(wt(1)), c_loc(fobs_t(1, 1)), c_loc(fband(1, 1)), c_null_ptr)
 #else
-        call opensps_hip_band_fluxes_dp(int(n_mod, c_int), int(nspec, c_int), int(nbands, c_int), int(TUNE_HIP_BAND_SMALL_N, c_int), &
+        call opensps_hip_band_fluxes_dp(int(n_mod, c_int), int(nspec, c_int), int(nbands, c_int), int(TUNE_HIP_BAND_SMALL_N, &
+        c_int), &
                                         c_loc(bands_t(1, 1)), c_loc(j_lo(1)), c_loc(j_hi(1)), c_loc(do_band(1)), &
                                         c_loc(wt(1)), c_loc(fobs_t(1, 1)), c_loc(fband(1, 1)), c_null_ptr)
 #endif

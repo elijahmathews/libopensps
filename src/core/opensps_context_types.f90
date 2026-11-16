@@ -428,7 +428,8 @@ contains
         if (g%sm_ready) then
 #ifdef OMP_TARGET
             associate (d_sm_lo => g%sm_lo, d_sm_hi => g%sm_hi, d_sm_off => g%sm_off, d_sm_coef => g%sm_coef, &
-                       d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef, d_sm_coef_f => g%sm_coef_f, d_sm_tptr => g%sm_tptr, &
+                       d_sm_t_lo => g%sm_t_lo, d_sm_t_hi => g%sm_t_hi, d_sm_dcoef => g%sm_dcoef, d_sm_coef_f => g%sm_coef_f, &
+                       d_sm_tptr => g%sm_tptr, &
                        d_sm_tcoef_f => g%sm_tcoef_f)
                 !$omp target exit data map(delete: d_sm_lo, d_sm_hi, d_sm_off, d_sm_coef, d_sm_t_lo, d_sm_t_hi, d_sm_dcoef, &
                 !$omp&     d_sm_coef_f, d_sm_tptr, d_sm_tcoef_f)
