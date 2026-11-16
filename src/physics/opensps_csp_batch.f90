@@ -85,7 +85,7 @@ module opensps_csp_batch
                               TUNE_AGE_SUMS_Z_FLANG_PT, TUNE_AGE_SUMS_Z_NVF_MT, TUNE_AGE_SUMS_Z4_NVF_MT, &
                               TUNE_AGE_SUMS_MT, TUNE_AGE_SUMS_PT, TUNE_NCH, &
                               TUNE_P_HOST_SFH_MAX, TUNE_P_PINNED_CHUNK_BYTES, TUNE_HIP_GEMM_RM, TUNE_HIP_GEMM_RN, &
-                              TUNE_HIP_GEMM_KC, TUNE_TEMPLATE_KB, TUNE_HIP_ATT_THREADS, tuning_get
+                              TUNE_HIP_GEMM_KC, TUNE_TEMPLATE_KB, TUNE_HIP_ATT_THREADS, TUNE_HIP_OBS_THREADS, TUNE_BAND_PIX_PER_THREAD, tuning_get
     use opensps_constants, only: SAFE_FLOOR, PI, NEMLINE, NEBNAGE, NEBNZ, NEBNIP, H_PLANCK, L_SOL
     use opensps_types, only: params, params_core
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings, batch_out_reserve, &
@@ -5112,6 +5112,52 @@ contains
         end if
     end subroutine batch_backward
 
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+    !> backward_observed_frame with the HIP kernels (opensps_hip_obs_backward): the observed-frame cotangent gw(:, m),
+    !> d L / d z (dzo) and the rest-frame cotangent gw(:, n_mod + m)
+    subroutine backward_observed_hip(n_mod, nspec, nbands, fb_bar, bp, bi, bk, wl, lam, zcm, total, have_s, sbar, gw, dzon, &
+                                     dzo, done)
+        use, intrinsic :: iso_c_binding, only: c_int, c_double, c_ptr, c_loc, c_null_ptr
+        integer, intent(in)     :: n_mod, nspec, nbands
+        real(WP), intent(in), target, contiguous :: fb_bar(:,:), lam(:), zcm(:)
+        integer, intent(in), target, contiguous  :: bp(:), bi(:)
+        real(KP), intent(in), target, contiguous :: bk(:), wl(:), total(:,:), sbar(:,:)
+        logical, intent(in)     :: have_s, dzon
+        real(KP), intent(inout), target, contiguous :: gw(:,:)
+        real(WP), intent(out), target, contiguous :: dzo(:)
+        logical, intent(out)    :: done
+        integer(c_int) :: rc
+        type(c_ptr) :: ps
+        interface
+            function opensps_hip_obs_backward(n_mod, nspec, nbands, threads, ch, zfloor, dzon, have_s, fb_bar, zc, lambda, wl, &
+                                              bp, bi, bk, total, sbar, ld_sbar, gw, dzo, stream) result(rc) &
+                bind(C, name="opensps_hip_obs_backward")
+                import :: c_int, c_double, c_ptr
+                integer(c_int), value :: n_mod, nspec, nbands, threads, ch, dzon, have_s, ld_sbar
+                real(c_double), value :: zfloor
+                type(c_ptr), value :: fb_bar, zc, lambda, wl, bp, bi, bk, total, sbar, gw, dzo, stream
+                integer(c_int) :: rc
+            end function opensps_hip_obs_backward
+        end interface
+
+        ps = c_null_ptr
+        !$omp target data use_device_addr(fb_bar, lam, zcm, bp, bi, bk, wl, total, gw, dzo)
+        if (have_s) then
+            !$omp target data use_device_addr(sbar)
+            ps = c_loc(sbar(1, 1))
+            !$omp end target data
+        end if
+        rc = opensps_hip_obs_backward(int(n_mod, c_int), int(nspec, c_int), int(nbands, c_int), &
+                                      int(TUNE_HIP_OBS_THREADS, c_int), int(TUNE_BAND_PIX_PER_THREAD, c_int), real(SAFE_FLOOR, c_double), &
+                                      int(merge(1, 0, dzon), c_int), int(merge(1, 0, have_s), c_int), c_loc(fb_bar(1, 1)), &
+                                      c_loc(zcm(1)), c_loc(lam(1)), c_loc(wl(1)), c_loc(bp(1)), c_loc(bi(1)), c_loc(bk(1)), &
+                                      c_loc(total(1, 1)), ps, int(size(sbar, 1), c_int), c_loc(gw(1, 1)), c_loc(dzo(1)), &
+                                      c_null_ptr)
+        !$omp end target data
+        done = rc == 0
+    end subroutine backward_observed_hip
+#endif
+
     !> Adjoint of the observed-frame interpolation and of the band integrals: gw(:, m) = d L /
     !> d fobs (per pixel j, the band weights of the trapezoid rule, as band_fluxes sums them), then
     !> gw(:, N + m) = spec_bar + the transposed interpolation (one thread per model, serial over the
@@ -5139,6 +5185,15 @@ contains
         real(KP) :: vk
         logical  :: zsame
         real(KP) :: gk, tk
+#if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
+        logical  :: hip_done
+
+        ! The FP32 HIP kernels (opensps_hip_obs_backward): the intervals and weights of the forward pass, no FP64
+        ! bisections; false if a scratch buffer could not be allocated (the portable kernels below then run)
+        call backward_observed_hip(n_mod, nspec, nbands, fb_bar, bp, bi, bk, wl, lam, zcm, total, have_s, sbar, gw, dzon, &
+                                   dzo, hip_done)
+        if (hip_done) return
+#endif
 
         zsame = all(zcm(1:n_mod) == zcm(1))
 

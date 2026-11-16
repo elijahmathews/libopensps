@@ -312,6 +312,7 @@ program benchmark_csp_batch
             end do
             call grad_batch(n)   ! warm-up
             if (status /= 0) stop 5
+            call dump_gradients(n)
             call system_clock(t0)
             do rep = 1, n_rep
                 call grad_batch(n)
@@ -352,6 +353,20 @@ contains
             call compute_csp_batch(ctx, psets(1:n), mags, status)
         end if
     end subroutine batch
+
+    !> OPENSPS_BENCH_DUMP=<file>: the gradients (params_bar, NBGRAD x n, FP64) of the last batch size timed, to compare two
+    !> builds (tools/compare_builds/compare_grad_dump.py). Each size overwrites the file.
+    subroutine dump_gradients(n)
+        integer, intent(in) :: n
+        character(len=512) :: fname
+        integer :: flen, u
+        call get_environment_variable('OPENSPS_BENCH_DUMP', fname, flen)
+        if (flen <= 0) return
+        open(newunit=u, file=fname(1:flen), form='unformatted', access='stream', status='replace')
+        write(u) NBGRAD, n
+        write(u) real(pbar(1:NBGRAD, 1:n), WP)
+        close(u)
+    end subroutine dump_gradients
 
     !> The batch of the first n models with its gradients (spectra, mass and lbol, and params_bar).
     subroutine grad_batch(n)

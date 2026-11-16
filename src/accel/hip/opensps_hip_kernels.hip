@@ -2850,8 +2850,9 @@ __global__ void __launch_bounds__(128) observed_frame_kernel(
                     const double td = (target - l0) / (l1 - l0);
                     v = (float)((double)tm[il] + td * ((double)tm[il + 1] - (double)tm[il]));
                 } else {
+                    // (the weights first: f * wavelength offset would underflow where the spectrum is ~1e-37)
                     const float den = num - numu;
-                    v = (tm[il] * (-numu) + tm[il + 1] * num) / den;
+                    v = tm[il] * (-numu / den) + tm[il + 1] * (num / den);
                 }
             } else {
                 v = tm[j];
@@ -2863,6 +2864,168 @@ __global__ void __launch_bounds__(128) observed_frame_kernel(
     }
 }
 
+
+
+// ---------------------------------------------------------------------------
+// Reverse pass of the observed-frame resampling (backward_observed_frame, FP32 kernels)
+//
+// The Fortran kernels located every (pixel, model)'s rest-frame interval with an FP64 bisection and formed the
+// fraction in FP64 (~140 FP64 operations per element: 18 ms of a 55 ms reverse pass at 1000 models, FP64 at 1/64
+// of the FP32 rate). Here the interval and the two weights come from the forward kernel's hi + lo numerators
+// (obs_num), so the reverse pass uses the weights the forward pass applied:
+//   K1  gw(j, m) = [v > 0] wl(j) sum_bands fb_bar(b, m) B(b, j)   (v: the resampled value, as the forward) and the
+//       block partial sums of d L / d z = sum_j gw (S(il+1) - S(il)) dt/dz in FP64;
+//   K2  the blocks of K1's partial sums, in order, per model;
+//   K3  the rest-frame cotangent, a gather per (rest pixel, model): the observed pixels that reach it are one run
+//       (the interval index does not decrease with j) found by one bisection, added in the order of j, as the
+//       scatter of the portable code; models at z = 0 pass the cotangent through.
+// ---------------------------------------------------------------------------
+#define OBS_ZON(z, zfloor) (fabs(z) > (zfloor))
+
+__device__ inline void obs_locate(const float2* __restrict__ lam, int nspec, float2 lj, float ahi, float alo, double a,
+                                  int il_start, int& il, float& num, float& numu) {
+    if (il_start < 0) {     // bisect: the last interval whose lower wavelength is <= the target
+        int lo = 0, hi = nspec - 2;
+        while (lo < hi) {
+            int mid = (lo + hi + 1) >> 1;
+            if (obs_num(lj, lam[mid], ahi, alo) >= 0.f) lo = mid; else hi = mid - 1;
+        }
+        il = lo;
+    } else {
+        il = il_start;
+    }
+    num = obs_num(lj, lam[il], ahi, alo);
+    numu = obs_num(lj, lam[il + 1], ahi, alo);
+    while (il > 0 && num < 0.f) {
+        --il;
+        numu = num;
+        num = obs_num(lj, lam[il], ahi, alo);
+    }
+    while (il < nspec - 2 && numu >= 0.f) {
+        ++il;
+        num = numu;
+        numu = obs_num(lj, lam[il + 1], ahi, alo);
+    }
+    // A pixel exactly on a node (the numerator is exactly zero: wavelengths that are in an exact ratio, as for round
+    // redshifts) lies in two intervals; the forward value is the same in both, the derivative is not. The FP64 code
+    // took the interval its rounded division fell into: do the same, so that the reverse pass agrees with it.
+    if (num == 0.f && il > 0) {
+        const double target = ((double)lj.x + (double)lj.y) / a;
+        if (target < (double)lam[il].x + (double)lam[il].y) {
+            numu = num;
+            --il;
+            num = obs_num(lj, lam[il], ahi, alo);
+        }
+    }
+}
+
+// fb_bar(band, model) as FP32, transposed to (model, band): the models of a warp read consecutive words
+__global__ void obs_fb_to_float_kernel(int nbands, int n_mod, const double* __restrict__ in, float* __restrict__ out) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < nbands * n_mod) {
+        int b = i % nbands, m = i / nbands;
+        out[m + (size_t)b * n_mod] = (float)in[i];
+    }
+}
+
+__global__ void __launch_bounds__(128) obs_bwd_gw_kernel(
+    int n_mod, int nspec, int nbands, int ch, int dzon, double zfloor,
+    const double* __restrict__ zc, const float2* __restrict__ lam, const float* __restrict__ wl,
+    const int* __restrict__ bp, const int* __restrict__ bi, const float* __restrict__ bk,
+    const float* __restrict__ fbf, const float* __restrict__ total, float* __restrict__ gw, double* __restrict__ dzp
+) {
+    // thread = (model, chunk of ch consecutive pixels): the interval index walks along the pixels, the first bisects
+    const int m = blockIdx.x * blockDim.x + threadIdx.x;
+    const int jc = blockIdx.y;
+    if (m >= n_mod) return;
+    const double z = zc[m];
+    const bool zon = OBS_ZON(z, zfloor);
+    const double a = 1.0 + z;
+    const float ahi = (float)a, alo = (float)(a - (double)ahi);
+    const float* tm = total + (size_t)m * nspec;
+    double dsum = 0.0;
+    int il = -1;
+    const int j0 = jc * ch, j1 = min(j0 + ch, nspec);
+    for (int j = j0; j < j1; ++j) {
+        float gk = 0.f;
+        for (int k = bp[j] - 1; k < bp[j + 1] - 1; ++k) gk += fbf[m + (size_t)(bi[k] - 1) * n_mod] * bk[k];
+        float v;
+        if (zon) {
+            const float2 lj = lam[j];
+            float num, numu;
+            int ils = il;
+            obs_locate(lam, nspec, lj, ahi, alo, a, ils, il, num, numu);
+            if ((il == 0 && num < 0.f) || (il == nspec - 2 && numu >= 0.f)) {
+                const double l0 = (double)lam[il].x + (double)lam[il].y, l1 = (double)lam[il + 1].x + (double)lam[il + 1].y;
+                const double target = ((double)lj.x + (double)lj.y) / a;
+                const double td = (target - l0) / (l1 - l0);
+                v = (float)((double)tm[il] + td * ((double)tm[il + 1] - (double)tm[il]));
+            } else {
+                v = tm[il] * (-numu / (num - numu)) + tm[il + 1] * (num / (num - numu));
+            }
+            if (!(v > 0.f)) gk = 0.f;
+            const float g = gk * wl[j];
+            gw[j + (size_t)m * nspec] = g;
+            if (dzon && g != 0.f) {
+                const double l0 = (double)lam[il].x + (double)lam[il].y, l1 = (double)lam[il + 1].x + (double)lam[il + 1].y;
+                dsum += (double)g * ((double)tm[il + 1] - (double)tm[il]) * (-((double)lj.x + (double)lj.y) / (a * a)) / (l1 - l0);
+            }
+        } else {
+            v = tm[j];
+            if (!(v > 0.f)) gk = 0.f;
+            gw[j + (size_t)m * nspec] = gk * wl[j];
+        }
+    }
+    if (dzon) dzp[jc + (size_t)gridDim.y * m] = dsum;
+}
+
+__global__ void obs_bwd_dz_kernel(int nblk, int n_mod, const double* __restrict__ dzp, double* __restrict__ dzo) {
+    int m = blockIdx.x * blockDim.x + threadIdx.x;
+    if (m >= n_mod) return;
+    double s = 0.0;
+    for (int b = 0; b < nblk; ++b) s += dzp[b + (size_t)nblk * m];
+    dzo[m] = s;
+}
+
+__global__ void __launch_bounds__(128) obs_bwd_rest_kernel(
+    int n_mod, int nspec, double zfloor, const double* __restrict__ zc, const float2* __restrict__ lam,
+    int have_s, const float* __restrict__ sbar, int ld_sbar, float* __restrict__ gw
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;      // 0-based rest pixel
+    const int m = blockIdx.y;
+    if (i >= nspec) return;
+    float vk = have_s ? sbar[i + (size_t)m * ld_sbar] : 0.f;
+    const float* g = gw + (size_t)m * nspec;
+    const double z = zc[m];
+    if (!OBS_ZON(z, zfloor)) {
+        gw[i + ((size_t)n_mod + m) * nspec] = vk + g[i];
+        return;
+    }
+    const double a = 1.0 + z;
+    const float ahi = (float)a, alo = (float)(a - (double)ahi);
+    // the first observed pixel whose interval index is >= i - 1: its rest wavelength reaches lambda_(i-1)
+    int jlo = 0;
+    if (i >= 2) {
+        int lo = 0, hi = nspec;
+        while (lo < hi) {
+            int mid = (lo + hi) >> 1;
+            if (obs_num(lam[mid], lam[i - 1], ahi, alo) >= 0.f) hi = mid; else lo = mid + 1;
+        }
+        jlo = lo;
+    }
+    int il = max(i - 1, 0);
+    for (int j = jlo; j < nspec; ++j) {
+        float num, numu;
+        obs_locate(lam, nspec, lam[j], ahi, alo, a, il, il, num, numu);
+        if (il > i) break;
+        if (il == i - 1) {
+            if (num != 0.f) vk += (num / (num - numu)) * g[j];
+        } else if (il == i) {
+            vk += (-numu / (num - numu)) * g[j];
+        }
+    }
+    gw[i + ((size_t)n_mod + m) * nspec] = vk;
+}
 
 // ---------------------------------------------------------------------------
 // Age sums with per-model metallicity (age_sums_z, FP32 kernels), as a product per metallicity pair
@@ -3073,6 +3236,50 @@ int opensps_hip_observed_frame(int n_col, int nspec, int npad, int ch, int ldf, 
     split_ltab_kernel<<<(nspec + 255) / 256, 256, 0, s>>>(nspec, d_lambda, g_ltf);
     observed_frame_kernel<<<dim3((n_col + threads - 1) / threads, (npad + ch - 1) / ch), threads, 0, s>>>(
         n_col, nspec, npad, ch, ldf, zfloor, d_zc, g_ltf, d_wl, d_total, d_fobs);
+    (void)hipStreamSynchronize(s);
+    return 0;
+}
+
+static float* g_fbf = nullptr;
+static size_t g_fbf_n = 0;
+static double* g_dzp = nullptr;
+static size_t g_dzp_n = 0;
+
+// Returns 1 if a scratch buffer could not be allocated (the caller then runs its portable kernels)
+int opensps_hip_obs_backward(int n_mod, int nspec, int nbands, int threads, int ch, double zfloor, int dzon, int have_s,
+                             const double* d_fb_bar, const double* d_zc, const double* d_lambda, const float* d_wl,
+                             const int* d_bp, const int* d_bi, const float* d_bk, const float* d_total,
+                             const float* d_sbar, int ld_sbar, float* d_gw, double* d_dzo, void* stream) {
+    if (n_mod <= 0 || nspec <= 1) return 0;
+    if (threads < 32) threads = 32;
+    if (threads > 128) threads = 128;   // (the kernels' launch bounds)
+    hipStream_t s = (hipStream_t)stream;
+    if (ch < 1) ch = 1;
+    const int nblk = (nspec + threads - 1) / threads;        // blocks of the rest-pixel gather
+    const int nch = (nspec + ch - 1) / ch;                   // chunks of pixels of the cotangent kernel
+    const size_t nfb = (size_t)nbands * n_mod, ndz = (size_t)nch * n_mod;
+    if ((size_t)nspec > g_ltf_n) {
+        if (g_ltf) (void)hipFree(g_ltf);
+        if (hipMalloc((void**)&g_ltf, (size_t)nspec * sizeof(float2)) != hipSuccess) { g_ltf = nullptr; g_ltf_n = 0; return 1; }
+        g_ltf_n = nspec;
+    }
+    if (nfb > g_fbf_n) {
+        if (g_fbf) (void)hipFree(g_fbf);
+        if (hipMalloc((void**)&g_fbf, nfb * sizeof(float)) != hipSuccess) { g_fbf = nullptr; g_fbf_n = 0; return 1; }
+        g_fbf_n = nfb;
+    }
+    if (ndz > g_dzp_n) {
+        if (g_dzp) (void)hipFree(g_dzp);
+        if (hipMalloc((void**)&g_dzp, ndz * sizeof(double)) != hipSuccess) { g_dzp = nullptr; g_dzp_n = 0; return 1; }
+        g_dzp_n = ndz;
+    }
+    split_ltab_kernel<<<(nspec + 255) / 256, 256, 0, s>>>(nspec, d_lambda, g_ltf);
+    obs_fb_to_float_kernel<<<(unsigned)((nfb + 255) / 256), 256, 0, s>>>(nbands, n_mod, d_fb_bar, g_fbf);
+    obs_bwd_gw_kernel<<<dim3((n_mod + threads - 1) / threads, nch), threads, 0, s>>>(n_mod, nspec, nbands, ch, dzon, zfloor,
+                                                                                     d_zc, g_ltf, d_wl, d_bp, d_bi, d_bk, g_fbf,
+                                                                                     d_total, d_gw, g_dzp);
+    if (dzon) obs_bwd_dz_kernel<<<(n_mod + 127) / 128, 128, 0, s>>>(nch, n_mod, g_dzp, d_dzo);
+    obs_bwd_rest_kernel<<<dim3(nblk, n_mod), threads, 0, s>>>(n_mod, nspec, zfloor, d_zc, g_ltf, have_s, d_sbar, ld_sbar, d_gw);
     (void)hipStreamSynchronize(s);
     return 0;
 }
