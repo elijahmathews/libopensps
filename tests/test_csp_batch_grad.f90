@@ -1027,6 +1027,13 @@ contains
                 ! Parameters at their bound 0 (masses of dust, fractions): one-sided, second order
                 bound = q /= 4 .and. q /= 5 .and. q /= 8 .and. q /= 9 .and. q /= 15 .and. q /= 24 .and. q < 32 .and. x <= 0.0_wp
                 bnd(q, m) = bound
+                ! (a batch with free modification factors: the rows the factors can touch, the factors, the metallicity and
+                ! the IMF's parameters, are checked; the others (dust, SFH, redshift, ...) are those of the groups above,
+                ! where the age sums are not combined from the groups, and cost ~500 forward batches of 8 groups here)
+                if (mods_on .and. .not. (q == 15 .or. (q >= 25 .and. q <= 27) .or. q == 30 .or. q == 31 .or. q >= 36)) then
+                    g_fd(q, m) = pbar(ROWS(q), m)
+                    cycle
+                end if
                 ! (sf_trunc = 0: no truncation, not a bound of a continuous parameter; not checked)
                 if (q == 23 .and. x <= 0.0_wp) then
                     g_fd(q, m) = pbar(ROWS(q), m)
