@@ -815,7 +815,7 @@ contains
     !> the set): a set that was never built (status 1), one that does not hold every metallicity of the context, with a
     !> metallicity out of place, an empty operator, other spectra or ages than the context's (status 3, 3, 1, 3), an age
     !> without stars (status 2), a single-metallicity set against models of another metallicity (status 3), and a shift
-    !> dell on a model (status 2 until the shifts are free). Each corruption is undone after its check.
+    !> dell on a model (free: status 0). Each corruption is undone after its check.
     subroutine check_mods_set_validation()
         integer, parameter :: NMOD = 3
         type(PARAMS) :: psets(NMOD)
@@ -885,10 +885,10 @@ contains
         do m = 1, NMOD
             psets(m)%zmet = 10
         end do
-        ! (dell on a model: the shift is not free here)
+        ! (dell on a model: the shifts are free)
         psets(2)%dell = 0.05_wp
         call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
-        call assert_true(status == 2, "dell on a model: status 2", total_tests, total_failures)
+        call assert_true(status == 0, "dell on a model: status 0", total_tests, total_failures)
         call ssp_opset_free(op)
         call set_int('zmet', zm0)
         deallocate(mags)
