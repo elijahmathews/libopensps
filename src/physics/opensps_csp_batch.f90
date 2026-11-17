@@ -676,8 +676,7 @@ contains
                 ! The TP-AGB group at each (delt, dell) of the batch: one more group per distinct nonzero pair, built here when
                 ! the context has not seen it (and, with gradients, the shifted sets of the central differences)
                 allocate(ipair(n_mod), dsh(2, n_mod))
-                call ssp_mods_prepare_pairs(ctx, ssp_ops, psets(1:n_mod)%delt, psets(1:n_mod)%dell, present(params_bar), ipair, &
-                                            st_pair)
+                call ssp_mods_prepare_pairs(ctx, ssp_ops, psets(1:n_mod)%delt, psets(1:n_mod)%dell, ipair, st_pair)
                 if (st_pair /= 0) then
                     status = 2; return
                 end if
@@ -5169,7 +5168,7 @@ contains
                 call ssp_batch_age_sums_adjoint(ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &
                                                 ssp_ops, zlo, zhi, dz, pm, wsfh, it_tesc, nb%nt_neb, nb%whlylim, nb%fesc, &
                                                 gw, slum, lsum_bar, qb, wbi, imfb, fescb, zbi, smass, mbx / cscale, &
-                                                cg=cgm, cbar=cbm, ipair=ipairm, dshift=dshm)
+                                                cg=cgm, cbar=cbm, ipair=ipairm, dshift=dshm, ctx=ctx)
             else
                 call ssp_batch_age_sums_adjoint(ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &
                                                 ssp_ops, zlo, zhi, dz, pm, wsfh, it_tesc, nb%nt_neb, nb%whlylim, nb%fesc, &

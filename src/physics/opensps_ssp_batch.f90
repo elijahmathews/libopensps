@@ -112,13 +112,12 @@ module opensps_ssp_batch
         type(ssp_opset_t), pointer :: grp(:) => null()
         !> The TP-AGB shifts delt and dell (the next groups): the sets of the TP-AGB group at the distinct nonzero pairs the
         !> batches so far used (ext(1:n_ext), pairs ext_t, ext_l; built when a batch needs one, ssp_mods_prepare_pairs); each is
-        !> one more group of the batch with the coefficient of the TP-AGB group for the models at that pair. fd: for the
-        !> gradients, the TP-AGB group at each pair (0: none) shifted by +-TP_FD_STEP in delt and in dell (index 1-4)
+        !> one more group of the batch with the coefficient of the TP-AGB group for the models at that pair. (The gradients'
+        !> shifted sets, +-TP_FD_STEP in delt and in dell, are built one pair at a time in the reverse pass and freed after it:
+        !> each is the size of a set of the TP-AGB group at every metallicity)
         integer :: n_ext = 0
         type(ssp_opset_t), pointer :: ext(:) => null()
         real(WP) :: ext_t(MAX_TP_PAIRS) = 0.0_wp, ext_l(MAX_TP_PAIRS) = 0.0_wp
-        type(ssp_opset_t), pointer :: fd(:,:) => null()
-        integer :: n_fd = -1
         !> What the groups were built from (the pairs' sets are built with the same)
         type(params) :: base_pset
         logical :: all_z = .false.
@@ -277,13 +276,11 @@ contains
     end subroutine ssp_opset_build_tp
 
     !> The pair of each model (ipair: 0 for delt = dell = 0, else k of ext(k)), building the sets of the pairs not seen yet
-    !> (and, with grad, the shifted sets of every pair for the gradients' central differences). status 2: a batch with more
-    !> than MAX_TP_PAIRS distinct pairs.
-    subroutine ssp_mods_prepare_pairs(ctx, set, delt, dell, grad, ipair, status)
+    !> status 2: a batch with more than MAX_TP_PAIRS distinct pairs.
+    subroutine ssp_mods_prepare_pairs(ctx, set, delt, dell, ipair, status)
         type(opensps_context_t), target, intent(inout) :: ctx
         type(ssp_opset_t), intent(inout) :: set
         real(WP), intent(in) :: delt(:), dell(:)
-        logical, intent(in) :: grad
         integer, intent(out) :: ipair(:), status
         integer :: m, k, ip, nnew, nnew_missing
         real(WP) :: nt_(MAX_TP_PAIRS), nl_(MAX_TP_PAIRS)
@@ -330,7 +327,6 @@ contains
                 set%ext_t(set%n_ext) = nt_(k)
                 set%ext_l(set%n_ext) = nl_(k)
                 call ssp_opset_build_tp(ctx, set, nt_(k), nl_(k), set%ext(set%n_ext))
-                if (associated(set%fd)) call free_fd(set)
             end if
         end do
         do m = 1, size(delt)
@@ -342,46 +338,7 @@ contains
                 end if
             end do
         end do
-        if (grad) call build_fd(ctx, set)
     end subroutine ssp_mods_prepare_pairs
-
-    subroutine free_fd(set)
-        type(ssp_opset_t), intent(inout) :: set
-        integer :: ip, j
-        do ip = lbound(set%fd, 2), ubound(set%fd, 2)
-            do j = 1, 4
-                call ssp_opset_free(set%fd(j, ip))
-            end do
-        end do
-        deallocate(set%fd)
-        nullify(set%fd)
-        set%n_fd = -1
-    end subroutine free_fd
-
-    !> The shifted sets for the central differences in delt and dell at every pair of the set (pair 0: no shift)
-    subroutine build_fd(ctx, set)
-        type(opensps_context_t), target, intent(inout) :: ctx
-        type(ssp_opset_t), intent(inout) :: set
-        integer :: ip
-        real(WP) :: t0, l0
-
-        if (associated(set%fd) .and. set%n_fd == set%n_ext) return
-        if (associated(set%fd)) call free_fd(set)
-        allocate(set%fd(4, 0:set%n_ext))
-        do ip = 0, set%n_ext
-            t0 = 0.0_wp
-            l0 = 0.0_wp
-            if (ip > 0) then
-                t0 = set%ext_t(ip)
-                l0 = set%ext_l(ip)
-            end if
-            call ssp_opset_build_tp(ctx, set, t0 + TP_FD_STEP, l0, set%fd(1, ip))
-            call ssp_opset_build_tp(ctx, set, t0 - TP_FD_STEP, l0, set%fd(2, ip))
-            call ssp_opset_build_tp(ctx, set, t0, l0 + TP_FD_STEP, set%fd(3, ip))
-            call ssp_opset_build_tp(ctx, set, t0, l0 - TP_FD_STEP, set%fd(4, ip))
-        end do
-        set%n_fd = set%n_ext
-    end subroutine build_fd
 
     !> The template entries of each point (pe_ptr, pe_k, pe_e): counts, then a fill in template order.
     subroutine entries_by_point(set, np, nen)
@@ -443,17 +400,7 @@ contains
             deallocate(set%ext)
             nullify(set%ext)
         end if
-        if (associated(set%fd)) then
-            do ig = 1, size(set%fd, 2)
-                do ip = 1, 4
-                    call ssp_opset_free(set%fd(ip, lbound(set%fd, 2) + ig - 1))
-                end do
-            end do
-            deallocate(set%fd)
-            nullify(set%fd)
-        end if
         set%n_ext = 0
-        set%n_fd = -1
         set%free_mods = .false.
 #ifdef OMP_TARGET
         if (set%on_device) then
@@ -901,7 +848,7 @@ contains
     !> fold's templates share ages and points.
     recursive subroutine ssp_batch_age_sums_adjoint(imf_type, remnants, n_mod, nt, nspec, set, zlo, zhi, dz, pm, wsfh, it_tesc, &
                                           nt_neb, whl, fesc, gw, slum, lsum_bar, qbar, wbar, imf_bar, fesc_bar, zbar, &
-                                          smass, msum_bar, cg, cbar, lfac, ipair, dshift)
+                                          smass, msum_bar, cg, cbar, lfac, ipair, dshift, ctx)
         logical, intent(in)  :: remnants
         integer, intent(in)  :: imf_type, n_mod, nt, nspec, nt_neb, whl
         type(ssp_opset_t), intent(inout) :: set
@@ -924,6 +871,7 @@ contains
         !> The TP-AGB shifts of a batch with free modifications: see ssp_batch_age_sums_adjoint_mods
         integer, intent(in), optional, contiguous :: ipair(:)
         real(WP), intent(out), optional, contiguous :: dshift(:,:)
+        type(opensps_context_t), target, intent(inout), optional :: ctx
 
         integer, parameter :: CHG = TUNE_IMF_GRAD_CHG
         integer, parameter :: PROWS(NIMFG) = [IMF_P_ALPHA, IMF_P_ALPHA + 1, IMF_P_ALPHA + 2, IMF_P_VDMC, IMF_P_MDAVE]
@@ -946,10 +894,10 @@ contains
         if (set%free_mods) then
             if (.not. present(cg) .or. .not. present(cbar)) &
                 error stop 'ssp_batch_age_sums_adjoint: a set with free modifications needs cg and cbar'
-            if (present(dshift) .and. present(ipair)) then
+            if (present(dshift) .and. present(ipair) .and. present(ctx)) then
                 call ssp_batch_age_sums_adjoint_mods(imf_type, remnants, n_mod, nt, nspec, set, cg, zlo, zhi, dz, pm, wsfh, &
                                                      it_tesc, nt_neb, whl, fesc, gw, slum, lsum_bar, qbar, wbar, imf_bar, &
-                                                     fesc_bar, zbar, smass, msum_bar, cbar, ipair, dshift)
+                                                     fesc_bar, zbar, smass, msum_bar, cbar, ipair, dshift, ctx)
             else
                 call ssp_batch_age_sums_adjoint_mods(imf_type, remnants, n_mod, nt, nspec, set, cg, zlo, zhi, dz, pm, wsfh, &
                                                      it_tesc, nt_neb, whl, fesc, gw, slum, lsum_bar, qbar, wbar, imf_bar, &
@@ -1169,7 +1117,7 @@ contains
     !> mass's cotangent of the SFH weights is that of the total mass, given to the plain group's pass.
     recursive subroutine ssp_batch_age_sums_adjoint_mods(imf_type, remnants, n_mod, nt, nspec, set, cg, zlo, zhi, dz, pm, wsfh, &
                                                it_tesc, nt_neb, whl, fesc, gw, slum, lsum_bar, qbar, wbar, imf_bar, &
-                                               fesc_bar, zbar, smass, msum_bar, cbar, ipair, dshift)
+                                               fesc_bar, zbar, smass, msum_bar, cbar, ipair, dshift, ctx)
         logical, intent(in)  :: remnants
         integer, intent(in)  :: imf_type, n_mod, nt, nspec, nt_neb, whl
         type(ssp_opset_t), intent(inout) :: set
@@ -1184,9 +1132,13 @@ contains
         !> differences, in TP_FD_STEP, of the cotangent against the TP-AGB group's outputs at the shifted sets
         integer, intent(in), optional, contiguous :: ipair(:)
         real(WP), intent(out), optional, contiguous :: dshift(:,:)
+        !> The context the shifted sets are built from (with ipair and dshift)
+        type(opensps_context_t), target, intent(inout), optional :: ctx
 
         integer :: g, m, t, p, k, ntq, ni, ng, ip, j, row
+        real(WP) :: t0, l0
         real(WP), allocatable :: slp_fd(:,:,:), cfd(:,:)
+        type(ssp_opset_t) :: fds(1)
         type(ssp_opset_t), pointer :: sg
         real(KP), allocatable :: yg(:,:)
         real(WP), allocatable :: sm_g(:,:), sl_g(:,:), q_g(:,:), sm_zero(:,:), wb_g(:,:), ib_g(:,:), fe_g(:), zb_g(:), &
@@ -1311,7 +1263,7 @@ contains
             end do
         end do
         ! The TP-AGB shifts: central differences of the cotangent against the TP-AGB group's outputs at the shifted sets
-        if (present(dshift) .and. present(ipair)) then
+        if (present(dshift) .and. present(ipair) .and. present(ctx)) then
             dshift = 0.0_wp
             allocate(slp_fd(nt, n_mod, 2), cfd(4, n_mod))
 #ifdef OMP_TARGET
@@ -1319,11 +1271,21 @@ contains
 #endif
             do ip = 0, set%n_ext
                 if (.not. any(ipair(1:n_mod) == ip)) cycle
+                t0 = 0.0_wp
+                l0 = 0.0_wp
+                if (ip > 0) then
+                    t0 = set%ext_t(ip)
+                    l0 = set%ext_l(ip)
+                end if
+                ! (the four shifted sets of this pair, one at a time: the memory of one set, then freed)
                 do j = 1, 4
-                    call ssp_batch_age_sums_z(imf_type, .false., n_mod, nt, nspec, set%fd(j, ip), zlo, zhi, dz, pm, wsfh, &
+                    call ssp_opset_build_tp(ctx, set, t0 + merge(TP_FD_STEP, 0.0_wp, j == 1) - merge(TP_FD_STEP, 0.0_wp, j == 2), &
+                                            l0 + merge(TP_FD_STEP, 0.0_wp, j == 3) - merge(TP_FD_STEP, 0.0_wp, j == 4), fds(1))
+                    call ssp_batch_age_sums_z(imf_type, .false., n_mod, nt, nspec, fds(1), zlo, zhi, dz, pm, wsfh, &
                                               it_tesc, nt_neb, whl, fesc, yg, sm_g, sl_g, q_g, slpass=slp_fd)
                     call group_cotangent(slp_fd)
                     cfd(j, 1:n_mod) = cb(1:n_mod)
+                    call ssp_opset_free(fds(1))
                 end do
                 row = 2
                 if (ip > 0) row = MOD_NGRP + ip

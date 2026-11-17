@@ -233,6 +233,7 @@ contains
         type(ssp_operator_t) :: opg
         real(WP), allocatable :: m_ref(:), l_ref(:), s_ref(:,:), m_g(:), l_g(:), s_g(:,:), m_sum(:), l_sum(:), s_sum(:,:)
         real(WP) :: p(IMF_NPAR), c(0:MOD_NGRP - 1), dspec, dmass, dlbol
+        real(WP), parameter :: FLOOR_REL = 1.0e7_wp
         integer :: nt, ns, t, i, g
         character(len=200) :: msg
 
@@ -258,13 +259,16 @@ contains
         dspec = 0.0_wp; dmass = 0.0_wp; dlbol = 0.0_wp
         do t = 1, nt
             do i = 1, ns
-                ! (every group's spectrum is floored at SAFE_FLOOR where it has no flux, and kernel precision flushes or rounds
-                ! values near the smallest normal number: pixels below 1e3 of it are not compared relatively)
-                if (s_ref(i, t) > 1.0e3_wp * max(SAFE_FLOOR, real(tiny(1.0_KP), WP))) then
+                ! (every group's spectrum is floored at the smallest normal number of the kernel precision where it has no
+                ! flux, so the sum over the MOD_NGRP groups carries up to MOD_NGRP * c of these floors, a relative error
+                ! of ~1e-3 at a pixel of 1e3 floors, which kernel rounding near the flush threshold makes appear on one
+                ! compiler and not another (nvfortran FP32): the pixels below 1e7 floors, where the floors exceed
+                ! the tolerance, are not compared relatively but only required to be as small)
+                if (s_ref(i, t) > FLOOR_REL * max(SAFE_FLOOR, real(tiny(1.0_KP), WP))) then
                     dspec = max(dspec, abs(s_sum(i, t) / s_ref(i, t) - 1.0_wp))
                 else
                     dspec = max(dspec, merge(0.0_wp, abs(s_sum(i, t)), &
-                                             abs(s_sum(i, t)) < 1.0e4_wp * max(SAFE_FLOOR, real(tiny(1.0_KP), WP))))
+                                             abs(s_sum(i, t)) < 10.0_wp * FLOOR_REL * max(SAFE_FLOOR, real(tiny(1.0_KP), WP))))
                 end if
             end do
             if (m_ref(t) > 0.0_wp) then
