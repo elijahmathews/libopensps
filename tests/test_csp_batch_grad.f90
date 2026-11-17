@@ -1145,7 +1145,9 @@ contains
                 ! (delt and dell: the step is large (TP_FD_STEP), so the adjoint, which linearizes the loss in the TP-AGB group's
                 ! outputs, and the difference of the loss itself differ at O(step) relative: measured 4e-5 - 9e-5 for delt and
                 ! 2e-7 - 4e-7 for dell at 5e-4 dex; tolerance 1e-3, against differences of order one for a wrong adjoint)
-                if (q >= 41) x = x * merge(DUST_RTOL32, DUST_RTOL, LINEAR_ONLY) / 1.0e-3_wp
+                ! (FP32: the gradients of these rows are 1e-5 - 1e-3 here and the rounding of the spectrum part over the step is
+                ! ~1e-6 absolute, so the finite difference is good to a few percent; measured 1e-2 - 6e-2: tolerance 0.2)
+                if (q >= 41) x = x * merge(DUST_RTOL32 / 0.2_wp, DUST_RTOL / 1.0e-3_wp, LINEAR_ONLY)
                 if (x > worst(q)) then
                     worst(q) = x
                     worst_m(q) = m
