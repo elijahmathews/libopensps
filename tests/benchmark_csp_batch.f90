@@ -34,7 +34,7 @@ program benchmark_csp_batch
     use opensps_context_types, only: opensps_context_t
     use opensps_api, only: opensps_build_afe_basis
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build
-    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build
+    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_build_mods
     use opensps_tuning, only: tuning_ct_count, tuning_ct_name, tuning_ct_value
     implicit none
 
@@ -45,6 +45,7 @@ program benchmark_csp_batch
     real(WP), allocatable :: spec_ssp(:, :), mass_ssp(:), lbol_ssp(:), mags(:, :), spec(:, :)
     character(len=32) :: arg, config = 'basic'
     logical :: afe = .false., lib = .false., full, zvar = .false., imf = .false., grad = .false., fit = .false., cue = .false.
+    logical :: mods = .false.
     real(WP), allocatable :: mbar(:, :), sbar(:, :), pbar(:, :), massv(:), lbolv(:), massb(:), lbolb(:)
     type(ssp_operator_t), allocatable :: ops(:)
     type(ssp_opset_t) :: opset
@@ -91,6 +92,9 @@ program benchmark_csp_batch
     lib = index(config, '_lib') > 0     ! the [alpha/Fe] libraries at [alpha/Fe] = 0 only (the 2-slab path), for comparison
     zvar = index(config, '_z') > 0 .or. afe .or. lib
     imf = index(config, '_imf') > 0
+    ! "_mods" (with "_imf"): the isochrone modification factors fbhb, sbss, agb, pagb, redgb free per model too
+    ! (the group operators)
+    mods = index(config, '_mods') > 0 .and. imf
     grad = index(config, '_grad') > 0
     fit = index(config, '_fit') > 0
     cue = index(config, '_cue') > 0
@@ -178,7 +182,12 @@ program benchmark_csp_batch
         call opensps_context_get_pset(ctx, pset)
     end if
 
-    if (imf .and. zvar) then
+    if (mods) then
+        call system_clock(t0)
+        call ssp_opset_build_mods(ctx, pset, zvar, opset)
+        call system_clock(t1)
+        write(*, '(A,F14.3)') 'ssp_operator_mods_build_s ', real(t1 - t0, WP) / rate
+    else if (imf .and. zvar) then
         ! One operator per metallicity (the metallicity free per model: ssp_ops)
         call system_clock(t0)
         allocate(ops(ctx%state%nz))
@@ -394,6 +403,14 @@ contains
             p%imf1 = 0.9_wp + 0.01_wp * mod(i, 61)
             p%imf2 = 1.8_wp + 0.01_wp * mod(i, 83)
             p%imf3 = 2.0_wp + 0.01_wp * mod(i, 79)
+        end if
+        if (mods) then
+            ! (MIST's 2nd and 12th metallicities do not take the horizontal-branch modification: legacy FSPS stops there)
+            if (.not. zvar) p%fbhb = 0.05_wp + 0.01_wp * mod(i, 71)
+            if (.not. zvar) p%sbss = 1.0_wp + 0.1_wp * mod(i, 53)
+            p%agb = 0.5_wp + 0.02_wp * mod(i, 61)
+            p%pagb = 0.5_wp + 0.03_wp * mod(i, 47)
+            p%redgb = 0.7_wp + 0.01_wp * mod(i, 59)
         end if
         if (fit) then
             ! A fitting population: everything differs between models (redshift, gas, dust, AGN)
