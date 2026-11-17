@@ -46,7 +46,7 @@ module opensps_c_api
                                  BGRAD_SF_TRUNC, BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, &
                                  BGRAD_VDMC, BGRAD_MDAVE, BGRAD_AGN_TAU, BGRAD_IGM_FACTOR, &
                                  BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, BGRAD_AFE, BGRAD_FBHB, BGRAD_SBSS, &
-                                 BGRAD_AGB, BGRAD_PAGB, BGRAD_REDGB, NBGRAD
+                                 BGRAD_AGB, BGRAD_PAGB, BGRAD_REDGB, BGRAD_DELT, BGRAD_DELL, NBGRAD
     use opensps_context_types, only: opensps_context_t
 
     implicit none
@@ -708,7 +708,8 @@ contains
         real(WP), allocatable :: mass_l(:), lbol_l(:), mdust_l(:), sfr_l(:), eml_l(:, :)
         character(LEN=10), parameter :: NEB_PARAMS(3) = [character(LEN=10) :: 'gas_logu', 'gas_logz', 'frac_obrun']
         character(LEN=10), parameter :: IMF_PARAMS(5) = [character(LEN=10) :: 'imf1', 'imf2', 'imf3', 'vdmc', 'mdave']
-        character(LEN=10), parameter :: MOD_PARAMS(5) = [character(LEN=10) :: 'fbhb', 'sbss', 'agb', 'pagb', 'redgb']
+        character(LEN=10), parameter :: MOD_PARAMS(7) = [character(LEN=10) :: 'fbhb', 'sbss', 'agb', 'pagb', 'redgb', &
+                                                                            'delt', 'dell']
 
         status = 0
         if (handle < 1 .or. .not. ALLOCATED(ctx_pool) .or. handle > SIZE(ctx_pool)) then
@@ -1146,6 +1147,8 @@ contains
         case (BGRAD_AGB);            p_name = 'agb'
         case (BGRAD_PAGB);           p_name = 'pagb'
         case (BGRAD_REDGB);          p_name = 'redgb'
+        case (BGRAD_DELT);           p_name = 'delt'
+        case (BGRAD_DELL);           p_name = 'dell'
         case default
             status = 1
             call opensps_set_error(1, 'opensps_get_grad_param_name: unknown index')
@@ -1199,9 +1202,9 @@ contains
     end subroutine opensps_context_build_ssp_ops_handle
 
     !> Builds the operators of the isochrone modification groups (doc/ISO_MODS_PLAN.md) on the context instead of the
-    !> single operator: with them the factors fbhb, sbss, agb, pagb and redgb may vary per model (together with the IMF,
-    !> and with the metallicity when all_metallicities /= 0). delt and dell stay zero, evtype, masscut and agb_dust those of
-    !> the context. Status as opensps_context_build_ssp_ops.
+    !> single operator: with them the factors fbhb, sbss, agb, pagb and redgb and the TP-AGB shifts delt and dell may vary
+    !> per model (together with the IMF, and with the metallicity when all_metallicities /= 0). evtype, masscut and agb_dust
+    !> are those of the context. Status as opensps_context_build_ssp_ops.
     subroutine opensps_context_build_ssp_ops_free_mods_handle(handle, all_metallicities, status) &
         bind(C, name="opensps_context_build_ssp_ops_free_mods")
         integer(c_int), value :: handle, all_metallicities

@@ -15,8 +15,8 @@ int main(void) {
 
     /* 1. Test metadata queries */
     opensps_get_nbgrad(&nbgrad);
-    if (nbgrad != OPENSPS_NBGRAD || nbgrad != 42) {
-        printf("FAIL: opensps_get_nbgrad=%d expected 42\n", nbgrad);
+    if (nbgrad != OPENSPS_NBGRAD || nbgrad != 44) {
+        printf("FAIL: opensps_get_nbgrad=%d expected 44\n", nbgrad);
         failures++;
     }
 
@@ -366,12 +366,57 @@ int main(void) {
             }
         }
 
-        /* delt and dell are not free: status 2 */
-        const char *dn[2] = {"dust2", "delt"};
-        double dl[N_MOD] = {0.05, 0.05};
-        const double *dv[2] = {dust2_val, dl};
-        opensps_context_compute_csp_batch(h, N_MOD, 2, dn, dv, NULL, mg, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &status);
-        if (status != 2) { printf("FAIL: delt per model: status %d (expected 2)\n", status); failures++; }
+        /* delt and dell free per model (the TP-AGB shifts): the rows against central differences of the loss at the step of
+           the adjoint (the TP-AGB spectra switch templates at thresholds, so a smaller step returns the steps) */
+        {
+            const char *dn[3] = {"dust2", "delt", "dell"};
+            double dt[N_MOD], dl[N_MOD];
+            for (int m = 0; m < N_MOD; m++) { dt[m] = 0.0437 - 0.115 * m; dl[m] = -0.0523 + 0.114 * m; }
+            const double *dv[3] = {dust2_val, dt, dl};
+            /* (a tau model of 2 Gyr, whose history has the ages with TP-AGB stars, at zmet 10, near solar: the context's
+               default zmet = 1 is MIST's most metal-poor grid, where there are no TP-AGB stars, and the SSP of 10 Gyr of the
+               rest of the test has none either) */
+            opensps_context_free_ssp_ops(h, &status);
+            opensps_context_set_int(h, "zmet", 10, &status);
+            opensps_context_build_ssp_ops_free_mods(h, 0, &status);
+            opensps_context_set_int(h, "sfh", 1, &status);
+            opensps_context_set_float(h, "tau", 5.0, &status);
+            opensps_context_set_float(h, "tage", 2.0, &status);
+            memset(par, 0, sizeof(double) * OPENSPS_NBGRAD * N_MOD);
+            opensps_context_compute_csp_batch_grad(h, N_MOD, 3, dn, dv, NULL, NULL, NULL, mags_bar, NULL, NULL, NULL,
+                                                   mg, NULL, NULL, NULL, NULL, NULL, NULL, NULL, par, NULL, NULL, &status);
+            if (status != 0) {
+                printf("FAIL: gradients with delt and dell free: status %d\n", status);
+                failures++;
+            } else {
+                const double h_tp = (tol_dust > 1e-2) ? 1e-3 : 5e-4;
+                const double tol_tp = (tol_dust > 1e-2) ? 0.2 : 1e-3;
+                const int trows[2] = {OPENSPS_BGRAD_DELT, OPENSPS_BGRAD_DELL};
+                double *tvals[2] = {dt, dl};
+                for (int r = 0; r < 2; r++) {
+                    for (int m = 0; m < N_MOD; m++) {
+                        double x0 = tvals[r][m], lp = 0.0, lm = 0.0;
+                        double *m2 = (double *)malloc(sizeof(double) * nbands * N_MOD);
+                        tvals[r][m] = x0 + h_tp;
+                        opensps_context_compute_csp_batch(h, N_MOD, 3, dn, dv, NULL, m2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &status);
+                        for (int b = 0; b < nbands; b++) lp += m2[m * nbands + b];
+                        tvals[r][m] = x0 - h_tp;
+                        opensps_context_compute_csp_batch(h, N_MOD, 3, dn, dv, NULL, m2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &status);
+                        for (int b = 0; b < nbands; b++) lm += m2[m * nbands + b];
+                        tvals[r][m] = x0;
+                        free(m2);
+                        double fd = (lp - lm) / (2.0 * h_tp), ad = par[trows[r] + m * OPENSPS_NBGRAD];
+                        double rel = fabs(ad - fd) / fmax(fabs(fd), 1e-3);
+                        printf("[%s m=%d] adjoint=%e fd=%e rel_err=%e\n", dn[1 + r], m, ad, fd, rel);
+                        if (!(rel <= tol_tp)) { printf("FAIL: %s gradient mismatch m=%d\n", dn[1 + r], m); failures++; }
+                        if (!(fabs(fd) > 1e-8)) { printf("FAIL: %s check without sensitivity m=%d\n", dn[1 + r], m); failures++; }
+                    }
+                }
+            }
+            opensps_context_set_int(h, "sfh", 0, &status);
+            opensps_context_set_float(h, "tage", 10.0, &status);
+            opensps_context_set_int(h, "zmet", 1, &status);
+        }
 
         /* One build per metallicity too (logzsol and the factors free) */
         opensps_context_free_ssp_ops(h, &status);

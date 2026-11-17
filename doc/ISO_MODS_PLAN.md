@@ -130,13 +130,33 @@ per model exactly as the per-metallicity operators are (concatenated tables with
 serves all). The phase-5 columns of the main operator are then unused for models with a shift, which is a
 coefficient of 0 in the group of 4.1. The L_bol of the shifted stars is exact: `L = 10^(logL + dell)`.
 
-Gradients: the derivative of a phase-5 star's template coefficients (bilinear weights, scale factor, snapping, the
-dust-shell corners) with respect to log T and log L, from `get_stellar_terms` (a derivative variant), assembled
-into the sub-operator's entries as a second value array (`d/d delt`, `d/d dell`); the reverse pass is then one
-more product over those entries. The derivative has kinks at the cell boundaries of the library, as the existing
-`agn_tau` and `afe` rows do (documented, tested away from them). Cost: a host build per distinct pair, so a batch
-with continuously varying shifts is slow by design (a build per model); few distinct pairs are cheap. A limit on
-the number of distinct pairs per batch (status 2 beyond it) bounds the memory.
+**As built (PR 3).** Each distinct nonzero pair is one more group of the batch: `ssp_operator_build(group = TPAGB,
+shift_t, shift_l)` builds the TP-AGB stars at the shifted log T and log L (the shifts enter through the isochrone
+modification, as in legacy FSPS), the set is cached per pair (`ssp_mods_prepare_pairs`), and the models at the pair take
+the TP-AGB coefficient `c_2` in that group's slot instead of the shared TP-AGB group (the forward and the reverse
+orchestrators are those of 4.1 with `ng = MOD_NGRP + n_ext` groups). Batches with more than 8 distinct pairs (4 when the
+set covers every metallicity: one pair's operators for MIST's 12 metallicities are ~1 GB at the regression data's size,
+measured) return status 2; a pair no batch uses is evicted when a new pair needs the slot.
+
+Gradients: not an analytic derivative of the template coefficients but central differences of the group's outputs, taken
+in the reverse pass: for each pair in the batch the TP-AGB group is built at the pair shifted by `+-TP_FD_STEP` in `delt`
+and in `dell` (four sets, one at a time, freed after use: the memory of one set), the cotangent of every model is formed
+against that group's outputs (spectra, surviving mass, ionizing photons, L_bol sums) exactly as for the factors, and
+`d L / d delt = c * (cot(+) - cot(-)) / (2 TP_FD_STEP)`. **The step is 5e-4 dex (1e-3 with FP32 kernels)**, not
+small: the TP-AGB spectra switch templates at thresholds, so the loss is a staircase in `delt` (measured with MIST, one
+model, by scanning the loss at 2e-6 dex: steps of 1e-7 to 1e-4 in L, 50 to 150 of them in 2e-3 dex, one every ~2e-5 dex)
+and a central difference over less than ~2e-4 dex returns a step (5.07, -7.56, -1.62 at 1e-5 against 2.1, -2.9, -1.4 from
+2e-4 to 1e-3). A gradient-based fit sees the response averaged over some tens of steps, which is also what a finite
+difference at the scale a fit explores gives. `dell` shifts L only and is smooth (agreement 1e-9 at 1e-5, 2e-7 at 5e-4).
+The tests compare the rows with the loss's own central difference at the same step: they differ at O(step) relative
+because the adjoint linearizes the loss in the group's outputs (4e-5 to 9e-5 for `delt`, 2e-7 to 4e-7 for `dell` in
+FP64; tolerance 1e-3, and 0.2 in FP32 where the rows are 1e-5 to 1e-3 and the finite difference's rounding is a few
+percent). Cost: a host build of the pair's set (and of its four shifted sets with gradients) per distinct pair not
+cached, so a batch with continuously varying shifts is slow by design and a batch of fits with all-distinct shifts
+cannot use this path beyond the cap. The all-metallicity group of the gradient test has the shifts at zero (the pair
+sets would take 1 GB each there, on top of its 4.7 GB); they are tested with one metallicity, and the C test builds
+the operator at `zmet = 10` (the default `zmet = 1` is MIST's most metal-poor grid, which has no TP-AGB stars, so
+neither `agb` nor the shifts change anything there).
 
 ### 4.3 Fixed IMF, free modifications: the shared IMF weights
 

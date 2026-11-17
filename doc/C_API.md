@@ -270,12 +270,12 @@ void opensps_context_compute_csp_batch_grad(
 );
 ```
 
-* `params_bar`: `[NBGRAD, n]` column-major array receiving exact analytical gradients of the loss $L$ with respect to physical parameters. Indexed by `OPENSPS_BGRAD_*` (0 to `OPENSPS_NBGRAD - 1`). `opensps_context_compute_csp_batch_grad` writes every row and takes no capacity argument: **allocate it with `opensps_get_nbgrad()` rows, not a constant** (`OPENSPS_NBGRAD` grew from 33 to 37 in 0.2.0 and to 42 with the modification factors, and may grow in any minor release). `opensps_context_compute_csp_batch_grad_rows` (same arguments plus `int params_bar_rows` after `params_bar`: its leading dimension) writes the first `OPENSPS_NBGRAD` rows of each column and leaves the rows beyond alone; with fewer rows than `opensps_get_nbgrad()` returns it computes and writes nothing and returns status 3 (the message names the rows needed), so a binding built for fewer rows gets a status, not a heap overrun. Prefer it in new code.
+* `params_bar`: `[NBGRAD, n]` column-major array receiving exact analytical gradients of the loss $L$ with respect to physical parameters. Indexed by `OPENSPS_BGRAD_*` (0 to `OPENSPS_NBGRAD - 1`). `opensps_context_compute_csp_batch_grad` writes every row and takes no capacity argument: **allocate it with `opensps_get_nbgrad()` rows, not a constant** (`OPENSPS_NBGRAD` grew from 33 to 37 in 0.2.0 and to 44 with the modification factors and the TP-AGB shifts, and may grow in any minor release). `opensps_context_compute_csp_batch_grad_rows` (same arguments plus `int params_bar_rows` after `params_bar`: its leading dimension) writes the first `OPENSPS_NBGRAD` rows of each column and leaves the rows beyond alone; with fewer rows than `opensps_get_nbgrad()` returns it computes and writes nothing and returns status 3 (the message names the rows needed), so a binding built for fewer rows gets a status, not a heap overrun. Prefer it in new code.
 * `weights_bar`: `[ntfull, n]` receiving $dL / d(weights)$ when `ssp_weights` is used.
 * `weights_z_bar`: `[ntfull, nz, n]` receiving $dL / d(weights\_z)$ when `ssp_weights_z` is used.
 * `mags_bar`, `spec_bar`, `mass_bar`, `lbol_bar`: incoming cotangents (derivatives of loss with respect to outputs). Any may be `NULL`.
 * Metadata:
-  * `opensps_get_nbgrad(int *nbgrad);` returns 42.
+  * `opensps_get_nbgrad(int *nbgrad);` returns 44.
   * `opensps_get_grad_param_name(int grad_idx, char *name, int max_len, int *status);` returns the parameter name for each row.
 
 A struct-based entry point `opensps_context_compute_csp_batch_ext` is also provided for clean C/C++ usage (it calls the `_rows` entry point, with `opts.params_bar_rows`, or `OPENSPS_NBGRAD` of the header it was compiled with when that is 0):
@@ -295,7 +295,7 @@ opensps_context_compute_csp_batch_ext(handle, &opts, &res, &status);
 `opensps_context_build_ssp_ops_free_mods(handle, all_metallicities, &status)` builds, instead of the single operator of
 `opensps_context_build_ssp_ops`, the operators of the *modification groups* (`doc/ISO_MODS_PLAN.md`): the stars of an
 isochrone partitioned by which of the factors `fbhb`, `sbss`, `agb`, `pagb`, `redgb` scale their weight. With them these five
-parameters may vary per model in `opensps_context_compute_csp_batch*` (together with the IMF, and with `logzsol` when
+parameters, and the TP-AGB shifts `delt` and `dell`, may vary per model in `opensps_context_compute_csp_batch*` (together with the IMF, and with `logzsol` when
 `all_metallicities != 0`); the SSP of a model is the sum over the groups of the group's coefficient (a function of the
 model's factors) times the group's age sums. Spectra, masses and L_bol agree with each model alone through a resident
 basis built with its factors to rounding (3e-15 in FP64; `tests/test_csp_batch.f90`, `tests/test_ssp_operator.f90`).
@@ -304,8 +304,15 @@ basis built with its factors to rounding (3e-15 in FP64; `tests/test_csp_batch.f
   differences to 1e-6 and better (`tests/test_csp_batch_grad.f90`). `fbhb` and `sbss` act through thresholds (`fbhb` above 1e-4,
   1e-3 for Padova isochrones, and `sbss` above 1e-3, and only at ages above `BHB_SBS_TIME`): the coefficients jump there and
   a row is the derivative on the side the model is on;
-- `delt` and `dell` must stay 0, and `agb_dust`, `masscut` and `evtype` those of the context, else status 2 (the next release
-  frees `delt` and `dell`);
+- `delt` and `dell`, the shifts of the TP-AGB stars' log T and log L, may vary per model too (rows `OPENSPS_BGRAD_DELT` and
+  `_DELL`). The models are grouped by their distinct nonzero `(delt, dell)` pairs, each pair one more group of the batch
+  (the TP-AGB stars at those shifts): at most 8 distinct pairs per batch, 4 when `all_metallicities != 0` (the group of a
+  pair then holds the operators of every metallicity: ~1 GB with MIST's 12), else status 2; pairs seen once are kept and
+  evicted when a batch needs the room. The rows are central differences of the group's outputs over +-5e-4 dex (1e-3 with
+  FP32 kernels): the TP-AGB spectra switch templates at thresholds, so the age sums are step functions of the shifts
+  (steps of 1e-7 to 1e-4 in L every ~2e-5 dex, MIST), and a difference over less than ~2e-4 dex returns one step; the
+  gradient is the response averaged over some tens of steps (against the loss's own difference at that step to 4e-5 - 9e-5,
+  `tests/test_csp_batch_grad.f90`). `agb_dust`, `masscut` and `evtype` must be those of the context, else status 2;
 - where the blue stars of the horizontal-branch modification and the stragglers would not fit the isochrone arrays
   (`NM = 2000` points; legacy FSPS stops there, MIST's 2nd and 12th metallicities) the operator of that metallicity is built
   without the modification, and a model that needs it (`fbhb` or `sbss` above their thresholds, with that metallicity among
