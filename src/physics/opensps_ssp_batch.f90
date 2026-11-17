@@ -25,7 +25,8 @@ module opensps_ssp_batch
 
     use, intrinsic :: iso_c_binding, only: c_float
     use opensps_precision, only: WP, KP
-    use opensps_tuning, only: TUNE_P_SSP_BATCH_CHUNK, TUNE_TEMPLATE_MT, TUNE_TEMPLATE_PT, TUNE_TEMPLATE_PIX_BLOCK, &
+    use opensps_tuning, only: TUNE_P_SSP_BATCH_CHUNK, TUNE_P_SHARE_IMF_MIN_CHUNK, TUNE_TEMPLATE_MT, TUNE_TEMPLATE_PT, &
+                              TUNE_TEMPLATE_PIX_BLOCK, &
                               TUNE_TEMPLATE_KB, TUNE_GEMM_KB, TUNE_GEMM_NC_BATCHED, TUNE_IMF_GRAD_CHG, TUNE_HIP_GEMM_RM, &
                               TUNE_HIP_GEMM_RN, &
                               TUNE_HIP_GEMM_KC, TUNE_HIP_FOLD_JB, TUNE_HIP_WEIGHTS_PIECES, tuning_get
@@ -44,7 +45,8 @@ module opensps_ssp_batch
 
     public :: ssp_batch_age_sums_z, ssp_batch_age_sums_adjoint, NIMFG, dot_lanes
     public :: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods, ssp_batch_age_sums_mods, &
-               ssp_batch_age_sums_adjoint_mods, ssp_mods_prepare_pairs, MAX_TP_PAIRS, MAX_TP_PAIRS_ALLZ, TP_FD_STEP
+               ssp_batch_age_sums_adjoint_mods, ssp_mods_prepare_pairs, MAX_TP_PAIRS, MAX_TP_PAIRS_ALLZ, TP_FD_STEP, &
+               ssp_batch_share_imf, imf_shared_models, chunk_unique_imf
 
     !> The IMF parameters of the gradients (imf1, imf2, imf3, vdmc, mdave)
     integer, parameter :: NIMFG = 5
@@ -66,6 +68,12 @@ module opensps_ssp_batch
     !> response of the loss to delt on the scale a fit explores. With FP32 kernels the step is 1e-3, as the outputs' rounding
     !> (1e-7) is divided by it.
     real(WP), parameter :: TP_FD_STEP = merge(5.0e-4_wp, 1.0e-3_wp, KP == WP)
+    !> Shared IMF weights in the forward pass: models of a chunk with the same IMF parameters (all of pm) and the same
+    !> metallicity have the same point weights, so they are computed once and copied to the others' columns
+    !> (ssp_batch_age_sums_z). On by default and chosen per batch (a batch whose models all have their own IMF takes the
+    !> path it always did); a switch for tests and benchmarks, which compare the two (the numbers are the same, as the
+    !> columns are copies of one computation).
+    logical :: ssp_batch_share_imf = .true.
 
     !> The kernels run on the device in OpenMP target builds and as OpenMP host loops otherwise
 #ifdef OMP_TARGET
@@ -508,7 +516,13 @@ contains
         integer, allocatable :: perm1(:), perm2(:), viz1(:), viz2(:), ptr1(:), ptr2(:), cnt(:)
         real(WP), allocatable :: cz1(:), cz2(:), w(:,:), tot(:), vp(:,:,:), pps(:,:,:), slz_l(:,:), sqz_l(:,:), slp_d(:,:,:)
         real(KP), allocatable :: wk(:,:), v(:,:), veuv(:,:), yz(:,:)
-        logical :: direct, fwd_w, want_sl
+        !> The shared IMF weights: the weights of the distinct (IMF, metallicity) virtual models of a chunk, and where each
+        !> model's weights are (the columns of the unique ones)
+        real(WP), allocatable :: w_u(:,:), tot_u(:), pps_u(:,:,:)
+        real(KP), allocatable :: wk_u(:,:)
+        integer, allocatable :: perm_u(:), viz_u(:), cmap(:)
+        logical :: direct, fwd_w, want_sl, share
+        integer :: share_min
 
         if (set%free_mods) then
             if (.not. present(cg)) error stop 'ssp_batch_age_sums_z: a set with free modifications needs the group coefficients'
@@ -553,6 +567,21 @@ contains
         allocate(wk(nc_max, set%n_pts_max), tot(nc_max), v(set%n_eff_max, 2 * nc_max))
         allocate(veuv(set%n_eff_max, max(1, neb_cols * 2 * nc_max)), vp(nc_max, 4, set%n_seg_max), &
                  pps(nc_max, 3, set%n_pc_max))
+        ! Some models of the batch share an IMF (and a chunk may hold their weights once): the scratch of the unique ones;
+        ! none shared (a free-IMF batch): one-element arrays, and the path as before
+        share_min = tuning_get(TUNE_P_SHARE_IMF_MIN_CHUNK)
+        share = ssp_batch_share_imf .and. nc_max >= share_min .and. imf_shared_models(n_mod, pm)
+        if (share) then
+            if (fwd_w) then
+                allocate(w_u(nc_max, set%n_pts_max))
+            else
+                allocate(w_u(1, 1))
+            end if
+            allocate(wk_u(nc_max, set%n_pts_max), tot_u(nc_max), pps_u(nc_max, 3, set%n_pc_max), perm_u(nc_max), &
+                     viz_u(nc_max), cmap(nc_max))
+        else
+            allocate(w_u(1, 1), wk_u(1, 1), tot_u(1), pps_u(1, 1, 1), perm_u(1), viz_u(1), cmap(1))
+        end if
         if (want_sl) then
             allocate(slz_l(nt, nc_max), sqz_l(nt, nc_max))
         else
@@ -564,7 +593,8 @@ contains
             allocate(yz(nspec, 2 * nc_max))
         end if
 #ifdef OMP_TARGET
-        !$omp target data map(alloc: w, wk, tot, v, veuv, vp, pps, yz, slz_l, sqz_l) map(to: perm1, perm2, viz1, viz2, cz1, cz2)
+        !$omp target data map(alloc: w, wk, tot, v, veuv, vp, pps, yz, slz_l, sqz_l, w_u, wk_u, tot_u, pps_u, perm_u, viz_u, cmap) &
+        !$omp& map(to: perm1, perm2, viz1, viz2, cz1, cz2)
 #endif
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2)
@@ -642,15 +672,42 @@ contains
             integer, intent(in) :: np, ipass
             integer, intent(in), contiguous :: perm(:), viz(:)
             real(WP), intent(in), contiguous :: cz(:)
-            integer :: m0, nc, j, j0, jr, iz, ky, nrun
+            integer :: m0, nc, j, j0, jr, iz, ky, nrun, nuniq
 
             do m0 = 1, np, CHUNK
                 nc = min(CHUNK, np - m0 + 1)
                 call opensps_trace_push("fwd_imf_pieces_multi")
-                call imf_pieces_multi(imf_type, remnants, m0, nc, nt, set%n_pc_max, nt_neb, pm, set%n_pc, set%pt_off, &
-                                      set%pc_off, set%pc_ptr, set%age_pc, set%pt_ptr, set%pt_mini, set%pt_m1, set%pt_m2, &
-                                      set%pt_llo, set%pt_dl, set%pt_first, set%pt_cm, set%pt_cl, set%pt_q, set%age_mmax, &
-                                      size(wk, 1), set%n_pts_max, w, wk, tot, pps, perm, viz, cz, smass, slum, q0, fwd_w, set%pt_f)
+                nuniq = nc
+                if (share .and. nc >= share_min) then
+                    call chunk_unique_imf(m0, nc, perm, viz, pm, perm_u, viz_u, cmap, nuniq)
+#ifdef OMP_TARGET
+                    if (nuniq < nc) then
+                        !$omp target update to(perm_u(1:nuniq), viz_u(1:nuniq), cmap(1:nc))
+                    end if
+#endif
+                end if
+                if (nuniq < nc) then
+                    ! The weights once per distinct (IMF, metallicity) of the chunk, copied to the columns of the others,
+                    ! then the sums over the ages for every model
+                    call imf_pieces_multi(imf_type, remnants, 1, nuniq, nt, set%n_pc_max, nt_neb, pm, set%n_pc, set%pt_off, &
+                                          set%pc_off, set%pc_ptr, set%age_pc, set%pt_ptr, set%pt_mini, set%pt_m1, set%pt_m2, &
+                                          set%pt_llo, set%pt_dl, set%pt_first, set%pt_cm, set%pt_cl, set%pt_q, set%age_mmax, &
+                                          size(wk, 1), set%n_pts_max, w_u, wk_u, tot_u, pps_u, perm_u, viz_u, cz, smass, slum, &
+                                          q0, fwd_w, set%pt_f, part=1)
+                    call share_expand(m0, nc, set%n_pc_max, set%n_pts_max, fwd_w, set%n_pc, set%pt_off, set%pc_off, set%pc_ptr, &
+                                      viz, cmap, w_u, wk_u, pps_u, w, wk, pps)
+                    call imf_pieces_multi(imf_type, remnants, m0, nc, nt, set%n_pc_max, nt_neb, pm, set%n_pc, set%pt_off, &
+                                          set%pc_off, set%pc_ptr, set%age_pc, set%pt_ptr, set%pt_mini, set%pt_m1, set%pt_m2, &
+                                          set%pt_llo, set%pt_dl, set%pt_first, set%pt_cm, set%pt_cl, set%pt_q, set%age_mmax, &
+                                          size(wk, 1), set%n_pts_max, w, wk, tot, pps, perm, viz, cz, smass, slum, q0, fwd_w, &
+                                          set%pt_f, part=2)
+                else
+                    call imf_pieces_multi(imf_type, remnants, m0, nc, nt, set%n_pc_max, nt_neb, pm, set%n_pc, set%pt_off, &
+                                          set%pc_off, set%pc_ptr, set%age_pc, set%pt_ptr, set%pt_mini, set%pt_m1, set%pt_m2, &
+                                          set%pt_llo, set%pt_dl, set%pt_first, set%pt_cm, set%pt_cl, set%pt_q, set%age_mmax, &
+                                          size(wk, 1), set%n_pts_max, w, wk, tot, pps, perm, viz, cz, smass, slum, q0, fwd_w, &
+                                          set%pt_f)
+                end if
                 call opensps_trace_pop()
                 if (want_sl) then
                     call adj_age_sums_sl(m0, nc, nt, set%age_pc, viz, pps, slz_l, sqz_l)
@@ -2705,9 +2762,107 @@ contains
     !> viz(v)) with the tables of an ssp_opset_t: the thread (piece q, virtual model) takes the piece
     !> and the points of its metallicity's table (offsets pt_off, pc_off) and skips it if the
     !> metallicity has fewer pieces; the sums accumulate (cz(m)) into smass, slum (logarithm) and q0.
+    !> True if two of the models share all their IMF parameters (pm(:, m): the parameters and the mass limits). Compared with
+    !> the first distinct ones only (a few): a batch of all-different IMFs costs a handful of comparisons per model.
+    function imf_shared_models(n, pm) result(shared)
+        integer, intent(in) :: n
+        real(WP), intent(in) :: pm(:,:)
+        logical :: shared
+        integer, parameter :: MAX_REPS = 8
+        integer :: m, r, nrep, reps(MAX_REPS)
+
+        shared = .false.
+        nrep = 0
+        do m = 1, n
+            do r = 1, nrep
+                if (all(pm(:, m) == pm(:, reps(r)))) then
+                    shared = .true.
+                    return
+                end if
+            end do
+            if (nrep < MAX_REPS) then
+                nrep = nrep + 1
+                reps(nrep) = m
+            end if
+        end do
+    end function imf_shared_models
+
+    !> The distinct (IMF parameters, metallicity) virtual models of a chunk (the nc from m0 of perm, viz): perm_u, viz_u their
+    !> model and metallicity (nuniq of them), cmap(j) the one whose weights virtual model j has. The last 16 distinct ones are
+    !> compared (the chunk is sorted by metallicity, so the equal ones are near); a model not matched in them is its own.
+    subroutine chunk_unique_imf(m0, nc, perm, viz, pm, perm_u, viz_u, cmap, nuniq)
+        integer, intent(in) :: m0, nc
+        integer, intent(in), contiguous :: perm(:), viz(:)
+        real(WP), intent(in) :: pm(:,:)
+        integer, intent(inout), contiguous :: perm_u(:), viz_u(:), cmap(:)
+        integer, intent(out) :: nuniq
+        integer :: j, r, m
+        logical :: found
+
+        nuniq = 0
+        do j = 1, nc
+            m = perm(m0 + j - 1)
+            found = .false.
+            do r = max(1, nuniq - 15), nuniq
+                if (viz_u(r) /= viz(m0 + j - 1)) cycle
+                if (all(pm(:, m) == pm(:, perm_u(r)))) then
+                    cmap(j) = r
+                    found = .true.
+                    exit
+                end if
+            end do
+            if (.not. found) then
+                nuniq = nuniq + 1
+                perm_u(nuniq) = m
+                viz_u(nuniq) = viz(m0 + j - 1)
+                cmap(j) = nuniq
+            end if
+        end do
+    end subroutine chunk_unique_imf
+
+    !> The weights of the unique virtual models of a chunk (columns of w_u, wk_u, pps_u: imf_pieces_multi with part = 1)
+    !> into the columns of all its nc virtual models (column j from column cmap(j)): the point weights of the pieces of
+    !> each model's metallicity and the piece sums. copy_w: the FP64 weights w too (the reverse pass's; the forward-only HIP
+    !> kernel does not write them).
+    subroutine share_expand(m0, nc, n_pc_max, n_pts_max, copy_w, n_pc, pt_off, pc_off, pc_ptr, viz, cmap, w_u, wk_u, pps_u, &
+                            w, wk, pps)
+        integer, intent(in) :: m0, nc, n_pc_max, n_pts_max
+        logical, intent(in) :: copy_w
+        integer, intent(in), contiguous :: n_pc(:), pt_off(:), pc_off(:), pc_ptr(:), viz(:), cmap(:)
+        real(WP), intent(in), contiguous :: w_u(:,:), pps_u(:,:,:)
+        real(KP), intent(in), contiguous :: wk_u(:,:)
+        real(WP), intent(inout), contiguous :: w(:,:), pps(:,:,:)
+        real(KP), intent(inout), contiguous :: wk(:,:)
+        integer :: q, j, k, k0, n, o, iz, c, kl
+
+#if defined(OMP_TARGET)
+        !$omp target teams distribute parallel do collapse(2) private(k, k0, n, o, iz, c, kl)
+#elif defined(_OPENMP)
+        !$omp parallel do collapse(2) private(k, k0, n, o, iz, c, kl)
+#endif
+        do q = 1, n_pc_max
+            do j = 1, nc
+                iz = viz(m0 + j - 1)
+                if (q > n_pc(iz)) cycle
+                c = cmap(j)
+                o = pt_off(iz)
+                k0 = pc_ptr(pc_off(iz) + q)
+                n = pc_ptr(pc_off(iz) + q + 1) - k0
+                do k = k0, k0 + n - 1
+                    kl = k - o
+                    wk(j, kl) = wk_u(c, kl)
+                    if (copy_w) w(j, kl) = w_u(c, kl)
+                end do
+                pps(j, 1, q) = pps_u(c, 1, q)
+                pps(j, 2, q) = pps_u(c, 2, q)
+                pps(j, 3, q) = pps_u(c, 3, q)
+            end do
+        end do
+    end subroutine share_expand
+
     subroutine imf_pieces_multi(imf_type, remnants, m0, nc, nt, n_pc_max, nt_neb, pm, n_pc, pt_off, pc_off, pc_ptr, &
                                 age_pc, pt_ptr, pt_mini, pt_m1, pt_m2, pt_llo, pt_dl, pt_first, pt_cm, pt_cl, pt_q, age_mmax, ldw, &
-                                n_pts_max, w, wk, tot, pps, perm, viz, cz, smass, slum, q0, store_w, pt_f)
+                                n_pts_max, w, wk, tot, pps, perm, viz, cz, smass, slum, q0, store_w, pt_f, part)
         logical, intent(in) :: remnants
         integer, intent(in) :: imf_type, m0, nc, nt, n_pc_max, nt_neb, ldw, n_pts_max
         real(WP), intent(in), contiguous :: pm(:,:), pt_mini(:), pt_m1(:), pt_m2(:), pt_llo(:), pt_dl(:), pt_cm(:), &
@@ -2723,13 +2878,24 @@ contains
         logical, intent(in), optional :: store_w
         !> The FP32 table of the set (ssp_opset_t%pt_f), read by the weights kernel of a forward-only call
         real(c_float), intent(in), optional, contiguous :: pt_f(:,:)
+        !> 0 (default): the weights of the models' columns and the sums over the ages, as always. 1: the weights only (tot,
+        !> w, wk, pps); 2: the sums over the ages only (smass, slum, q0 from pps), for the columns whose weights
+        !> were copied from those of another model with the same IMF (ssp_batch_age_sums_z)
+        integer, intent(in), optional :: part
         integer  :: j, t, k, m, q, k0, n, iz, o, kl
         real(WP) :: sm, sl, sq
-        logical  :: keep_w
+        logical  :: keep_w, do_w, do_acc
 
         keep_w = .true.
         if (present(store_w)) keep_w = store_w
         if (.not. present(pt_f)) keep_w = .true.
+        do_w = .true.
+        do_acc = .true.
+        if (present(part)) then
+            do_w = part /= 2
+            do_acc = part /= 1
+        end if
+        if (do_w) then
 
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do 
@@ -2844,6 +3010,8 @@ contains
             end do
         end do
 #endif
+        end if
+        if (do_acc) then
 #if defined(OMP_TARGET)
         !$omp target teams distribute parallel do collapse(2) private(q, sm, sl, sq, iz, m)
 #elif defined(_OPENMP)
@@ -2869,6 +3037,7 @@ contains
                 if (t <= nt_neb) q0(t, m) = q0(t, m) + cz(m) * sq
             end do
         end do
+        end if
     end subroutine imf_pieces_multi
 
     !> fold_segments with the tables of an ssp_opset_t (see imf_pieces_multi): the thread (segment s,

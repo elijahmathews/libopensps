@@ -87,6 +87,7 @@ Run-time parameters:
 | `SSP_BATCH_CHUNK` | 2048 | 1 to 1e6 | models per chunk of the batched SSP |
 | `HOST_SFH_MAX` | 16 | 0 to 1e6 | batches smaller than this form the SFH weights on the host; 0 sends every batch to the device |
 | `PINNED_CHUNK_BYTES` | 16 MiB | 64 KiB to 1 GiB | bytes per chunk of the pinned host-device copies (`OPENSPS_PINNED` offload builds) |
+| `SHARE_IMF_MIN_CHUNK` | 2048 | 0 to 1e6 | chunks of at least this many models, whose models share their IMF parameters, compute the IMF weights once per distinct IMF and copy them (M6); 0 shares in every chunk |
 
 ## How a run-time value is resolved
 

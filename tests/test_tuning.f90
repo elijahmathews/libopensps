@@ -83,7 +83,7 @@ program test_tuning
     call tuning_reset()
     call assert_int_equals(8, tuning_get(TUNE_P_HOST_SFH_MAX), "reset re-reads the environment", &
                            total_tests, total_failures)
-    call assert_true(len_trim(tuning_name(1)) > 0 .and. len_trim(tuning_name(0)) == 0 .and. tuning_count() == 3, &
+    call assert_true(len_trim(tuning_name(1)) > 0 .and. len_trim(tuning_name(0)) == 0 .and. tuning_count() == 4, &
                      "names and count", total_tests, total_failures)
 
     call print_group("Device profiles (OPENSPS_TUNE_PROFILE=cc80)")
