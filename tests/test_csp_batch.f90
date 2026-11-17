@@ -731,8 +731,8 @@ contains
         call compute_csp_batch(ctx, psets, mags, status, spec=ref_spec, ssp_ops=op)
         call assert_true(status == 0 .and. op%n_ext == 6 .and. maxval(abs(ref_spec - spec)) <= 1.0e-12_wp * maxval(abs(spec)), &
                          "free factors: the pairs of the first batch are reused", total_tests, total_failures)
-        ! More distinct pairs than the set keeps (MAX_TP_PAIRS) in one batch: status 2
-        allocate(many(MAX_TP_PAIRS + 1))
+        ! More distinct pairs than the set keeps (max_ext) in one batch: status 2
+        allocate(many(op%max_ext + 1))
         many = psets(1)
         do m = 1, size(many)
             many(m)%delt = 0.01_wp * m

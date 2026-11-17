@@ -44,19 +44,28 @@ module opensps_ssp_batch
 
     public :: ssp_batch_age_sums_z, ssp_batch_age_sums_adjoint, NIMFG, dot_lanes
     public :: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods, ssp_batch_age_sums_mods, &
-               ssp_batch_age_sums_adjoint_mods, ssp_mods_prepare_pairs, MAX_TP_PAIRS, TP_FD_STEP
+               ssp_batch_age_sums_adjoint_mods, ssp_mods_prepare_pairs, MAX_TP_PAIRS, MAX_TP_PAIRS_ALLZ, TP_FD_STEP
 
     !> The IMF parameters of the gradients (imf1, imf2, imf3, vdmc, mdave)
     integer, parameter :: NIMFG = 5
     !> The distinct nonzero (delt, dell) pairs of a context's batches the free-modification set keeps operators of
     !> The most distinct nonzero (delt, dell) pairs a free-modification set holds sets for (and a batch may use). Each pair
-    !> keeps one set of the TP-AGB group (about 40 MB at the regression data's size) and, with gradients, four more for the
-    !> central differences, so the cap bounds the memory at about 5 (MAX_TP_PAIRS + 1) sets: a larger cap (32 was tried) took
-    !> 6 GB in the finite-difference tests, whose every step is a new pair
+    !> keeps one set of the TP-AGB group (the operators of the set's metallicities: ~90 MB for one at the regression data's
+    !> size, see MAX_TP_PAIRS_ALLZ for all) and the gradients build one more at a time for their central differences, so the
+    !> cap bounds the memory at that of MAX_TP_PAIRS + 1 sets. (A cap of 32, with the four shifted sets of every pair kept,
+    !> took 10 GB in the finite-difference tests, whose every step is a new pair.)
     integer, parameter :: MAX_TP_PAIRS = 8
-    !> The step of the central differences of the TP-AGB group's outputs in delt and dell (dex): the operators' own
-    !> numbers are FP64, so the FP64 step is small; with FP32 kernels the outputs' rounding (1e-7) would be divided by it
-    real(WP), parameter :: TP_FD_STEP = merge(1.0e-5_wp, 1.0e-3_wp, KP == WP)
+    !> The same for a set whose operators cover every metallicity (ssp_opset_build_mods with all_z: the logzsol of each
+    !> model free): a pair's set holds the operators of all of them, ~1 GB with MIST's 12 at the regression data's size
+    integer, parameter :: MAX_TP_PAIRS_ALLZ = 4
+    !> The step of the central differences of the TP-AGB group's outputs in delt and dell (dex). Not small: the spectra of the
+    !> TP-AGB stars switch templates at thresholds, so the age sums are step functions of delt (measured, MIST, one model: steps
+    !> of 1e-7 to 1e-4 in L, 50 to 150 of them per 2e-3 dex, i.e. every ~2e-5 dex), and a difference over a step below that
+    !> returns one step (5.07, -7.56, -1.62 at 1e-5 where the slope averaged over the steps is 2.1, -2.9, -1.4). From 2e-4 dex
+    !> up the central difference is the slope averaged over some tens of steps (2.12, 2.10, 2.15 at 2e-4, 5e-4, 1e-3), the
+    !> response of the loss to delt on the scale a fit explores. With FP32 kernels the step is 1e-3, as the outputs' rounding
+    !> (1e-7) is divided by it.
+    real(WP), parameter :: TP_FD_STEP = merge(5.0e-4_wp, 1.0e-3_wp, KP == WP)
 
     !> The kernels run on the device in OpenMP target builds and as OpenMP host loops otherwise
 #ifdef OMP_TARGET
@@ -115,7 +124,10 @@ module opensps_ssp_batch
         !> one more group of the batch with the coefficient of the TP-AGB group for the models at that pair. (The gradients'
         !> shifted sets, +-TP_FD_STEP in delt and in dell, are built one pair at a time in the reverse pass and freed after it:
         !> each is the size of a set of the TP-AGB group at every metallicity)
-        integer :: n_ext = 0
+        !> n_ext: the highest slot of ext in use (a slot whose ext_ok is false is free: a pair a batch did not use is evicted
+        !> when a new pair needs the room); max_ext: the pairs a batch may use
+        integer :: n_ext = 0, max_ext = MAX_TP_PAIRS
+        logical :: ext_ok(MAX_TP_PAIRS) = .false.
         type(ssp_opset_t), pointer :: ext(:) => null()
         real(WP) :: ext_t(MAX_TP_PAIRS) = 0.0_wp, ext_l(MAX_TP_PAIRS) = 0.0_wp
         !> What the groups were built from (the pairs' sets are built with the same)
@@ -239,6 +251,8 @@ contains
         set%all_z = all_z
         allocate(set%ext(MAX_TP_PAIRS))
         set%n_ext = 0
+        set%ext_ok = .false.
+        set%max_ext = merge(MAX_TP_PAIRS_ALLZ, MAX_TP_PAIRS, all_z)
     end subroutine ssp_opset_build_mods
 
     !> The set of group g of a free-modification set: the groups of ssp_opset_build_mods (0 .. MOD_NGRP - 1), then the TP-AGB
@@ -275,15 +289,17 @@ contains
         call ssp_opset_build(ops, out)
     end subroutine ssp_opset_build_tp
 
-    !> The pair of each model (ipair: 0 for delt = dell = 0, else k of ext(k)), building the sets of the pairs not seen yet
-    !> status 2: a batch with more than MAX_TP_PAIRS distinct pairs.
+    !> The pair of each model (ipair: 0 for delt = dell = 0, else k of ext(k)), building the sets of the pairs not seen yet,
+    !> in a free slot or one whose pair this batch does not use. status 2: a batch with more than set%max_ext distinct pairs.
     subroutine ssp_mods_prepare_pairs(ctx, set, delt, dell, ipair, status)
         type(opensps_context_t), target, intent(inout) :: ctx
         type(ssp_opset_t), intent(inout) :: set
         real(WP), intent(in) :: delt(:), dell(:)
         integer, intent(out) :: ipair(:), status
-        integer :: m, k, ip, nnew, nnew_missing
+        integer :: m, k, ip, nnew, slot
         real(WP) :: nt_(MAX_TP_PAIRS), nl_(MAX_TP_PAIRS)
+        integer :: where_(MAX_TP_PAIRS)
+        logical :: inuse(MAX_TP_PAIRS)
 
         status = 0
         ipair = 0
@@ -295,7 +311,7 @@ contains
                 if (nt_(k) == delt(m) .and. nl_(k) == dell(m)) exit
             end do
             if (k > nnew) then
-                if (nnew == MAX_TP_PAIRS) then
+                if (nnew == set%max_ext) then
                     status = 2
                     return
                 end if
@@ -304,36 +320,50 @@ contains
                 nl_(nnew) = dell(m)
             end if
         end do
-        ! Keep the pairs built so far and add the new ones; when they would not all fit, start from this batch's
-        nnew_missing = 0
+        ! The slots of the pairs already built (those are kept), then the new pairs into free or unused slots
+        inuse = .false.
+        where_ = 0
         do k = 1, nnew
             do ip = 1, set%n_ext
-                if (set%ext_t(ip) == nt_(k) .and. set%ext_l(ip) == nl_(k)) exit
+                if (set%ext_ok(ip) .and. set%ext_t(ip) == nt_(k) .and. set%ext_l(ip) == nl_(k)) then
+                    where_(k) = ip
+                    inuse(ip) = .true.
+                    exit
+                end if
             end do
-            if (ip > set%n_ext) nnew_missing = nnew_missing + 1
         end do
-        if (set%n_ext + nnew_missing > MAX_TP_PAIRS) then
-            do ip = 1, set%n_ext
-                call ssp_opset_free(set%ext(ip))
-            end do
-            set%n_ext = 0
-        end if
         do k = 1, nnew
-            do ip = 1, set%n_ext
-                if (set%ext_t(ip) == nt_(k) .and. set%ext_l(ip) == nl_(k)) exit
+            if (where_(k) > 0) cycle
+            slot = 0
+            do ip = 1, MAX_TP_PAIRS
+                if (.not. set%ext_ok(ip)) then
+                    slot = ip
+                    exit
+                end if
             end do
-            if (ip > set%n_ext) then
-                set%n_ext = set%n_ext + 1
-                set%ext_t(set%n_ext) = nt_(k)
-                set%ext_l(set%n_ext) = nl_(k)
-                call ssp_opset_build_tp(ctx, set, nt_(k), nl_(k), set%ext(set%n_ext))
+            if (slot == 0) then
+                do ip = 1, MAX_TP_PAIRS
+                    if (.not. inuse(ip)) then
+                        slot = ip
+                        exit
+                    end if
+                end do
+                call ssp_opset_free(set%ext(slot))
+                set%ext_ok(slot) = .false.
             end if
+            call ssp_opset_build_tp(ctx, set, nt_(k), nl_(k), set%ext(slot))
+            set%ext_t(slot) = nt_(k)
+            set%ext_l(slot) = nl_(k)
+            set%ext_ok(slot) = .true.
+            set%n_ext = max(set%n_ext, slot)
+            inuse(slot) = .true.
+            where_(k) = slot
         end do
         do m = 1, size(delt)
             if (delt(m) == 0.0_wp .and. dell(m) == 0.0_wp) cycle
-            do ip = 1, set%n_ext
-                if (set%ext_t(ip) == delt(m) .and. set%ext_l(ip) == dell(m)) then
-                    ipair(m) = ip
+            do k = 1, nnew
+                if (nt_(k) == delt(m) .and. nl_(k) == dell(m)) then
+                    ipair(m) = where_(k)
                     exit
                 end if
             end do
@@ -401,6 +431,7 @@ contains
             nullify(set%ext)
         end if
         set%n_ext = 0
+        set%ext_ok = .false.
         set%free_mods = .false.
 #ifdef OMP_TARGET
         if (set%on_device) then

@@ -53,7 +53,7 @@ program test_csp_batch_grad
     use opensps_cue, only: cue_data_dir, cue_w, cue_load_dir, cue_unload, cue_weights_t
     use cue_test_library, only: cue_synthetic, cue_write_library
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build
-    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods
+    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods, TP_FD_STEP
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                                opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
                                opensps_context_set_param_int, opensps_context_set_param_float
@@ -106,6 +106,9 @@ program test_csp_batch_grad
     !> Model 5's metallicity brackets an isochrone set of which the horizontal-branch stars do not fit the arrays (MIST,
     !> the 2nd metallicity: legacy FSPS stops there): it is given no HB modification (such a model is refused)
     logical :: hb_limited = .false.
+    !> The free-modification set covers every metallicity: no TP-AGB shifts (each pair's set is ~1 GB then, and the
+    !> group already takes ~5 GB: the shifts are checked with one metallicity)
+    logical :: mods_allz = .false.
     type(ssp_opset_t) :: opset
     !> The cotangents of the current check (the loss L is formed with them)
     real(WP), allocatable :: lbar_m(:, :), lbar_s(:, :)
@@ -308,6 +311,7 @@ program test_csp_batch_grad
     call set_int('add_neb_emission', 0)
     mods_on = .false.
     hb_limited = .false.
+    mods_allz = .false.
     use_ops = .false.
     call ssp_opset_free(opset)
 
@@ -362,6 +366,7 @@ contains
         call opensps_context_prepare_pset(ctx)
         call opensps_context_get_pset(ctx, pset)
         call ssp_opset_build_mods(ctx, pset, all_z, opset)
+        mods_allz = all_z
     end subroutine build_opset_mods
 
     !> The modification factors of model m (a model of each regime: below and above the thresholds of fbhb and sbss).
@@ -373,11 +378,16 @@ contains
         real(WP), parameter :: AG(6) = [1.0_wp, 0.6_wp, 1.4_wp, 0.9_wp, 1.8_wp, 0.5_wp]
         real(WP), parameter :: PA(6) = [1.0_wp, 1.5_wp, 0.5_wp, 2.0_wp, 1.0_wp, 0.8_wp]
         real(WP), parameter :: RG(6) = [1.0_wp, 0.8_wp, 1.2_wp, 1.0_wp, 0.7_wp, 1.4_wp]
-        ! (the TP-AGB shifts: models 2 and 3 share a pair, model 1 has none)
-        real(WP), parameter :: DT(6) = [0.0_wp, 0.04_wp, 0.04_wp, -0.07_wp, 0.0_wp, 0.09_wp]
-        real(WP), parameter :: DL(6) = [0.0_wp, -0.05_wp, -0.05_wp, 0.06_wp, 0.08_wp, -0.1_wp]
+        ! (the TP-AGB shifts: three pairs, models 2 and 3 share one and so do 4 and 5, model 1 has none: a finite
+        ! difference in one model's shift makes a fourth, and a set for all metallicities holds four)
+        ! (not round numbers: the shifted temperatures of isochrone points must not sit on a template threshold, where
+        ! the spectrum jumps and a finite difference of any step sees the jump)
+        real(WP), parameter :: DT(6) = [0.0_wp, 0.0437_wp, 0.0437_wp, -0.0713_wp, -0.0713_wp, 0.0911_wp]
+        real(WP), parameter :: DL(6) = [0.0_wp, -0.0523_wp, -0.0523_wp, 0.0617_wp, 0.0617_wp, -0.1031_wp]
         p%fbhb = FB(m); p%sbss = SB(m); p%agb = AG(m); p%pagb = PA(m); p%redgb = RG(m)
-        p%delt = DT(m); p%dell = DL(m)
+        if (.not. mods_allz) then
+            p%delt = DT(m); p%dell = DL(m)
+        end if
         if (hb_limited .and. m == 5) then
             p%fbhb = 0.0_wp
             p%sbss = 0.0_wp
@@ -1030,7 +1040,8 @@ contains
                 ! (a batch with free modification factors: the rows the factors can touch, the factors, the metallicity and
                 ! the IMF's parameters, are checked; the others (dust, SFH, redshift, ...) are those of the groups above,
                 ! where the age sums are not combined from the groups, and cost ~500 forward batches of 8 groups here)
-                if (mods_on .and. .not. (q == 15 .or. (q >= 25 .and. q <= 27) .or. q == 30 .or. q == 31 .or. q >= 36)) then
+                if (mods_on .and. .not. (q == 15 .or. (q >= 25 .and. q <= 27) .or. q == 30 .or. q == 31 .or. q >= 36) .or. &
+                    (mods_allz .and. q >= 41)) then
                     g_fd(q, m) = pbar(ROWS(q), m)
                     cycle
                 end if
@@ -1078,6 +1089,10 @@ contains
                 ! 1e-6 relative resolve the local derivative. Measured: central differences -0.2770633 at
                 ! 1e-6, -0.2770529 at 1e-5 and 1e-4, -0.2770666 at 1e-3, against the adjoint's -0.2770632)
                 if (q == 30 .and. .not. LINEAR_ONLY) h = 1.0e-6_wp * max(abs(x), 1.0e-2_wp)
+                ! (delt and dell: the step of the adjoint, TP_FD_STEP: the TP-AGB spectra switch templates at thresholds, steps
+                ! of the loss of 1e-7 to 1e-4 every ~2e-5 dex of delt, so a finite difference over less than ~2e-4 dex
+                ! returns the steps (measured: 5.07, -7.56, -1.62 at 1e-5 against 2.1, -2.9, -1.4 from 2e-4 to 1e-3)
+                if (q >= 41) h = TP_FD_STEP
                 if (bound) then
                     ! (h / 10: at dust2 or dust3 = 0 the curvature of the UV screen leaves the third-order
                     ! formula a truncation of up to ~2e-4 at h = 1e-5 (as h^3); the rounding floor is below)
@@ -1127,6 +1142,10 @@ contains
                 ! adjoint, 8.1074e-3 at h = 1e-6, 8.1241e-3 at 1e-7, against 8.1279e-3, until rounding takes
                 ! over below 1e-8)
                 if (bnd(q, m) .and. .not. LINEAR_ONLY) x = x * DUST_RTOL / DUST_RTOL_BOUND
+                ! (delt and dell: the step is large (TP_FD_STEP), so the adjoint, which linearizes the loss in the TP-AGB group's
+                ! outputs, and the difference of the loss itself differ at O(step) relative: measured 4e-5 - 9e-5 for delt and
+                ! 2e-7 - 4e-7 for dell at 5e-4 dex; tolerance 1e-3, against differences of order one for a wrong adjoint)
+                if (q >= 41) x = x * merge(DUST_RTOL32, DUST_RTOL, LINEAR_ONLY) / 1.0e-3_wp
                 if (x > worst(q)) then
                     worst(q) = x
                     worst_m(q) = m
