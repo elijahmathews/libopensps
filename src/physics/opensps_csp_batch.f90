@@ -115,7 +115,8 @@ module opensps_csp_batch
     use opensps_imf, only: imf_pack_params, IMF_NPAR, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE
     use opensps_ssp_operator, only: ssp_op_mod_signature, ssp_mod_coefficients, ssp_mod_coefficient_derivatives, MOD_NGRP, &
                                     N_MOD_SIG
-    use opensps_ssp_batch, only: ssp_batch_age_sums_z, ssp_opset_t, ssp_batch_age_sums_adjoint, NIMFG, dot_lanes
+    use opensps_ssp_batch, only: ssp_batch_age_sums_z, ssp_opset_t, ssp_batch_age_sums_adjoint, NIMFG, dot_lanes, &
+                                 ssp_mods_prepare_pairs
     use opensps_sfh_tangent, only: sfh_weights_tangent, sfh_tangent_supported, NSFHT
 #if defined(OPENSPS_ACCEL_BLAS)
     use opensps_accel_blas, only: accel_blas_init, accel_blas_gemm, ACCEL_BLAS_OP_N
@@ -136,7 +137,7 @@ module opensps_csp_batch
               BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, &
               BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, BGRAD_VDMC, BGRAD_MDAVE, BGRAD_AGN_TAU, &
               BGRAD_IGM_FACTOR, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, BGRAD_AFE, BGRAD_FBHB, BGRAD_SBSS, &
-              BGRAD_AGB, BGRAD_PAGB, BGRAD_REDGB, NBGRAD
+              BGRAD_AGB, BGRAD_PAGB, BGRAD_REDGB, BGRAD_DELT, BGRAD_DELL, NBGRAD
 
     !> Rows of params_bar (compute_csp_batch's gradients): the derivative of the caller's loss with
     !> respect to each parameter of the model. The list grows as the adjoints of more stages are
@@ -185,7 +186,10 @@ module opensps_csp_batch
     !> The isochrone modification factors free per model (ssp_opset_build_mods): fbhb, sbss, agb, pagb, redgb. One-sided at the
     !> thresholds where the factors jump (fbhb above 1e-4, 1e-3 for Padova; sbss above 1e-3); zero without such a set
     integer, parameter :: BGRAD_FBHB = 38, BGRAD_SBSS = 39, BGRAD_AGB = 40, BGRAD_PAGB = 41, BGRAD_REDGB = 42
-    integer, parameter :: NBGRAD = 42
+    !> The TP-AGB shifts delt and dell (central differences of the TP-AGB group's outputs, in 1e-5 dex, 1e-3 in FP32 builds:
+    !> one-sided where a star's template changes its interpolation cell; zero without such a set)
+    integer, parameter :: BGRAD_DELT = 43, BGRAD_DELL = 44
+    integer, parameter :: NBGRAD = 44
     !> The rows of the SFH tangents' parameters (opensps_sfh_tangent: SFHT_TAGE .. SFHT_SF_SLOPE)
     integer, parameter :: SFHT_ROWS(8) = [17, 18, 19, 20, 21, 22, 25, 26]
     !> Rows BGRAD_DUST1 .. BGRAD_DUSTE_GAMMA, summed per model by the attenuation adjoint (10-12 as
@@ -395,7 +399,9 @@ contains
         logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw, host_m, imf, dev, zimf, grad
         logical  :: cue
         type(ssp_opset_t), pointer :: refset => null()
-        real(WP), allocatable :: cgm(:,:), dcm(:,:,:)
+        real(WP), allocatable :: cgm(:,:), dcm(:,:,:), dsh(:,:)
+        integer, allocatable :: ipair(:)
+        integer :: ng, st_pair
         real(WP) :: sigm(N_MOD_SIG)
         integer  :: st_cue
         real(WP), allocatable :: gas(:,:)
@@ -653,11 +659,10 @@ contains
                 ! Isochrone modifications change which templates the stars use, so S is rebuilt for
                 ! them: not supported per model (status 2), and not different from the build either
                 if (ssp_ops%free_mods) then
-                    ! fbhb, sbss, agb, pagb and redgb are free; delt and dell must be zero, the cuts (agb_dust, masscut, evtype)
-                    ! those of the operators
+                    ! fbhb, sbss, agb, pagb, redgb, delt and dell are free; the cuts (agb_dust, masscut, evtype) are those of the
+                    ! operators
                     sigm = ssp_op_mod_signature(psets(m))
-                    if (any(sigm(8:10) /= refset%ops(1)%mod_sig(8:10)) .or. &
-                        psets(m)%delt /= 0.0_wp .or. psets(m)%dell /= 0.0_wp) then
+                    if (any(sigm(8:10) /= refset%ops(1)%mod_sig(8:10))) then
                         status = 2; return
                     end if
 
@@ -668,12 +673,34 @@ contains
         end if
         if (imf) then
             if (ssp_ops%free_mods) then
-                allocate(cgm(MOD_NGRP, n_mod))
-                if (present(params_bar)) allocate(dcm(MOD_NGRP, 5, n_mod))
+                ! The TP-AGB group at each (delt, dell) of the batch: one more group per distinct nonzero pair, built here when
+                ! the context has not seen it (and, with gradients, the shifted sets of the central differences)
+                allocate(ipair(n_mod), dsh(2, n_mod))
+                call ssp_mods_prepare_pairs(ctx, ssp_ops, psets(1:n_mod)%delt, psets(1:n_mod)%dell, present(params_bar), ipair, &
+                                            st_pair)
+                if (st_pair /= 0) then
+                    status = 2; return
+                end if
+                ng = MOD_NGRP + ssp_ops%n_ext
+                allocate(cgm(ng, n_mod))
+                cgm = 0.0_wp
+                if (present(params_bar)) then
+                    allocate(dcm(ng, 5, n_mod))
+                    dcm = 0.0_wp
+                end if
                 do m = 1, n_mod
-                    cgm(:, m) = ssp_mod_coefficients(psets(m), trim(ctx%state%isoc_type) == 'pdva')
+                    cgm(1:MOD_NGRP, m) = ssp_mod_coefficients(psets(m), trim(ctx%state%isoc_type) == 'pdva')
                     if (allocated(dcm)) &
-                        dcm(:, :, m) = ssp_mod_coefficient_derivatives(psets(m), trim(ctx%state%isoc_type) == 'pdva')
+                        dcm(1:MOD_NGRP, :, m) = ssp_mod_coefficient_derivatives(psets(m), trim(ctx%state%isoc_type) == 'pdva')
+                    if (ipair(m) > 0) then
+                        ! the TP-AGB stars of this model are those of its pair's set
+                        cgm(MOD_NGRP + ipair(m), m) = cgm(2, m)
+                        cgm(2, m) = 0.0_wp
+                        if (allocated(dcm)) then
+                            dcm(MOD_NGRP + ipair(m), :, m) = dcm(2, :, m)
+                            dcm(2, :, m) = 0.0_wp
+                        end if
+                    end if
                 end do
             end if
         end if
@@ -1425,7 +1452,7 @@ contains
                                     neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
                                     psets(1)%min_wave_smooth, psets(1)%max_wave_smooth, &
                                     imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzbl, &
-                                    mags_bar, spec_bar, params_bar, wbl, gas, cgm, dcm)
+                                    mags_bar, spec_bar, params_bar, wbl, gas, cgm, dcm, ipair)
             else
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
                                     it_tesc, zlo, zhi, dz, da, nzs, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
@@ -1433,7 +1460,7 @@ contains
                                     neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
                                     psets(1)%min_wave_smooth, psets(1)%max_wave_smooth, &
                                     imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzbl, &
-                                    mags_bar, spec_bar, params_bar, wbl, gas, cgm, dcm)
+                                    mags_bar, spec_bar, params_bar, wbl, gas, cgm, dcm, ipair)
             end if
             ! The mass output's cotangent: mass = sum over ages of w_k M_k (M interpolated in log Z with
             ! per-model metallicity, which then adds to logzsol's row)
@@ -4834,11 +4861,12 @@ contains
                               zlo, zhi, dz, da, nzs, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, yo, total, &
                               emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, neb, nb, w2, lzm, tsave, &
                               sigma, minl, maxl, imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzb_out, mags_bar, &
-                              spec_bar, params_bar, weights_bar, gas, cgm, dcm)
+                              spec_bar, params_bar, weights_bar, gas, cgm, dcm, ipairm)
         type(opensps_context_t), intent(inout) :: ctx
         !> The isochrone modification groups' coefficients and their derivatives with respect to fbhb .. redgb
         !> (a set of ssp_opset_build_mods; absent: none free)
         real(WP), intent(in), optional   :: cgm(:,:), dcm(:,:,:)
+        integer, intent(in), optional    :: ipairm(:)
         integer, intent(in)              :: n_mod, nspec, nt, nbands
 #if !defined(__flang__)
         type(params), intent(in), target :: pbuf(n_mod)
@@ -4895,7 +4923,7 @@ contains
         ! The IMF's reverse pass: dL / dQ per nebular age, the SFH weights' cotangent, the IMF rows,
         ! fesc's and dz's cotangents
         real(WP), allocatable :: qb(:,:), wbi(:,:), imfb(:,:), fescb(:), zbi(:)
-        real(WP), allocatable :: cbm(:,:)
+        real(WP), allocatable :: cbm(:,:), dshm(:,:)
         integer :: kk
         logical :: lgiven
         integer, allocatable  :: jmx(:)
@@ -5136,11 +5164,12 @@ contains
             !$omp target update from(qb, nwb, gneb)
 #endif
             if (present(cgm)) then
-                allocate(cbm(MOD_NGRP, n_mod))
+                allocate(cbm(size(cgm, 1), n_mod), dshm(2, n_mod))
+                dshm = 0.0_wp
                 call ssp_batch_age_sums_adjoint(ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &
                                                 ssp_ops, zlo, zhi, dz, pm, wsfh, it_tesc, nb%nt_neb, nb%whlylim, nb%fesc, &
                                                 gw, slum, lsum_bar, qb, wbi, imfb, fescb, zbi, smass, mbx / cscale, &
-                                                cg=cgm, cbar=cbm)
+                                                cg=cgm, cbar=cbm, ipair=ipairm, dshift=dshm)
             else
                 call ssp_batch_age_sums_adjoint(ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &
                                                 ssp_ops, zlo, zhi, dz, pm, wsfh, it_tesc, nb%nt_neb, nb%whlylim, nb%fesc, &
@@ -5197,6 +5226,8 @@ contains
                     do kk = 1, 5
                         params_bar(BGRAD_FBHB + kk - 1, m) = sum(cbm(:, m) * dcm(:, kk, m)) * cscale(m)
                     end do
+                    params_bar(BGRAD_DELT, m) = dshm(1, m) * cscale(m)
+                    params_bar(BGRAD_DELL, m) = dshm(2, m) * cscale(m)
                 end if
             end do
         end if

@@ -83,6 +83,14 @@ program test_ssp_operator
     call set_float('fbhb', 0.3_wp); call set_float('agb', 0.6_wp); call set_float('pagb', 2.0_wp)
     call set_int('imf_type', 2)
     call check_groups("MIST groups: Kroupa, all factors")
+    ! The TP-AGB shifts delt and dell: the group of the TP-AGB stars built at them
+    call set_float('delt', 0.03_wp); call set_float('dell', -0.08_wp)
+    call check_groups("MIST groups: all factors, delt 0.03, dell -0.08")
+    call set_float('delt', -0.12_wp); call set_float('dell', 0.0_wp)
+    call check_groups("MIST groups: delt -0.12")
+    call set_float('delt', 0.0_wp); call set_float('dell', 0.15_wp)
+    call check_groups("MIST groups: dell 0.15")
+    call set_float('delt', 0.0_wp); call set_float('dell', 0.0_wp)
     call ssp_operator_free(op)
     call opensps_destroy(ctx)
     deallocate(ctx)
@@ -116,6 +124,9 @@ program test_ssp_operator
     call check_groups("Padova groups: fbhb 2e-3")
     call set_float('fbhb', 0.0_wp); call set_float('sbss', 0.0_wp)
     call check_groups("Padova groups: factors only")
+    call set_float('delt', 0.05_wp); call set_float('dell', -0.1_wp)
+    call check_groups("Padova groups: delt 0.05, dell -0.1")
+    call set_float('delt', 0.0_wp); call set_float('dell', 0.0_wp)
     call ssp_operator_free(op)
     call opensps_destroy(ctx)
     deallocate(ctx)
@@ -237,7 +248,7 @@ contains
         c = ssp_mod_coefficients(pset, trim(ctx%state%isoc_type) == 'pdva')
         s_sum = 0.0_wp; m_sum = 0.0_wp; l_sum = 0.0_wp
         do g = 0, MOD_NGRP - 1
-            call ssp_operator_build(ctx, pset, opg, group=g)
+            call ssp_operator_build(ctx, pset, opg, group=g, shift_t=pset%delt, shift_l=pset%dell)
             call ssp_operator_evaluate(ctx, pset, opg, ctx%imf_type_val, p, m_g, l_g, s_g)
             s_sum = s_sum + c(g) * s_g
             m_sum = m_sum + c(g) * m_g

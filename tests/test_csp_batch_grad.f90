@@ -48,7 +48,7 @@ program test_csp_batch_grad
                                  BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, &
                                  BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, BGRAD_AGN_TAU, &
                                  BGRAD_IGM_FACTOR, BGRAD_VDMC, BGRAD_MDAVE, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, &
-                                 NBGRAD, BGRAD_FBHB, BGRAD_SBSS, BGRAD_AGB, BGRAD_PAGB, BGRAD_REDGB
+                                 NBGRAD, BGRAD_FBHB, BGRAD_SBSS, BGRAD_AGB, BGRAD_PAGB, BGRAD_REDGB, BGRAD_DELT, BGRAD_DELL
     use opensps_ssp, only: generate_ssp_grid
     use opensps_cue, only: cue_data_dir, cue_w, cue_load_dir, cue_unload, cue_weights_t
     use cue_test_library, only: cue_synthetic, cue_write_library
@@ -373,7 +373,11 @@ contains
         real(WP), parameter :: AG(6) = [1.0_wp, 0.6_wp, 1.4_wp, 0.9_wp, 1.8_wp, 0.5_wp]
         real(WP), parameter :: PA(6) = [1.0_wp, 1.5_wp, 0.5_wp, 2.0_wp, 1.0_wp, 0.8_wp]
         real(WP), parameter :: RG(6) = [1.0_wp, 0.8_wp, 1.2_wp, 1.0_wp, 0.7_wp, 1.4_wp]
+        ! (the TP-AGB shifts: models 2 and 3 share a pair, model 1 has none)
+        real(WP), parameter :: DT(6) = [0.0_wp, 0.04_wp, 0.04_wp, -0.07_wp, 0.0_wp, 0.09_wp]
+        real(WP), parameter :: DL(6) = [0.0_wp, -0.05_wp, -0.05_wp, 0.06_wp, 0.08_wp, -0.1_wp]
         p%fbhb = FB(m); p%sbss = SB(m); p%agb = AG(m); p%pagb = PA(m); p%redgb = RG(m)
+        p%delt = DT(m); p%dell = DL(m)
         if (hb_limited .and. m == 5) then
             p%fbhb = 0.0_wp
             p%sbss = 0.0_wp
@@ -992,7 +996,7 @@ contains
         type(PARAMS), intent(in) :: psets(:)
         real(WP), intent(in) :: w(:, :), pbar(:, :)
         logical, intent(in) :: given_w
-        integer, parameter :: NQ = 40
+        integer, parameter :: NQ = 42
         integer :: nq_use
         integer, parameter :: ROWS(NQ) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
                                           BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, &
@@ -1001,14 +1005,14 @@ contains
                                           BGRAD_SF_START, BGRAD_ZRED, BGRAD_SF_TRUNC, BGRAD_SF_SLOPE, BGRAD_IMF1, &
                                           BGRAD_IMF2, BGRAD_IMF3, BGRAD_AGN_TAU, BGRAD_IGM_FACTOR, &
                                           BGRAD_VDMC, BGRAD_MDAVE, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, BGRAD_AFE, &
-                                          BGRAD_FBHB, BGRAD_SBSS, BGRAD_AGB, BGRAD_PAGB, BGRAD_REDGB]
+                                          BGRAD_FBHB, BGRAD_SBSS, BGRAD_AGB, BGRAD_PAGB, BGRAD_REDGB, BGRAD_DELT, BGRAD_DELL]
         character(len=12), parameter :: NAMES(NQ) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
                                                      'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb', &
                                                      'duste_qpah', 'duste_umin', 'duste_gamma', 'gas_logz', 'gas_logu', &
                                                      'logzsol', 'tage', 'tau', 'const', 'fburst', 'tburst', 'sf_start', &
                                                      'zred', 'sf_trunc', 'sf_slope', 'imf1', 'imf2', 'imf3', 'agn_tau', &
                                                      'igm_factor', 'vdmc', 'mdave', 'gas_logn', 'gas_logno', 'gas_logco', 'afe', &
-                                                     'fbhb', 'sbss', 'agb', 'pagb', 'redgb']
+                                                     'fbhb', 'sbss', 'agb', 'pagb', 'redgb', 'delt', 'dell']
         type(PARAMS) :: pp(size(psets))
         real(WP) :: g_fd(NQ, size(psets)), lp, lm, l0, l3, x, h, worst(NQ), gmax
         integer :: q, m, worst_m(NQ)
@@ -1281,6 +1285,8 @@ contains
         case (38); get_par = p%agb
         case (39); get_par = p%pagb
         case (40); get_par = p%redgb
+        case (41); get_par = p%delt
+        case (42); get_par = p%dell
         case default; get_par = p%afe
         end select
     end function get_par
@@ -1329,6 +1335,8 @@ contains
         case (38); p%agb = x
         case (39); p%pagb = x
         case (40); p%redgb = x
+        case (41); p%delt = x
+        case (42); p%dell = x
         case default; p%afe = x
         end select
     end subroutine set_par
