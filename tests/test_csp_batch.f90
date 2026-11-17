@@ -168,6 +168,7 @@ program test_csp_batch
     ! Per-model metallicity: all bases resident, logzsol varied
     call check_batch_z()
     call check_mods_hb_blocked()
+    call check_mods_set_validation()
     call check_batch_afe()
     call check_cue_z()
     call check_cue_afe()
@@ -809,6 +810,89 @@ contains
         call set_int('zmet', zm0)
         deallocate(mags)
     end subroutine check_mods_hb_blocked
+
+    !> The checks of compute_csp_batch on the operator set of the free factors (the plain group's operators stand for
+    !> the set): a set that was never built (status 1), one that does not hold every metallicity of the context, with a
+    !> metallicity out of place, an empty operator, other spectra or ages than the context's (status 3, 3, 1, 3), an age
+    !> without stars (status 2), a single-metallicity set against models of another metallicity (status 3), and a shift
+    !> dell on a model (status 2 until the shifts are free). Each corruption is undone after its check.
+    subroutine check_mods_set_validation()
+        integer, parameter :: NMOD = 3
+        type(PARAMS) :: psets(NMOD)
+        type(ssp_opset_t) :: op, never
+        real(WP), allocatable :: mags(:, :)
+        integer :: m, status, zm0, nz_save, zmet_save, npts_save, nspec_save
+        logical :: age_save
+        type(PARAMS) :: pset
+
+        call print_group("Batched CSP: the checks of the operator set of the free factors")
+        allocate(mags(ctx%state%nbands, NMOD))
+        call opensps_context_get_pset(ctx, pset)
+        zm0 = pset%zmet
+        call set_int('imf_type', 1)
+        call set_factors(0.0_wp, 0.0_wp, 1.0_wp, 1.0_wp, 1.0_wp)
+        do m = 1, NMOD
+            call set_model(m, 0.5_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
+        end do
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=never)
+        call assert_true(status == 1, "a set that was never built: status 1", total_tests, total_failures)
+
+        call ssp_opset_build_mods(ctx, psets(1), .true., op)
+        psets%logzsol = 0.0_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 0, "the set of every metallicity: status 0", total_tests, total_failures)
+        nz_save = op%grp(0)%nz
+        op%grp(0)%nz = nz_save - 1
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 3, "a set without every metallicity of the context: status 3", total_tests, total_failures)
+        op%grp(0)%nz = nz_save
+        zmet_save = op%grp(0)%ops(1)%zmet
+        op%grp(0)%ops(1)%zmet = zmet_save + 4
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 3, "an operator of another metallicity than its place: status 3", total_tests, total_failures)
+        op%grp(0)%ops(1)%zmet = zmet_save
+        npts_save = op%grp(0)%ops(1)%n_pts
+        op%grp(0)%ops(1)%n_pts = 0
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 1, "an empty operator: status 1", total_tests, total_failures)
+        op%grp(0)%ops(1)%n_pts = npts_save
+        nspec_save = op%grp(0)%ops(1)%nspec
+        op%grp(0)%ops(1)%nspec = nspec_save + 1
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 3, "an operator of other spectra than the context's: status 3", total_tests, total_failures)
+        op%grp(0)%ops(1)%nspec = nspec_save
+        age_save = op%grp(0)%ops(1)%age_on(1)
+        op%grp(0)%ops(1)%age_on(1) = .false.
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 2, "an operator with an age without stars: status 2", total_tests, total_failures)
+        op%grp(0)%ops(1)%age_on(1) = age_save
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 0, "the set again as built: status 0", total_tests, total_failures)
+        call ssp_opset_free(op)
+
+        ! One metallicity in the set, models of another one
+        call set_int('zmet', 10)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        call ssp_opset_build_mods(ctx, pset, .false., op)
+        do m = 1, NMOD
+            psets(m)%zmet = 3
+        end do
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 3, "a set of one metallicity, models of another: status 3", total_tests, total_failures)
+        do m = 1, NMOD
+            psets(m)%zmet = 10
+        end do
+        ! (dell on a model: the shift is not free here)
+        psets(2)%dell = 0.05_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 2, "dell on a model: status 2", total_tests, total_failures)
+        call ssp_opset_free(op)
+        call set_int('zmet', zm0)
+        deallocate(mags)
+    end subroutine check_mods_set_validation
 
     subroutine set_factors(fbhb, sbss, agb, pagb, redgb)
         real(WP), intent(in) :: fbhb, sbss, agb, pagb, redgb
