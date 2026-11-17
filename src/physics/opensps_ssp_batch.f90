@@ -992,6 +992,11 @@ contains
         logical :: used(MOD_NGRP)
 
         if (.not. allocated(set%slp)) error stop 'ssp_batch_age_sums_adjoint_mods: no forward pass of this batch'
+        ! (lsum_bar is built on the device by the caller, whose host copy is current only when the lbol output has a cotangent: the
+        ! host formulas below read it)
+#ifdef OMP_TARGET
+        !$omp target update from(lsum_bar)
+#endif
         ntq = size(qbar, 1)
         ni = size(imf_bar, 1)
         do g = 1, MOD_NGRP

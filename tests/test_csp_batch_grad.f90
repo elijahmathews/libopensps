@@ -1033,6 +1033,13 @@ contains
                     g_fd(q, m) = pbar(ROWS(q), m)
                     cycle
                 end if
+                ! (fbhb and sbss act through thresholds, 1e-4 and 1e-3: the steps of kernel precision, 1e-2 and more,
+                ! cross them from a model below them, where the one-sided derivative is that of its side; not checked
+                ! there in FP32)
+                if (LINEAR_ONLY .and. (q == 36 .or. q == 37) .and. x < 0.05_wp) then
+                    g_fd(q, m) = pbar(ROWS(q), m)
+                    cycle
+                end if
                 if (bound .and. LINEAR_ONLY) then
                     g_fd(q, m) = pbar(ROWS(q), m)   ! (FP32: not checked at a bound)
                     cycle

@@ -342,7 +342,8 @@ int main(void) {
             printf("FAIL: gradients with the factors free: status %d\n", status);
             failures++;
         } else {
-            const double h_fd = 1e-5;
+            /* (kernel precision: steps of 1e-2 and the loose tolerance; the factors' thresholds are far below the values here) */
+            const double h_fd = (tol_dust > 1e-2) ? 1e-2 : 1e-5;
             const int rows[5] = {OPENSPS_BGRAD_FBHB, OPENSPS_BGRAD_SBSS, OPENSPS_BGRAD_AGB, OPENSPS_BGRAD_PAGB, OPENSPS_BGRAD_REDGB};
             double *vals[5] = {fb, sb, ag, pa, rg};
             for (int r = 0; r < 5; r++) {
