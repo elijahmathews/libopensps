@@ -925,15 +925,10 @@ contains
         if (set%free_mods) then
             if (.not. present(cg) .or. .not. present(cbar)) &
                 error stop 'ssp_batch_age_sums_adjoint: a set with free modifications needs cg and cbar'
-            if (present(dshift) .and. present(ipair) .and. present(ctx)) then
-                call ssp_batch_age_sums_adjoint_mods(imf_type, remnants, n_mod, nt, nspec, set, cg, zlo, zhi, dz, pm, wsfh, &
-                                                     it_tesc, nt_neb, whl, fesc, gw, slum, lsum_bar, qbar, wbar, imf_bar, &
-                                                     fesc_bar, zbar, smass, msum_bar, cbar, ipair, dshift, ctx)
-            else
-                call ssp_batch_age_sums_adjoint_mods(imf_type, remnants, n_mod, nt, nspec, set, cg, zlo, zhi, dz, pm, wsfh, &
-                                                     it_tesc, nt_neb, whl, fesc, gw, slum, lsum_bar, qbar, wbar, imf_bar, &
-                                                     fesc_bar, zbar, smass, msum_bar, cbar)
-            end if
+            ! (absent optional arguments are passed on as absent: without the shifts' arguments, no shift gradients)
+            call ssp_batch_age_sums_adjoint_mods(imf_type, remnants, n_mod, nt, nspec, set, cg, zlo, zhi, dz, pm, wsfh, &
+                                                 it_tesc, nt_neb, whl, fesc, gw, slum, lsum_bar, qbar, wbar, imf_bar, &
+                                                 fesc_bar, zbar, smass, msum_bar, cbar, ipair, dshift, ctx)
             return
         end if
         nz = set%nz
