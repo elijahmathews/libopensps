@@ -19,6 +19,13 @@ int main(void) {
         failures++;
     }
 
+    /* ... and the build of the group operators likewise */
+    opensps_context_build_ssp_ops_free_mods(h, 0, &status);
+    if (status != 301) {
+        printf("FAIL: build_ssp_ops_free_mods before setup expected 301, got %d\n", status);
+        failures++;
+    }
+
     opensps_context_setup(-1, "mist", "miles", "DL07", h, &status);
     if (status != 0) { printf("FAIL: context_setup\n"); return 1; }
 
@@ -39,6 +46,8 @@ int main(void) {
     int bad_h = 999;
     opensps_context_build_ssp_ops(bad_h, 0, &status);
     if (status != 1) { printf("FAIL: build_ssp_ops bad handle\n"); failures++; }
+    opensps_context_build_ssp_ops_free_mods(bad_h, 0, &status);
+    if (status != 1) { printf("FAIL: build_ssp_ops_free_mods bad handle\n"); failures++; }
     opensps_context_free_ssp_ops(bad_h, &status);
     if (status != 1) { printf("FAIL: free_ssp_ops bad handle\n"); failures++; }
     opensps_context_has_ssp_ops(bad_h, &has_ops, &status);
@@ -73,6 +82,16 @@ int main(void) {
     if (status != 0) { printf("FAIL: evaluate_ssp_op NULL imf_params\n"); failures++; }
 
     /* Build all-metallicities SSP operator */
+    /* The group operators replace a set the context already has (the plain operator here), and a plain build replaces them */
+    opensps_context_build_ssp_ops_free_mods(h, 0, &status);
+    if (status != 0) { printf("FAIL: build_ssp_ops_free_mods over an existing operator status=%d\n", status); failures++; }
+    opensps_context_has_ssp_ops(h, &has_ops, &status);
+    if (status != 0 || has_ops != 1) { printf("FAIL: has_ssp_ops after build_ssp_ops_free_mods\n"); failures++; }
+    opensps_context_build_ssp_ops_free_mods(h, 0, &status);
+    if (status != 0) { printf("FAIL: build_ssp_ops_free_mods over group operators status=%d\n", status); failures++; }
+    opensps_context_build_ssp_ops(h, 0, &status);
+    if (status != 0) { printf("FAIL: build_ssp_ops over group operators status=%d\n", status); failures++; }
+
     opensps_context_build_ssp_ops(h, 1, &status);
     if (status != 0) {
         printf("FAIL: build_ssp_ops all_metallicities status=%d\n", status);

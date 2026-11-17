@@ -167,6 +167,7 @@ program test_csp_batch
     call build_basis()
     ! Per-model metallicity: all bases resident, logzsol varied
     call check_batch_z()
+    call check_mods_hb_blocked()
     call check_batch_afe()
     call check_cue_z()
     call check_cue_afe()
@@ -727,6 +728,65 @@ contains
         call ssp_opset_free(op)
         deallocate(spec, mags, ref_spec, ref_mags, s1, g1)
     end subroutine check_mods_free_forward
+
+    !> The horizontal-branch limit of the group operators. Where the HB stars would not fit the isochrone arrays (NM = 2000:
+    !> MIST's 2nd and 12th metallicities, where legacy FSPS stops) the operator of that metallicity is built without the
+    !> modification: a model that needs it (fbhb or sbss above their thresholds) is refused with status 2, one that does not
+    !> is served. With one metallicity in the set and with the metallicity free per model (the blocked one either end of a
+    !> model's interval). Needs the context of every metallicity.
+    subroutine check_mods_hb_blocked()
+        integer, parameter :: NMOD = 6
+        type(PARAMS) :: pset, psets(NMOD)
+        type(ssp_opset_t) :: op
+        real(WP), allocatable :: mags(:, :)
+        real(WP) :: zc(3)
+        integer :: m, status, nbands, zm0, nzz
+
+        call print_group("Batched CSP: group operators at a metallicity whose horizontal-branch stars do not fit the arrays")
+        nbands = ctx%state%nbands
+        nzz = ctx%state%nz
+        allocate(mags(nbands, NMOD))
+        call opensps_context_get_pset(ctx, pset)
+        zm0 = pset%zmet
+        call set_int('imf_type', 1)
+        call set_factors(0.0_wp, 0.0_wp, 1.0_wp, 1.0_wp, 1.0_wp)
+        call set_int('zmet', 2)
+        do m = 1, NMOD
+            call set_model(m, 0.5_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
+        end do
+        call ssp_opset_build_mods(ctx, psets(1), .false., op)
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 0, "blocked metallicity, no HB modification: status 0", total_tests, total_failures)
+        psets(3)%fbhb = 0.5_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 2, "blocked metallicity, fbhb above its threshold: status 2", total_tests, total_failures)
+        psets(3)%fbhb = 0.0_wp
+        psets(4)%sbss = 12.0_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 2, "blocked metallicity, sbss above its threshold: status 2", total_tests, total_failures)
+        psets(4)%sbss = 0.0_wp
+        ! ... and with the metallicity free per model: the blocked one the lower or the upper of a model's interval
+        call ssp_opset_free(op)
+        call ssp_opset_build_mods(ctx, psets(1), .true., op)
+        zc(1) = 0.5_wp * (log10(ctx%state%zlegend(2) / ctx%state%zsol) + log10(ctx%state%zlegend(3) / ctx%state%zsol))
+        zc(2) = 0.5_wp * (log10(ctx%state%zlegend(nzz - 1) / ctx%state%zsol) + log10(ctx%state%zlegend(nzz) / ctx%state%zsol))
+        zc(3) = log10(ctx%state%zlegend(6) / ctx%state%zsol)
+        psets%logzsol = zc(3)
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 0, "free metallicity, no HB modification: status 0", total_tests, total_failures)
+        psets(1)%logzsol = zc(1); psets(1)%fbhb = 0.4_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 2, "free metallicity, the lower of the interval blocked: status 2", total_tests, total_failures)
+        psets(1)%logzsol = zc(3); psets(1)%fbhb = 0.0_wp
+        psets(5)%logzsol = zc(2); psets(5)%fbhb = 0.4_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 2, "free metallicity, the upper of the interval blocked: status 2", total_tests, total_failures)
+        call ssp_opset_free(op)
+        call set_int('zmet', zm0)
+        deallocate(mags)
+    end subroutine check_mods_hb_blocked
 
     subroutine set_factors(fbhb, sbss, agb, pagb, redgb)
         real(WP), intent(in) :: fbhb, sbss, agb, pagb, redgb
