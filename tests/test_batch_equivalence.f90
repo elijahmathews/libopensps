@@ -22,7 +22,7 @@ program test_batch_equivalence
     use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_free, ssp_opset_build_mods
     use opensps_batch_registry, only: N_FIELDS, registry_name, registry_class, registry_range, registry_set, registry_get, &
                                       CLASS_S, F_LOGZSOL, F_AFE, F_FBHB, F_SBSS, F_AGB, F_PAGB, F_REDGB, F_DELT, F_DELL, &
-                                      F_IMF1, F_IMF2, F_IMF3, F_VDMC, F_MDAVE
+                                      F_IMF1, F_IMF2, F_IMF3, F_VDMC, F_MDAVE, F_IMF_LOWER_LIMIT, F_IMF_UPPER_LIMIT
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                             opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
                             opensps_context_set_param_int, opensps_context_set_param_float
@@ -108,7 +108,8 @@ contains
         integer, intent(in) :: idx
 
         select case (idx)
-        case (F_FBHB, F_SBSS, F_AGB, F_PAGB, F_REDGB, F_DELT, F_DELL, F_IMF1, F_IMF2, F_IMF3, F_VDMC, F_MDAVE)
+        case (F_FBHB, F_SBSS, F_AGB, F_PAGB, F_REDGB, F_DELT, F_DELL, F_IMF1, F_IMF2, F_IMF3, F_VDMC, F_MDAVE, &
+             F_IMF_LOWER_LIMIT, F_IMF_UPPER_LIMIT)
             ssp_level = .true.
         case default
             ssp_level = .false.

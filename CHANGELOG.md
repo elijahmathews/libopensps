@@ -18,6 +18,10 @@ major version is 0, a minor release may change the API, and each such change is 
 
 ### Added
 
+- **IMF mass limits per model**: `imf_lower_limit` and `imf_upper_limit` may differ from model to model in a batch with the
+  context's SSP operators (like the other IMF parameters), forward and with gradients of the other parameters. They are now
+  members of the parameter set (`params`), kept in step with the context's settings; a batch without operators, or with a
+  user IMF file (which has its own limits), refuses other limits per model (status 2).
 - **Isochrone modification factors free per model** (#45): `opensps_context_build_ssp_ops_free_mods` builds the operators of
   the modification groups, with which `fbhb`, `sbss`, `agb`, `pagb`, `redgb` and the TP-AGB shifts `delt`, `dell` vary per
   model in a batch (with the IMF and the metallicity), forward and with gradients (rows `OPENSPS_BGRAD_FBHB` ..

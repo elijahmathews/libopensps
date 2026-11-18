@@ -493,9 +493,11 @@ contains
             ctx%settings_dirty = .true.
         case ('imf_upper_limit')
             ctx%imf_upper_limit_val = value
+            ctx%pset%imf_upper_limit = value
             ctx%settings_dirty = .true.
         case ('imf_lower_limit')
             ctx%imf_lower_limit_val = value
+            ctx%pset%imf_lower_limit = value
             ctx%settings_dirty = .true.
         case ('logt_wmb_hot')
             ctx%logt_wmb_hot_val = value
@@ -1068,6 +1070,9 @@ contains
     subroutine opensps_context_prepare_pset(ctx)
         type(opensps_context_t), intent(inout) :: ctx
 
+        ! The IMF mass limits are context settings that a batch may vary per model: the parameter set carries them
+        ctx%pset%imf_lower_limit = ctx%imf_lower_limit_val
+        ctx%pset%imf_upper_limit = ctx%imf_upper_limit_val
         if (.not. allocated(ctx%pset%mag_compute)) then
             allocate (ctx%pset%mag_compute(ctx%state%nbands))
             ctx%pset%mag_compute = 1

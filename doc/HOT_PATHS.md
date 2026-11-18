@@ -65,6 +65,11 @@ rules for new parameters, kernel variants and library routines are in `AGENTS.md
   triples, one kernel per group on the fast device operator (at most 16 distinct), a column at a time with each model's own
   values on the host modes. With nebular lines in the spectrum the lines' profile table is built once per batch from one
   sigma, so a batch whose models differ in sigma there is status 2.)
+* (`imf_lower_limit` and `imf_upper_limit` are per model since the IMF-limits PR, class W with the other IMF parameters: the
+  IMF weights of the operator path already took the limits per IMF (`IMF_P_LOWER_LIMIT`, `IMF_P_UPPER_LIMIT`, and the lower edge
+  of the first bin with the lower limit unless the isochrones fix it), so a model's own limits are two more entries of its
+  parameter vector. They are context settings, and the parameter set carries them (`prepare_pset`); without operators the
+  resident basis has the context's, so other limits are status 2, as with a user IMF file, which has its own.)
 * The operator path with `afe`, `ssp_weights_z`, `add_neb_emission = 2`, `add_xrb_emission = 1` or `smooth_lsf`; cue with
   a free IMF; `agb_dust`, `masscut`, `evtype` (they select stars: a rebuild per distinct value).
 

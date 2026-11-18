@@ -112,7 +112,8 @@ module opensps_csp_batch
                                      prepare_smoothing_kernel, smooth_columns, smooth_columns_adjoint, distance_term_dz, &
                                      smooth_sigma_adjoint
     use opensps_ssp, only: configure_imf_parameters
-    use opensps_imf, only: imf_pack_params, IMF_NPAR, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE
+    use opensps_imf, only: imf_pack_params, IMF_NPAR, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT, &
+                           IMF_P_LOWER_BOUND
     use opensps_ssp_operator, only: ssp_op_mod_signature, ssp_mod_coefficients, ssp_mod_coefficient_derivatives, MOD_NGRP, &
                                     N_MOD_SIG
     use opensps_batch_registry, only: batch_info_t, batch_classify, batch_info_set_path, batch_info_print, batch_debug_path
@@ -672,7 +673,9 @@ contains
         ! a model with others would silently get the basis's (the C API refuses such parameters; this guards the Fortran one)
         if (.not. imf) then
             do m = 1, n_mod
-                if (any(ssp_op_mod_signature(psets(m)) /= ssp_op_mod_signature(ctx%pset))) then
+                if (any(ssp_op_mod_signature(psets(m)) /= ssp_op_mod_signature(ctx%pset)) .or. &
+                    psets(m)%imf_lower_limit /= ctx%pset%imf_lower_limit .or. &
+                    psets(m)%imf_upper_limit /= ctx%pset%imf_upper_limit) then
                     status = 2; return
                 end if
             end do
@@ -684,6 +687,11 @@ contains
                     if (psets(m)%zmet /= psets(1)%zmet) then
                         status = 2; return
                     end if
+                end if
+                ! A user IMF file (type 5) has its own mass limits: other ones per model would be ignored silently
+                if (ctx%imf_type_val == 5 .and. (psets(m)%imf_lower_limit /= ctx%pset%imf_lower_limit .or. &
+                                                 psets(m)%imf_upper_limit /= ctx%pset%imf_upper_limit)) then
+                    status = 2; return
                 end if
                 ! Isochrone modifications change which templates the stars use, so S is rebuilt for
                 ! them: not supported per model (status 2), and not different from the build either
@@ -956,6 +964,13 @@ contains
                 pm(IMF_P_ALPHA + 2, m) = psets(m)%imf3
                 pm(IMF_P_VDMC, m) = psets(m)%vdmc
                 pm(IMF_P_MDAVE, m) = psets(m)%mdave
+                ! The mass limits of the IMF (and with them the lower edge of the first bin, unless the isochrones fix it)
+                ! (a user IMF file, type 5, has its own limits)
+                if (ctx%imf_type_val /= 5) then
+                    pm(IMF_P_LOWER_LIMIT, m) = psets(m)%imf_lower_limit
+                    pm(IMF_P_UPPER_LIMIT, m) = psets(m)%imf_upper_limit
+                    if (trim(ctx%state%isoc_type) /= 'gnva') pm(IMF_P_LOWER_BOUND, m) = psets(m)%imf_lower_limit
+                end if
             end do
             nobasis = 0.0_KP
 #if defined(OMP_TARGET)
