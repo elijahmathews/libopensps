@@ -51,10 +51,15 @@ R9700 (FP32) the changed rows differ from the old by 2e-8 - 1e-7 of their scale 
 routines to about 200 of the template and its wrapper), since the per-pixel difference forms, the CPU dot-product branch and the K-specific
 loops are gone but the combination code remains.
 
-**Step 2, one "SSP source" interface** (the biggest change to how the code reads). A small type that says where the SSP sums come
+**Step 2, one "SSP source" interface (first slice done, #131; the rest not started).** A small type that says where the SSP sums come
 from (resident basis with K slabs, weights over metallicities, operators), built by the planner (`batch_info` already reports it);
 the SSP section of `compute_csp_batch` calls one entry point and the flags become its fields. The operator path keeps its own
-implementation (its physics differs: IMF weights, group operators) behind the same interface.
+implementation (its physics differs: IMF weights, group operators) behind the same interface. First slice: `ssp_source_t`,
+`ssp_source_select` (the kind, the number of slabs and the path label, formerly an inline chain in the driver) and
+`ssp_source_age_sums` (the dispatcher over the resident-basis kernels). What is left: the flags `zmode`, `zw`, `imf`, `zimf`, `naf` are
+still locals of the driver (about 70 uses: the mass and L_bol block, the nebular calls, the whole backward pass), and the descriptor
+arrays (`zlo`, `zhi`, `dz`, `da`, `nzs`) are still formed there; moving those behind the source (as procedures of it, or by passing it to
+the stage routines of Step 4) is what makes the driver read as one path.
 
 **Step 3, the descriptor in the other blends.** The nebular Q and ionizing-flux blends, the L_bol blend and the mass blend repeat the
 cascade `(1 - da) ((1 - dz) a + dz b) + ...`; with the descriptor they become one helper. Only the exact-match sites (the
@@ -74,6 +79,9 @@ of sharing); a language change (nothing in the plan needs one).
 Order: Steps 0 and 1 first (safe, clear payoff), then 2; re-evaluate before 3 - 5.
 
 ## How to check a step (recipes)
+
+* **The whole chain in one go:** `~/scratch/forward-opt/run_verify_chain.sh NAME` (host FP64 + FP32 suites, the R9700 device suite
+  rebuilt from scratch, the nvfortran compile; one stage after the other, under a memory cap) after the forward and gradient dumps.
 
 * **Force a rebuild of the tree under test.** Ninja goes by modification times: in a build directory shared between a baseline and a
   new tree, a tree whose files are older than the objects of the previous build is not rebuilt, and the comparison is of a build

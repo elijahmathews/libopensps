@@ -148,6 +148,18 @@ module opensps_csp_batch
     !> Where model_sums takes the SSP's mass and L_bol from: the model's own (IMF per model), the resident basis blended in
     !> metallicity and [alpha/Fe], or its first plane
     integer, parameter :: MSUMS_OWN = 0, MSUMS_BLEND = 1, MSUMS_FIXED = 2
+
+    !> Where the SSPs of a batch come from (the "SSP source" of doc/HOT_PATHS.md): the resident basis (one SSP, blended in
+    !> metallicity from two slabs, or in metallicity and [alpha/Fe] from four), the resident bases with the weights over ages and
+    !> metallicities (ssp_weights_z), or the operators of the batched SSP (the IMF, and with the group operators the isochrone
+    !> factors, free per model). Chosen once per batch by ssp_source_select; the age sums of the basis kinds are run by
+    !> ssp_source_age_sums, those of the operators by the operator's own pass.
+    integer, parameter :: SSP_SRC_BASIS = 1, SSP_SRC_BASIS_Z = 2, SSP_SRC_BASIS_ZA = 3, SSP_SRC_BASIS_W = 4, SSP_SRC_OPERATOR = 5
+    type :: ssp_source_t
+        integer :: kind = SSP_SRC_BASIS
+        integer :: n_src = 1                   !< slabs blended per model, or groups of the operators (the K of batch_info)
+        character(len=32) :: label = ''        !< the name of the path (batch_info)
+    end type ssp_source_t
 #ifdef OMP_TARGET
     !$omp declare target(model_sums_zw, model_sums)
 #endif
@@ -425,6 +437,7 @@ contains
 
         integer :: n_mod, nt, nspec, nbands, m, k
         type(batch_info_t) :: binfo
+        type(ssp_source_t) :: src
         real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk, wa_m
         logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw, host_m, imf, dev, zimf, grad
         logical  :: cue
@@ -822,25 +835,11 @@ contains
         if (naf > 1 .and. (zw .or. imf)) then
             status = 2; return
         end if
-        ! The path of the batch, for the caller (info) or the debug print: nothing is computed otherwise
+        ! The SSP source of the batch, and its path for the caller (info) or the debug print: nothing is computed otherwise
+        src = ssp_source_select(zw, zmode, naf, nzb, ssp_ops)
         if (present(info) .or. batch_debug_path()) then
             call batch_classify(psets(1:n_mod)%params_core, binfo)
-            if (imf) then
-                if (ssp_ops%free_mods) then
-                    call batch_info_set_path(binfo, merge('operator groups, Z', 'operator groups   ', zimf), &
-                                             MOD_NGRP + ssp_ops%n_ext)
-                else
-                    call batch_info_set_path(binfo, merge('operator, Z', 'operator   ', zimf), merge(2, 1, zimf))
-                end if
-            else if (zw) then
-                call batch_info_set_path(binfo, 'resident bases, weights over Z', max(nzb, 1))
-            else if (naf > 1 .and. zmode) then
-                call batch_info_set_path(binfo, 'resident bases, Z x [alpha/Fe]', 4)
-            else if (zmode) then
-                call batch_info_set_path(binfo, 'resident bases, Z', 2)
-            else
-                call batch_info_set_path(binfo, 'resident basis', 1)
-            end if
+            call batch_info_set_path(binfo, src%label, src%n_src)
             if (batch_debug_path()) call batch_info_print(binfo)
             if (present(info)) info = binfo
         end if
@@ -1181,19 +1180,8 @@ contains
 #endif
         end if
 
-        if (imf) then
-            ! (done above, from the operator)
-        else if (zw) then
-            call age_sums_w(nspec, nt, nzw, n_mod, ctx%state%ssp_basis_spec, wz, it_tesc, yo)
-        else if (zmode .and. nzs > 0) then
-            call age_sums_z4(nspec, nt, size(ctx%state%ssp_basis_spec, 3), nzs, n_mod, ctx%state%ssp_basis_spec, w2, &
-                             it_tesc, zlo, dz, da, yo)
-        else if (zmode) then
-            call age_sums_z(nspec, nt, size(ctx%state%ssp_basis_spec, 3), n_mod, ctx%state%ssp_basis_spec, w2, w2, &
-                            it_tesc, zlo, zhi, dz, yo)
-        else
-            call age_sums(nspec, nt, n_mod, ctx%state%ssp_basis_spec(:, :, 1), w2, it_tesc, yo)
-        end if
+        ! (the operators' sums are done above)
+        call ssp_source_age_sums(src, ctx, nspec, nt, nzw, n_mod, nzs, wz, w2, it_tesc, zlo, zhi, dz, da, yo)
         if (neb .and. imf) then
             call add_nebular_batch(ctx, n_mod, nspec, nt, nzb, nobasis, w2, it_tesc, zlo, zhi, dz, da, nzs, nb, yo, eml, &
                                    q_model=.true.)
@@ -2138,6 +2126,70 @@ contains
         wu = max(0.0_wp, min(wu, 1.0_wp))
         gam = max(0.0_wp, min(pset%duste_gamma, 1.0_wp))
     end subroutine dl07_indices
+
+    !> The SSP source of a batch from the modes it was found to have: zw (weights over ages and metallicities), zmode (a basis
+    !> per metallicity, interpolated at each model's logzsol), naf (the [alpha/Fe] planes of the context's stack, 1 without), nzb
+    !> (bases of the context), and the operators if given.
+    function ssp_source_select(zw, zmode, naf, nzb, ssp_ops) result(src)
+        logical, intent(in) :: zw, zmode
+        integer, intent(in) :: naf, nzb
+        type(ssp_opset_t), intent(in), optional :: ssp_ops
+        type(ssp_source_t) :: src
+
+        if (present(ssp_ops)) then
+            src%kind = SSP_SRC_OPERATOR
+            if (ssp_ops%free_mods) then
+                src%label = merge('operator groups, Z', 'operator groups   ', ssp_ops%nz > 1)
+                src%n_src = MOD_NGRP + ssp_ops%n_ext
+            else
+                src%label = merge('operator, Z', 'operator   ', ssp_ops%nz > 1)
+                src%n_src = merge(2, 1, ssp_ops%nz > 1)
+            end if
+        else if (zw) then
+            src%kind = SSP_SRC_BASIS_W
+            src%label = 'resident bases, weights over Z'
+            src%n_src = max(nzb, 1)
+        else if (naf > 1 .and. zmode) then
+            src%kind = SSP_SRC_BASIS_ZA
+            src%label = 'resident bases, Z x [alpha/Fe]'
+            src%n_src = 4
+        else if (zmode) then
+            src%kind = SSP_SRC_BASIS_Z
+            src%label = 'resident bases, Z'
+            src%n_src = 2
+        else
+            src%kind = SSP_SRC_BASIS
+            src%label = 'resident basis'
+            src%n_src = 1
+        end if
+    end function ssp_source_select
+
+    !> The age sums of the resident bases of a batch (the operators' are run by their own pass): yo(:, m) the young and
+    !> yo(:, n_mod + m) the old spectrum of model m from its weights (w2: the young and old weights per age; wz: over ages and
+    !> metallicities for SSP_SRC_BASIS_W) and the slabs of its descriptor (zlo, zhi, dz, da, nzs as the driver forms them)
+    subroutine ssp_source_age_sums(src, ctx, nspec, nt, nzw, n_mod, nzs, wz, w2, it_tesc, zlo, zhi, dz, da, yo)
+        type(ssp_source_t), intent(in) :: src
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)     :: nspec, nt, nzw, n_mod, nzs, it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
+        real(KP), intent(in)    :: wz(:,:,:), w2(nt, 2 * n_mod)
+        real(WP), intent(in)    :: dz(n_mod), da(n_mod)
+        real(KP), intent(inout) :: yo(nspec, 2 * n_mod)
+
+        select case (src%kind)
+        case (SSP_SRC_OPERATOR)
+            continue
+        case (SSP_SRC_BASIS_W)
+            call age_sums_w(nspec, nt, nzw, n_mod, ctx%state%ssp_basis_spec, wz, it_tesc, yo)
+        case (SSP_SRC_BASIS_ZA)
+            call age_sums_z4(nspec, nt, size(ctx%state%ssp_basis_spec, 3), nzs, n_mod, ctx%state%ssp_basis_spec, w2, &
+                             it_tesc, zlo, dz, da, yo)
+        case (SSP_SRC_BASIS_Z)
+            call age_sums_z(nspec, nt, size(ctx%state%ssp_basis_spec, 3), n_mod, ctx%state%ssp_basis_spec, w2, w2, &
+                            it_tesc, zlo, zhi, dz, yo)
+        case default
+            call age_sums(nspec, nt, n_mod, ctx%state%ssp_basis_spec(:, :, 1), w2, it_tesc, yo)
+        end select
+    end subroutine ssp_source_age_sums
 
     !> The mass and L_bol of one model of a batch whose SSP weights run over ages and metallicities (zw): summed over both
     !> (metallicities outer, as compute_csp_scenario with nzin > 1), split at the model's dust_tesc age index into young
