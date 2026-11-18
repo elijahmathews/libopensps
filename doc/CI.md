@@ -17,7 +17,7 @@ well under a minute at the stress step is a data problem first (issue #80).
 
 ## Coverage
 
-Coverage is reported separately from the build and test results: it is meta-CI. The `gfortran /
+Coverage is reported separately from the build and test results: it is meta-CI. The `GCC /
 Linux x86-64 / coverage` job uploads its report to Codecov, which posts two commit statuses on
 every pull request (`codecov/project`, `codecov/patch`); each goes red on its own when it fails,
 and the CI workflow (and its README badge) stays about builds and tests. The CI workflow fails on
@@ -38,16 +38,16 @@ coverage only if the upload itself fails.
 
 | Job | Compiler | Hardware | Notes |
 |---|---|---|---|
-| gfortran / Linux x86-64 / coverage | gfortran (Ubuntu 24.04) | x86-64 | Only job with the full data tree (C3K); uploads coverage |
-| gfortran / Linux arm64 | gfortran | arm64 (Ampere) | Linux on ARM |
-| gfortran / macOS arm64 | gfortran 14 (Homebrew) | Apple silicon | macOS toolchain and linker |
-| LLVM flang / Linux x86-64 | flang 20 | x86-64 | LLVM front end |
-| Intel ifx / Linux x86-64 | ifx 2026.1 | x86-64 | Intel LLVM-based compiler |
-| gfortran / Fortran 2008 | gfortran, `-Dfortran_std=f2008` | x86-64 | Library, tests and tools compile as strict Fortran 2008 (the README's language claim) |
-| gfortran / OpenMP host threads | gfortran, `-Denable_openmp=true` | x86-64 | The OpenMP loops of the device kernels on host threads |
-| nvfortran / OpenMP host threads (FP64, FP32) | nvfortran 26.1, `-Denable_openmp=true` | x86-64 | The same with nvfortran (nvfortran's front end and OpenMP runtime) |
-| AddressSanitizer + UBSan | gfortran | x86-64 | Unit tests; stress phases A (leaks) and C (reallocation) |
-| ThreadSanitizer | gfortran + OpenMP threads | x86-64 | Unit tests; stress phases B (concurrent compute) and D (concurrent setup/release) |
+| GCC / Linux x86-64 / coverage | gfortran (Ubuntu 24.04) | x86-64 | Only job with the full data tree (C3K); uploads coverage |
+| GCC / Linux arm64 | gfortran | arm64 (Ampere) | Linux on ARM |
+| GCC / macOS arm64 | gfortran 14 (Homebrew) | Apple silicon | macOS toolchain and linker |
+| LLVM / Linux x86-64 | flang 20 | x86-64 | LLVM front end |
+| Intel oneAPI Toolkit / Linux x86-64 | ifx 2026.1 | x86-64 | Intel LLVM-based compiler |
+| GCC / Fortran 2008 | gfortran, `-Dfortran_std=f2008` | x86-64 | Library, tests and tools compile as strict Fortran 2008 (the README's language claim) |
+| GCC / OpenMP host threads | gfortran, `-Denable_openmp=true` | x86-64 | The OpenMP loops of the device kernels on host threads |
+| NVIDIA HPC SDK / OpenMP host threads (FP64, FP32) | nvfortran 26.1, `-Denable_openmp=true` | x86-64 | The same with nvfortran (nvfortran's front end and OpenMP runtime) |
+| GCC / AddressSanitizer + UBSan | gfortran | x86-64 | Unit tests; stress phases A (leaks) and C (reallocation) |
+| GCC / ThreadSanitizer | gfortran + OpenMP threads | x86-64 | Unit tests; stress phases B (concurrent compute) and D (concurrent setup/release) |
 
 Every non-sanitizer job runs the complete unit and regression suites, including the physics
 oracles and all 34 cases of the parameterized regression. The regression references were

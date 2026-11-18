@@ -58,7 +58,7 @@ jobs:
       matrix:
         include:
           # Reference build: the only job that checks out the 600 MB C3K library; coverage
-          - name: gfortran / Linux x86-64 / coverage
+          - name: GCC / Linux x86-64 / coverage
             os: ubuntu-24.04
             install: apt-gfortran
             full_data: true
@@ -72,21 +72,21 @@ jobs:
             fflags: -fprofile-update=single
             cflags: -fprofile-update=single
 
-          - name: gfortran / Linux arm64
+          - name: GCC / Linux arm64
             os: ubuntu-24.04-arm
             install: apt-gfortran
 
-          - name: gfortran / macOS arm64
+          - name: GCC / macOS arm64
             os: macos-15
             install: setup-fortran
             toolchain: gcc
             version: 14
 
-          - name: LLVM flang / Linux x86-64
+          - name: LLVM / Linux x86-64
             os: ubuntu-24.04
             install: apt-flang
 
-          - name: Intel ifx / Linux x86-64
+          - name: Intel oneAPI Toolkit / Linux x86-64
             os: ubuntu-24.04
             install: setup-fortran
             toolchain: intel
@@ -94,13 +94,13 @@ jobs:
 
           # Host threads (-Denable_openmp=true): the OpenMP loops of the device kernels on the CPU
           # cores (hosted runners have no GPU)
-          - name: gfortran / OpenMP host threads / Linux x86-64
+          - name: GCC / OpenMP host threads / Linux x86-64
             os: ubuntu-24.04
             install: apt-gfortran
             setup_args: -Denable_openmp=true
 
           # The same with nvfortran (its front end and OpenMP runtime), FP64 and FP32 kernels
-          - name: nvfortran / OpenMP host threads / Linux x86-64
+          - name: NVIDIA HPC SDK / OpenMP host threads / Linux x86-64
             os: ubuntu-24.04
             install: setup-fortran
             toolchain: nvidia-hpc
@@ -108,7 +108,7 @@ jobs:
             setup_args: -Denable_openmp=true -Dcpu_baseline=x86-64-v3
             fflags: -Minfo=mp
 
-          - name: nvfortran / OpenMP host threads / FP32 kernels / Linux x86-64
+          - name: NVIDIA HPC SDK / OpenMP host threads / FP32 kernels / Linux x86-64
             os: ubuntu-24.04
             install: setup-fortran
             toolchain: nvidia-hpc
@@ -118,14 +118,14 @@ jobs:
 
           # Strict language standard: the library, tests and tools must compile as Fortran 2008
           # (README "Requirements"); gfortran rejects any extension or later-standard feature
-          - name: gfortran / Fortran 2008 (-std=f2008) / Linux x86-64
+          - name: GCC / Fortran 2008 (-std=f2008) / Linux x86-64
             os: ubuntu-24.04
             install: apt-gfortran
             setup_args: -Dfortran_std=f2008
 
           # FP32 kernels (-Dkernel_precision=single), the configuration a consumer GPU would run;
           # the regression suite checks them against the FP64 references
-          - name: gfortran / FP32 kernels / Linux x86-64
+          - name: GCC / FP32 kernels / Linux x86-64
             os: ubuntu-24.04
             install: apt-gfortran
             setup_args: -Dkernel_precision=single
@@ -327,7 +327,7 @@ jobs:
   # AddressSanitizer + UBSan: unit tests, then the stress phases that exercise allocation (A: create,
   # compute, destroy; C: parameter mutations that reallocate). Every phase runs nightly.
   asan:
-    name: AddressSanitizer + UBSan / stress A, C
+    name: GCC / AddressSanitizer + UBSan / stress A, C
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -392,7 +392,7 @@ jobs:
   # ThreadSanitizer: the concurrent phases (B: per-thread setup and compute; D: concurrent
   # setup/release of one shared cache entry). The harness makes its threads with OpenMP.
   tsan:
-    name: ThreadSanitizer / stress B, D
+    name: GCC / ThreadSanitizer / stress B, D
     needs: changes
     if: always() && (needs.changes.outputs.threading == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04

@@ -25,17 +25,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: AddressSanitizer + UBSan
+          - name: GCC AddressSanitizer + UBSan
             install: apt
             setup_args: -Db_sanitize=address,undefined
             stress_env: FSPS_STRESS_ITERS=10
             regression: true
-          - name: ThreadSanitizer
+          - name: GCC ThreadSanitizer
             install: apt
             setup_args: -Db_sanitize=thread -Denable_openmp=true
             stress_env: FSPS_STRESS_ITERS=8
             tsan: true
-          - name: nvfortran OpenMP host threads
+          - name: NVIDIA HPC SDK OpenMP host threads
             install: nvidia-hpc
             setup_args: -Denable_openmp=true -Dcpu_baseline=x86-64-v3
             stress_env: FSPS_STRESS_ITERS=20
@@ -121,11 +121,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: gfortran 15 / Linux
+          - name: GCC 15 / Linux
             os: ubuntu-24.04
             toolchain: gcc
             version: 15
-          - name: gfortran 15 / macOS arm64
+          - name: GCC 15 / macOS arm64
             os: macos-15
             toolchain: gcc
             version: 15
@@ -170,7 +170,7 @@ jobs:
   # gpu-nvidia). Set the repository variable GPU_RUNNER to 'true' once such a runner is registered.
 
   gpu-openmp:
-    name: GPU / nvfortran OpenMP target
+    name: GPU / NVIDIA HPC SDK OpenMP target
     if: vars.GPU_RUNNER == 'true'
     runs-on: [self-hosted, linux, gpu-nvidia]
     timeout-minutes: 60
