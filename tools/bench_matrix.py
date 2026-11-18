@@ -35,7 +35,7 @@ import sys
 # fields that act in the benchmark's configuration ("full", an exponentially declining SFH) and are not already free there
 ALONE = ['dust1', 'dust2', 'dust3', 'dust_index', 'dust1_index', 'frac_nodust', 'dust_tesc', 'duste_gamma', 'duste_qpah',
          'gas_logz', 'frac_obrun', 'fagn', 'agn_tau', 'zred', 'igm_factor',
-         'logzsol', 'fbhb', 'sbss', 'agb', 'pagb', 'redgb', 'delt', 'dell', 'imf1', 'imf2', 'imf3', 'vdmc', 'mdave']
+         'logzsol', 'fbhb', 'sbss', 'agb', 'pagb', 'redgb', 'delt', 'dell', 'imf1', 'imf2', 'imf3', 'vdmc', 'mdave', 'sigma_smooth']
 PAIRS = ['logzsol+imf1', 'logzsol+fbhb', 'imf1+fbhb', 'imf1+delt', 'fbhb+delt', 'logzsol+delt', 'dust2+imf1', 'dust2+logzsol',
          'zred+logzsol', 'agb+fbhb']
 ALL_SET = ['dust1', 'dust2', 'dust_index', 'duste_qpah', 'gas_logz', 'fagn', 'zred', 'igm_factor', 'logzsol', 'imf1', 'imf2',

@@ -45,7 +45,7 @@ program benchmark_csp_batch
     use opensps_batch_registry, only: registry_find, registry_set, registry_name, registry_class, registry_range, N_FIELDS, &
                                       CLASS_C, CLASS_L, &
                                       CLASS_W, CLASS_G, CLASS_S, F_LOGZSOL, F_AFE, F_FBHB, F_SBSS, F_AGB, F_PAGB, F_REDGB, &
-                                      F_DELT, F_DELL, F_IMF1, F_IMF2, F_IMF3, F_VDMC, F_MDAVE
+                                      F_DELT, F_DELL, F_IMF1, F_IMF2, F_IMF3, F_VDMC, F_MDAVE, F_SIGMA_SMOOTH
     use opensps_tuning, only: tuning_ct_count, tuning_ct_name, tuning_ct_value
     implicit none
 
@@ -56,7 +56,7 @@ program benchmark_csp_batch
     real(WP), allocatable :: spec_ssp(:, :), mass_ssp(:), lbol_ssp(:), mags(:, :), spec(:, :)
     character(len=32) :: arg, config = 'basic'
     logical :: afe = .false., lib = .false., full, zvar = .false., imf = .false., grad = .false., fit = .false., cue = .false.
-    logical :: mods = .false., imfs = .false., mods_build = .false., matrix = .false., all_times = .false.
+    logical :: mods = .false., imfs = .false., mods_build = .false., matrix = .false., all_times = .false., smooth_free = .false.
     character(len=512) :: fname_dump
     integer :: dump_len
     character(len=8) :: noshare
@@ -158,6 +158,12 @@ program benchmark_csp_batch
     call set_float('tage', 10.0_wp)
     call set_float('dust2', 0.3_wp)
     call set_int('compute_indices', merge(1, 0, full))
+    if (smooth_free) then
+        ! (nebular lines in the spectrum take one sigma for the batch: left out when sigma_smooth is free)
+        call set_int('smooth_velocity', 1)
+        call set_int('smoothspec_fast', 1)
+        call set_int('nebemlineinspec', 0)
+    end if
     if (full) then
         call set_float('dust1', 0.5_wp)
         call set_int('add_neb_emission', 1)
@@ -535,6 +541,7 @@ contains
                 case (F_IMF1, F_IMF2, F_IMF3); wfree = .true.; matrix_imf_type = 2
                 case (F_VDMC); wfree = .true.; matrix_imf_type = 3
                 case (F_MDAVE); wfree = .true.; matrix_imf_type = 4
+                case (F_SIGMA_SMOOTH); smooth_free = .true.
                 case (F_FBHB, F_SBSS, F_AGB, F_PAGB, F_REDGB, F_DELT, F_DELL); mfree = .true.
                 end select
                 p0 = p1 + 2

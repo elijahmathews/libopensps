@@ -128,6 +128,7 @@ program test_csp_batch
     call check_mods_pair_cache()
     call check_share_imf()
     call check_batch_info()
+    call check_smooth_per_model()
     ! compute_csp_scenario: all-ages outputs against single-age calls, in each mode, on the
     ! one-metallicity basis
     call build_basis()
@@ -1194,6 +1195,102 @@ contains
         call ssp_opset_free(op)
         deallocate(mg)
     end subroutine check_batch_info
+
+    !> The velocity smoothing per model (sigma_smooth and its range differ among the models): each model against a batch of that
+    !> model alone, with the fast device operator (one kernel per distinct triple) and with the exact host convolution (a column
+    !> at a time with its own values); a model with sigma = 0 is not smoothed. More distinct triples than the device operator
+    !> holds are status 2 there, and served by the host modes.
+    subroutine check_smooth_per_model()
+        integer, parameter :: NB = 6, NMANY = 20
+        real(WP), parameter :: SIG(NB) = [0.0_wp, 100.0_wp, 100.0_wp, 150.0_wp, 250.0_wp, 100.0_wp]
+        type(PARAMS) :: pb(NB), many(NMANY), unsmoothed
+        real(WP), allocatable :: s(:, :), g(:, :), rs(:, :), rg(:, :), s1(:, :), g1(:, :), gm(:, :)
+        real(WP) :: d_spec, d_mag, d_smooth
+        integer :: m, j, imode, status
+        character(len=24) :: mode
+
+        call print_group("Batched CSP: velocity smoothing per model")
+        allocate(s(ctx%state%nspec, NB), g(ctx%state%nbands, NB), rs(ctx%state%nspec, NB), rg(ctx%state%nbands, NB), &
+                 s1(ctx%state%nspec, 1), g1(ctx%state%nbands, 1), gm(ctx%state%nbands, NMANY))
+        call set_int('imf_type', 1)
+        call set_int('add_neb_emission', 0)    ! (with nebular lines in the spectrum, see below)
+        call set_factors(0.0_wp, 0.0_wp, 1.0_wp, 1.0_wp, 1.0_wp)
+        call build_basis()
+        smooth_sigma = 0.0_wp
+        do m = 1, NB
+            call set_model(m, 0.5_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pb(m))
+            pb(m)%sigma_smooth = SIG(m)
+        end do
+        pb(6)%min_wave_smooth = 3000.0_wp     ! a triple of its own although its sigma is that of models 2 and 3
+        pb(6)%max_wave_smooth = 7000.0_wp
+        do imode = 1, 2
+            if (imode == 1) then
+                mode = 'fast device operator'
+            else
+                mode = 'exact host convolution'
+            end if
+            call set_int('smooth_velocity', 1)
+            call set_int('smoothspec_fast', merge(1, 0, imode == 1))
+            call compute_csp_batch(ctx, pb, g, status, spec=s)
+            call assert_true(status == 0, trim(mode) // ": per-model sigma: status 0", total_tests, total_failures)
+            do j = 1, NB
+                call compute_csp_batch(ctx, pb(j:j), g1, status, spec=s1)
+                rs(:, j) = s1(:, 1)
+                rg(:, j) = g1(:, 1)
+            end do
+            d_spec = 0.0_wp
+            d_mag = 0.0_wp
+            do j = 1, NB
+                d_spec = max(d_spec, maxval(abs(s(:, j) - rs(:, j))) / maxval(abs(rs(:, j))))
+                d_mag = max(d_mag, maxval(abs(g(:, j) - rg(:, j))))
+            end do
+            write(*, '(A,2ES10.2)') '#   max difference from each model alone (spectrum, mag): ', d_spec, d_mag
+            call assert_true(d_spec <= SPEC_RTOL, trim(mode) // ": spectra the same as each model alone", &
+                             total_tests, total_failures)
+            call assert_true(d_mag <= MAG_TOL, trim(mode) // ": magnitudes the same", total_tests, total_failures)
+            ! the smoothing acts, and a model with sigma = 0 is not touched
+            unsmoothed = pb(5)
+            unsmoothed%sigma_smooth = 0.0_wp
+            call compute_csp_batch(ctx, [unsmoothed], g1, status, spec=s1)
+            d_smooth = maxval(abs(s(:, 5) - s1(:, 1))) / maxval(abs(s1(:, 1)))
+            call assert_true(d_smooth > 1.0e-4_wp, trim(mode) // ": a smoothed model differs from the unsmoothed", &
+                             total_tests, total_failures)
+            call compute_csp_batch(ctx, [pb(1)], g1, status, spec=s1)
+            call assert_true(maxval(abs(s(:, 1) - s1(:, 1))) <= SPEC_RTOL * maxval(abs(s1(:, 1))), &
+                             trim(mode) // ": a model with sigma = 0 is not smoothed", total_tests, total_failures)
+            ! more distinct triples than the device operator holds
+            do j = 1, NMANY
+                many(j) = pb(2)
+                many(j)%sigma_smooth = 50.0_wp + 10.0_wp * j
+            end do
+            call compute_csp_batch(ctx, many, gm, status)
+            if (imode == 1) then
+                call assert_true(status == 2, trim(mode) // ": 20 distinct sigmas: status 2", total_tests, total_failures)
+            else
+                call assert_true(status == 0, trim(mode) // ": 20 distinct sigmas: status 0", total_tests, total_failures)
+            end if
+        end do
+        ! the nebular lines are broadened by sigma_smooth with a profile table of the batch: models with different sigma and lines
+        ! in the spectrum are refused; the same sigma, or the lines left out of the spectrum, are fine
+        call set_int('add_neb_emission', 1)
+        call set_int('nebemlineinspec', 1)
+        call compute_csp_batch(ctx, pb, g, status)
+        call assert_true(status == 2, "nebular lines in the spectrum, sigma per model: status 2", total_tests, total_failures)
+        pb(:)%sigma_smooth = 100.0_wp
+        call compute_csp_batch(ctx, pb, g, status)
+        call assert_true(status == 0, "nebular lines in the spectrum, one sigma: status 0", total_tests, total_failures)
+        pb(:)%sigma_smooth = SIG
+        call set_int('nebemlineinspec', 0)
+        call compute_csp_batch(ctx, pb, g, status)
+        call assert_true(status == 0, "nebular lines not in the spectrum, sigma per model: status 0", total_tests, total_failures)
+        call set_int('nebemlineinspec', 1)
+        call set_int('add_neb_emission', 0)
+        call set_int('smooth_velocity', 1)
+        call set_int('smoothspec_fast', 1)
+        deallocate(s, g, rs, rg, s1, g1, gm)
+    end subroutine check_smooth_per_model
 
     subroutine set_factors(fbhb, sbss, agb, pagb, redgb)
         real(WP), intent(in) :: fbhb, sbss, agb, pagb, redgb

@@ -115,8 +115,8 @@ module opensps_batch_registry
     integer, parameter :: field_class(N_FIELDS) = [ &
         1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 2, 2, 2, 2, 2, 2, 2, 4, 4, 3, &
         3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, &
-        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, &
-        0, 0, 0]
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 4, 4, &
+        4, 0, 0]
     integer, parameter :: field_stage(N_FIELDS) = [ &
         1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, &
         2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, &
@@ -407,6 +407,7 @@ contains
         case (F_REDGB); lo = 0.7_wp; hi = 1.3_wp
         case (F_DELT); lo = -0.1_wp; hi = 0.1_wp
         case (F_DELL); lo = -0.1_wp; hi = 0.1_wp
+        case (F_SIGMA_SMOOTH); lo = 50.0_wp; hi = 250.0_wp
         case (F_IMF1); lo = 0.9_wp; hi = 1.5_wp
         case (F_IMF2); lo = 1.8_wp; hi = 2.6_wp
         case (F_IMF3); lo = 2.0_wp; hi = 2.8_wp

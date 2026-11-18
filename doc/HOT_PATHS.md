@@ -16,8 +16,8 @@ forgotten). The class says how the parameter enters the model, which fixes the m
 | **C** closed form | read by uniform per-model kernels | the CSP stage: SFH weights, attenuation tables, dust emission, gas, AGN, redshift | nothing | SFH (`tau`, `tage`, `const`, `fburst`, `tburst`, `sf_*`, `sfh`), dust (`dust1`-`dust3`, `dust_index`, ...), `duste_*`, `gas_*`, `frac_obrun`, `fagn`, `agn_tau`, `zred`, `igm_factor` |
 | **L** linear mixture | the coefficient of a fixed set of sources | the batch is a sum over sources: metallicity (2 slabs), [alpha/Fe] (4 slabs), the modification groups (`ssp_opset_build_mods`) | the number of sources K | `logzsol`, `afe`, `fbhb`, `sbss`, `agb`, `pagb`, `redgb` |
 | **W** weights | per-point weights of the SSP | computed once per distinct value of the parameters (shared IMF weights, `SHARE_IMF_MIN_BATCH`) | the distinct values | `imf1`-`imf3`, `vdmc`, `mdave` |
-| **G** grouped discrete | selects a precomputed structure | one structure per distinct value, gathered per model (the TP-AGB pairs) | the distinct values | `delt`, `dell` |
-| **S** shared | must be equal across the batch, or is not a per-model quantity | status 2 if it differs | | `sigma_smooth` and the smoothing range (per-model smoothing is planned), `masscut`, `agb_dust`, `evtype`, `zmet`, `pmetals`, `wgp1`-`wgp3`, `fcstar`, `frac_xrb`, the file names and the output switches |
+| **G** grouped discrete | selects a precomputed structure | one structure per distinct value, gathered per model (the TP-AGB pairs, the smoothing kernel) | the distinct values | `delt`, `dell`, `sigma_smooth`, `min_wave_smooth`, `max_wave_smooth` |
+| **S** shared | must be equal across the batch, or is not a per-model quantity | status 2 if it differs | | `masscut`, `agb_dust`, `evtype`, `zmet`, `pmetals`, `wgp1`-`wgp3`, `fcstar`, `frac_xrb`, the file names and the output switches |
 
 The SSP stage has two sources behind these classes: the **resident basis** (the SSPs for one IMF and one set of
 modifications, built once; metallicity and [alpha/Fe] are blended per model from several resident bases) and the
@@ -54,8 +54,10 @@ classification costs a pass over the models and is made only on request, so the 
 
 ## Not yet free per model (each its own piece of work)
 
-* Class S fields that are physically per-model quantities: `sigma_smooth` and its range (velocity dispersion is a common
-  fit parameter).
+* (`sigma_smooth` and its range are per model since the smoothing PR: the models are grouped by their distinct (sigma, range)
+  triples, one kernel per group on the fast device operator (at most 16 distinct), a column at a time with each model's own
+  values on the host modes. With nebular lines in the spectrum the lines' profile table is built once per batch from one
+  sigma, so a batch whose models differ in sigma there is status 2.)
 * The operator path with `afe`, `ssp_weights_z`, `add_neb_emission = 2`, `add_xrb_emission = 1` or `smooth_lsf`; cue with
   a free IMF; `agb_dust`, `masscut`, `evtype` (they select stars: a rebuild per distinct value).
 
