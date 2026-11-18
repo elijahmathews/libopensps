@@ -49,7 +49,8 @@ classification costs a pass over the models and is made only on request, so the 
   metallicity and are covered by `test_csp_batch`.
 * Bit-identical baseline for a refactor: `benchmark_csp_batch` with `OPENSPS_BENCH_DUMP_FWD=<file>` writes the magnitudes and
   spectra of its last batch; `tools/bench_matrix.py --dump DIR` does it for every free set and distribution of the matrix, and
-  `tools/compare_forward_dump.py DIR_A DIR_B` compares two runs (`--tol 0`, the default, needs identical bits, which the same
+  `tools/bench_matrix.py --dump-grad DIR` writes the gradients (params_bar) of every set likewise, and
+  `tools/compare_builds/compare_grad_dump.py DIR_A DIR_B` compares two runs bit for bit; `tools/compare_forward_dump.py DIR_A DIR_B` compares two forward runs (`--tol 0`, the default, needs identical bits, which the same
   build on the same device gives).
 
 ## Guardrails

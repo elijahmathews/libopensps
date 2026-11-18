@@ -45,7 +45,8 @@ program benchmark_csp_batch
     use opensps_batch_registry, only: registry_find, registry_set, registry_name, registry_class, registry_range, N_FIELDS, &
                                       CLASS_C, CLASS_L, &
                                       CLASS_W, CLASS_G, CLASS_S, F_LOGZSOL, F_AFE, F_FBHB, F_SBSS, F_AGB, F_PAGB, F_REDGB, &
-                                      F_DELT, F_DELL, F_IMF1, F_IMF2, F_IMF3, F_VDMC, F_MDAVE, F_SIGMA_SMOOTH
+                                      F_DELT, F_DELL, F_IMF1, F_IMF2, F_IMF3, F_VDMC, F_MDAVE, F_SIGMA_SMOOTH, F_IMF_LOWER_LIMIT, &
+                                      F_IMF_UPPER_LIMIT
     use opensps_tuning, only: tuning_ct_count, tuning_ct_name, tuning_ct_value
     implicit none
 
@@ -315,6 +316,9 @@ program benchmark_csp_batch
                 call dump_forward(n)
                 deallocate(spec)
             end if
+            ! the gradients once, for a dump (OPENSPS_BENCH_DUMP), if asked and the config has "_grad"
+            call get_environment_variable('OPENSPS_BENCH_DUMP', fname_dump, length=dump_len)
+            if (grad .and. dump_len > 0) call gradients(n, .false.)
             cycle
         end if
 
@@ -354,33 +358,7 @@ program benchmark_csp_batch
         if (.not. c_associated(dptr) .or. k_n /= n) stop 4
         write(*, '(A,I0,A,F14.3)') 'batch_', n, '_spec_host_kp_us_per_model ', 1.0e6_wp * dt / n
 
-        ! The gradients: cotangents of every output (fixed, O(1) per band, the spectra's scaled by
-        ! their peak), params_bar
-        if (grad) then
-            allocate(spec(nspec, n), mbar(ctx%state%nbands, n), sbar(nspec, n), pbar(NBGRAD, n), massv(n), lbolv(n), &
-                     massb(n), lbolb(n))
-            call batch(n, .true.)
-            do i = 1, n
-                do rep = 1, ctx%state%nbands
-                    mbar(rep, i) = merge(sin(real(rep + 7 * i, WP)), 0.0_wp, mags(rep, i) == mags(rep, i))
-                end do
-                sbar(:, i) = cos(real([(rep, rep = 1, nspec)], WP) + i) / (maxval(abs(spec(:, i))) * nspec)
-                massb(i) = 0.3_wp
-                lbolb(i) = -0.2_wp
-            end do
-            call grad_batch(n)   ! warm-up
-            if (status /= 0) stop 5
-            call dump_gradients(n)
-            call system_clock(t0)
-            do rep = 1, n_rep
-                call grad_batch(n)
-            end do
-            call system_clock(t1)
-            dt = real(t1 - t0, WP) / rate / n_rep
-            write(*, '(A,I0,A,F14.3)') 'batch_', n, '_grad_us_per_model ', 1.0e6_wp * dt / n
-            total = total + pbar(1, 1)
-            deallocate(spec, mbar, sbar, pbar, massv, lbolv, massb, lbolb)
-        end if
+        if (grad) call gradients(n, .true.)
     end do
     if (total /= total) write(*, *) total   ! keep the results live
 
@@ -388,6 +366,39 @@ program benchmark_csp_batch
     deallocate(ctx)
 
 contains
+
+    !> The batch of the first n models with its gradients: cotangents of every output (fixed, O(1) per band, the spectra's scaled by
+    !> their peak), params_bar; dumped if OPENSPS_BENCH_DUMP is set, and timed if timed.
+    subroutine gradients(n, timed)
+        integer, intent(in) :: n
+        logical, intent(in) :: timed
+
+        allocate(spec(nspec, n), mbar(ctx%state%nbands, n), sbar(nspec, n), pbar(NBGRAD, n), massv(n), lbolv(n), &
+                 massb(n), lbolb(n))
+        call batch(n, .true.)
+        do i = 1, n
+            do rep = 1, ctx%state%nbands
+                mbar(rep, i) = merge(sin(real(rep + 7 * i, WP)), 0.0_wp, mags(rep, i) == mags(rep, i))
+            end do
+            sbar(:, i) = cos(real([(rep, rep = 1, nspec)], WP) + i) / (maxval(abs(spec(:, i))) * nspec)
+            massb(i) = 0.3_wp
+            lbolb(i) = -0.2_wp
+        end do
+        call grad_batch(n)   ! warm-up
+        if (status /= 0) stop 5
+        call dump_gradients(n)
+        if (timed) then
+            call system_clock(t0)
+            do rep = 1, n_rep
+                call grad_batch(n)
+            end do
+            call system_clock(t1)
+            dt = real(t1 - t0, WP) / rate / n_rep
+            write(*, '(A,I0,A,F14.3)') 'batch_', n, '_grad_us_per_model ', 1.0e6_wp * dt / n
+        end if
+        total = total + pbar(1, 1)
+        deallocate(spec, mbar, sbar, pbar, massv, lbolv, massb, lbolb)
+    end subroutine gradients
 
     !> The batch of the first n models (magnitudes; spectra too if with_spec; indices in "full").
     subroutine batch(n, with_spec)
@@ -539,6 +550,7 @@ contains
                 case (F_LOGZSOL); zvar = .true.
                 case (F_AFE); afe = .true.; zvar = .true.
                 case (F_IMF1, F_IMF2, F_IMF3); wfree = .true.; matrix_imf_type = 2
+                case (F_IMF_LOWER_LIMIT, F_IMF_UPPER_LIMIT); wfree = .true.; matrix_imf_type = 2
                 case (F_VDMC); wfree = .true.; matrix_imf_type = 3
                 case (F_MDAVE); wfree = .true.; matrix_imf_type = 4
                 case (F_SIGMA_SMOOTH); smooth_free = .true.
