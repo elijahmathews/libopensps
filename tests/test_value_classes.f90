@@ -11,6 +11,7 @@ program test_value_classes
     call test_basic()
     call test_idx_key()
     call test_cap_window()
+    call test_combinations()
     call print_summary_line("Value classes", total_tests - total_failures, total_tests)
     call tap_finish()
     if (total_failures > 0) stop 1
@@ -80,5 +81,32 @@ contains
         call classify_columns(v(:, 1:21), 30, 16, cls(1:21), rep, ncls, ov)
         call assert_true(ncls == 20 .and. cls(21) == 5, "inside the window it is found", total_tests, total_failures)
     end subroutine test_cap_window
+
+    subroutine test_combinations()
+        real(WP) :: v(2, 6)
+        integer :: cls(6), rep(6), ncls, idx(3), key(6)
+        logical :: ov
+
+        call print_group("classify_columns: a key without a selection, a selection with a window, count_distinct of a selection")
+        v(:, 1) = [1.0_wp, 1.0_wp]; v(:, 2) = [1.0_wp, 1.0_wp]; v(:, 3) = [2.0_wp, 1.0_wp]
+        v(:, 4) = [1.0_wp, 1.0_wp]; v(:, 5) = [2.0_wp, 1.0_wp]; v(:, 6) = [1.0_wp, 2.0_wp]
+        key = [1, 2, 1, 1, 1, 1]         ! column 2 equals column 1 but has another key
+        call classify_columns(v, 6, 0, cls, rep, ncls, ov, key=key)
+        call assert_true(.not. ov .and. ncls == 4 .and. all(cls == [1, 2, 3, 1, 3, 4]), &
+                         "a key without a selection: equal columns with another key are separate classes", &
+                         total_tests, total_failures)
+        idx = [5, 6, 3]                  ! the values (2,1), (1,2), (2,1)
+        call classify_columns(v, 6, 1, cls(1:3), rep, ncls, ov, idx=idx, key=key(1:3))
+        call assert_true(.not. ov .and. ncls == 3 .and. cls(3) == 3, &
+                         "a selection with a window of 1 and a key: the repeat outside the window is its own class", &
+                         total_tests, total_failures)
+        call classify_columns(v, 6, 2, cls(1:3), rep, ncls, ov, idx=idx)
+        call assert_true(.not. ov .and. ncls == 2 .and. cls(3) == 1, "a window of 2 reaches back to the first class", &
+                         total_tests, total_failures)
+        call assert_true(count_distinct(v, 6, idx=idx) == 2 .and. count_distinct(v, 1, idx=idx) == 1, &
+                         "count_distinct of a selection, and its cap", total_tests, total_failures)
+        call assert_true(count_distinct(v, 0) == 0, "count_distinct with a cap of 0 stops at the first new value", &
+                         total_tests, total_failures)
+    end subroutine test_combinations
 
 end program test_value_classes
