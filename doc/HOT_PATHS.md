@@ -39,6 +39,19 @@ the models, the number of distinct values of each (up to 16), whether a shared f
 `batch_info_text(info)` formats it; with `OPENSPS_DEBUG_PATH=1` every batch prints that line to standard error. The
 classification costs a pass over the models and is made only on request, so the default path pays nothing.
 
+## Checking that a combination works, and that a refactor changes nothing
+
+* `test_batch_equivalence` (regression suite): each field of the registry that can be free here (`registry_range`), alone,
+  then seeded random subsets of 2-6 fields and all of them together; each model of the batch against a batch of that model
+  alone (on a resident basis built for its SSP parameters). A batch with only closed-form fields free runs the resident basis
+  both ways, so it catches a kernel chosen by the free set (the uniform and per-model twins); one with an SSP-level field
+  free runs the operator path against the resident basis. Metallicity and [alpha/Fe] free per model need the bases of every
+  metallicity and are covered by `test_csp_batch`.
+* Bit-identical baseline for a refactor: `benchmark_csp_batch` with `OPENSPS_BENCH_DUMP_FWD=<file>` writes the magnitudes and
+  spectra of its last batch; `tools/bench_matrix.py --dump DIR` does it for every free set and distribution of the matrix, and
+  `tools/compare_forward_dump.py DIR_A DIR_B` compares two runs (`--tol 0`, the default, needs identical bits, which the same
+  build on the same device gives).
+
 ## Not yet free per model (each its own piece of work)
 
 * Class S fields that are physically per-model quantities: `sigma_smooth` and its range (velocity dispersion is a common

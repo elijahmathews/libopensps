@@ -12,6 +12,7 @@ program test_batch_registry
     call print_major_header("Batch registry")
     call test_table()
     call test_accessors()
+    call test_range()
     call test_classify()
     call test_text()
     call print_summary_line("Batch registry", total_tests - total_failures, total_tests)
@@ -110,6 +111,41 @@ contains
             if (.not. registry_equal(p, q, i)) registry_same_but = .false.
         end do
     end function registry_same_but
+
+    subroutine test_range()
+        integer :: i, n_varied
+        real(WP) :: lo, hi
+        logical :: ok_order, ok_shared, ok_real
+
+        call print_group("registry: the ranges fields are sampled over")
+        ok_order = .true.
+        ok_shared = .true.
+        ok_real = .true.
+        n_varied = 0
+        do i = 1, N_FIELDS
+            call registry_range(i, lo, hi)
+            if (hi < lo) ok_order = .false.
+            if (hi > lo) then
+                n_varied = n_varied + 1
+                ! a field with a range is a real, per-model one: not shared, not an integer, not a name
+                if (registry_class(i) == CLASS_S) ok_shared = .false.
+                if (registry_kind(i) /= KIND_REAL) ok_real = .false.
+            else if (registry_class(i) == CLASS_S .and. (lo /= 0.0_wp .or. hi /= 0.0_wp)) then
+                ok_shared = .false.
+            end if
+        end do
+        call assert_true(ok_order, "no range runs backwards", total_tests, total_failures)
+        call assert_true(ok_shared, "shared fields have no range, and a field with a range is not shared", &
+                         total_tests, total_failures)
+        call assert_true(ok_real, "a field with a range is a real one", total_tests, total_failures)
+        call assert_true(n_varied >= 30, "most per-model fields have a range", total_tests, total_failures)
+        call registry_range(F_LOGZSOL, lo, hi)
+        call assert_true(lo == -1.5_wp .and. hi == 0.05_wp, "the range of logzsol", total_tests, total_failures)
+        call registry_range(F_SIGMA_SMOOTH, lo, hi)
+        call assert_true(lo == 0.0_wp .and. hi == 0.0_wp, "a shared field has no range", total_tests, total_failures)
+        call registry_range(0, lo, hi)
+        call assert_true(lo == 0.0_wp .and. hi == 0.0_wp, "an index out of range gives none", total_tests, total_failures)
+    end subroutine test_range
 
     subroutine test_classify()
         integer, parameter :: N = 40

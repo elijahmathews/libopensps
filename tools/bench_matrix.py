@@ -43,12 +43,14 @@ ALL_SET = ['dust1', 'dust2', 'dust_index', 'duste_qpah', 'gas_logz', 'fagn', 'zr
 LINE = re.compile(r'^batch_(\d+)_(mags|spec)_us_per_model\s+([0-9.eE+-]+)')
 
 
-def run(exe, free, dist, sizes, config, env_extra, n_single=0):
+def run(exe, free, dist, sizes, config, env_extra, n_single=0, dump=None):
     env = dict(os.environ)
     env['OPENSPS_BENCH_FREE'] = free if free else '-'
     env['OPENSPS_BENCH_DIST'] = dist
     env['OPENSPS_BENCH_SIZES'] = sizes
     env.update(env_extra)
+    if dump:
+        env['OPENSPS_BENCH_DUMP_FWD'] = dump
     nmax = max(int(x) for x in sizes.split(','))
     nmin = min(int(x) for x in sizes.split(','))
     p = subprocess.run([exe, str(nmax), str(n_single), config, str(nmin)], env=env, capture_output=True, text=True)
@@ -65,8 +67,8 @@ def run(exe, free, dist, sizes, config, env_extra, n_single=0):
     return out
 
 
-def median_runs(exe, free, dist, sizes, config, env_extra, reps):
-    runs = [run(exe, free, dist, sizes, config, env_extra) for _ in range(reps)]
+def median_runs(exe, free, dist, sizes, config, env_extra, reps, dump=None):
+    runs = [run(exe, free, dist, sizes, config, env_extra, dump=dump) for _ in range(reps)]
     bad = [r for r in runs if r['status'] != 0]
     if bad:
         return {'status': bad[0]['status'], 'mags': {}, 'spec': {}}
@@ -142,7 +144,9 @@ def main():
     ap.add_argument('--reps', type=int, default=2)
     ap.add_argument('--config', default='full')
     ap.add_argument('--tsv', default=None)
+    ap.add_argument('--dump', default=None, help='directory for the forward dumps (one file per distribution and free set,\n                    the largest size), to compare two commits with compare_forward_dump.py')
     ap.add_argument('--report', action='store_true')
+    ap.add_argument('--resume', action='store_true', help='skip the (distribution, free set) rows already in --tsv and append the rest')
     ap.add_argument('--report-only', default=None)
     ap.add_argument('--alone-limit', type=float, default=1.5)
     ap.add_argument('--pair-limit', type=float, default=1.15)
@@ -163,24 +167,39 @@ def main():
     allset = ALL_SET if a.all is None else ([] if a.all == 'none' else a.all.split(','))
     sizes = [int(x) for x in a.sizes.split(',')]
     rows = []
+    done = set()
+    header = ['dist', 'free', 'n', 'mags_us_per_model', 'spec_us_per_model', 'status']
+    if a.tsv and a.resume and os.path.exists(a.tsv):
+        with open(a.tsv) as fh:
+            rows = [tuple(r) for r in csv.reader(fh, delimiter='\t')][1:]
+        done = set((r[0], r[1]) for r in rows)
+    if a.tsv and not (a.resume and os.path.exists(a.tsv)):
+        with open(a.tsv, 'w', newline='') as fh:
+            csv.writer(fh, delimiter='\t').writerow(header)
     sets = [('-', '')] + [(f, f) for f in fields] + [(p, p.replace('+', ',')) for p in pairs]
     if allset:
         sets.append(('ALL', ','.join(allset)))
     for d in a.dists.split(','):
         for label, free in sets:
-            res = median_runs(a.exe, free, d, a.sizes, a.config, env_extra, a.reps)
+            if (d, label) in done:
+                continue
+            dump = None
+            if a.dump:
+                os.makedirs(a.dump, exist_ok=True)
+                dump = os.path.join(a.dump, '%s__%s.bin' % (d, label.replace('+', '_')))
+            res = median_runs(a.exe, free, d, a.sizes, a.config, env_extra, a.reps, dump)
+            new_rows = []
             for n in sizes:
                 m = res['mags'].get(n)
-                s = res['spec'].get(n)
-                rows.append((d, label, str(n), '' if m is None else '%.3f' % m, '' if s is None else '%.3f' % s,
-                             str(res['status'])))
+                s_ = res['spec'].get(n)
+                new_rows.append((d, label, str(n), '' if m is None else '%.3f' % m, '' if s_ is None else '%.3f' % s_,
+                                 str(res['status'])))
+            rows += new_rows
+            if a.tsv:
+                with open(a.tsv, 'a', newline='') as fh:
+                    csv.writer(fh, delimiter='\t').writerows(new_rows)
             print('%-9s %-24s %s' % (d, label, ' '.join('%s' % ('%.2f' % res['mags'][n] if n in res['mags'] else res['status'])
                                                        for n in sizes)), flush=True)
-    if a.tsv:
-        with open(a.tsv, 'w', newline='') as fh:
-            w = csv.writer(fh, delimiter='\t')
-            w.writerow(['dist', 'free', 'n', 'mags_us_per_model', 'spec_us_per_model', 'status'])
-            w.writerows(rows)
     if a.report or not a.tsv:
         report(rows, a.alone_limit, a.pair_limit, a.dist_limit)
 
