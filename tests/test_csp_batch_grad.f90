@@ -60,7 +60,7 @@ program test_csp_batch_grad
     use opensps_context_types, only: opensps_context_t
     use test_utils_mod, only: tap_finish, skip_without_data, print_major_header, print_group, print_summary_line, &
                               assert_true
-    use opensps_tuning, only: tuning_set, TUNE_P_SHARE_IMF_MIN_CHUNK
+    use opensps_tuning, only: tuning_set, TUNE_P_SHARE_IMF_MIN_BATCH
     implicit none
     logical :: tuning_ok
 
@@ -126,9 +126,9 @@ program test_csp_batch_grad
 
     call skip_without_data()
     call print_major_header("Batched CSP gradients")
-    ! Every chunk shares the IMF weights of its models with one IMF (the default threshold, SHARE_IMF_MIN_CHUNK, is above the
+    ! Every batch shares the IMF weights of its models with one IMF (the default threshold, SHARE_IMF_MIN_BATCH, is above the
     ! sizes of a test batch): the free-factor batches of this program all have one IMF, so they run that path
-    call tuning_set(TUNE_P_SHARE_IMF_MIN_CHUNK, 0, tuning_ok)
+    call tuning_set(TUNE_P_SHARE_IMF_MIN_BATCH, 0, tuning_ok)
     if (.not. tuning_ok) error stop 'tuning_set failed'
 
     allocate(ctx)

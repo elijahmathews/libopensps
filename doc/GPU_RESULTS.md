@@ -1626,3 +1626,22 @@ With `-Dgpu_arch=cc60` nvfortran 25.1 refuses the target regions: OpenMP GPU off
 cc70+. So on this node the OpenMP path is validated numerically through host fallback only
 (csp_batch: spectra 5.9e-7, magnitudes 1.5e-7 against `compute_csp_scenario`); the device run
 is pending an A100 (V100 or newer).
+
+### 2026-11-17: isochrone factors free per model and shared IMF weights, R9700
+
+Branch `feat/iso-mods-pr4-shared-imf` (stacked on #115, #113, #112: issue #45). `gfx1201`, FP32 kernels, HIP kernels,
+`benchmark_csp_batch`, microseconds per model (`full` configs: dust, DL07 dust emission, nebular emission, IGM, AGN; MIST + MILES).
+
+| config | N = 1000 | N = 10000 |
+|---|---|---|
+| `full` (resident basis, fixed IMF) | 9.0 | 6.6 - 7.3 |
+| `full_imf` (IMF free per model) | 26.4 - 27.1 | 23.1 - 23.5 |
+| `full_imfs` (operator, one IMF), sharing off / on | 30.0 / 29.0 | 23.1 / 20.7 |
+| `full_imfs_mods` (+ five factors free), sharing off / on | 43.7 / 39.5 | 33.9 / 32.4 |
+
+The factors free per model cost ~10 - 12 us per model on top of the operator path (the nine group operators run the
+age sums nine times; no new kernel). Sharing the IMF weights of models with one IMF takes 3 - 13% off from N = 1000
+(`doc/TUNING.md` M6, the sweep and the default). The default operator and the resident-basis path are unchanged.
+Verification on this device: the full unit and regression suite of the head of this branch (67 ok, 0 fail, 1 skipped:
+`afe_library`, no [alpha/Fe] data in the container run), and the targeted device runs of each earlier change of the stack. The A100 waits for the
+whole stack.

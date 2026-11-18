@@ -25,7 +25,7 @@ module opensps_ssp_batch
 
     use, intrinsic :: iso_c_binding, only: c_float
     use opensps_precision, only: WP, KP
-    use opensps_tuning, only: TUNE_P_SSP_BATCH_CHUNK, TUNE_P_SHARE_IMF_MIN_CHUNK, TUNE_TEMPLATE_MT, TUNE_TEMPLATE_PT, &
+    use opensps_tuning, only: TUNE_P_SSP_BATCH_CHUNK, TUNE_P_SHARE_IMF_MIN_BATCH, TUNE_TEMPLATE_MT, TUNE_TEMPLATE_PT, &
                               TUNE_TEMPLATE_PIX_BLOCK, &
                               TUNE_TEMPLATE_KB, TUNE_GEMM_KB, TUNE_GEMM_NC_BATCHED, TUNE_IMF_GRAD_CHG, TUNE_HIP_GEMM_RM, &
                               TUNE_HIP_GEMM_RN, &
@@ -522,7 +522,7 @@ contains
         real(KP), allocatable :: wk_u(:,:)
         integer, allocatable :: perm_u(:), viz_u(:), cmap(:)
         logical :: direct, fwd_w, want_sl, share
-        integer :: share_min
+        integer :: share_min, ncu, np_pass, m0, nc, nuniq
 
         if (set%free_mods) then
             if (.not. present(cg)) error stop 'ssp_batch_age_sums_z: a set with free modifications needs the group coefficients'
@@ -569,17 +569,39 @@ contains
                  pps(nc_max, 3, set%n_pc_max))
         ! Some models of the batch share an IMF (and a chunk may hold their weights once): the scratch of the unique ones;
         ! none shared (a free-IMF batch): one-element arrays, and the path as before
-        share_min = tuning_get(TUNE_P_SHARE_IMF_MIN_CHUNK)
-        share = ssp_batch_share_imf .and. nc_max >= share_min .and. imf_shared_models(n_mod, pm)
+        share_min = tuning_get(TUNE_P_SHARE_IMF_MIN_BATCH)
+        share = ssp_batch_share_imf .and. n_mod >= share_min .and. imf_shared_models(n_mod, pm)
+        ncu = 1
+        if (share) then
+            ! The scratch holds one column per distinct (IMF, metallicity) of a chunk: the most of any chunk of the two passes
+            allocate(perm_u(nc_max), viz_u(nc_max), cmap(nc_max))
+            do pass = 1, 2
+                if (pass == 1) then
+                    np_pass = ptr1(nz + 1) - 1
+                else
+                    np_pass = ptr2(nz + 1) - 1
+                end if
+                do m0 = 1, np_pass, CHUNK
+                    nc = min(CHUNK, np_pass - m0 + 1)
+                    if (pass == 1) then
+                        call chunk_unique_imf(m0, nc, perm1, viz1, pm, perm_u, viz_u, cmap, nuniq)
+                    else
+                        call chunk_unique_imf(m0, nc, perm2, viz2, pm, perm_u, viz_u, cmap, nuniq)
+                    end if
+                    ncu = max(ncu, nuniq)
+                end do
+            end do
+            if (ncu >= nc_max) share = .false.      ! nothing is shared in any chunk
+        end if
         if (share) then
             if (fwd_w) then
-                allocate(w_u(nc_max, set%n_pts_max))
+                allocate(w_u(ncu, set%n_pts_max))
             else
                 allocate(w_u(1, 1))
             end if
-            allocate(wk_u(nc_max, set%n_pts_max), tot_u(nc_max), pps_u(nc_max, 3, set%n_pc_max), perm_u(nc_max), &
-                     viz_u(nc_max), cmap(nc_max))
+            allocate(wk_u(ncu, set%n_pts_max), tot_u(ncu), pps_u(ncu, 3, set%n_pc_max))
         else
+            if (allocated(perm_u)) deallocate(perm_u, viz_u, cmap)
             allocate(w_u(1, 1), wk_u(1, 1), tot_u(1), pps_u(1, 1, 1), perm_u(1), viz_u(1), cmap(1))
         end if
         if (want_sl) then
@@ -678,7 +700,7 @@ contains
                 nc = min(CHUNK, np - m0 + 1)
                 call opensps_trace_push("fwd_imf_pieces_multi")
                 nuniq = nc
-                if (share .and. nc >= share_min) then
+                if (share) then
                     call chunk_unique_imf(m0, nc, perm, viz, pm, perm_u, viz_u, cmap, nuniq)
 #ifdef OMP_TARGET
                     if (nuniq < nc) then
@@ -692,7 +714,7 @@ contains
                     call imf_pieces_multi(imf_type, remnants, 1, nuniq, nt, set%n_pc_max, nt_neb, pm, set%n_pc, set%pt_off, &
                                           set%pc_off, set%pc_ptr, set%age_pc, set%pt_ptr, set%pt_mini, set%pt_m1, set%pt_m2, &
                                           set%pt_llo, set%pt_dl, set%pt_first, set%pt_cm, set%pt_cl, set%pt_q, set%age_mmax, &
-                                          size(wk, 1), set%n_pts_max, w_u, wk_u, tot_u, pps_u, perm_u, viz_u, cz, smass, slum, &
+                                          size(wk_u, 1), set%n_pts_max, w_u, wk_u, tot_u, pps_u, perm_u, viz_u, cz, smass, slum, &
                                           q0, fwd_w, set%pt_f, part=1)
                     call share_expand(m0, nc, set%n_pc_max, set%n_pts_max, fwd_w, set%n_pc, set%pt_off, set%pc_off, set%pc_ptr, &
                                       viz, cmap, w_u, wk_u, pps_u, w, wk, pps)

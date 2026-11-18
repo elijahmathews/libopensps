@@ -87,7 +87,7 @@ Run-time parameters:
 | `SSP_BATCH_CHUNK` | 2048 | 1 to 1e6 | models per chunk of the batched SSP |
 | `HOST_SFH_MAX` | 16 | 0 to 1e6 | batches smaller than this form the SFH weights on the host; 0 sends every batch to the device |
 | `PINNED_CHUNK_BYTES` | 16 MiB | 64 KiB to 1 GiB | bytes per chunk of the pinned host-device copies (`OPENSPS_PINNED` offload builds) |
-| `SHARE_IMF_MIN_CHUNK` | 2048 | 0 to 1e6 | chunks of at least this many models, whose models share their IMF parameters, compute the IMF weights once per distinct IMF and copy them (M6); 0 shares in every chunk |
+| `SHARE_IMF_MIN_BATCH` | 1024 | 0 to 1e6 | batches of at least this many models, some of which share their IMF parameters, compute the IMF weights once per distinct IMF and copy them (M6); 0 shares in every batch |
 
 ## How a run-time value is resolved
 
@@ -210,6 +210,30 @@ config `full_smooth_z_imf`:
 (Gradient: two runs each.) With the template products left to cuBLAS (the HIP kernel preempted it before 28dccbe: forward
 54 - 55 at N = 1000). This is a check that the R9700 defaults (M4) do not hurt on a second device, not a better value: no
 profile entry is added (rule 3: an entry needs a sweep of the parameter on that device).
+
+**M6. `gfx1201` (AMD Radeon AI PRO R9700), `SHARE_IMF_MIN_BATCH` (no profile entry: the default 1024 is from this sweep).**
+Measured 2026-11-17 on the desktop of the maintainer (Ryzen 9 9950X, the ROCm 7.2.4 container, FP32 kernels,
+`-Daccel=omp_gpu -Dgpu_arch=gfx1201 -Daccel_hip=true`, `OMP_TARGET_OFFLOAD=MANDATORY`), branch
+`feat/iso-mods-pr4-shared-imf`, `benchmark_csp_batch 10000 0 <config> 500` with `OPENSPS_BENCH_SIZES=500,1000,2048,4096,10000`
+after a warm-up run (the clocks ramp), `OPENSPS_TUNE_SHARE_IMF_MIN_BATCH=0` (every batch shares), sharing off with
+`OPENSPS_BENCH_NOSHARE=1`. The configs have all models on one Kroupa IMF through the operator path (`full_imfs`) and
+with the five isochrone factors free per model, nine group operators (`full_imfs_mods`). Microseconds per model,
+median of three runs (on / off; run-to-run spread ~5%, and up to 15% at N = 500):
+
+| config | N = 500 | 1000 | 2048 | 4096 | 10000 |
+|---|---|---|---|---|---|
+| `full_imfs` | 47.0 / 44.1 | 29.0 / 30.0 | 26.1 / 24.4 | 22.4 / 22.9 | 20.7 / 23.1 |
+| `full_imfs_mods` | 65.5 / 63.7 | 39.5 / 43.7 | 32.5 / 37.4 | 32.3 / 34.2 | 32.4 / 33.9 |
+
+From N = 1000 the sharing is faster in every row but one noisy `full_imfs` size (N = 2048: 26.1 against 24.4, its
+three runs 22.0 - 26.1 on and 24.2 - 28.5 off), by 3 - 13%; at N = 500 the two are within the noise. 1024 is the smallest
+size tested with a consistent gain, not a fitted crossover. The saving is ~2 us per model (the weights of the one distinct
+IMF are a single column of a latency-bound kernel); an earlier version that allocated its scratch at the width of a chunk
+(2048 models) instead of the number of distinct IMFs had a fixed cost of ~0.8 ms per call of the age sums (nine calls
+with free factors), which made it slower than no sharing up to N = 2048 (1.15x at 500, 1.04x at 2048) and 5% faster at
+10^4: sizing the scratch by the distinct count removed the cost. On the host (FP64, 8 threads, that earlier version,
+N = 1000, `full_imfs`): 1100 against 1114 us per model, 1%: the weights are not where the CPU's time goes. Not covered: other
+devices; the A100 waits for the whole stack of #45.
 
 ## Where this is going
 
