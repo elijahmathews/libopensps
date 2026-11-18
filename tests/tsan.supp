@@ -35,6 +35,16 @@ race:insert_unit
 race:close_unit_1
 
 # ------------------------------------------------------------------------------
+# 2b. The first formatted write of a test program (tests/test_utils.f90)
+# The suppressions above hide libgfortran's lock of a logical unit (the stack of that lock has a libgfortran frame), but the
+# matching unlock of the first write of a program that has not yet entered the OpenMP runtime is reported with the caller's
+# frame only (libgfortran has no frame pointers): "unlock of an unlocked mutex" in print_major_header. Seen with the
+# programs that start with it and nothing else (test_batch_registry, test_value_classes); without these suppressions
+# those programs report nothing at all.
+# ------------------------------------------------------------------------------
+mutex:test_utils_mod
+
+# ------------------------------------------------------------------------------
 # 3. Sanitizer Internals & Main Program Setup
 # Prevents TSan from tracking the internal operations of other sanitizers  (if
 # linked simultaneously) or flagging the implicit Fortran environment 
