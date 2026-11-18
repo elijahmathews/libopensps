@@ -4064,38 +4064,19 @@ contains
             end do
         end do
 #else
-        ! Host: per model and block of pixels, contiguous (vectorizable) passes over the ages (the same arithmetic per
-        ! element as the loops of the device branch)
-        integer, parameter :: PB = 256
-        integer  :: m, ib, i0, n, k, it, i
-        real(KP) :: y(PB), o(PB), d, wk
+        ! Host: the descriptor of the two metallicity slabs per model (the same arithmetic per element as the loops of the
+        ! device branch: (1 - d) b_lo + d b_hi with d at kernel precision)
+        integer, allocatable :: slab(:,:)
+        real(KP), allocatable :: wt(:,:)
+        integer :: m
 
-        !$omp parallel do collapse(2) private(ib, i0, n, k, it, i, y, o, d, wk)
+        allocate(slab(2, n_mod), wt(2, n_mod))
         do m = 1, n_mod
-            do ib = 1, (nspec + PB - 1) / PB
-                i0 = (ib - 1) * PB + 1
-                n = min(PB, nspec - i0 + 1)
-                it = it_tesc(m)
-                d = real(dz(m), KP)
-                y(1:n) = 0.0_KP
-                o(1:n) = 0.0_KP
-                do k = 1, nt
-                    if (k <= it) then
-                        wk = w2(k, m)
-                        do i = 1, n
-                            y(i) = y(i) + wk * ((1.0_KP - d) * basis(i0 + i - 1, k, zlo(m)) + d * basis(i0 + i - 1, k, zhi(m)))
-                        end do
-                    else
-                        wk = w2(k, n_mod + m)
-                        do i = 1, n
-                            o(i) = o(i) + wk * ((1.0_KP - d) * basis(i0 + i - 1, k, zlo(m)) + d * basis(i0 + i - 1, k, zhi(m)))
-                        end do
-                    end if
-                end do
-                yo(i0:i0 + n - 1, m) = y(1:n)
-                yo(i0:i0 + n - 1, n_mod + m) = o(1:n)
-            end do
+            slab(1, m) = zlo(m); slab(2, m) = zhi(m)
+            wt(2, m) = real(dz(m), KP)
+            wt(1, m) = 1.0_KP - wt(2, m)
         end do
+        call age_sums_host(2, nspec, nt, nz, n_mod, basis, w2flat, it_tesc, slab, wt, yo)
 #endif
     end subroutine age_sums_z_generic
 
@@ -4103,6 +4084,78 @@ contains
     !> slabs, (1 - da) [(1 - dz) b(zlo) + dz b(zlo + 1)] + da [(1 - dz) b(zlo + nzs) + dz b(zlo + nzs + 1)]
     !> (zlo the slab of the lower [alpha/Fe] plane, nzs the plane stride), formed at kernel precision from the
     !> four coefficients. Same structure as age_sums_z (portable kernel; also used in cuBLAS builds).
+    !> The host age sums of every model of a batch, for K = 1, 2 or 4 slabs per model, from a descriptor: model m's SSP is
+    !> sum_s wt(s, m) basis(:, :, slab(s, m)) at every age, and its young and old spectra (ages up to it_tesc(m), and after)
+    !> are the sums over the ages of the weight times that. K = 1 is the resident basis' single SSP (wt = 1), K = 2 the
+    !> two metallicity slabs (zlo, zhi), K = 4 those of two [alpha/Fe] planes. One skeleton (per model and block of pixels,
+    !> contiguous and vectorizable passes over the ages, the young and old sums apart); the blend is the expression of K, in
+    !> the order of the descriptor, so that each K gives the numbers of the kernel it replaces bit for bit.
+    subroutine age_sums_host(K, nspec, nt, nsl, n_mod, basis, w2flat, it_tesc, slab, wt, yo)
+        integer, intent(in)   :: K, nspec, nt, nsl, n_mod, it_tesc(n_mod), slab(K, n_mod)
+        real(KP), intent(in)  :: basis(nspec, nt, nsl), w2flat(nt * 2 * n_mod), wt(K, n_mod)
+        real(KP), intent(out) :: yo(nspec, 2 * n_mod)
+        integer, parameter :: PB = 256
+        integer  :: m, ib, i0, n, k_, it, i, s1, s2, s3, s4
+        real(KP) :: y(PB), o(PB), wk, c1, c2, c3, c4
+
+        !$omp parallel do collapse(2) private(ib, i0, n, k_, it, i, y, o, wk, c1, c2, c3, c4, s1, s2, s3, s4)
+        do m = 1, n_mod
+            do ib = 1, (nspec + PB - 1) / PB
+                i0 = (ib - 1) * PB + 1
+                n = min(PB, nspec - i0 + 1)
+                it = it_tesc(m)
+                y(1:n) = 0.0_KP
+                o(1:n) = 0.0_KP
+                c1 = wt(1, m); s1 = slab(1, m)
+                c2 = 0.0_KP; c3 = 0.0_KP; c4 = 0.0_KP
+                s2 = s1; s3 = s1; s4 = s1
+                if (K >= 2) then
+                    c2 = wt(2, m); s2 = slab(2, m)
+                end if
+                if (K == 4) then
+                    c3 = wt(3, m); s3 = slab(3, m); c4 = wt(4, m); s4 = slab(4, m)
+                end if
+                do k_ = 1, nt
+                    if (k_ <= it) then
+                        wk = w2flat(k_ + (m - 1) * nt)
+                        if (K == 4) then
+                            do i = 1, n
+                                y(i) = y(i) + wk * (c1 * basis(i0 + i - 1, k_, s1) + c2 * basis(i0 + i - 1, k_, s2) + &
+                                                    c3 * basis(i0 + i - 1, k_, s3) + c4 * basis(i0 + i - 1, k_, s4))
+                            end do
+                        else if (K == 2) then
+                            do i = 1, n
+                                y(i) = y(i) + wk * (c1 * basis(i0 + i - 1, k_, s1) + c2 * basis(i0 + i - 1, k_, s2))
+                            end do
+                        else
+                            do i = 1, n
+                                y(i) = y(i) + wk * (c1 * basis(i0 + i - 1, k_, s1))
+                            end do
+                        end if
+                    else
+                        wk = w2flat(k_ + (n_mod + m - 1) * nt)
+                        if (K == 4) then
+                            do i = 1, n
+                                o(i) = o(i) + wk * (c1 * basis(i0 + i - 1, k_, s1) + c2 * basis(i0 + i - 1, k_, s2) + &
+                                                    c3 * basis(i0 + i - 1, k_, s3) + c4 * basis(i0 + i - 1, k_, s4))
+                            end do
+                        else if (K == 2) then
+                            do i = 1, n
+                                o(i) = o(i) + wk * (c1 * basis(i0 + i - 1, k_, s1) + c2 * basis(i0 + i - 1, k_, s2))
+                            end do
+                        else
+                            do i = 1, n
+                                o(i) = o(i) + wk * (c1 * basis(i0 + i - 1, k_, s1))
+                            end do
+                        end if
+                    end if
+                end do
+                yo(i0:i0 + n - 1, m) = y(1:n)
+                yo(i0:i0 + n - 1, n_mod + m) = o(1:n)
+            end do
+        end do
+    end subroutine age_sums_host
+
     subroutine age_sums_z4(nspec, nt, nsl, nzs, n_mod, basis, w2flat, it_tesc, zlo, dz, da, yo)
         integer, intent(in)  :: nspec, nt, nsl, nzs, n_mod, it_tesc(n_mod), zlo(n_mod)
         real(KP), intent(in) :: basis(nspec, nt, nsl), w2flat(nt * 2 * n_mod)
@@ -4254,43 +4307,20 @@ contains
             end do
         end do
 #else
-        ! Host: per model and block of pixels, contiguous (vectorizable) passes over the ages
-        integer, parameter :: PB = 256
-        integer  :: m, ib, i0, n, k, s0, it, i
-        real(KP) :: y(PB), o(PB), c0, c1, c2, c3, wk
+        ! Host: the descriptor of four slabs (two [alpha/Fe] planes x the two metallicity slabs) per model
+        integer, allocatable :: slab(:,:)
+        real(KP), allocatable :: wt(:,:)
+        integer :: m
 
-        !$omp parallel do collapse(2) private(ib, i0, n, k, s0, it, i, y, o, c0, c1, c2, c3, wk)
+        allocate(slab(4, n_mod), wt(4, n_mod))
         do m = 1, n_mod
-            do ib = 1, (nspec + PB - 1) / PB
-                i0 = (ib - 1) * PB + 1
-                n = min(PB, nspec - i0 + 1)
-                s0 = zlo(m)
-                it = it_tesc(m)
-                c0 = real((1.0_wp - dz(m)) * (1.0_wp - da(m)), KP)
-                c1 = real(dz(m) * (1.0_wp - da(m)), KP)
-                c2 = real((1.0_wp - dz(m)) * da(m), KP)
-                c3 = real(dz(m) * da(m), KP)
-                y(1:n) = 0.0_KP
-                o(1:n) = 0.0_KP
-                do k = 1, nt
-                    if (k <= it) then
-                        wk = w2flat(k + (m - 1) * nt)
-                        do i = 1, n
-                            y(i) = y(i) + wk * (c0 * basis(i0 + i - 1, k, s0) + c1 * basis(i0 + i - 1, k, s0 + 1) + &
-                                                c2 * basis(i0 + i - 1, k, s0 + nzs) + c3 * basis(i0 + i - 1, k, s0 + nzs + 1))
-                        end do
-                    else
-                        wk = w2flat(k + (n_mod + m - 1) * nt)
-                        do i = 1, n
-                            o(i) = o(i) + wk * (c0 * basis(i0 + i - 1, k, s0) + c1 * basis(i0 + i - 1, k, s0 + 1) + &
-                                                c2 * basis(i0 + i - 1, k, s0 + nzs) + c3 * basis(i0 + i - 1, k, s0 + nzs + 1))
-                        end do
-                    end if
-                end do
-                yo(i0:i0 + n - 1, m) = y(1:n)
-                yo(i0:i0 + n - 1, n_mod + m) = o(1:n)
-            end do
+            slab(:, m) = [zlo(m), zlo(m) + 1, zlo(m) + nzs, zlo(m) + nzs + 1]
+            wt(1, m) = real((1.0_wp - dz(m)) * (1.0_wp - da(m)), KP)
+            wt(2, m) = real(dz(m) * (1.0_wp - da(m)), KP)
+            wt(3, m) = real((1.0_wp - dz(m)) * da(m), KP)
+            wt(4, m) = real(dz(m) * da(m), KP)
         end do
+        call age_sums_host(4, nspec, nt, nsl, n_mod, basis, w2flat, it_tesc, slab, wt, yo)
 #endif
     end subroutine age_sums_z4
 
@@ -4449,31 +4479,15 @@ contains
         !$omp end target data
 #endif
 #elif !defined(OMP_TARGET)
-        ! CPU builds: per model, one pass over the pixels (stride 1, vectorized) for each age with
-        ! a weight, as compute_csp_scenario; the register tile below would pad a batch of fewer
-        ! than MT models with copies (8x the work at N = 1). The same sums in the same order:
-        ! ages in order, the young ones (<= it_tesc) into column m, the old into N + m, so the
-        ! results equal the tiled kernel's bit for bit.
-        integer  :: m, k, i, col
-        real(KP) :: wk
+        ! CPU builds: the descriptor of the single slab, with weight 1 (the same sums in the same order as the tiled
+        ! kernel below: ages in order, the young ones (<= it_tesc) into column m, the old into N + m)
+        integer, allocatable :: slab(:,:)
+        real(KP), allocatable :: wt(:,:)
 
-        do m = 1, 2 * n_mod
-            do i = 1, nspec
-                yo(i, m) = 0.0_KP
-            end do
-        end do
-        ! (each model writes only its own two columns)
-        !$omp parallel do private(k, i, wk, col)
-        do m = 1, n_mod
-            do k = 1, nt
-                wk = w2(k, m) + w2(k, n_mod + m)   ! one of the two is zero
-                if (wk == 0.0_KP) cycle
-                col = merge(m, n_mod + m, k <= it_tesc(m))
-                do i = 1, nspec
-                    yo(i, col) = yo(i, col) + wk * basis(i, k)
-                end do
-            end do
-        end do
+        allocate(slab(1, n_mod), wt(1, n_mod))
+        slab = 1
+        wt = 1.0_KP
+        call age_sums_host(1, nspec, nt, 1, n_mod, basis, w2, it_tesc, slab, wt, yo)
 #else
         ! Register tile: each thread does PT pixels (strided by npt, so each load is coalesced
         ! across the threads) x MT models, PT + 2 MT loads per PT * MT multiply-adds.
