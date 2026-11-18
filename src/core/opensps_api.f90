@@ -99,7 +99,8 @@ contains
     !> @param[in]  isoc_name   Isochrone library without selection (e.g. 'mist_afe').
     !> @param[in]  spec_name   Spectral library without selection (e.g. 'c3k_lr').
     !> @param[in]  afe_values  The [alpha/Fe] planes, increasing.
-    !> @param[out] status      0 on success, 1 for fewer than two or unsorted values.
+    !> @param[out] status      0 on success, 1 for fewer than two or unsorted values, else the status of the SSP that could not be
+    !>                      generated (generate_ssp_grid: OPENSPS_STAT_*; the context's basis is then left as it was).
     subroutine opensps_build_afe_basis(ctx, isoc_name, spec_name, afe_values, status, dust_type_in)
         type(opensps_context_t), intent(inout) :: ctx
         character(len=*), intent(in) :: isoc_name, spec_name
@@ -131,7 +132,11 @@ contains
                 call opensps_context_set_param_int(ctx, 'zmet', iz, st)
                 call opensps_context_prepare_pset(ctx)
                 pset = ctx%pset
-                call generate_ssp_grid(ctx, pset, mass(:, slab), lbol(:, slab), spec(:, :, slab))
+                call generate_ssp_grid(ctx, pset, mass(:, slab), lbol(:, slab), spec(:, :, slab), stat=st)
+                if (st /= 0) then
+                    status = st
+                    return
+                end if
             end do
         end do
         ctx%state%ssp_basis_is_dirty = .true.
@@ -221,24 +226,28 @@ contains
     end subroutine opensps_prepare_pset
 
     !> @brief Compute SSP outputs for the current context.
-    subroutine opensps_compute_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp)
+    subroutine opensps_compute_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp, stat)
         type(opensps_context_t), intent(inout) :: ctx
         real(WP), dimension(:), intent(out) :: mass_ssp, lbol_ssp
         real(WP), dimension(:, :), intent(out) :: spec_ssp
+        !> OPENSPS_STAT_OK or why the SSP could not be made (generate_ssp_grid)
+        integer, intent(out), optional :: stat
 
-        call opensps_context_compute_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp)
+        call opensps_context_compute_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp, stat)
     end subroutine opensps_compute_ssp
 
     !> @brief Compute CSP outputs for the current context.
-    subroutine opensps_compute_csp(ctx, write_compsp, nzin, outfile, mass_ssp, lbol_ssp, spec_ssp, ocompsp)
+    subroutine opensps_compute_csp(ctx, write_compsp, nzin, outfile, mass_ssp, lbol_ssp, spec_ssp, ocompsp, stat)
         type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in) :: write_compsp, nzin
         character(len=*), intent(in) :: outfile
         real(WP), dimension(:, :), intent(in) :: mass_ssp, lbol_ssp
         real(WP), dimension(:, :, :), intent(in) :: spec_ssp
         type(compspout), dimension(:), intent(inout) :: ocompsp
+        !> OPENSPS_STAT_OK or why the SFH table could not be loaded (load_tabular_sfh)
+        integer, intent(out), optional :: stat
 
-        call opensps_context_compute_csp(ctx, write_compsp, nzin, outfile, mass_ssp, lbol_ssp, spec_ssp, ocompsp)
+        call opensps_context_compute_csp(ctx, write_compsp, nzin, outfile, mass_ssp, lbol_ssp, spec_ssp, ocompsp, stat)
     end subroutine opensps_compute_csp
 
 end module opensps_api

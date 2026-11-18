@@ -24,7 +24,8 @@ module opensps_ssp
 
     use opensps_precision, only: WP, KP
     use opensps_tuning, only: TUNE_PIX_BLOCK, TUNE_SSP_STAR_BATCH
-    use opensps_constants, only: NM, M_SOL, L_SOL, VERBOSE, BHB_SBS_TIME, TIME_RES_INCR, SAFE_FLOOR
+    use opensps_constants, only: NM, M_SOL, L_SOL, VERBOSE, BHB_SBS_TIME, TIME_RES_INCR, SAFE_FLOOR, OPENSPS_STAT_OK, &
+                                 OPENSPS_STAT_NOT_SETUP, OPENSPS_STAT_ZMET_RANGE, OPENSPS_STAT_IMF_TYPE, OPENSPS_STAT_IMF_FILE
     use opensps_types, only: params
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings
     
@@ -150,15 +151,19 @@ contains
     !> @param[out]    mass_grid Output mass history (time dependent).
     !> @param[out]    lbol_grid Output bolometric luminosity history.
     !> @param[out]    spec_grid Output spectral grid (wavelength, time).
-    subroutine generate_ssp_grid(ctx, pset, mass_grid, lbol_grid, spec_grid)
+    subroutine generate_ssp_grid(ctx, pset, mass_grid, lbol_grid, spec_grid, stat)
         type(opensps_context_t), target, intent(inout) :: ctx
         type(params), intent(in)            :: pset
         real(WP), intent(out), contiguous   :: mass_grid(:)
         real(WP), intent(out), contiguous   :: lbol_grid(:)
         real(WP), intent(out), contiguous   :: spec_grid(:,:)
+        !> OPENSPS_STAT_OK, or why the grid could not be made (OPENSPS_STAT_NOT_SETUP, _ZMET_RANGE, _IMF_TYPE, _IMF_FILE,
+        !> _ISO_FULL); the grids are then not valid. Without `stat` the error is printed and the routine returns.
+        integer, intent(out), optional      :: stat
 
         ! Local variables
         type(isochrone_buffer_t) :: buf
+        integer :: st
         integer :: n_curr, n_times, i_time, out_idx
         real(WP) :: time_log_yr
         ! Main-library template weights of every age (templates x ages), summed after the age
@@ -171,6 +176,7 @@ contains
         ! --------------------------------------------------------------------
         
         call opensps_context_sync_device_settings(ctx)
+        if (present(stat)) stat = OPENSPS_STAT_OK
         ! Initialize outputs to zero
         mass_grid = 0.0_wp
         lbol_grid = 0.0_wp
@@ -178,14 +184,16 @@ contains
 
         ! Validation: Check for setup flag
         if (ctx%state%check_sps_setup == 0) then
-            write(*,*) 'SSP_GEN ERROR: SPS_SETUP must be run before SSP_GEN.'
-            stop
+            if (.not. present(stat)) write(*,*) 'SSP_GEN ERROR: SPS_SETUP must be run before SSP_GEN.'
+            if (present(stat)) stat = OPENSPS_STAT_NOT_SETUP
+            return
         end if
 
         ! Validation: Check metallicity index
         if (pset%zmet < 1 .or. pset%zmet > ctx%state%nz) then
-            write(*,*) 'SSP_GEN ERROR: Metallicity index out of range:', pset%zmet
-            stop
+            if (.not. present(stat)) write(*,*) 'SSP_GEN ERROR: Metallicity index out of range:', pset%zmet
+            if (present(stat)) stat = OPENSPS_STAT_ZMET_RANGE
+            return
         end if
 
         ! --------------------------------------------------------------------
@@ -218,7 +226,11 @@ contains
 
         ! Configure IMF parameters (maps pset -> context global vars)
         ! Also handles legacy file reading for user-defined IMFs.
-        call configure_imf_parameters(ctx, pset)
+        call configure_imf_parameters(ctx, pset, st)
+        if (st /= OPENSPS_STAT_OK) then
+            if (present(stat)) stat = st
+            return
+        end if
 
         ! Initialize the reusable memory buffer
         call init_isochrone_buffer(buf)
@@ -257,7 +269,12 @@ contains
 
             ! B. APPLY PHYSICS
             !    IMF, Horizontal Branch, Blue Stragglers, Giant Branch modifications
-            call apply_isochrone_physics(ctx, pset, time_log_yr, buf)
+            call apply_isochrone_physics(ctx, pset, time_log_yr, buf, st)
+            if (st /= OPENSPS_STAT_OK) then
+                call free_isochrone_buffer(buf)
+                if (present(stat)) stat = st
+                return
+            end if
 
             ! Sync buffer to device for the per-star kernel (the template path and
             ! compute_integrated_properties then run on the host)
@@ -486,18 +503,20 @@ contains
     !> @param[in]     pset         User settings.
     !> @param[in]     time_log_yr  Current age in log(years).
     !> @param[in,out] buf          The working buffer (modified in place).
-    subroutine apply_isochrone_physics(ctx, pset, time_log_yr, buf)
+    subroutine apply_isochrone_physics(ctx, pset, time_log_yr, buf, stat)
         type(opensps_context_t), intent(inout) :: ctx
         type(params), intent(in)            :: pset
         real(WP), intent(in)                :: time_log_yr
         type(isochrone_buffer_t), intent(inout) :: buf
+        !> OPENSPS_STAT_OK or OPENSPS_STAT_ISO_FULL (see apply_isochrone_modifications)
+        integer, intent(out), optional :: stat
 
         ! 1. Calculate IMF Weights
         call compute_imf_weights(ctx, buf%initial_mass(1:buf%n_stars), &
                                  buf%weights(1:buf%n_stars), buf%n_stars)
 
         ! 2-4. Horizontal branch, blue stragglers, giant branch
-        call apply_isochrone_modifications(ctx, pset, time_log_yr, buf)
+        call apply_isochrone_modifications(ctx, pset, time_log_yr, buf, stat=stat)
 
     end subroutine apply_isochrone_physics
 
@@ -511,13 +530,16 @@ contains
     !> factor. The optional outputs are its bookkeeping: hb_flag(j) for the stars summed into
     !> the HB weight (whose sum sets the blue-straggler weights), parent(i) = j for blue HB
     !> stars i split from star j, n_after_hb = number of stars before the blue stragglers.
-    subroutine apply_isochrone_modifications(ctx, pset, time_log_yr, buf, hb_flag, parent, n_after_hb)
+    subroutine apply_isochrone_modifications(ctx, pset, time_log_yr, buf, hb_flag, parent, n_after_hb, stat)
         type(opensps_context_t), intent(inout) :: ctx
         type(params), intent(in)            :: pset
         real(WP), intent(in)                :: time_log_yr
         type(isochrone_buffer_t), intent(inout) :: buf
         logical, intent(inout), optional    :: hb_flag(:)
         integer, intent(inout), optional    :: parent(:)
+        !> OPENSPS_STAT_OK, or OPENSPS_STAT_ISO_FULL when the isochrone's arrays have no room for the added stars (the
+        !> buffer is then not complete: the caller discards it)
+        integer, intent(out), optional      :: stat
         integer, intent(out), optional      :: n_after_hb
 
         ! Local variables
@@ -525,6 +547,7 @@ contains
         
         ! Wrapper for n_stars to satisfy legacy array interfaces
         integer :: n_stars_wrap(1)
+        integer :: st
         
         ! Pointers for 2D views (Rank-2)
         real(WP), pointer :: p_mini(:,:), p_mact(:,:)
@@ -532,6 +555,7 @@ contains
         real(WP), pointer :: p_phase(:,:)
 
         ! Initialize wrapper with current count
+        if (present(stat)) stat = OPENSPS_STAT_OK
         n_stars_wrap(1) = buf%n_stars
         hb_weight = 0.0_wp
 
@@ -558,7 +582,11 @@ contains
                 ctx, 1, pset%fbhb, time_log_yr, hb_weight, &
                 n_stars_wrap, &
                 p_mini, p_mact, p_logl, p_logt, p_logg, p_phase, &
-                buf%weights, hb_flag, parent) ! weights is 1D in the interface
+                buf%weights, hb_flag, parent, stat=st) ! weights is 1D in the interface
+            if (st /= OPENSPS_STAT_OK) then
+                if (present(stat)) stat = st
+                return
+            end if
         end if
         if (present(n_after_hb)) n_after_hb = n_stars_wrap(1)
 
@@ -571,7 +599,11 @@ contains
                 ctx, 1, pset%zmet, pset%sbss, hb_weight, &
                 n_stars_wrap, &
                 p_mini, p_mact, p_logl, p_logt, p_logg, p_phase, &
-                buf%weights)
+                buf%weights, stat=st)
+            if (st /= OPENSPS_STAT_OK) then
+                if (present(stat)) stat = st
+                return
+            end if
         end if
 
         ! Sync buffer count with the wrapper (in case stars were added)
@@ -1681,9 +1713,12 @@ contains
     !>
     !> @param[in,out] ctx   Simulation context.
     !> @param[in]     pset  User settings.
-    subroutine configure_imf_parameters(ctx, pset)
+    subroutine configure_imf_parameters(ctx, pset, stat)
         type(opensps_context_t), intent(inout) :: ctx
         type(params), intent(in)            :: pset
+        !> OPENSPS_STAT_OK, OPENSPS_STAT_IMF_TYPE (imf_type outside 0..5) or OPENSPS_STAT_IMF_FILE (the user IMF file cannot be
+        !> read or has no segments). Without `stat` the error is printed and the routine returns.
+        integer, intent(out), optional :: stat
 
         ! Local variables
         integer :: imf_type
@@ -1691,14 +1726,16 @@ contains
         integer :: i
         character(len=1024) :: filepath
 
+        if (present(stat)) stat = OPENSPS_STAT_OK
         imf_type = ctx%imf_type_val
 
         ! 1. Validate IMF Type
         !    Supported types: 0=Salpeter, 1=Chabrier, 2=Kroupa, 
         !                     3=van Dokkum, 4=Dave, 5=User-defined
         if (imf_type < 0 .or. imf_type > 5) then
-            write(*,*) 'SSP_GEN ERROR: IMF type outside of range [0-5]:', imf_type
-            stop
+            if (.not. present(stat)) write(*,*) 'SSP_GEN ERROR: IMF type outside of range [0-5]:', imf_type
+            if (present(stat)) stat = OPENSPS_STAT_IMF_TYPE
+            return
         end if
 
         ! 2. Transfer Scalar Parameters
@@ -1730,8 +1767,9 @@ contains
                  action='read', iostat=io_status)
             
             if (io_status /= 0) then
-                write(*,*) 'SSP_GEN ERROR: Could not open IMF file: ', trim(filepath)
-                stop
+                if (.not. present(stat)) write(*,*) 'SSP_GEN ERROR: Could not open IMF file: ', trim(filepath)
+                if (present(stat)) stat = OPENSPS_STAT_IMF_FILE
+                return
             end if
 
             ! Read Loop
@@ -1757,8 +1795,9 @@ contains
             close(unit_imf)
 
             if (i == 0) then
-                write(*,*) 'SSP_GEN ERROR: User IMF file was empty or invalid.'
-                stop
+                if (.not. present(stat)) write(*,*) 'SSP_GEN ERROR: User IMF file was empty or invalid.'
+                if (present(stat)) stat = OPENSPS_STAT_IMF_FILE
+                return
             end if
 
             ! Store count and limits
@@ -2019,12 +2058,14 @@ contains
     !> @param[inout] ctx     The FSPS context (must be initialized).
     !> @param[in]    pset    Parameter set (uses `zmet`, `fbhb`, `sbss`, etc.).
     !> @param[in]    outfile Output filename stem (written to OUTPUTS/<name>.mags).
-    subroutine compute_surface_brightness_fluctuations(ctx, pset, outfile)
+    subroutine compute_surface_brightness_fluctuations(ctx, pset, outfile, stat)
         type(opensps_context_t), intent(inout) :: ctx
         type(params), intent(in) :: pset
         character(len=*), intent(in) :: outfile
+        !> OPENSPS_STAT_OK, or OPENSPS_STAT_ISO_FULL (the file is then incomplete)
+        integer, intent(out), optional :: stat
 
-        integer :: i, j
+        integer :: i, j, st
         character(34) :: fmt
         real(WP) :: zero, hb_wght
         real(WP), dimension(NM) :: wght
@@ -2059,6 +2100,8 @@ contains
             hb_wght = 0.0_wp
             wght = 0.0_wp
 
+            st = OPENSPS_STAT_OK
+            if (present(stat)) stat = OPENSPS_STAT_OK
             open (56, file=trim(output_home)//'/OUTPUTS/'//trim(outfile)//'.mags', status='replace')
             do i = 1, 8
                 write (56, *) '#'
@@ -2080,12 +2123,22 @@ contains
 
                 if (pset%fbhb > 0.0_wp .or. pset%sbss > 1.0e-3_wp) then
                     call modify_horizontal_branch(ctx, i, pset%fbhb, time(i), hb_wght, nmass, &
-                        mini, mact, logl, logt, logg, phase, wght)
+                        mini, mact, logl, logt, logg, phase, wght, stat=st)
+                    if (st /= OPENSPS_STAT_OK) then
+                        close(56)
+                        if (present(stat)) stat = st
+                        return
+                    end if
                 end if
 
                 if (time(i) >= BHB_SBS_TIME .and. pset%sbss > 1.0e-3_wp) then
                     call apply_blue_stragglers(ctx, i, pset%zmet, pset%sbss, hb_wght, nmass, &
-                        mini, mact, logl, logt, logg, phase, wght)
+                        mini, mact, logl, logt, logg, phase, wght, stat=st)
+                    if (st /= OPENSPS_STAT_OK) then
+                        close(56)
+                        if (present(stat)) stat = st
+                        return
+                    end if
                 end if
 
                 call modify_giant_branch(ctx, i, pset%zmet, time(i), nmass(i), pset%delt, pset%dell, pset%pagb, &

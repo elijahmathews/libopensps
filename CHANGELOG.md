@@ -7,6 +7,15 @@ major version is 0, a minor release may change the API, and each such change is 
 
 ## Unreleased
 
+### Changed
+
+- **A library routine no longer stops the host program.** The 16 `stop` statements of the library (an SSP generated before
+  `sps_setup`, a metallicity or IMF type out of range, an unreadable user IMF file, a full isochrone array, a tabular SFH
+  that cannot be loaded, BPASS asked for an operator) are statuses now: the Fortran routines take an optional `stat`
+  (`OPENSPS_STAT_*` of `opensps_constants`), and the C API returns them (`OPENSPS_ERR_SSP_*`, 501 - 508, with the message in
+  `opensps_get_last_error`). The legacy global-state C entry points set the error and return. A Fortran caller that passes no
+  `stat` gets the message on standard output and an early return instead of the stop.
+
 ### Added
 
 - **Isochrone modification factors free per model** (#45): `opensps_context_build_ssp_ops_free_mods` builds the operators of

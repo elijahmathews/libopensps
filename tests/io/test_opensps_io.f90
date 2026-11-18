@@ -1,6 +1,7 @@
 module test_opensps_io_mod
     use opensps_precision, only: WP
-    use opensps_constants, only: SAFE_FLOOR, C_LIGHT, NM, NDIM_LOGT, NDIM_LOGG, NLAM_NEBCONT, NEBNZ, NEBNAGE, NEBNIP, NEMLINE
+    use opensps_constants, only: SAFE_FLOOR, C_LIGHT, NM, NDIM_LOGT, NDIM_LOGG, NLAM_NEBCONT, NEBNZ, NEBNAGE, NEBNIP, NEMLINE, &
+                                 OPENSPS_STAT_OK, OPENSPS_STAT_TABULAR_SFH, NTABMAX
     use opensps_context_types, only: opensps_context_t
     use opensps_types, only: params, compspout
     use opensps_io, only: read_isochrone_database, write_binary_spectral_lib, read_spectral_binary, read_bpass_data, &
@@ -44,6 +45,7 @@ contains
 
         call test_tabular_sfh_units()
         call test_tabular_sfh_clipping()
+        call test_tabular_sfh_errors()
 
         call test_cmd_column_count()
         call test_output_mode_flags()
@@ -651,6 +653,71 @@ contains
         
         deallocate(ctx)
     end subroutine test_tabular_sfh_units
+
+    !> The ways a tabular SFH cannot be loaded are statuses (OPENSPS_STAT_TABULAR_SFH), not a stop of the program
+    subroutine test_tabular_sfh_errors()
+        type(opensps_context_t), allocatable :: ctx
+        type(params) :: pset
+        character(len=256) :: root, file_path
+        integer :: u, i, stat
+
+        allocate(ctx)
+        call print_group("Tabular SFH errors are statuses")
+        call make_temp_root(root)
+        call ensure_dir(trim(root) // '/data')
+        ctx%sps_home = trim(root)
+        ctx%state%nz = 1
+
+        file_path = trim(root) // '/data/sfh_ok.dat'
+        open(newunit=u, file=trim(file_path), status='replace', action='write')
+        write(u, '(3F10.2)') 1.0_wp, 2.0_wp, 0.02_wp
+        close(u)
+        pset%sfh = 2
+        pset%sf_start = 0.0_wp
+        pset%sfh_filename = 'sfh_ok.dat'
+        stat = -1
+        call load_tabular_sfh(ctx, pset, 1, stat)
+        call assert_int_equals(OPENSPS_STAT_OK, stat, "a good file: status 0", total_tests, total_failures)
+
+        pset%sf_start = 1.0_wp
+        stat = -1
+        call load_tabular_sfh(ctx, pset, 1, stat)
+        call assert_int_equals(OPENSPS_STAT_TABULAR_SFH, stat, "sf_start > 0 with a tabular SFH", total_tests, total_failures)
+
+        pset%sf_start = 0.0_wp
+        pset%sfh_filename = 'no_such_file.dat'
+        stat = -1
+        call load_tabular_sfh(ctx, pset, 1, stat)
+        call assert_int_equals(OPENSPS_STAT_TABULAR_SFH, stat, "a missing file", total_tests, total_failures)
+
+        file_path = trim(root) // '/data/sfh_bad.dat'
+        open(newunit=u, file=trim(file_path), status='replace', action='write')
+        write(u, '(A)') 'one two three'
+        close(u)
+        pset%sfh_filename = 'sfh_bad.dat'
+        stat = -1
+        call load_tabular_sfh(ctx, pset, 1, stat)
+        call assert_int_equals(OPENSPS_STAT_TABULAR_SFH, stat, "a line that is not numbers", total_tests, total_failures)
+
+        file_path = trim(root) // '/data/sfh_long.dat'
+        open(newunit=u, file=trim(file_path), status='replace', action='write')
+        do i = 1, NTABMAX + 1
+            write(u, '(2F10.4)') real(i, WP), 1.0_wp
+        end do
+        close(u)
+        pset%sfh_filename = 'sfh_long.dat'
+        ctx%state%nz = 2                 ! (two columns per line are read unless nzin is the last metallicity)
+        stat = -1
+        call load_tabular_sfh(ctx, pset, 1, stat)
+        call assert_int_equals(OPENSPS_STAT_TABULAR_SFH, stat, "more rows than NTABMAX", total_tests, total_failures)
+
+        pset%sfh = 3
+        ctx%state%ntabsfh = 0
+        stat = -1
+        call load_tabular_sfh(ctx, pset, 1, stat)
+        call assert_int_equals(OPENSPS_STAT_TABULAR_SFH, stat, "sfh = 3 without a table", total_tests, total_failures)
+        deallocate(ctx)
+    end subroutine test_tabular_sfh_errors
 
     subroutine test_tabular_sfh_clipping()
         type(opensps_context_t), allocatable :: ctx

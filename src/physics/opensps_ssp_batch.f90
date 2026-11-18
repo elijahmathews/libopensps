@@ -230,15 +230,18 @@ contains
     !> and limits are not used, evtype, masscut, agb_dust, the TP-AGB normalisation are the operators'), for the
     !> metallicity pset%zmet (all_z false) or every metallicity of the context (all_z true), as the container of a batch with
     !> the factors fbhb, sbss, agb, pagb and redgb free per model.
-    subroutine ssp_opset_build_mods(ctx, pset, all_z, set)
+    subroutine ssp_opset_build_mods(ctx, pset, all_z, set, stat)
         type(opensps_context_t), target, intent(inout) :: ctx
         type(params), intent(in) :: pset
         logical, intent(in) :: all_z
         type(ssp_opset_t), intent(inout) :: set
+        !> OPENSPS_STAT_OK, or the status of the operator that could not be built (ssp_operator_build); the set is then empty
+        integer, intent(out), optional :: stat
         type(ssp_operator_t), allocatable :: ops(:)
         type(params) :: p
-        integer :: g, z, nzo
+        integer :: g, z, nzo, st
 
+        if (present(stat)) stat = 0
         call ssp_opset_free(set)
         nzo = 1
         if (all_z) nzo = ctx%state%nz
@@ -248,7 +251,12 @@ contains
             allocate(ops(nzo))
             do z = 1, nzo
                 if (all_z) p%zmet = z
-                call ssp_operator_build(ctx, p, ops(z), group=g)
+                call ssp_operator_build(ctx, p, ops(z), group=g, stat=st)
+                if (st /= 0) then
+                    call ssp_opset_free(set)
+                    if (present(stat)) stat = st
+                    return
+                end if
             end do
             call ssp_opset_build(ops, set%grp(g))
             if (allocated(ops)) deallocate(ops)
@@ -278,22 +286,29 @@ contains
     end function gset
 
     !> The operators of the TP-AGB group at the shifts (delt, dell), for the metallicities of the set (as ssp_opset_build_mods)
-    subroutine ssp_opset_build_tp(ctx, base, delt, dell, out)
+    subroutine ssp_opset_build_tp(ctx, base, delt, dell, out, stat)
         type(opensps_context_t), target, intent(inout) :: ctx
         type(ssp_opset_t), intent(in) :: base
         real(WP), intent(in) :: delt, dell
         type(ssp_opset_t), intent(inout) :: out
+        !> OPENSPS_STAT_OK, or the status of the operator that could not be built; `out` is then empty
+        integer, intent(out), optional :: stat
         type(ssp_operator_t), allocatable :: ops(:)
         type(params) :: p
-        integer :: z, nzo
+        integer :: z, nzo, st
 
+        if (present(stat)) stat = 0
         nzo = 1
         if (base%all_z) nzo = ctx%state%nz
         allocate(ops(nzo))
         p = base%base_pset
         do z = 1, nzo
             if (base%all_z) p%zmet = z
-            call ssp_operator_build(ctx, p, ops(z), group=MOD_GRP_TPAGB, shift_t=delt, shift_l=dell)
+            call ssp_operator_build(ctx, p, ops(z), group=MOD_GRP_TPAGB, shift_t=delt, shift_l=dell, stat=st)
+            if (st /= 0) then
+                if (present(stat)) stat = st
+                return
+            end if
         end do
         call ssp_opset_build(ops, out)
     end subroutine ssp_opset_build_tp
@@ -305,7 +320,7 @@ contains
         type(ssp_opset_t), intent(inout) :: set
         real(WP), intent(in) :: delt(:), dell(:)
         integer, intent(out) :: ipair(:), status
-        integer :: m, k, ip, nnew, slot, n_b, nidx
+        integer :: m, k, ip, nnew, slot, n_b, nidx, st_tp
         real(WP) :: nt_(MAX_TP_PAIRS), nl_(MAX_TP_PAIRS)
         real(WP), allocatable :: vals(:,:)
         integer, allocatable :: idx(:), cls(:), reps(:)
@@ -369,7 +384,11 @@ contains
                 call ssp_opset_free(set%ext(slot))
                 set%ext_ok(slot) = .false.
             end if
-            call ssp_opset_build_tp(ctx, set, nt_(k), nl_(k), set%ext(slot))
+            call ssp_opset_build_tp(ctx, set, nt_(k), nl_(k), set%ext(slot), stat=st_tp)
+            if (st_tp /= 0) then
+                status = st_tp
+                return
+            end if
             set%ext_t(slot) = nt_(k)
             set%ext_l(slot) = nl_(k)
             set%ext_ok(slot) = .true.
@@ -1250,7 +1269,7 @@ contains
         !> The context the shifted sets are built from (with ipair and dshift)
         type(opensps_context_t), target, intent(inout), optional :: ctx
 
-        integer :: g, m, t, p, k, ntq, ni, ng, ip, j, row
+        integer :: g, m, t, p, k, ntq, ni, ng, ip, j, row, st_fd
         real(WP) :: t0, l0
         real(WP), allocatable :: slp_fd(:,:,:), cfd(:,:)
         type(ssp_opset_t) :: fds(1)
@@ -1395,7 +1414,10 @@ contains
                 ! (the four shifted sets of this pair, one at a time: the memory of one set, then freed)
                 do j = 1, 4
                     call ssp_opset_build_tp(ctx, set, t0 + merge(TP_FD_STEP, 0.0_wp, j == 1) - merge(TP_FD_STEP, 0.0_wp, j == 2), &
-                                            l0 + merge(TP_FD_STEP, 0.0_wp, j == 3) - merge(TP_FD_STEP, 0.0_wp, j == 4), fds(1))
+                                            l0 + merge(TP_FD_STEP, 0.0_wp, j == 3) - merge(TP_FD_STEP, 0.0_wp, j == 4), fds(1), &
+                                            stat=st_fd)
+                    ! (the pair was built before with the same stars: the shifts do not change what fits the arrays)
+                    if (st_fd /= 0) error stop 'ssp_batch_age_sums_adjoint_mods: the shifted TP-AGB set could not be built'
                     call ssp_batch_age_sums_z(imf_type, .false., n_mod, nt, nspec, fds(1), zlo, zhi, dz, pm, wsfh, &
                                               it_tesc, nt_neb, whl, fesc, yg, sm_g, sl_g, q_g, slpass=slp_fd)
                     call group_cotangent(slp_fd)

@@ -191,4 +191,18 @@ module opensps_constants
 
     real(WP), parameter :: SAFE_FLOOR = tiny(1.0_wp)
 
+    ! ------------------------------------------------------------------------
+    ! Status codes of the library routines that used to stop the program (the optional `stat` argument; 0 is success). A
+    ! routine called without `stat` reports the error on standard output and returns without finishing its work.
+    ! ------------------------------------------------------------------------
+    integer, parameter :: OPENSPS_STAT_OK = 0
+    integer, parameter :: OPENSPS_STAT_NOT_SETUP = 501         !< sps_setup has not run
+    integer, parameter :: OPENSPS_STAT_ZMET_RANGE = 502        !< metallicity index outside the library
+    integer, parameter :: OPENSPS_STAT_IMF_TYPE = 503          !< imf_type outside 0..5
+    integer, parameter :: OPENSPS_STAT_IMF_FILE = 504          !< user IMF file missing, unreadable or empty
+    integer, parameter :: OPENSPS_STAT_ISO_FULL = 505          !< an isochrone's arrays (NM stars) are full
+    integer, parameter :: OPENSPS_STAT_BPASS_OPERATOR = 506    !< BPASS SSPs are tabulated: no operator to build
+    integer, parameter :: OPENSPS_STAT_HB_PARENT = 507         !< a blue HB star without a parent (internal inconsistency)
+    integer, parameter :: OPENSPS_STAT_TABULAR_SFH = 508       !< tabular SFH: invalid parameters, missing, unreadable or too long file
+
 end module opensps_constants

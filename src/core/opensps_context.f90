@@ -678,10 +678,12 @@ contains
     !> @param[out] mass_ssp SSP mass history.
     !> @param[out] lbol_ssp SSP bolometric luminosity history.
     !> @param[out] spec_ssp SSP spectra.
-    subroutine opensps_context_compute_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp)
+    subroutine opensps_context_compute_ssp(ctx, mass_ssp, lbol_ssp, spec_ssp, stat)
         type(opensps_context_t), intent(inout) :: ctx
         real(WP), dimension(:), intent(out) :: mass_ssp, lbol_ssp
         real(WP), dimension(:, :), intent(out) :: spec_ssp
+        !> OPENSPS_STAT_OK or why the SSP could not be made (generate_ssp_grid)
+        integer, intent(out), optional :: stat
 
         call opensps_context_ensure_setup(ctx)
         call opensps_context_prepare_pset(ctx)
@@ -689,7 +691,7 @@ contains
 #ifdef OMP_TARGET
         if (.not. ctx%on_device) call opensps_context_move_to_device(ctx)
 #endif
-        call generate_ssp_grid(ctx, ctx%pset, mass_ssp, lbol_ssp, spec_ssp)
+        call generate_ssp_grid(ctx, ctx%pset, mass_ssp, lbol_ssp, spec_ssp, stat)
     end subroutine opensps_context_compute_ssp
 
     !> @brief Compute CSP outputs for the current context.
@@ -701,21 +703,28 @@ contains
     !> @param[in] lbol_ssp SSP bolometric luminosity grid.
     !> @param[in] spec_ssp SSP spectra grid.
     !> @param[inout] ocompsp CSP output buffer.
-    subroutine opensps_context_compute_csp(ctx, write_compsp, nzin, outfile, mass_ssp, lbol_ssp, spec_ssp, ocompsp)
+    subroutine opensps_context_compute_csp(ctx, write_compsp, nzin, outfile, mass_ssp, lbol_ssp, spec_ssp, ocompsp, stat)
         type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in) :: write_compsp, nzin
         character(len=*), intent(in) :: outfile
         real(WP), dimension(:, :), intent(in) :: mass_ssp, lbol_ssp
         real(WP), dimension(:, :, :), intent(in) :: spec_ssp
         type(COMPSPOUT), dimension(:), intent(inout) :: ocompsp
+        !> OPENSPS_STAT_OK or why the SFH table could not be loaded (load_tabular_sfh)
+        integer, intent(out), optional :: stat
         type(COMPSPOUT), allocatable :: results(:)
-        integer :: i, n_out, status
+        integer :: i, n_out, status, st
 
+        if (present(stat)) stat = 0
         call opensps_context_ensure_setup(ctx)
         call opensps_context_prepare_pset(ctx)
 
         if (ctx%pset%sfh == 2 .or. ctx%pset%sfh == 3) then
-            call load_tabular_sfh(ctx, ctx%pset, nzin)
+            call load_tabular_sfh(ctx, ctx%pset, nzin, st)
+            if (st /= 0) then
+                if (present(stat)) stat = st
+                return
+            end if
         end if
 
         call opensps_context_update_ssp_basis(ctx, spec_ssp, mass_ssp, lbol_ssp, nzin)

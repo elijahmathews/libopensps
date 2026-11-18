@@ -39,7 +39,7 @@ module opensps_io
     !>   to prevent stack overflow errors common in the legacy codebase.
 
     use opensps_precision, only: WP
-    use opensps_constants, only: VERBOSE, SAFE_FLOOR, C_LIGHT, &
+    use opensps_constants, only: VERBOSE, SAFE_FLOOR, C_LIGHT, OPENSPS_STAT_OK, OPENSPS_STAT_TABULAR_SFH, &
                               NM, NLINES, NDIM_LOGT, NDIM_LOGG, NTABMAX, &
                               NLAM_NEBCONT, NEBNZ, NEBNAGE, NEBNIP, &
                               NDIM_WR, BASEL_STR, N_AGB_C, N_AGB_O, N_AGB_CAR, &
@@ -2372,14 +2372,19 @@ contains
     !> @param[inout] ctx  The FSPS context (updates sfh_tab, ntabsfh).
     !> @param[in]    pset User parameters.
     !> @param[in]    nzin Current metallicity index (legacy logic for Z-column reading).
-    subroutine load_tabular_sfh(ctx, pset, nzin)
+    subroutine load_tabular_sfh(ctx, pset, nzin, stat)
         type(opensps_context_t), intent(inout) :: ctx
         type(params), intent(in) :: pset
         integer, intent(in) :: nzin
+        !> OPENSPS_STAT_OK, or OPENSPS_STAT_TABULAR_SFH (sf_start > 0, a missing, unreadable or over-long file, or sfh = 3 without a
+        !> table); the table is then not valid. Without `stat` the error is printed and the routine returns.
+        integer, intent(out), optional :: stat
 
         integer :: io_stat, file_unit, i_row
         character(len=256) :: file_path
         logical :: file_exists
+
+        if (present(stat)) stat = OPENSPS_STAT_OK
 
         ! --------------------------------------------------------------------
         ! CASE 1: Read from File (SFH = 2)
@@ -2388,8 +2393,9 @@ contains
 
             ! Constraint: Tabular SFHs in FSPS start at T=0.
             if (pset%sf_start > SAFE_FLOOR) then
-                print *, 'Error: [load_tabular_sfh] sf_start must be 0 for tabular SFH (type 2).'
-                stop
+                if (.not. present(stat)) print *, 'Error: [load_tabular_sfh] sf_start must be 0 for tabular SFH (type 2).'
+                if (present(stat)) stat = OPENSPS_STAT_TABULAR_SFH
+                return
             end if
 
             ! Construct File Path
@@ -2402,8 +2408,9 @@ contains
             ! Check Existence
             inquire(file=trim(file_path), exist=file_exists)
             if (.not. file_exists) then
-                print *, 'Error: [load_tabular_sfh] File not found: ', trim(file_path)
-                stop
+                if (.not. present(stat)) print *, 'Error: [load_tabular_sfh] File not found: ', trim(file_path)
+                if (present(stat)) stat = OPENSPS_STAT_TABULAR_SFH
+                return
             end if
 
             ! Open File
@@ -2411,8 +2418,9 @@ contains
                  action='read', iostat=io_stat)
             
             if (io_stat /= 0) then
-                print *, 'Error: [load_tabular_sfh] Could not open file: ', trim(file_path)
-                stop
+                if (.not. present(stat)) print *, 'Error: [load_tabular_sfh] Could not open file: ', trim(file_path)
+                if (present(stat)) stat = OPENSPS_STAT_TABULAR_SFH
+                return
             end if
 
             ! Read Loop
@@ -2433,9 +2441,10 @@ contains
                 ! Check for End of File or Error
                 if (io_stat < 0) exit ! EOF
                 if (io_stat > 0) then
-                    print *, 'Error: [load_tabular_sfh] Read error at line ', i_row
+                    if (.not. present(stat)) print *, 'Error: [load_tabular_sfh] Read error at line ', i_row
                     close(file_unit)
-                    stop
+                    if (present(stat)) stat = OPENSPS_STAT_TABULAR_SFH
+                    return
                 end if
             end do
 
@@ -2443,9 +2452,10 @@ contains
 
             ! Check if we hit the array limit without finding EOF
             if (io_stat == 0 .and. i_row > NTABMAX) then
-                print *, 'Error: [load_tabular_sfh] SFH file exceeds NTABMAX rows.'
-                print *, '       Increase NTABMAX in opensps_constants.'
-                stop
+                if (.not. present(stat)) print *, 'Error: [load_tabular_sfh] SFH file exceeds NTABMAX rows.'
+                if (.not. present(stat)) print *, '       Increase NTABMAX in opensps_constants.'
+                if (present(stat)) stat = OPENSPS_STAT_TABULAR_SFH
+                return
             end if
 
             ! Store number of points (i_row is now the index of the first BAD read, so subtract 1)
@@ -2461,8 +2471,9 @@ contains
         else if (pset%sfh == 3) then
             
             if (ctx%state%ntabsfh == 0) then
-                print *, 'Error: [load_tabular_sfh] SFH=3 selected but sfh_tab is empty.'
-                stop
+                if (.not. present(stat)) print *, 'Error: [load_tabular_sfh] SFH=3 selected but sfh_tab is empty.'
+                if (present(stat)) stat = OPENSPS_STAT_TABULAR_SFH
+                return
             end if
 
         end if

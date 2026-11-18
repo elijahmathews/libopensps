@@ -82,7 +82,8 @@ module opensps_ssp_operator
 
     use opensps_precision, only: WP, KP
     use opensps_tuning, only: TUNE_SEG_LEN, TUNE_PT_PIECE, TUNE_PIX_BLOCK
-    use opensps_constants, only: NM, SAFE_FLOOR, TIME_RES_INCR, C_LIGHT, H_PLANCK, L_SOL, BHB_SBS_TIME
+    use opensps_constants, only: NM, SAFE_FLOOR, TIME_RES_INCR, C_LIGHT, H_PLANCK, L_SOL, BHB_SBS_TIME, OPENSPS_STAT_OK, &
+                                 OPENSPS_STAT_BPASS_OPERATOR, OPENSPS_STAT_HB_PARENT
     use opensps_types, only: params
     use opensps_context_types, only: opensps_context_t, opensps_context_sync_device_settings
     use opensps_imf, only: imf_integral_p, IMF_NPAR, IMF_P_LOWER_LIMIT, IMF_P_UPPER_LIMIT, IMF_P_LOWER_BOUND, &
@@ -280,7 +281,7 @@ contains
     !> @brief Builds the IMF-independent operator S of metallicity pset%zmet.
     !> @details The context must be set up (opensps_setup). pset supplies the non-IMF parameters
     !> listed in the module notes; its IMF parameters are not used.
-    subroutine ssp_operator_build(ctx, pset, op, group, shift_t, shift_l)
+    subroutine ssp_operator_build(ctx, pset, op, group, shift_t, shift_l, stat)
         type(opensps_context_t), target, intent(inout) :: ctx
         type(params), intent(in)              :: pset
         type(ssp_operator_t), intent(inout)   :: op
@@ -293,7 +294,12 @@ contains
         !> With group = MOD_GRP_TPAGB: the shifts delt and dell of the TP-AGB stars' log T and log L the group is built
         !> at (the other groups are not affected by them; without the arguments, zero)
         real(WP), intent(in), optional        :: shift_t, shift_l
+        !> OPENSPS_STAT_OK; OPENSPS_STAT_BPASS_OPERATOR (BPASS SSPs are tabulated, there is no operator); OPENSPS_STAT_ISO_FULL or
+        !> OPENSPS_STAT_HB_PARENT (an isochrone that does not fit the arrays, or an inconsistent one): the operator is then
+        !> empty. Without `stat` the error is printed and the routine returns.
+        integer, intent(out), optional        :: stat
 
+        integer :: st
         type(isochrone_buffer_t) :: buf, buf1
         type(params) :: pset_use, pset1
         integer :: t, n_nat, n_all, n_after_hb, n_hb, j, k, i, nz, nspec, cap_pts, grp, nah1
@@ -318,6 +324,7 @@ contains
         integer  :: c_k(NM), nc
         real(WP) :: c_f(NM)
 
+        if (present(stat)) stat = OPENSPS_STAT_OK
         call ssp_operator_free(op)
         call opensps_context_sync_device_settings(ctx)
         grp = -1
@@ -345,8 +352,9 @@ contains
         pdva = trim(ctx%state%isoc_type) == 'pdva'
         op%mod_group = grp
         if (trim(ctx%state%isoc_type) == 'bpss') then
-            write(*,*) 'SSP_OPERATOR ERROR: BPASS SSPs are tabulated, there is no operator to build.'
-            stop
+            if (.not. present(stat)) write(*,*) 'SSP_OPERATOR ERROR: BPASS SSPs are tabulated, there is no operator to build.'
+            if (present(stat)) stat = OPENSPS_STAT_BPASS_OPERATOR
+            return
         end if
         nz = pset%zmet
         nspec = ctx%state%nspec
@@ -437,10 +445,17 @@ contains
                 pset1 = pset_use
                 pset1%fbhb = 0.0_wp
                 pset1%sbss = 0.0_wp
-                call apply_isochrone_modifications(ctx, pset1, tlog, buf, hb_flag, parent, n_after_hb)
+                call apply_isochrone_modifications(ctx, pset1, tlog, buf, hb_flag, parent, n_after_hb, st)
             else
-                call apply_isochrone_modifications(ctx, pset_use, tlog, buf, hb_flag, parent, n_after_hb)
+                call apply_isochrone_modifications(ctx, pset_use, tlog, buf, hb_flag, parent, n_after_hb, st)
             end if
+                if (st /= OPENSPS_STAT_OK) then
+                    call free_isochrone_buffer(buf)
+                    call free_isochrone_buffer(buf1)
+                    call ssp_operator_free(op)
+                    if (present(stat)) stat = st
+                    return
+                end if
             n_all = buf%n_stars
             op%age_nstars(t) = n_all
             probe(1:n_all) = buf%weights(1:n_all)
@@ -457,7 +472,14 @@ contains
                 par1 = 0
                 pset1 = pset_use
                 pset1%fbhb = MOD_FBHB_REF
-                call apply_isochrone_modifications(ctx, pset1, tlog, buf1, hb1, par1, nah1)
+                call apply_isochrone_modifications(ctx, pset1, tlog, buf1, hb1, par1, nah1, st)
+                if (st /= OPENSPS_STAT_OK) then
+                    call free_isochrone_buffer(buf)
+                    call free_isochrone_buffer(buf1)
+                    call ssp_operator_free(op)
+                    if (present(stat)) stat = st
+                    return
+                end if
             else
                 hb1 = hb_flag
             end if
@@ -474,7 +496,11 @@ contains
                 else if (j <= n_after_hb) then
                     if (parent(j) < 1) then
                         write(*,*) 'SSP_OPERATOR ERROR: blue HB star without parent at age', t
-                        stop
+                        call free_isochrone_buffer(buf)
+                        call free_isochrone_buffer(buf1)
+                        call ssp_operator_free(op)
+                        if (present(stat)) stat = OPENSPS_STAT_HB_PARENT
+                        return
                     end if
                     nc = 1; c_k(1) = parent(j); c_f(1) = probe(j)
                 else

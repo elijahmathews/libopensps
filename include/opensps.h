@@ -93,6 +93,16 @@ typedef enum {
 #define OPENSPS_ERR_CSP_ZDEP_FAILED_1 313
 #define OPENSPS_ERR_CSP_ZDEP_FAILED_2 314
 #define OPENSPS_ERR_CSP_ZDEP_FAILED_3 315
+// An SSP (or an SSP operator, or the SFH table) could not be made; before 0.3 these ended the program. The message of
+// opensps_get_last_error says which.
+#define OPENSPS_ERR_SSP_NOT_SETUP 501        // sps_setup has not run
+#define OPENSPS_ERR_SSP_ZMET_RANGE 502       // metallicity index outside the library
+#define OPENSPS_ERR_SSP_IMF_TYPE 503         // imf_type outside 0..5
+#define OPENSPS_ERR_SSP_IMF_FILE 504         // user IMF file missing, unreadable or empty
+#define OPENSPS_ERR_SSP_ISO_FULL 505         // an isochrone's arrays are full (NM stars)
+#define OPENSPS_ERR_SSP_BPASS_OPERATOR 506   // BPASS SSPs are tabulated: no operator to build
+#define OPENSPS_ERR_SSP_HB_PARENT 507        // internal inconsistency of an isochrone's blue HB stars
+#define OPENSPS_ERR_SSP_TABULAR_SFH 508      // tabular SFH: invalid parameters, missing, unreadable or too long file
 #define OPENSPS_ERR_LOCK_HELD 401
 #define OPENSPS_ERR_UNLOCK_NOLOCK 402
 

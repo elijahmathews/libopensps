@@ -13,7 +13,7 @@
   },
   "io": {
     "conditionals": 0,
-    "stops": 6
+    "stops": 0
   },
   "math": {
     "conditionals": 47,
@@ -21,7 +21,7 @@
   },
   "physics": {
     "conditionals": 596,
-    "stops": 10
+    "stops": 0
   },
   "spectra": {
     "conditionals": 78,
@@ -29,6 +29,6 @@
   },
   "total": {
     "conditionals": 968,
-    "stops": 16
+    "stops": 0
   }
 }

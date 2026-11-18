@@ -1,6 +1,7 @@
 module test_opensps_ssp_mod
     use opensps_precision, only: WP, KP
-    use opensps_constants, only: NM, SAFE_FLOOR, TIME_RES_INCR, BHB_SBS_TIME, C_LIGHT
+    use opensps_constants, only: NM, SAFE_FLOOR, TIME_RES_INCR, BHB_SBS_TIME, C_LIGHT, OPENSPS_STAT_OK, OPENSPS_STAT_NOT_SETUP, &
+                                 OPENSPS_STAT_ZMET_RANGE, OPENSPS_STAT_IMF_TYPE, OPENSPS_STAT_IMF_FILE
     use opensps_types, only: params
     use opensps_context_types, only: opensps_context_t
     use opensps_ssp, only: generate_ssp_grid, isochrone_buffer_t, init_isochrone_buffer, reset_buffer, &
@@ -35,6 +36,7 @@ contains
         call test_silent_truncation_guard()
         call test_fresh_start_zeroing()
 
+        call test_error_statuses()
         call test_remnant_budgeting()
         call test_remnants_ignore_appended_stragglers()
 
@@ -214,6 +216,63 @@ contains
         call teardown_isochrone_context(ctx)
         deallocate(ctx)
     end subroutine test_strided_gather
+
+    !> The errors of the SSP generation are statuses of the routine (generate_ssp_grid, configure_imf_parameters), not a stop
+    !> of the program: setup missing, metallicity out of range, IMF type out of range, a user IMF file missing or empty.
+    subroutine test_error_statuses()
+        type(opensps_context_t), allocatable :: ctx
+        type(params) :: pset
+        real(WP) :: mass(1), lbol(1), spec(1, 1)
+        integer :: stat, u
+        character(len=*), parameter :: dir = 'opensps_test_ssp_errors'
+
+        call print_group("Errors are statuses (no stop)")
+        allocate(ctx)
+        pset%zmet = 1
+        stat = -1
+        call generate_ssp_grid(ctx, pset, mass, lbol, spec, stat)
+        call assert_int_equals(OPENSPS_STAT_NOT_SETUP, stat, "generate_ssp_grid before setup", total_tests, total_failures)
+
+        ctx%state%check_sps_setup = 1
+        ctx%state%nz = 1
+        pset%zmet = 5
+        stat = -1
+        call generate_ssp_grid(ctx, pset, mass, lbol, spec, stat)
+        call assert_int_equals(OPENSPS_STAT_ZMET_RANGE, stat, "generate_ssp_grid with zmet beyond the library", &
+                               total_tests, total_failures)
+
+        ctx%imf_type_val = 9
+        stat = -1
+        call configure_imf_parameters(ctx, pset, stat)
+        call assert_int_equals(OPENSPS_STAT_IMF_TYPE, stat, "imf_type outside 0..5", total_tests, total_failures)
+
+        ctx%imf_type_val = 5
+        ctx%sps_home = dir
+        pset%imf_filename = 'missing_imf.dat'
+        stat = -1
+        call configure_imf_parameters(ctx, pset, stat)
+        call assert_int_equals(OPENSPS_STAT_IMF_FILE, stat, "a user IMF file that is not there", total_tests, total_failures)
+
+        call execute_command_line('mkdir -p ' // dir // '/data')
+        open(newunit=u, file=dir // '/data/empty_imf.dat', status='replace', action='write')
+        close(u)
+        pset%imf_filename = 'empty_imf.dat'
+        stat = -1
+        call configure_imf_parameters(ctx, pset, stat)
+        call assert_int_equals(OPENSPS_STAT_IMF_FILE, stat, "a user IMF file without segments", total_tests, total_failures)
+
+        open(newunit=u, file=dir // '/data/ok_imf.dat', status='replace', action='write')
+        write(u, '(3F8.3)') 0.08_wp, 0.5_wp, 1.3_wp
+        write(u, '(3F8.3)') 0.5_wp, 100.0_wp, 2.3_wp
+        close(u)
+        pset%imf_filename = 'ok_imf.dat'
+        stat = -1
+        call configure_imf_parameters(ctx, pset, stat)
+        call assert_int_equals(OPENSPS_STAT_OK, stat, "a good user IMF file", total_tests, total_failures)
+        call assert_int_equals(2, ctx%state%n_user_imf, "its two segments are read", total_tests, total_failures)
+        call execute_command_line('rm -rf ' // dir)
+        deallocate(ctx)
+    end subroutine test_error_statuses
 
     subroutine test_silent_truncation_guard()
         type(opensps_context_t), allocatable :: ctx
@@ -508,7 +567,6 @@ contains
         close(unit_imf)
 
         call configure_imf_parameters(ctx, pset)
-
         call assert_float_equals(0.1_wp, ctx%state%imf_user_alpha(1, 1), EPS, "IMF seg1 low", total_tests, total_failures)
         call assert_float_equals(1.0_wp, ctx%state%imf_user_alpha(2, 1), EPS, "IMF seg1 high", total_tests, total_failures)
         call assert_float_equals(1.3_wp, ctx%state%imf_user_alpha(3, 1), EPS, "IMF seg1 slope", total_tests, total_failures)

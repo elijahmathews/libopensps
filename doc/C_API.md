@@ -452,6 +452,10 @@ Most functions return a `status` integer.
 * `0`: **OPENSPS_STATUS_OK**
 * `>0`: Error or Warning code.
 
+An SSP, an SSP operator or a tabular SFH that cannot be made (setup missing, metallicity or IMF type out of range, an
+unreadable user IMF file, a full isochrone array, BPASS asked for an operator) is status `501` - `508`
+(`OPENSPS_ERR_SSP_*` in `opensps.h`); the library does not stop the program.
+
 To retrieve the descriptive error message for the last failure:
 
 ```c
