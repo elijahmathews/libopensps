@@ -1199,6 +1199,20 @@ contains
         ! the resident basis has the context's limits: other limits are refused
         call compute_csp_batch(ctx, psets, g_b, status)
         call assert_true(status == 2, "limits per model without operators: status 2", total_tests, total_failures)
+        ! (each of the two limits alone)
+        psets(1:2) = psets(5:6)
+        psets(1)%imf_lower_limit = pset%imf_lower_limit; psets(1)%imf_upper_limit = pset%imf_upper_limit
+        psets(2) = psets(1)
+        psets(2)%imf_upper_limit = pset%imf_upper_limit - 1.0_wp
+        call compute_csp_batch(ctx, psets(1:2), g_b(:, 1:2), status)
+        call assert_true(status == 2, "an upper limit alone per model without operators: status 2", total_tests, total_failures)
+        psets(2) = psets(1)
+        psets(2)%imf_lower_limit = pset%imf_lower_limit + 0.1_wp
+        call compute_csp_batch(ctx, psets(1:2), g_b(:, 1:2), status)
+        call assert_true(status == 2, "a lower limit alone per model without operators: status 2", total_tests, total_failures)
+        psets(2) = psets(1)
+        call compute_csp_batch(ctx, psets(1:2), g_b(:, 1:2), status)
+        call assert_true(status == 0, "the context's own limits without operators: status 0", total_tests, total_failures)
         call ssp_opset_free(op)
         deallocate(s_b, s_1, g_b, g_1)
     end subroutine check_imf_limits
@@ -1400,6 +1414,17 @@ contains
                                ssp_ops=op)
         if (status /= 0) write(*, '(A,I0)') "# status = ", status
         call assert_true(status == 0, label // ": status 0", total_tests, total_failures)
+        if (imf_type == 5) then
+            ! a user IMF file has its own limits: other ones per model (either of them) would be ignored, so are refused
+            psets(2)%imf_upper_limit = mhi - 1.0_wp
+            call compute_csp_batch(ctx, psets(1:2), mags(:, 1:2), status, ssp_ops=op)
+            call assert_true(status == 2, label // ": another upper limit per model is refused", total_tests, total_failures)
+            psets(2)%imf_upper_limit = mhi
+            psets(2)%imf_lower_limit = mlo + 0.1_wp
+            call compute_csp_batch(ctx, psets(1:2), mags(:, 1:2), status, ssp_ops=op)
+            call assert_true(status == 2, label // ": another lower limit per model is refused", total_tests, total_failures)
+            psets(2)%imf_lower_limit = mlo
+        end if
 
         ! Reference: each model with its own basis
         do m = 1, N_MOD
