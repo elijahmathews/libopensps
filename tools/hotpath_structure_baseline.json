@@ -1,0 +1,34 @@
+{
+  "accel": {
+    "conditionals": 0,
+    "stops": 0
+  },
+  "bindings": {
+    "conditionals": 8,
+    "stops": 0
+  },
+  "core": {
+    "conditionals": 239,
+    "stops": 0
+  },
+  "io": {
+    "conditionals": 0,
+    "stops": 6
+  },
+  "math": {
+    "conditionals": 47,
+    "stops": 0
+  },
+  "physics": {
+    "conditionals": 596,
+    "stops": 10
+  },
+  "spectra": {
+    "conditionals": 78,
+    "stops": 0
+  },
+  "total": {
+    "conditionals": 968,
+    "stops": 16
+  }
+}

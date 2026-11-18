@@ -86,6 +86,12 @@ GitHub workflow files are checked with `actionlint`.
   a value for one device is a *profile entry* in that module with its measurement cited
   (`doc/TUNING.md`: what to measure, how to cite it). `tools/check_tuning_literals.py` (the
   `unit_tuning_literals` test) fails on the known names defined as literals outside the module.
+- **Hot paths:** a new per-model parameter is registered in `src/core/opensps_batch_registry.f90` with a class and
+  is served by the mechanism of that class (`doc/HOT_PATHS.md`); a new kernel variant replaces another or equals a
+  named baseline bit for bit and shows no regression in `tools/bench_matrix.py`; the preprocessor conditionals of
+  `src/` and the `stop` statements of the library do not grow (`tools/check_hotpath_structure.py`, the
+  `unit_hotpath_structure` test, baseline in `tools/hotpath_structure_baseline.json`); a batch with any set of free
+  parameters equals each model alone (`test_batch_equivalence`).
 - **Documentation:** `!>` comments (Doxygen style) on modules and public procedures. A physics
   choice gets a comment that says why, with a reference.
 - **Floating point:** never `-ffast-math`, nvfortran `-fast`, or any flag that reassociates
