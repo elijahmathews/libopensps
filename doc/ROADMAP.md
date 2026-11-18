@@ -130,10 +130,12 @@ limits and metallicities (`test_csp_batch`: FP64 ~1e-14 on CPU, FP32 ~6e-7). Cos
 (FP32, us/model): A100 19.9 (IMF free) and 32.2 (IMF and metallicity free) against 6.4-7.2 for
 the resident basis; R9700 59.0 and 96.6 against 19.1 (`doc/GPU_RESULTS.md`).
 
-Not supported per model: the isochrone modifications (`fbhb`, `sbss`, `delt`, `dell`, `agb`,
-`pagb`, `redgb`, `agb_dust`, `evtype`, `masscut`). A batch whose models differ from the
-operators' build returns status 2 (`ssp_op_mod_signature`). The design that keeps them on the
-batch path (per-point group factors; operator sets grouped by `delt`, `dell`) is in its own issue.
+Isochrone modifications (#45, `doc/ISO_MODS_PLAN.md`): `fbhb`, `sbss`, `agb`, `pagb`, `redgb`, `delt`
+and `dell` are free per model with `opensps_context_build_ssp_ops_free_mods` (the stars partitioned into
+modification groups, one operator per group, the batch a coefficient-weighted sum; the shifts grouped by
+distinct pair), forward and with gradients; models with the same IMF share their IMF weights. Still shared
+by a batch (status 2 if they differ, `ssp_op_mod_signature`): `agb_dust`, `evtype`, `masscut` and the
+context's `tpagb_norm_type`. Which parameters can be free, by class and mechanism: `doc/HOT_PATHS.md`.
 
 Alongside, two input generalisations that reuse the same machinery:
 

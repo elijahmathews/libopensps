@@ -10,7 +10,9 @@ or tested when it lands. Companion documents: `doc/GPU_PLAN.md` (GPU rules), `do
 A batch (`compute_csp_batch`, `opensps_context_compute_csp_batch*`) lets the IMF and the metallicity
 vary per model through the template operator (`ssp_ops`). It does not let the isochrone modifications
 vary: `fbhb`, `sbss`, `agb`, `pagb`, `redgb`, `delt`, `dell` (and the context's TP-AGB normalisation,
-which stays shared). A batch whose models differ in any of them returns status 2.
+which stays shared). (As written, before the implementation: a batch whose models differ in any of them returned
+status 2. With #45 delivered they are free per model on the free-modifications operators; `doc/HOT_PATHS.md`
+puts them in the classification of per-model parameters.)
 
 Requirements, from the project owner:
 
