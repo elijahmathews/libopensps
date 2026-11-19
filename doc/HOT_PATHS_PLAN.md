@@ -58,7 +58,7 @@ weights, group operators) behind the same interface. Slice 1: `ssp_source_t`, `s
 path label, formerly an inline chain in the driver) and `ssp_source_age_sums` (the dispatcher over the resident-basis kernels). Slice 2:
 `ssp_source_describe` (the per-model slab descriptor `zlo`, `zhi`, `dz`, `da`, `nzs`, and the refusal of a horizontal-branch modification that
 is not in the operators) and `ssp_source_scalars` (the mass, L_bol and weights block, with its host and device loops). What is left: the
-flags `zmode`, `zw`, `imf`, `zimf`, `naf` are still locals of the driver (the nebular calls, the backward pass, the checks), and the stages
+flags `blend_z`, `weights_over_z`, `use_operators`, `operators_per_z`, `n_afe_planes` (named `zmode`, `zw`, `imf`, `zimf`, `naf` until they were renamed to say what they mean) are still locals of the driver (the nebular calls, the backward pass, the checks), and the stages
 after the SSP sums still take them as arguments; passing the source to them is what Step 4 (stage routines) does.
 
 **Step 3, the descriptor in the other blends (done, small).** `slab_blend_wp` and `slab_blend_kp`: the cascade `(1 - da) ((1 - dz) a + dz b) +

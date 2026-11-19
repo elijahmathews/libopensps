@@ -439,7 +439,8 @@ contains
         type(batch_info_t) :: binfo
         type(ssp_source_t) :: src
         real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk, wa_m
-        logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw, host_m, imf, dev, zimf, grad
+        logical  :: igm, any_emis, neb, agn, smooth, blend_z, z_varies, weights_given, weights_on_host, parts, &
+            weights_over_z, sums_on_host, use_operators, dev, operators_per_z, grad
         logical  :: cue
         type(ssp_opset_t), pointer :: refset => null()
         real(WP), allocatable :: cgm(:,:), dcm(:,:,:), dsh(:,:)
@@ -487,11 +488,11 @@ contains
         type(params_core), pointer :: pl
         integer,  pointer, contiguous :: it_tesc(:), iq(:), iu(:), ita(:), zlo(:), zhi(:)
         real(WP), pointer, contiguous :: wq(:), wu(:), gam(:), wta(:), dz(:), zcol(:), lum_linear(:), wext(:,:)
-        ! [alpha/Fe]: the stack of bases holds naf planes of nz slabs; each model blends the two planes
+        ! [alpha/Fe]: the stack of bases holds n_afe_planes planes of nz slabs; each model blends the two planes
         ! alo, alo + 1 with weight da (zlo, zhi are slabs of plane alo; nzs = nz is the plane stride, 0 without
         ! an [alpha/Fe] axis)
         real(WP), pointer, contiguous :: da(:)
-        integer :: naf, nzs, ia_lo, iz0
+        integer :: n_afe_planes, nzs, ia_lo, iz0
         logical,  pointer, contiguous :: emis(:), agn_on(:)
         real(WP), pointer, contiguous :: s_abs(:), s_norm(:), s_esc(:), s_line(:), msum(:), lsum(:)
         real(WP), pointer, contiguous :: msy(:), mso(:), lsy(:), lso(:)
@@ -540,13 +541,13 @@ contains
         ! ------------------------------------------------------------------
         ! 0. Checks
         ! ------------------------------------------------------------------
-        imf = present(ssp_ops)
-        zimf = .false.
-        if (imf) zimf = ssp_ops%nz > 1
-        if (ctx%state%check_sps_setup == 0 .or. (.not. imf .and. .not. allocated(ctx%state%ssp_basis_spec))) then
+        use_operators = present(ssp_ops)
+        operators_per_z = .false.
+        if (use_operators) operators_per_z = ssp_ops%nz > 1
+        if (ctx%state%check_sps_setup == 0 .or. (.not. use_operators .and. .not. allocated(ctx%state%ssp_basis_spec))) then
             status = 1; return
         end if
-        if (imf) then
+        if (use_operators) then
             ! The operators of the SSPs (one metallicity: the batch's; several: one per metallicity of
             ! the context, the metallicity free per model). With free isochrone modifications the set is a container
             ! of the groups' sets, whose plain group stands for the checks.
@@ -555,7 +556,7 @@ contains
             if (refset%nz < 1 .or. .not. allocated(refset%ops)) then
                 status = 1; return
             end if
-            if (zimf .and. refset%nz /= ctx%state%nz) then
+            if (operators_per_z .and. refset%nz /= ctx%state%nz) then
                 status = 3; return
             end if
             do m = 1, refset%nz
@@ -565,14 +566,14 @@ contains
                 if (refset%ops(m)%nspec /= nspec .or. refset%ops(m)%n_ages /= nt) then
                     status = 3; return
                 end if
-                if (zimf .and. refset%ops(m)%zmet /= m) then
+                if (operators_per_z .and. refset%ops(m)%zmet /= m) then
                     status = 3; return
                 end if
                 if (.not. all(refset%ops(m)%age_on)) then
                     status = 2; return
                 end if
             end do
-            if (.not. zimf .and. refset%ops(1)%zmet /= psets(1)%zmet) then
+            if (.not. operators_per_z .and. refset%ops(1)%zmet /= psets(1)%zmet) then
                 status = 3; return
             end if
             ! (the gradients of the free modifications are the reverse pass of ssp_batch_age_sums_mods)
@@ -583,16 +584,16 @@ contains
         end if
         call batch_check_shapes(ctx, n_mod, nt, nspec, nbands, mags, spec, emlines, indx, zred_mags, spec_young, spec_old, &
                                 mass_young, mass_old, lbol_young, lbol_old, mags_bar, spec_bar, params_bar, weights_bar, &
-                                weights_z_bar, ssp_weights, status, parts, grad, given_w)
+                                weights_z_bar, ssp_weights, status, parts, grad, weights_given)
         if (status /= 0) return
         ! Weights over ages and metallicities: every resident basis summed with its own weights
         nzb = 1
-        if (.not. imf) nzb = size(ctx%state%ssp_basis_spec, 3)
-        if (imf) nzb = ssp_ops%nz
-        zw = present(ssp_weights_z)
+        if (.not. use_operators) nzb = size(ctx%state%ssp_basis_spec, 3)
+        if (use_operators) nzb = ssp_ops%nz
+        weights_over_z = present(ssp_weights_z)
         nzw = 1
-        if (zw) then
-            if (given_w .or. size(ssp_weights_z, 1) < nt .or. size(ssp_weights_z, 2) < nzb .or. &
+        if (weights_over_z) then
+            if (weights_given .or. size(ssp_weights_z, 1) < nt .or. size(ssp_weights_z, 2) < nzb .or. &
                 size(ssp_weights_z, 3) < n_mod) then
                 status = 3; return
             end if
@@ -601,14 +602,14 @@ contains
             if (ctx%add_neb_emission_val == 1) then
                 status = 2; return
             end if
-            given_w = .true.
+            weights_given = .true.
             nzw = nzb
         end if
         ! cue (nebular_model = 1): with the resident bases, with gradients (cue_nebular_backward), not
         ! the IMF per model (which uses the CLOUDY grids' kernels); its weights are read on first use
         cue = ctx%add_neb_emission_val == 1 .and. ctx%nebular_model_val == 1
         if (cue) then
-            if (imf) then
+            if (use_operators) then
                 status = 2; return
             end if
             call cue_load(st_cue)
@@ -617,14 +618,15 @@ contains
             end if
         end if
         zred = psets(1)%zred
-        call batch_check_models(ctx, psets, n_mod, given_w, present(params_bar), ssp_ops, refset, zimf, zvar, status)
+        call batch_check_models(ctx, psets, n_mod, weights_given, present(params_bar), ssp_ops, refset, operators_per_z, &
+            z_varies, status)
         if (status /= 0) return
         HOST_SFH_MAX = tuning_get(TUNE_P_HOST_SFH_MAX)
-        host_w = .false.
+        weights_on_host = .false.
 #if defined(OMP_TARGET)
-        host_w = (.not. given_w) .and. n_mod < HOST_SFH_MAX
+        weights_on_host = (.not. weights_given) .and. n_mod < HOST_SFH_MAX
 #endif
-        if (imf) then
+        if (use_operators) then
             if (ssp_ops%free_mods) then
                 ! The TP-AGB group at each (delt, dell) of the batch: one more group per distinct nonzero pair, built here when
                 ! the context has not seen it (and, with gradients, the shifted sets of the central differences)
@@ -657,7 +659,7 @@ contains
             end if
         end if
         nw = 1
-        if (given_w .or. host_w) nw = nt * nzw * n_mod
+        if (weights_given .or. weights_on_host) nw = nt * nzw * n_mod
         allocate(ipk(6 * n_mod), rpk(7 * n_mod + nt + nw), lpk(2 * n_mod), rout(10 * n_mod))
         it_tesc => ipk(1:n_mod)
         iq => ipk(n_mod + 1:2 * n_mod)
@@ -693,15 +695,15 @@ contains
         rpk = 0.0_wp
 
         zcol = psets(1:n_mod)%zred
-        if (zw) then
+        if (weights_over_z) then
             do m = 1, n_mod
                 do z = 1, nzw
                     wext((z - 1) * nt + 1:z * nt, m) = ssp_weights_z(1:nt, z, m)
                 end do
             end do
-        else if (given_w) then
+        else if (weights_given) then
             wext = ssp_weights(1:nt, 1:n_mod)
-        else if (host_w) then
+        else if (weights_on_host) then
             ! Few models: the SFH weights on the host (as compute_csp_scenario does for one output),
             ! then used as a given weight matrix
             allocate(wh(nt, 1), t1h(nt), t2h(nt))
@@ -728,18 +730,18 @@ contains
 
         ! Per-model metallicity: a basis per metallicity of the context (interpolated at logzsol,
         ! unless the weights cover the metallicities)
-        zmode = nzb > 1 .and. .not. zw
-        naf = 1
-        if (.not. imf .and. allocated(ctx%state%afe_basis)) naf = size(ctx%state%afe_basis)
-        if ((zmode .or. (zw .and. nzb > 1)) .and. nzb /= ctx%state%nz * naf) then
+        blend_z = nzb > 1 .and. .not. weights_over_z
+        n_afe_planes = 1
+        if (.not. use_operators .and. allocated(ctx%state%afe_basis)) n_afe_planes = size(ctx%state%afe_basis)
+        if ((blend_z .or. (weights_over_z .and. nzb > 1)) .and. nzb /= ctx%state%nz * n_afe_planes) then
             status = 3; return
         end if
         ! [alpha/Fe]: not with weights over ages and metallicities (they would need a plane too) nor the IMF per model
-        if (naf > 1 .and. (zw .or. imf)) then
+        if (n_afe_planes > 1 .and. (weights_over_z .or. use_operators)) then
             status = 2; return
         end if
         ! The SSP source of the batch, and its path for the caller (info) or the debug print: nothing is computed otherwise
-        src = ssp_source_select(zw, zmode, naf, nzb, ssp_ops)
+        src = ssp_source_select(weights_over_z, blend_z, n_afe_planes, nzb, ssp_ops)
         if (present(info) .or. batch_debug_path()) then
             call batch_classify(psets(1:n_mod)%params_core, binfo)
             call batch_info_set_path(binfo, src%label, src%n_src)
@@ -755,11 +757,11 @@ contains
             status = 5; return
         end if
 #if defined(OPENSPS_HIP)
-        if (offload_on_host() .and. (grad .or. imf .or. cue)) then
+        if (offload_on_host() .and. (grad .or. use_operators .or. cue)) then
             status = 5; return
         end if
 #endif
-        call ssp_source_describe(zmode, naf, ctx, psets, ssp_ops, refset, n_mod, zlo, zhi, dz, da, nzs, status)
+        call ssp_source_describe(blend_z, n_afe_planes, ctx, psets, ssp_ops, refset, n_mod, zlo, zhi, dz, da, nzs, status)
         if (status /= 0) return
 
         ! ------------------------------------------------------------------
@@ -770,24 +772,25 @@ contains
         ! SFH scratch: sfh_weights_core uses ntfull entries (sized from the ages, not from the
         ! context's CSP workspace, which a context used only through the batch may not have)
         allocate(weights(nt, nzw, n_mod), tmp1(nt, n_mod), tmp2(nt, n_mod))
-        if (zw) then
+        if (weights_over_z) then
             allocate(wz(nt, nzw, n_mod))
         else
             allocate(wz(1, 1, 1))
         end if
-        if (imf) then
+        if (use_operators) then
             lum_linear = 0.0_wp
         else
             lum_linear = 10.0_wp**ctx%state%ssp_basis_lbol(1:nt, 1)
         end if
-        call batch_model_indices(ctx, psets, n_mod, nt, given_w, grad, sfr, it_tesc, emis, iq, wq, iu, wu, gam, agn_on, ita, wta)
+        call batch_model_indices(ctx, psets, n_mod, nt, weights_given, grad, sfr, it_tesc, emis, iq, wq, iu, wu, gam, agn_on, &
+            ita, wta)
         any_emis = any(emis)
         agn = any(agn_on)
         ! Only with a nebular grid: isochrone sets without one (BaSTI, Geneva) get no nebular
         ! emission and zero lines, as in legacy FSPS (whose tables stay zero there). The setup
         ! leaves the grid's age axis at zero when it loads no grid (reset_setup_tables)
         neb = ctx%add_neb_emission_val == 1 .and. ctx%state%nebem_age(NEBNAGE) > 0.0_wp
-        if (imf) then
+        if (use_operators) then
             call nebular_setup(ctx, psets, neb, n_mod, nb)   ! ionizing photons per age and model
         else
             call nebular_setup(ctx, psets, neb, nzb, nb)
@@ -796,7 +799,7 @@ contains
         ! IMF per model: the IMF parameters of each model (the context's IMF with its slopes,
         ! characteristic and break masses), the operator on the device
         dev = .false.
-        if (imf) then
+        if (use_operators) then
             call batch_imf_vectors(ctx, psets, n_mod, nt, pm, smass, slum, wsfh, nobasis, st_imf)
             if (st_imf /= 0) then
                 status = 3; return
@@ -813,7 +816,7 @@ contains
 
         ! Grid-only data for this redshift (cached in ctx%state%batch, on the device too)
         ! (with per-model redshifts: the z = 0 data, for the redshift-independent parts)
-        if (zvar) then
+        if (z_varies) then
             call prepare_batch_grid(ctx, 0.0_wp, psets(1)%igm_factor)
             igm = ctx%add_igm_absorption_val == 1 .and. any(zcol > SAFE_FLOOR)
         else
@@ -864,7 +867,7 @@ contains
 #endif
 #ifdef OMP_TARGET
         ! The IMF-per-model arrays are mapped only then (the mappings cost ~10 us each per call)
-        !$omp target data if(imf) map(to: pm, nobasis) map(alloc: smass, slum, wsfh)
+        !$omp target data if(use_operators) map(to: pm, nobasis) map(alloc: smass, slum, wsfh)
         !$omp target data if(neb) map(to: nb%ipk, nb%rpk, nb%lpk) map(alloc: nb%q0, nb%lum, nb%cy, nb%co, nb%lns)
 #endif
 
@@ -872,20 +875,21 @@ contains
         ! into young and old ages at the model's dust_tesc and cast once to kernel precision
         ! (Two kernels: the device call's array sections cost six descriptor transfers per launch,
         ! paid only when the device computes the weights.) Fewer than HOST_SFH_MAX models with
-        ! weights from the host: these loops run on the host (host_m), then w2 / wz and the
+        ! weights from the host: these loops run on the host (sums_on_host), then w2 / wz and the
         ! results go up in one update each (one device thread per model took ~90 us at N = 1)
-        host_m = .false.
+        sums_on_host = .false.
 #if defined(OMP_TARGET)
-        host_m = (given_w .or. host_w) .and. n_mod < HOST_SFH_MAX .and. .not. imf
+        sums_on_host = (weights_given .or. weights_on_host) .and. n_mod < HOST_SFH_MAX .and. .not. use_operators
 #endif
         ! The host form of these loops is a plain loop, not the target construct with a false
         ! if clause: LLVM's libomp (flang 22) crashes in __kmpc_dist_for_static_init_4u when a
         ! "teams distribute parallel do" runs on the host with one OpenMP thread (#87)
-        call batch_sfh_weights(ctx, PBUF_ARG, n_mod, nt, nzw, host_m, given_w .or. host_w, wext, weights, tmp1, tmp2)
+        call batch_sfh_weights(ctx, PBUF_ARG, n_mod, nt, nzw, sums_on_host, weights_given .or. weights_on_host, wext, &
+            weights, tmp1, tmp2)
         ! IMF per model: the young and old age sums, and per age and model the mass, L_bol and
         ! ionizing photons, from the operator (opensps_ssp_batch), with the SFH weights masked as
         ! below
-        if (imf) then
+        if (use_operators) then
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do collapse(2) if(target: dev)
 #elif defined(_OPENMP)
@@ -911,10 +915,10 @@ contains
             end if
         end if
 
-        call ssp_source_scalars(src, ctx, n_mod, nt, nzw, nzs, host_m, dev, weights, wz, w2, smass, slum, lum_linear, &
+        call ssp_source_scalars(src, ctx, n_mod, nt, nzw, nzs, sums_on_host, dev, weights, wz, w2, smass, slum, lum_linear, &
                                 it_tesc, zlo, zhi, dz, da, msum, lsum, msy, mso, lsy, lso)
 
-        if (host_m) then
+        if (sums_on_host) then
 #ifdef OMP_TARGET
             !$omp target update to(w2, wz, rout)
 #endif
@@ -922,7 +926,7 @@ contains
 
         ! (the operators' sums are done above)
         call ssp_source_age_sums(src, ctx, nspec, nt, nzw, n_mod, nzs, wz, w2, it_tesc, zlo, zhi, dz, da, yo)
-        if (neb .and. imf) then
+        if (neb .and. use_operators) then
             call add_nebular_batch(ctx, n_mod, nspec, nt, nzb, nobasis, w2, it_tesc, zlo, zhi, dz, da, nzs, nb, yo, eml, &
                                    q_model=.true.)
         else if (neb .and. cue) then
@@ -981,7 +985,7 @@ contains
             call add_dust_emission(n_mod, nspec, emis, yo, s_abs, s_esc, total)
         end if
 
-        if (igm .and. zvar) then
+        if (igm .and. z_varies) then
             call apply_igm_z(ctx, PBUF_ARG, n_mod, nspec, absorbed, total)   ! absorbed: free by now
         else if (igm) then
             call apply_igm(n_mod, nspec, ctx%state%batch%igm_t, total)
@@ -1032,11 +1036,11 @@ contains
             call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, &
                                             zred_col=zred_mags(1:n_mod), fband_out=fbk, &
                                             maggies_out=ctx%state%last_maggies)
-        else if (zvar .and. allocated(psets(1)%mag_compute)) then
+        else if (z_varies .and. allocated(psets(1)%mag_compute)) then
             call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, psets(1)%mag_compute, &
                                             zred_col=zcol, fband_out=fbk, &
                                             maggies_out=ctx%state%last_maggies)
-        else if (zvar) then
+        else if (z_varies) then
             call compute_magnitudes_columns(ctx, zred, psets(1)%igm_factor, total, n_mod, mags, zred_col=zcol, fband_out=fbk, &
                                             maggies_out=ctx%state%last_maggies)
         else if (allocated(psets(1)%mag_compute)) then
@@ -1055,7 +1059,7 @@ contains
             allocate(zcm(n_mod))
             if (present(zred_mags)) then
                 zcm = zred_mags(1:n_mod)
-            else if (zvar) then
+            else if (z_varies) then
                 zcm = zcol
             else
                 zcm = zred
@@ -1065,7 +1069,7 @@ contains
             !$omp target update from(rout)
 #endif
             allocate(wbl(nt, n_mod), lbx(n_mod), mbx(n_mod))
-            if (zw) then
+            if (weights_over_z) then
                 allocate(wzbl(nt, nzw, n_mod))
             else
                 allocate(wzbl(1, 1, 1))
@@ -1075,40 +1079,45 @@ contains
             ! (with ssp_ops the mass's cotangent goes through the operator's reverse pass, the IMF
             ! parameters acting on the surviving mass and the remnants)
             mbx = 0.0_wp
-            if (present(mass_bar) .and. imf) mbx = mass_bar(1:n_mod)
+            if (present(mass_bar) .and. use_operators) mbx = mass_bar(1:n_mod)
             ! The template's interpolation weights against q_PAH, U_min and gamma (dl07_indices: linear in
             ! the bracketing interval, clamped to the grid; one-sided at the nodes)
             allocate(dchain(8, n_mod))
             dchain = 0.0_wp
-            call batch_chain_derivatives(ctx, psets, n_mod, zmode, naf, nzs, zlo, neb, nb, any_emis, iq, iu, dchain)
+            call batch_chain_derivatives(ctx, psets, n_mod, blend_z, n_afe_planes, nzs, zlo, neb, nb, any_emis, iq, iu, dchain)
             if (any_emis) then
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
-                                    it_tesc, zlo, zhi, dz, da, nzs, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
+                                    it_tesc, zlo, zhi, dz, da, nzs, blend_z, igm, z_varies, agn_on, ita, wta, lsum, &
+                                        lum_linear, tdiff, &
                                     absorbed, ysave, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
                                     neb, nb, w2, present(zred_mags), tsave, splan, &
-                                    imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzbl, &
+                                    use_operators, operators_per_z, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, weights_over_z, &
+                                        wzbl, &
                                     mags_bar, spec_bar, params_bar, wbl, gas, cgm, dcm, ipair)
             else
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
-                                    it_tesc, zlo, zhi, dz, da, nzs, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
+                                    it_tesc, zlo, zhi, dz, da, nzs, blend_z, igm, z_varies, agn_on, ita, wta, lsum, &
+                                        lum_linear, tdiff, &
                                     absorbed, yo, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
                                     neb, nb, w2, present(zred_mags), tsave, splan, &
-                                    imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzbl, &
+                                    use_operators, operators_per_z, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, weights_over_z, &
+                                        wzbl, &
                                     mags_bar, spec_bar, params_bar, wbl, gas, cgm, dcm, ipair)
             end if
             ! The mass output's cotangent: mass = sum over ages of w_k M_k (M interpolated in log Z with
             ! per-model metallicity, which then adds to logzsol's row)
-            if (present(mass_bar) .and. .not. zw .and. .not. imf) then
+            if (present(mass_bar) .and. .not. weights_over_z .and. .not. use_operators) then
 #ifdef OMP_TARGET
                 ! (the SFH weights from the device, where it computed them; with few models the host
                 ! did, and the device copy is not current)
-                if (zmode .and. .not. host_m) then
+                if (blend_z .and. .not. sums_on_host) then
                     !$omp target update from(weights)
                 end if
 #endif
-                call batch_mass_cotangent(ctx, n_mod, nt, zmode, nzs, zlo, zhi, dz, da, weights, mass_bar, params_bar, dchain, wbl)
+                call batch_mass_cotangent(ctx, n_mod, nt, blend_z, nzs, zlo, zhi, dz, da, weights, mass_bar, params_bar, &
+                    dchain, wbl)
             end if
-            if (zw) then
+            if (weights_over_z) then
                 ! (ssp_weights_z: the mass's cotangent per age and metallicity)
                 if (present(mass_bar)) then
                     do m = 1, n_mod
@@ -1130,7 +1139,7 @@ contains
             end if
             ! The SFH parameters: dL / d theta = sum over ages of dL / d w_k  d w_k / d theta, with the
             ! weights' tangents in FP64 on the host (one model per thread)
-            if (present(params_bar) .and. .not. given_w) then
+            if (present(params_bar) .and. .not. weights_given) then
                 call batch_sfh_gradients(ctx, psets, n_mod, nt, wbl, params_bar)
             end if
         end if
@@ -1780,10 +1789,10 @@ contains
 
     !> The sizes of the arguments of compute_csp_batch against the batch (status 3 when an output or a cotangent is too small, 2 for
     !> redshifted colours without zred_mags), and the modes the optional arguments make: parts (the young and old parts), grad (any
-    !> gradient), given_w (the SFH weights are given). No device code, nothing is computed.
+    !> gradient), weights_given (the SFH weights are given). No device code, nothing is computed.
     subroutine batch_check_shapes(ctx, n_mod, nt, nspec, nbands, mags, spec, emlines, indx, zred_mags, spec_young, spec_old, &
                                   mass_young, mass_old, lbol_young, lbol_old, mags_bar, spec_bar, params_bar, weights_bar, &
-                                  weights_z_bar, ssp_weights, status, parts, grad, given_w)
+                                  weights_z_bar, ssp_weights, status, parts, grad, weights_given)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)  :: n_mod, nt, nspec, nbands
         real(WP), intent(in) :: mags(:,:)
@@ -1792,7 +1801,7 @@ contains
         real(WP), intent(in), optional :: mags_bar(:,:), spec_bar(:,:), params_bar(:,:), weights_bar(:,:), weights_z_bar(:,:,:)
         real(WP), intent(in), optional :: ssp_weights(:,:)
         integer, intent(out) :: status
-        logical, intent(out) :: parts, grad, given_w
+        logical, intent(out) :: parts, grad, weights_given
 
         status = 0
         if (size(mags, 1) < nbands .or. size(mags, 2) < n_mod) then
@@ -1853,44 +1862,44 @@ contains
                 end if
             end if
         end if
-        given_w = present(ssp_weights)
-        if (given_w) then
+        weights_given = present(ssp_weights)
+        if (weights_given) then
             if (size(ssp_weights, 1) < nt .or. size(ssp_weights, 2) < n_mod) then
                 status = 3; return
             end if
         end if
     end subroutine batch_check_shapes
 
-    !> The values of the models of a batch that this path does not support (status 2): a non-positive age without given weights,
-    !> an invalid UVB or birth-cloud parameter, a SFH whose gradient is not covered, isochrone modifications or IMF mass limits that differ from
-    !> those of the SSPs (the resident basis, or the operators), several metallicities without per-metallicity operators; and zvar,
-    !> whether the redshifts or igm_factor differ among the models. Nothing is computed.
-    subroutine batch_check_models(ctx, psets, n_mod, given_w, want_pbar, ssp_ops, refset, zimf, zvar, status)
+    !> The values of the models of a batch that this path does not support (status 2): a non-positive age without given weights, an
+    !> invalid UVB or birth-cloud parameter, a SFH whose gradient is not covered, isochrone modifications or IMF mass limits that
+    !> differ from those of the SSPs (the resident basis, or the operators), several metallicities without per-metallicity
+    !> operators; and z_varies, whether the redshifts or igm_factor differ among the models. Nothing is computed.
+    subroutine batch_check_models(ctx, psets, n_mod, weights_given, want_pbar, ssp_ops, refset, operators_per_z, z_varies, status)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)  :: n_mod
         type(params), intent(in) :: psets(n_mod)
-        logical, intent(in)  :: given_w, want_pbar, zimf
+        logical, intent(in)  :: weights_given, want_pbar, operators_per_z
         type(ssp_opset_t), intent(in), optional :: ssp_ops
         type(ssp_opset_t), pointer, intent(in) :: refset
-        logical, intent(out) :: zvar
+        logical, intent(out) :: z_varies
         integer, intent(out) :: status
         integer :: m
         real(WP) :: zred, sigm(N_MOD_SIG)
-        logical  :: imf
+        logical  :: use_operators
 
         status = 0
-        imf = present(ssp_ops)
+        use_operators = present(ssp_ops)
         zred = psets(1)%zred
-        zvar = .false.
+        z_varies = .false.
         do m = 1, n_mod
-            if ((psets(m)%tage <= 0.0_wp .and. .not. given_w) .or. &
+            if ((psets(m)%tage <= 0.0_wp .and. .not. weights_given) .or. &
                 psets(m)%uvb < 0.0_wp .or. psets(m)%wgp1 < 1 .or. psets(m)%wgp2 < 1) then
                 status = 2; return
             end if
-            if (psets(m)%zred /= zred .or. psets(m)%igm_factor /= psets(1)%igm_factor) zvar = .true.
+            if (psets(m)%zred /= zred .or. psets(m)%igm_factor /= psets(1)%igm_factor) z_varies = .true.
         end do
         ! Gradients of the SFH parameters: the forms opensps_sfh_tangent covers
-        if (want_pbar .and. .not. given_w) then
+        if (want_pbar .and. .not. weights_given) then
             do m = 1, n_mod
                 if (.not. sfh_tangent_supported(psets(m)%params_core, psets(m)%tage)) then
                     status = 2; return
@@ -1899,7 +1908,7 @@ contains
         end if
         ! Without operators the SSPs are the context's resident basis, built with the context's isochrone modifications:
         ! a model with others would silently get the basis's (the C API refuses such parameters; this guards the Fortran one)
-        if (.not. imf) then
+        if (.not. use_operators) then
             do m = 1, n_mod
                 if (any(ssp_op_mod_signature(psets(m)) /= ssp_op_mod_signature(ctx%pset)) .or. &
                     psets(m)%imf_lower_limit /= ctx%pset%imf_lower_limit .or. &
@@ -1909,9 +1918,9 @@ contains
             end do
         end if
         ! IMF per model: one metallicity (the operator's)
-        if (imf) then
+        if (use_operators) then
             do m = 1, n_mod
-                if (.not. zimf) then
+                if (.not. operators_per_z) then
                     if (psets(m)%zmet /= psets(1)%zmet) then
                         status = 2; return
                     end if
@@ -1938,21 +1947,21 @@ contains
         end if
     end subroutine batch_check_models
 
-    !> The factors of the chain rule from the interpolation positions to the parameters, per model, for the reverse pass (dchain(:, m),
-    !> zero where a position is clamped to its grid): 1 - 3 the dust emission's q_PAH, U_min and gamma (the bracketing interval of
-    !> dl07_indices), 4, 5 the nebular gas_logz and gas_logu (get_grid_indices_weights), 6 frac_obrun (the escaping fraction, clamped
-    !> to [0, 1]), 7 d dz / d logzsol (metallicity_interval, not clamped), 8 d da / d afe. dchain is zero on entry.
-    subroutine batch_chain_derivatives(ctx, psets, n_mod, zmode, naf, nzs, zlo, neb, nb, any_emis, iq, iu, dchain)
+    !> The factors of the chain rule from the interpolation positions to the parameters, per model, for the reverse pass (dchain(:,
+    !> m), zero where a position is clamped to its grid): 1 - 3 the dust emission's q_PAH, U_min and gamma (the bracketing interval
+    !> of dl07_indices), 4, 5 the nebular gas_logz and gas_logu (get_grid_indices_weights), 6 frac_obrun (the escaping fraction,
+    !> clamped to [0, 1]), 7 d dz / d logzsol (metallicity_interval, not clamped), 8 d da / d afe. dchain is zero on entry.
+    subroutine batch_chain_derivatives(ctx, psets, n_mod, blend_z, n_afe_planes, nzs, zlo, neb, nb, any_emis, iq, iu, dchain)
         type(opensps_context_t), intent(in) :: ctx
-        integer, intent(in)  :: n_mod, naf, nzs, zlo(n_mod), iq(n_mod), iu(n_mod)
+        integer, intent(in)  :: n_mod, n_afe_planes, nzs, zlo(n_mod), iq(n_mod), iu(n_mod)
         type(params), intent(in) :: psets(n_mod)
-        logical, intent(in)  :: zmode, neb, any_emis
+        logical, intent(in)  :: blend_z, neb, any_emis
         type(nebular_setup_t), intent(in) :: nb
         real(WP), intent(inout) :: dchain(8, n_mod)
         integer :: m, iz0, ia_lo
 
         ! Per-model metallicity: dz / d logzsol (metallicity_interval, not clamped)
-        if (zmode) then
+        if (blend_z) then
             do m = 1, n_mod
                 ! (zlo is a slab of plane ia: its metallicity index is zlo - nzs (ia - 1))
                 iz0 = zlo(m)
@@ -1962,7 +1971,7 @@ contains
                 ! [alpha/Fe]: d da / d afe, 1 / (the plane interval's width) inside the grid, zero where clamped
                 if (nzs > 0) then
                     ia_lo = (zlo(m) - 1) / nzs + 1
-                    if (psets(m)%afe >= ctx%state%afe_basis(1) .and. psets(m)%afe <= ctx%state%afe_basis(naf)) &
+                    if (psets(m)%afe >= ctx%state%afe_basis(1) .and. psets(m)%afe <= ctx%state%afe_basis(n_afe_planes)) &
                         dchain(8, m) = 1.0_wp / (ctx%state%afe_basis(ia_lo + 1) - ctx%state%afe_basis(ia_lo))
                 end if
             end do
@@ -1993,11 +2002,11 @@ contains
         end if
     end subroutine batch_chain_derivatives
 
-    !> The IMF of every model of a batch with the operators: the IMF parameter vector pm(:, m) of each model (the context's IMF with the
-    !> model's slopes, characteristic and break masses and, unless a user IMF file has its own, its mass limits and the lower edge
-    !> of the first bin), and the work arrays of the operators' pass: the surviving mass and linear L_bol per age and model (smass,
-    !> slum), the SFH weights (wsfh) and a placeholder basis. status: that of configure_imf_parameters (0, or an IMF type or file
-    !> that cannot be used).
+    !> The IMF of every model of a batch with the operators: the IMF parameter vector pm(:, m) of each model (the context's IMF
+    !> with the model's slopes, characteristic and break masses and, unless a user IMF file has its own, its mass limits and the
+    !> lower edge of the first bin), and the work arrays of the operators' pass: the surviving mass and linear L_bol per age and
+    !> model (smass, slum), the SFH weights (wsfh) and a placeholder basis. status: that of configure_imf_parameters (0, or an IMF
+    !> type or file that cannot be used).
     subroutine batch_imf_vectors(ctx, psets, n_mod, nt, pm, smass, slum, wsfh, nobasis, status)
         type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in)  :: n_mod, nt
@@ -2034,11 +2043,12 @@ contains
     !> rate at its age (sfr, if asked: NaN with given weights), whether it has dust emission (emis) and the interpolation indices
     !> and weights of the dust emission grid (iq, wq, iu, wu, gam) and of the AGN template (agn_on, ita, wta: with gradients the
     !> AGN stage runs for every model, so that d/d fagn exists at fagn = 0, where it adds exact zeros).
-    subroutine batch_model_indices(ctx, psets, n_mod, nt, given_w, grad, sfr, it_tesc, emis, iq, wq, iu, wu, gam, agn_on, ita, wta)
+    subroutine batch_model_indices(ctx, psets, n_mod, nt, weights_given, grad, sfr, it_tesc, emis, iq, wq, iu, wu, gam, &
+        agn_on, ita, wta)
         type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in)  :: n_mod, nt
         type(params), intent(in) :: psets(n_mod)
-        logical, intent(in)  :: given_w, grad
+        logical, intent(in)  :: weights_given, grad
         real(WP), intent(out), optional :: sfr(:)
         integer, intent(out) :: it_tesc(n_mod), iq(n_mod), iu(n_mod), ita(n_mod)
         logical, intent(out) :: emis(n_mod), agn_on(n_mod)
@@ -2053,7 +2063,7 @@ contains
                 dust_age_log = 7.0_wp
             end if
             it_tesc(m) = max(1, min(find_interval(ctx%state%time_full, dust_age_log), nt))
-            if (present(sfr) .and. given_w) then
+            if (present(sfr) .and. weights_given) then
                 sfr(m) = ieee_value(1.0_wp, ieee_quiet_nan)
             else if (present(sfr)) then
                 call get_sfh_properties_at_age(ctx, psets(m)%params_core, psets(m)%tage, mass_frac, sfr_norm, frac_linear)
@@ -2071,11 +2081,11 @@ contains
     end subroutine batch_model_indices
 
     !> The SFH weights of every model, weights(:, :, m) over the ages (and metallicities): from the given matrix wext (the weights
-    !> given by the caller, or computed on the host: given), copied on the host for few models (host_m: the host form is a plain
-    !> loop, not the target construct with a false if clause, as LLVM's libomp, flang 22, crashes in __kmpc_dist_for_static_init_4u
-    !> when a "teams distribute parallel do" runs on the host with one OpenMP thread, #87) or on the device, or computed on the device
-    !> (sfh_weights_core, one thread per model; tmp1, tmp2 its scratch).
-    subroutine batch_sfh_weights(ctx, pbuf, n_mod, nt, nzw, host_m, given, wext, weights, tmp1, tmp2)
+    !> given by the caller, or computed on the host: given), copied on the host for few models (sums_on_host: the host form is a
+    !> plain loop, not the target construct with a false if clause, as LLVM's libomp, flang 22, crashes in
+    !> __kmpc_dist_for_static_init_4u when a "teams distribute parallel do" runs on the host with one OpenMP thread, #87) or on the
+    !> device, or computed on the device (sfh_weights_core, one thread per model; tmp1, tmp2 its scratch).
+    subroutine batch_sfh_weights(ctx, pbuf, n_mod, nt, nzw, sums_on_host, given, wext, weights, tmp1, tmp2)
         type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in)  :: n_mod, nt, nzw
 #if !defined(__flang__)
@@ -2083,13 +2093,13 @@ contains
 #else
         integer(int64), intent(in), target :: pbuf(NPW, n_mod)
 #endif
-        logical, intent(in)  :: host_m, given
+        logical, intent(in)  :: sums_on_host, given
         real(WP), intent(in) :: wext(nt * nzw, n_mod)
         real(WP), intent(inout) :: weights(nt, nzw, n_mod), tmp1(nt, n_mod), tmp2(nt, n_mod)
         type(params_core), pointer :: pl
         integer :: m, k, z
 
-        if (host_m) then
+        if (sums_on_host) then
             do m = 1, n_mod
                 do k = 1, nt
                     do z = 1, nzw
@@ -2129,14 +2139,15 @@ contains
         end if
     end subroutine batch_sfh_weights
 
-    !> The mass output's cotangent in the reverse pass (the resident basis, not the operators and not the weights over metallicities):
-    !> mass = sum over ages of w_k M_k, with M the model's blend of the basis' surviving masses, so wbl(k, m) (dL / d w_k) gains
-    !> mass_bar(m) M_k(m); and, with per-model metallicity and gradients (params_bar present), the rows of logzsol and of afe gain
-    !> mass_bar(m) times the derivative of the mass with respect to dz (times dchain(7, m)) and da (times dchain(8, m)).
-    subroutine batch_mass_cotangent(ctx, n_mod, nt, zmode, nzs, zlo, zhi, dz, da, weights, mass_bar, params_bar, dchain, wbl)
+    !> The mass output's cotangent in the reverse pass (the resident basis, not the operators and not the weights over
+    !> metallicities): mass = sum over ages of w_k M_k, with M the model's blend of the basis' surviving masses, so wbl(k, m) (dL /
+    !> d w_k) gains mass_bar(m) M_k(m); and, with per-model metallicity and gradients (params_bar present), the rows of logzsol and
+    !> of afe gain mass_bar(m) times the derivative of the mass with respect to dz (times dchain(7, m)) and da (times dchain(8,
+    !> m)).
+    subroutine batch_mass_cotangent(ctx, n_mod, nt, blend_z, nzs, zlo, zhi, dz, da, weights, mass_bar, params_bar, dchain, wbl)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)  :: n_mod, nt, nzs, zlo(n_mod), zhi(n_mod)
-        logical, intent(in)  :: zmode
+        logical, intent(in)  :: blend_z
         real(WP), intent(in) :: dz(n_mod), da(n_mod), weights(:,:,:), mass_bar(:), dchain(8, n_mod)
         real(WP), intent(inout), optional :: params_bar(:,:)
         real(WP), intent(inout) :: wbl(nt, n_mod)
@@ -2145,20 +2156,20 @@ contains
 
         do m = 1, n_mod
             do k = 1, nt
-                if (zmode .and. nzs > 0) then
+                if (blend_z .and. nzs > 0) then
                     wbl(k, m) = wbl(k, m) + mass_bar(m) * ( &
                         (1.0_wp - da(m)) * ((1.0_wp - dz(m)) * ctx%state%ssp_basis_mass(k, zlo(m)) + &
                                             dz(m) * ctx%state%ssp_basis_mass(k, zhi(m))) + &
                         da(m) * ((1.0_wp - dz(m)) * ctx%state%ssp_basis_mass(k, zlo(m) + nzs) + &
                                  dz(m) * ctx%state%ssp_basis_mass(k, zhi(m) + nzs)))
-                else if (zmode) then
+                else if (blend_z) then
                     wbl(k, m) = wbl(k, m) + mass_bar(m) * ((1.0_wp - dz(m)) * ctx%state%ssp_basis_mass(k, zlo(m)) + &
                                                            dz(m) * ctx%state%ssp_basis_mass(k, zhi(m)))
                 else
                     wbl(k, m) = wbl(k, m) + mass_bar(m) * ctx%state%ssp_basis_mass(k, 1)
                 end if
             end do
-            if (zmode .and. present(params_bar)) then
+            if (blend_z .and. present(params_bar)) then
                 w = 0.0_wp
                 wa_m = 0.0_wp
                 do k = 1, nt
@@ -2186,9 +2197,9 @@ contains
         end do
     end subroutine batch_mass_cotangent
 
-    !> The gradients with respect to the SFH parameters (tage, tau, const, fburst, ...: the rows SFHT_ROWS of params_bar): dL / d theta =
-    !> sum over ages of dL / d w_k  d w_k / d theta, with the weights' tangents (sfh_weights_tangent) in FP64 on the host, one model per
-    !> thread; wbl(:, m) is dL / d w_k of model m.
+    !> The gradients with respect to the SFH parameters (tage, tau, const, fburst, ...: the rows SFHT_ROWS of params_bar): dL / d
+    !> theta = sum over ages of dL / d w_k  d w_k / d theta, with the weights' tangents (sfh_weights_tangent) in FP64 on the host,
+    !> one model per thread; wbl(:, m) is dL / d w_k of model m.
     subroutine batch_sfh_gradients(ctx, psets, n_mod, nt, wbl, params_bar)
         type(opensps_context_t), intent(inout) :: ctx
         integer, intent(in)  :: n_mod, nt
@@ -2211,12 +2222,12 @@ contains
         end do
     end subroutine batch_sfh_gradients
 
-    !> The SSP source of a batch from the modes it was found to have: zw (weights over ages and metallicities), zmode (a basis
-    !> per metallicity, interpolated at each model's logzsol), naf (the [alpha/Fe] planes of the context's stack, 1 without), nzb
-    !> (bases of the context), and the operators if given.
-    function ssp_source_select(zw, zmode, naf, nzb, ssp_ops) result(src)
-        logical, intent(in) :: zw, zmode
-        integer, intent(in) :: naf, nzb
+    !> The SSP source of a batch from the modes it was found to have: weights_over_z (weights over ages and metallicities), blend_z
+    !> (a basis per metallicity, interpolated at each model's logzsol), n_afe_planes (the [alpha/Fe] planes of the context's stack,
+    !> 1 without), nzb (bases of the context), and the operators if given.
+    function ssp_source_select(weights_over_z, blend_z, n_afe_planes, nzb, ssp_ops) result(src)
+        logical, intent(in) :: weights_over_z, blend_z
+        integer, intent(in) :: n_afe_planes, nzb
         type(ssp_opset_t), intent(in), optional :: ssp_ops
         type(ssp_source_t) :: src
 
@@ -2229,15 +2240,15 @@ contains
                 src%label = merge('operator, Z', 'operator   ', ssp_ops%nz > 1)
                 src%n_src = merge(2, 1, ssp_ops%nz > 1)
             end if
-        else if (zw) then
+        else if (weights_over_z) then
             src%kind = SSP_SRC_BASIS_W
             src%label = 'resident bases, weights over Z'
             src%n_src = max(nzb, 1)
-        else if (naf > 1 .and. zmode) then
+        else if (n_afe_planes > 1 .and. blend_z) then
             src%kind = SSP_SRC_BASIS_ZA
             src%label = 'resident bases, Z x [alpha/Fe]'
             src%n_src = 4
-        else if (zmode) then
+        else if (blend_z) then
             src%kind = SSP_SRC_BASIS_Z
             src%label = 'resident bases, Z'
             src%n_src = 2
@@ -2277,13 +2288,12 @@ contains
 
     !> The slabs of the resident basis (or the operators) that each model of a batch blends, as the descriptor of its SSP source:
     !> zlo (the first slab), zhi (the second), dz (its position between them, from its logzsol, with a basis per metallicity:
-    !> zmode) and,
-    !> with the [alpha/Fe] planes of the context's stack (naf > 1), the plane stride nzs, the position da between the two planes
-    !> and zlo, zhi the slabs of the lower plane. status 2: a model whose horizontal-branch modification is not in the operators
-    !> of its metallicity (legacy FSPS stops there).
-    subroutine ssp_source_describe(zmode, naf, ctx, psets, ssp_ops, refset, n_mod, zlo, zhi, dz, da, nzs, status)
-        logical, intent(in)  :: zmode
-        integer, intent(in)  :: naf, n_mod
+    !> blend_z) and, with the [alpha/Fe] planes of the context's stack (n_afe_planes > 1), the plane stride nzs, the position da
+    !> between the two planes and zlo, zhi the slabs of the lower plane. status 2: a model whose horizontal-branch modification is
+    !> not in the operators of its metallicity (legacy FSPS stops there).
+    subroutine ssp_source_describe(blend_z, n_afe_planes, ctx, psets, ssp_ops, refset, n_mod, zlo, zhi, dz, da, nzs, status)
+        logical, intent(in)  :: blend_z
+        integer, intent(in)  :: n_afe_planes, n_mod
         type(opensps_context_t), intent(in) :: ctx
         type(params), intent(in) :: psets(n_mod)
         type(ssp_opset_t), intent(in), optional :: ssp_ops
@@ -2296,7 +2306,7 @@ contains
         zlo = 1; zhi = 1; dz = 0.0_wp
         da = 0.0_wp
         nzs = 0
-        if (zmode) then
+        if (blend_z) then
             do m = 1, n_mod
                 call metallicity_interval(ctx, psets(m)%logzsol, zlo(m), dz(m))
                 zhi(m) = zlo(m) + 1
@@ -2309,7 +2319,7 @@ contains
                 do m = 1, n_mod
                     if (psets(m)%fbhb > merge(1.0e-3_wp, 1.0e-4_wp, trim(ctx%state%isoc_type) == 'pdva') .or. &
                         psets(m)%sbss > 1.0e-3_wp) then
-                        if (zmode) then
+                        if (blend_z) then
                             if (refset%ops(zlo(m))%hb_blocked .or. (dz(m) /= 0.0_wp .and. refset%ops(zhi(m))%hb_blocked)) then
                                 status = 2; return
                             end if
@@ -2320,7 +2330,7 @@ contains
                 end do
             end if
         end if
-        if (naf > 1) then
+        if (n_afe_planes > 1) then
             ! Plane interval and weight of the model's [alpha/Fe] (clamped to the grid: the flux of an
             ! extrapolated plane could be negative), zlo, zhi the slabs of the lower plane
             nzs = ctx%state%nz
@@ -2336,13 +2346,13 @@ contains
     !> the weights split into young and old at the model's dust_tesc age and cast to kernel precision (w2; wz over ages and
     !> metallicities for SSP_SRC_BASIS_W), from the SSP source: the weights over metallicities (model_sums_zw), the model's own
     !> surviving mass and L_bol per age (the operators: smass, slum, present only then) or the resident basis (blended or its first
-    !> plane). On the host (host_m: few models, the weights from the host) or on the device.
-    subroutine ssp_source_scalars(src, ctx, n_mod, nt, nzw, nzs, host_m, dev, weights, wz, w2, smass, slum, lum_linear, &
+    !> plane). On the host (sums_on_host: few models, the weights from the host) or on the device.
+    subroutine ssp_source_scalars(src, ctx, n_mod, nt, nzw, nzs, sums_on_host, dev, weights, wz, w2, smass, slum, lum_linear, &
                                   it_tesc, zlo, zhi, dz, da, msum, lsum, msy, mso, lsy, lso)
         type(ssp_source_t), intent(in) :: src
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)     :: n_mod, nt, nzw, nzs, it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
-        logical, intent(in)     :: host_m, dev
+        logical, intent(in)     :: sums_on_host, dev
         real(WP), intent(in)    :: weights(nt, nzw, n_mod), lum_linear(nt), dz(n_mod), da(n_mod)
         real(KP), intent(inout) :: wz(nt, nzw, n_mod), w2(nt, 2 * n_mod)
         real(WP), intent(in), optional :: smass(nt, n_mod), slum(nt, n_mod)
@@ -2354,7 +2364,7 @@ contains
         if (src%kind == SSP_SRC_BASIS_W) then
             ! Weights over ages and metallicities: mass and L_bol summed over both (metallicities
             ! outer, as compute_csp_scenario with nzin > 1), the weights cast once to KP
-            if (host_m) then
+            if (sums_on_host) then
                 do m = 1, n_mod
                     call model_sums_zw(nt, nzw, it_tesc(m), weights(:, :, m), bas_mass, bas_lbol, wz(:, :, m), &
                                        msum(m), lsum(m), msy(m), mso(m), lsy(m), lso(m))
@@ -2383,7 +2393,7 @@ contains
                                 lum_linear, zlo, zhi, dz, da, w2, msum(m), lsum(m), msy(m), mso(m), lsy(m), lso(m))
             end do
         else
-            if (host_m) then
+            if (sums_on_host) then
                 do m = 1, n_mod
                     call model_sums(mode, m, n_mod, nt, it_tesc(m), nzs, weights(:, 1, m), &
                                     bas_mass, bas_lbol, bas_mass, bas_lbol, lum_linear, zlo, zhi, dz, da, w2, &
@@ -2441,10 +2451,10 @@ contains
         end if
     end function slab_blend_kp
 
-    !> The mass and L_bol of one model of a batch whose SSP weights run over ages and metallicities (zw): summed over both
-    !> (metallicities outer, as compute_csp_scenario with nzin > 1), split at the model's dust_tesc age index into young
-    !> and old parts (summed separately: no differences), and the weights cast once to kernel precision. One body for the
-    !> host loop and the device kernel (the OpenMP clauses are those of the callers).
+    !> The mass and L_bol of one model of a batch whose SSP weights run over ages and metallicities (weights_over_z): summed over
+    !> both (metallicities outer, as compute_csp_scenario with nzin > 1), split at the model's dust_tesc age index into young and
+    !> old parts (summed separately: no differences), and the weights cast once to kernel precision. One body for the host loop and
+    !> the device kernel (the OpenMP clauses are those of the callers).
     subroutine model_sums_zw(nt, nzw, itesc, wt, bmass, blbol, wzm, ms, ls, msy, mso, lsy, lso)
         integer, intent(in)   :: nt, nzw, itesc
         real(WP), intent(in)  :: wt(nt, nzw), bmass(nt, *), blbol(nt, *)
@@ -5075,9 +5085,11 @@ contains
     !> final spectrum (N+1:2N), then of the young (1:N) and old (N+1:2N) age sums; yo (the
     !> forward's age sums) is read.
     subroutine batch_backward(ctx, pbuf, n_mod, nspec, nt, nbands, zred, igm_factor, mags, fband, zcm, it_tesc, &
-                              zlo, zhi, dz, da, nzs, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, yo, total, &
+                              zlo, zhi, dz, da, nzs, blend_z, igm, z_varies, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, &
+                                  yo, total, &
                               emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, neb, nb, w2, lzm, tsave, &
-                              splan, imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzb_out, mags_bar, &
+                              splan, use_operators, operators_per_z, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, &
+                                  weights_over_z, wzb_out, mags_bar, &
                               spec_bar, params_bar, weights_bar, gas, cgm, dcm, ipairm)
         type(opensps_context_t), intent(inout) :: ctx
         !> The isochrone modification groups' coefficients and their derivatives with respect to fbhb .. redgb
@@ -5094,7 +5106,7 @@ contains
         real(WP), intent(in)             :: mags(:,:), fband(:,:), zcm(n_mod)
         integer, intent(in)              :: it_tesc(n_mod), zlo(n_mod), zhi(n_mod), ita(n_mod), nzs
         real(WP), intent(in)             :: dz(n_mod), da(n_mod), wta(n_mod), lsum(n_mod), lum_linear(nt)
-        logical, intent(in)              :: zmode, igm, zvar, agn_on(n_mod)
+        logical, intent(in)              :: blend_z, igm, z_varies, agn_on(n_mod)
         real(KP), intent(in)             :: tdiff(:,:), tau(nspec, n_mod), total(nspec, n_mod)
         real(KP), intent(in)             :: yo(nspec, 2 * n_mod)
         ! Dust emission: per model, the flag, the template's interpolation (dl07_indices), the absorbed
@@ -5113,7 +5125,7 @@ contains
         real(KP), intent(inout), contiguous :: tsave(:,:)
         type(smooth_plan_t), intent(in)  :: splan   ! the smoothing groups, and the model's own values (the host modes)
         ! The IMF per model (ssp_ops): its flags, parameters, masked SFH weights, L_bol per age, operators
-        logical, intent(in)              :: imf, zimf
+        logical, intent(in)              :: use_operators, operators_per_z
         real(WP), intent(in), contiguous :: pm(:,:), wsfh(:,:), slum(:,:), smass(:,:)
         type(ssp_opset_t), intent(inout), optional :: ssp_ops
         !> dL / d(L_bol) from the lbol output's cotangent (lbol = log10 L_bol), unscaled
@@ -5121,7 +5133,7 @@ contains
         !> dL / d(mass) from the mass output's cotangent with ssp_ops (zero otherwise), unscaled
         real(WP), intent(in)             :: mbx(n_mod)
         ! Weights over ages and metallicities (ssp_weights_z): d L / d wz (nt, nz, N; 1 x 1 x 1 otherwise)
-        logical, intent(in)              :: zw
+        logical, intent(in)              :: weights_over_z
         real(WP), intent(out), contiguous :: wzb_out(:,:,:)
         real(WP), intent(in), optional   :: mags_bar(:,:), spec_bar(:,:)
         real(WP), intent(out), optional  :: params_bar(:,:), weights_bar(:,:)
@@ -5230,12 +5242,12 @@ contains
         ! The band weights and trapezoid weights (z-independent), and the common IGM transmission of
         ! the forward's redshift (the cache: compute_magnitudes_columns may have released it, or
         ! left the z = 0 grid with per-model redshifts, where the IGM is per model anyway)
-        if (zvar) then
+        if (z_varies) then
             call prepare_batch_grid(ctx, 0.0_wp, igm_factor)
         else
             call prepare_batch_grid(ctx, zred, igm_factor)
         end if
-        if (imf) then
+        if (use_operators) then
             nzb = n_mod   ! (the per-model ionizing photons of nebular_setup: q0(ages, models))
         else
             nzb = size(ctx%state%ssp_basis_spec, 3)
@@ -5299,13 +5311,13 @@ contains
 #endif
         end if
         ! Dust emission: the cotangents of its two sums (eb: s_abs_bar, s_esc_bar, R = s_abs / s_esc)
-        call backward_emission_sums(ctx, pbuf, n_mod, nspec, igm, zvar, g%igm_t, tau, g%wt, emis, iq, iu, wq, wu, gam, &
+        call backward_emission_sums(ctx, pbuf, n_mod, nspec, igm, z_varies, g%igm_t, tau, g%wt, emis, iq, iu, wq, wu, gam, &
                                     s_abs, s_esc, gw, part, eb)
         if (any_agn) then
-            call backward_attenuation(ctx, pbuf, n_mod, nspec, ntau, igm, zvar, g%igm_t, tau, yo, agn_on, ita, wta, &
+            call backward_attenuation(ctx, pbuf, n_mod, nspec, ntau, igm, z_varies, g%igm_t, tau, yo, agn_on, ita, wta, &
                                       lsum, ctx%state%agndust_spec, g%wt, emis, iq, iu, wq, wu, gam, eb, jmx, gw, part, dpar)
         else
-            call backward_attenuation(ctx, pbuf, n_mod, nspec, 1, igm, zvar, g%igm_t, tau, yo, agn_on, ita, wta, &
+            call backward_attenuation(ctx, pbuf, n_mod, nspec, 1, igm, z_varies, g%igm_t, tau, yo, agn_on, ita, wta, &
                                       lsum, noagn, g%wt, emis, iq, iu, wq, wu, gam, eb, jmx, gw, part, dpar)
         end if
         ! Lines outside the spectrum with dust emission: their absorbed part joins s_abs
@@ -5322,40 +5334,42 @@ contains
                                       nwb, gneb, gcue)
             call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, &
                                    ctx%state%ssp_basis_spec_t, &
-                                   ctx%state%ssp_basis_lbol, zmode, it_tesc, zlo, zhi, dz, da, nzs, lum_linear, &
+                                   ctx%state%ssp_basis_lbol, blend_z, it_tesc, zlo, zhi, dz, da, nzs, lum_linear, &
                                    lsum_bar, gw, w_bar, ntn, nb%whlylim, nb%fesc, w2, nwb, gneb)
         else if (neb) then
             ! (the line profiles exist only with the lines in the spectrum; lbar stands in otherwise)
             if (nb%xrb .and. nb%lines_in_spec) then
                 call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, .true., it_tesc, zlo, zhi, dz, da, nzs, &
-                                      zmode .and. .not. imf, &
+                                      blend_z .and. .not. use_operators, &
                                       nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, &
                                       nb%lj_lo, nb%lj_hi, nb%nrun, nb%rs, nb%rl, nb%rt, w2, &
                                       ctx%state%xnebem_cont, ctx%state%xnebem_line, ctx%state%gaussnebarr, gw, lbar, nwb, gneb, &
-                                      imf, qb, lgiven)
+                                      use_operators, qb, lgiven)
             else if (nb%xrb) then
                 call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, lgiven, it_tesc, zlo, zhi, dz, da, nzs, &
-                                      zmode .and. .not. imf, &
+                                      blend_z .and. .not. use_operators, &
                                       nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, &
                                       nb%lj_lo, nb%lj_hi, nb%nrun, nb%rs, nb%rl, nb%rt, w2, &
-                                      ctx%state%xnebem_cont, ctx%state%xnebem_line, lbar, gw, lbar, nwb, gneb, imf, qb, lgiven)
+                                      ctx%state%xnebem_cont, ctx%state%xnebem_line, lbar, gw, lbar, nwb, gneb, use_operators, &
+                                          qb, lgiven)
             else if (nb%lines_in_spec) then
                 call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, .true., it_tesc, zlo, zhi, dz, da, nzs, &
-                                      zmode .and. .not. imf, &
+                                      blend_z .and. .not. use_operators, &
                                       nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, &
                                       nb%lj_lo, nb%lj_hi, nb%nrun, nb%rs, nb%rl, nb%rt, w2, &
                                       ctx%state%nebem_cont, ctx%state%nebem_line, ctx%state%gaussnebarr, gw, lbar, nwb, gneb, &
-                                      imf, qb, lgiven)
+                                      use_operators, qb, lgiven)
             else
                 call backward_nebular(n_mod, nspec, nt, nzb, ntn, nb%cont, lgiven, it_tesc, zlo, zhi, dz, da, nzs, &
-                                      zmode .and. .not. imf, &
+                                      blend_z .and. .not. use_operators, &
                                       nb%ia, nb%wa, nb%iz, nb%wz, nb%iu, nb%wu, nb%fabs, nb%q0, &
                                       nb%lj_lo, nb%lj_hi, nb%nrun, nb%rs, nb%rl, nb%rt, w2, &
-                                      ctx%state%nebem_cont, ctx%state%nebem_line, lbar, gw, lbar, nwb, gneb, imf, qb, lgiven)
+                                      ctx%state%nebem_cont, ctx%state%nebem_line, lbar, gw, lbar, nwb, gneb, use_operators, &
+                                          qb, lgiven)
             end if
-            if (.not. imf) call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, &
+            if (.not. use_operators) call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, &
                                                   ctx%state%ssp_basis_spec_t, &
-                                                  ctx%state%ssp_basis_lbol, zmode, it_tesc, zlo, zhi, dz, da, nzs, lum_linear, &
+                                                  ctx%state%ssp_basis_lbol, blend_z, it_tesc, zlo, zhi, dz, da, nzs, lum_linear, &
                                                   lsum_bar, gw, w_bar, ntn, nb%whlylim, nb%fesc, w2, nwb, gneb)
         else
             gneb = 0.0_wp
@@ -5363,7 +5377,7 @@ contains
 #ifdef OMP_TARGET
             !$omp target update to(nwb, gneb)
 #endif
-            if (zw) then
+            if (weights_over_z) then
                 call backward_age_sums_w(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, &
                                          ctx%state%ssp_basis_spec_t, ctx%state%ssp_basis_lbol, &
                                          it_tesc, lsum_bar, gw, wzb_out)
@@ -5371,16 +5385,16 @@ contains
 #ifdef OMP_TARGET
                 !$omp target update to(w_bar)
 #endif
-            else if (.not. imf) then
+            else if (.not. use_operators) then
                 call backward_age_sums(n_mod, nspec, nt, nzb, ctx%state%ssp_basis_spec, &
                                        ctx%state%ssp_basis_spec_t, &
-                                       ctx%state%ssp_basis_lbol, zmode, it_tesc, zlo, zhi, dz, da, nzs, lum_linear, &
+                                       ctx%state%ssp_basis_lbol, blend_z, it_tesc, zlo, zhi, dz, da, nzs, lum_linear, &
                                        lsum_bar, gw, w_bar, 0, 0, nb%fesc, w2, nwb, gneb)
             end if
         end if
         ! The IMF per model: the operator's reverse pass (the SFH weights, the IMF parameters, the
         ! escaping fraction and, with the metallicity free, dz), then the nebular weights' part
-        if (imf) then
+        if (use_operators) then
 #ifdef OMP_TARGET
             !$omp target update from(qb, nwb, gneb)
 #endif
@@ -5400,7 +5414,7 @@ contains
                 w_bar(:, m) = wbi(:, m)
                 if (ntn > 0) w_bar(1:ntn, m) = w_bar(1:ntn, m) + nwb(1:ntn, m)
                 gneb(4, m) = fescb(m)
-                if (zimf) gneb(5, m) = gneb(5, m) + zbi(m)
+                if (operators_per_z) gneb(5, m) = gneb(5, m) + zbi(m)
             end do
 #ifdef OMP_TARGET
             !$omp target update to(w_bar, gneb)
@@ -5442,7 +5456,7 @@ contains
                 ! (agn_tau: d L / d wta here; compute_csp_batch applies d wta / d agn_tau)
                 params_bar(BGRAD_AGN_TAU, m) = tmbar(m) * cscale(m)
                 params_bar(BGRAD_IGM_FACTOR, m) = dpar(14, m) * cscale(m)
-                if (imf) params_bar(BGRAD_IMF1:BGRAD_MDAVE, m) = imfb(:, m) * cscale(m)
+                if (use_operators) params_bar(BGRAD_IMF1:BGRAD_MDAVE, m) = imfb(:, m) * cscale(m)
                 if (allocated(cbm) .and. present(dcm)) then
                     do kk = 1, 5
                         params_bar(BGRAD_FBHB + kk - 1, m) = sum(cbm(:, m) * dcm(:, kk, m)) * cscale(m)
@@ -5457,7 +5471,7 @@ contains
                 weights_bar(1:nt, m) = w_bar(:, m) * cscale(m)
             end do
         end if
-        if (zw) then
+        if (weights_over_z) then
             do m = 1, n_mod
                 wzb_out(:, :, m) = wzb_out(:, :, m) * cscale(m)
             end do
@@ -5949,7 +5963,7 @@ contains
     !> R_bar = sum over pixels of A_bar shape T_d (per model, NCHG chunks then FP64), and
     !> s_abs_bar = R_bar / s_esc, s_esc_bar = -R_bar s_abs / s_esc^2 (eb(1:2, m); eb(3, m) = R). Zero
     !> for models without dust emission (or with s_esc at the floor, where the forward adds none).
-    subroutine backward_emission_sums(ctx, pbuf, n_mod, nspec, igm, zvar, igm_t, tau, wt, emis, iq, iu, wq, wu, gam, &
+    subroutine backward_emission_sums(ctx, pbuf, n_mod, nspec, igm, z_varies, igm_t, tau, wt, emis, iq, iu, wq, wu, gam, &
                                       s_abs, s_esc, gw, part, eb)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)              :: n_mod, nspec
@@ -5958,7 +5972,7 @@ contains
 #else
         integer(int64), intent(in), target :: pbuf(NPW, n_mod)
 #endif
-        logical, intent(in)              :: igm, zvar, emis(n_mod)
+        logical, intent(in)              :: igm, z_varies, emis(n_mod)
         integer, intent(in)              :: iq(n_mod), iu(n_mod)
         real(WP), intent(in)             :: wq(n_mod), wu(n_mod), gam(n_mod), s_abs(n_mod), s_esc(n_mod)
         real(KP), intent(in)             :: igm_t(nspec), tau(nspec, n_mod), wt(nspec), gw(nspec, 2 * n_mod)
@@ -5990,7 +6004,7 @@ contains
 #endif
                     do i = c, nspec, NCHG
                         ga = gw(i, n_mod + m)
-                        if (igm .and. zvar) then
+                        if (igm .and. z_varies) then
                             if (pl%zred > SAFE_FLOOR) ga = ga * real(exp(-real(tau(i, m), WP) * pl%igm_factor), KP)
                         else if (igm) then
                             ga = ga * igm_t(i)
@@ -6188,7 +6202,7 @@ contains
     !> into gw(:, N + m), and the dust parameters' gradients dpar (NDP x N), summed per model over
     !> NCHG chunks of pixels (atten_adjoint_chunk; one thread per model and chunk, consecutive
     !> threads on consecutive pixels), then over the chunks in FP64.
-    subroutine backward_attenuation(ctx, pbuf, n_mod, nspec, ntau, igm, zvar, igm_t, tau, yo, agn_on, ita, wta, lsum, &
+    subroutine backward_attenuation(ctx, pbuf, n_mod, nspec, ntau, igm, z_varies, igm_t, tau, yo, agn_on, ita, wta, lsum, &
                                     agndust_spec, wt, emis, iq, iu, wq, wu, gam, eb, jmx, gw, part, dpar)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)              :: n_mod, nspec, ntau
@@ -6197,7 +6211,7 @@ contains
 #else
         integer(int64), intent(in), target :: pbuf(NPW, n_mod)
 #endif
-        logical, intent(in)              :: igm, zvar, agn_on(n_mod)
+        logical, intent(in)              :: igm, z_varies, agn_on(n_mod)
         integer, intent(in)              :: ita(n_mod)
         real(WP), intent(in)             :: wta(n_mod), lsum(n_mod), agndust_spec(nspec, ntau)
         real(KP), intent(in)             :: igm_t(nspec), tau(nspec, n_mod), yo(nspec, 2 * n_mod), wt(nspec)
@@ -6271,7 +6285,7 @@ contains
 #else
                 call c_f_pointer(c_loc(pbuf(1, m)), pl)
 #endif
-                call atten_adjoint_chunk(ctx, pl, n_mod, nspec, ntau, m, c, dt, ttab, ltab, igm, zvar, igm_t, tau, yo, &
+                call atten_adjoint_chunk(ctx, pl, n_mod, nspec, ntau, m, c, dt, ttab, ltab, igm, z_varies, igm_t, tau, yo, &
                                          jtop, ta, tb, tbd, &
                                          agn_on(m), ita(m), wta(m), lsum(m), agndust_spec, wt, emis(m), iq(m), iu(m), &
                                          wq(m), wu(m), gam(m), eb, jmx(m), gw, part)
@@ -6313,7 +6327,7 @@ contains
     !> absorbed_bar = s_abs_bar c to the young and old spectra, the three transmissions and the two
     !> fractions; shape_bar is carried to the template's interpolation weights (dl07_shape_grad).
     !> Sums compensated at FP32 kernel precision.
-    subroutine atten_adjoint_chunk(ctx, pl, n_mod, nspec, ntau, m, c, dt, ttab, ltab, igm, zvar, igm_t, tau, yo, &
+    subroutine atten_adjoint_chunk(ctx, pl, n_mod, nspec, ntau, m, c, dt, ttab, ltab, igm, z_varies, igm_t, tau, yo, &
                                    jtop, igm_a, igm_b, igm_bd, &
                                    agn_m, ita_m, wta_m, lsum_m, agndust_spec, wt, emis_m, iq_m, iu_m, wq_m, wu_m, gam_m, &
                                    eb, jmx_m, gw, part)
@@ -6326,7 +6340,7 @@ contains
         real(WP), intent(in)             :: igm_a(IGM_NTERM, max(jtop, 1)), igm_b(IGM_NTERM, n_mod), igm_bd(IGM_NTERM, n_mod)
         real(KP), intent(in)             :: ttab(nspec, 0:3)
         real(WP), intent(in)             :: ltab(nspec), wta_m, lsum_m, agndust_spec(nspec, ntau)
-        logical, intent(in)              :: igm, zvar, agn_m
+        logical, intent(in)              :: igm, z_varies, agn_m
         real(KP), intent(in)             :: igm_t(nspec), tau(nspec, n_mod), yo(nspec, 2 * n_mod), wt(nspec)
         logical, intent(in)              :: emis_m
         integer, intent(in)              :: iq_m, iu_m
@@ -6369,7 +6383,7 @@ contains
             o = yo(i, n_mod + m)
             gs = gw(i, n_mod + m)
             ga = gs
-            if (igm .and. zvar) then
+            if (igm .and. z_varies) then
                 if (pl%zred > SAFE_FLOOR .and. tau(i, m) /= 0.0_KP) &
                     ga = gs * real(exp(-real(tau(i, m), WP) * pl%igm_factor), KP)
             else if (igm) then
@@ -6532,13 +6546,14 @@ contains
     !> Nebular emission (ntn nebular ages): the EUV rows (pixels <= whlylim) of the nebular ages
     !> carry the escaping fraction fesc, as nebular_kernels redoes them; gneb(4, m) = d L / d fesc;
     !> nwb (the nebular continuum's and lines' part) is added for the nebular ages.
-    subroutine backward_age_sums(n_mod, nspec, nt, nzb, basis, basis_t, blbol, zmode, it_tesc, zlo, zhi, dz, da, nzs, lum_linear, &
+    subroutine backward_age_sums(n_mod, nspec, nt, nzb, basis, basis_t, blbol, blend_z, it_tesc, zlo, zhi, dz, da, nzs, &
+        lum_linear, &
                                  lsum_bar, gw, w_bar, ntn, whlylim, fesc, w2, nwb, gneb)
         integer, intent(in)     :: n_mod, nspec, nt, nzb, it_tesc(n_mod), zlo(n_mod), zhi(n_mod), ntn, whlylim, nzs
         real(KP), intent(in)    :: basis(nspec, nt, nzb), basis_t(nt, nspec, nzb), gw(nspec, 2 * n_mod), w2(nt, 2 * n_mod)
         real(WP), intent(in)    :: blbol(nt, nzb), dz(n_mod), da(n_mod), lum_linear(nt), lsum_bar(n_mod), fesc(n_mod)
         real(WP), intent(in)    :: nwb(max(1, ntn), n_mod)
-        logical, intent(in)     :: zmode
+        logical, intent(in)     :: blend_z
         real(WP), intent(out)   :: w_bar(nt, n_mod)
         real(WP), intent(inout) :: gneb(6, n_mod)   ! (4): set here; (5), (6): added to
         integer, allocatable :: slab(:,:)
@@ -6553,7 +6568,7 @@ contains
             end do
             call age_sums_adj_slab4(n_mod, nspec, nt, nzb, basis, basis_t, blbol, it_tesc, slab, dz, da, lum_linear, lsum_bar, &
                                     gw, w_bar, ntn, whlylim, fesc, w2, nwb, gneb)
-        else if (zmode) then
+        else if (blend_z) then
             allocate(slab(2, n_mod))
             do m = 1, n_mod
                 slab(1, m) = zlo(m); slab(2, m) = zhi(m)
@@ -6600,14 +6615,14 @@ contains
     !>   the same for wu, and d L / d(1 - frac_obrun) = sum_t w_t |Q0(t)| sum(y_bar 10^lg) (gneb(1:3)).
     !> One thread per (model, nebular age), serial over pixels and lines, sums compensated at FP32
     !> kernel precision; 10^lg q as exp_kp(lg ln 10 + ln q) (exponent formed in FP64, rule 3).
-    subroutine backward_nebular(n_mod, nspec, nt, nzb, ntn, cont, lines, it_tesc, zlo, zhi, dz, da, nzs, zmode, ia, wa, iz, wz, &
+    subroutine backward_nebular(n_mod, nspec, nt, nzb, ntn, cont, lines, it_tesc, zlo, zhi, dz, da, nzs, blend_z, ia, wa, iz, wz, &
                                 iu, wu, fabs, q0, lj_lo, lj_hi, nrun, rs, rl, rt, w2, ctab, ltab, gauss, gw, lbar, &
                                 nwb, gneb, qmod, qb, lgiven)
 #if defined(OPENSPS_HIP)
         use, intrinsic :: iso_c_binding, only: c_loc, c_null_ptr, c_int
 #endif
         integer, intent(in), target :: n_mod, nspec, nt, nzb, ntn, it_tesc(n_mod), zlo(n_mod), zhi(n_mod), nzs
-        logical, intent(in)     :: cont, lines, zmode
+        logical, intent(in)     :: cont, lines, blend_z
         integer, intent(in), target :: ia(max(1, ntn)), iz(n_mod), iu(n_mod)
         integer, intent(in)     :: lj_lo(NEMLINE), lj_hi(NEMLINE), nrun
         integer, intent(in), target :: rs(max(1, ntn)), rl(max(1, ntn)), rt(max(1, ntn))
@@ -6689,10 +6704,10 @@ contains
             do t = 1, ntn
                 if (qmod) then
                     qzt(t, m) = abs(q0(t, m))
-                else if (zmode .and. nzs > 0) then
+                else if (blend_z .and. nzs > 0) then
                     qzt(t, m) = abs((1.0_wp - da(m)) * ((1.0_wp - dz(m)) * q0(t, zlo(m)) + dz(m) * q0(t, zhi(m))) + &
                                     da(m) * ((1.0_wp - dz(m)) * q0(t, zlo(m) + nzs) + dz(m) * q0(t, zhi(m) + nzs)))
-                else if (zmode) then
+                else if (blend_z) then
                     qzt(t, m) = abs((1.0_wp - dz(m)) * q0(t, zlo(m)) + dz(m) * q0(t, zhi(m)))
                 else
                     qzt(t, m) = abs(q0(t, 1))
@@ -6833,7 +6848,7 @@ contains
                     tu(t, m) = real(w2(t, col), WP) * fa * s3
                     tf(t, m) = real(w2(t, col), WP) * s1
                     if (qmod) qb(t, m) = real(w2(t, col), WP) * fa * s1 / qz
-                    if (zmode .and. nzs > 0) then
+                    if (blend_z .and. nzs > 0) then
                         qlin = (1.0_wp - da(m)) * ((1.0_wp - dz(m)) * q0(t, zlo(m)) + dz(m) * q0(t, zhi(m))) + &
                                da(m) * ((1.0_wp - dz(m)) * q0(t, zlo(m) + nzs) + dz(m) * q0(t, zhi(m) + nzs))
                         tq(t, m) = real(w2(t, col), WP) * fa * s1 / qz * sign(1.0_wp, qlin) * &
@@ -6842,7 +6857,7 @@ contains
                         tqa(t, m) = real(w2(t, col), WP) * fa * s1 / qz * sign(1.0_wp, qlin) * &
                                     ((1.0_wp - dz(m)) * (q0(t, zlo(m) + nzs) - q0(t, zlo(m))) + &
                                      dz(m) * (q0(t, zhi(m) + nzs) - q0(t, zhi(m))))
-                    else if (zmode) then
+                    else if (blend_z) then
                         tq(t, m) = real(w2(t, col), WP) * fa * s1 / qz * &
                                    sign(1.0_wp, (1.0_wp - dz(m)) * q0(t, zlo(m)) + dz(m) * q0(t, zhi(m))) * &
                                    (q0(t, zhi(m)) - q0(t, zlo(m)))
