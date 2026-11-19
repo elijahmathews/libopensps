@@ -1864,12 +1864,12 @@ contains
     !> device, or computed on the device (sfh_weights_core, one thread per model; tmp1, tmp2 its scratch).
     subroutine batch_sfh_weights(ctx, pbuf, n_mod, nt, nzw, sums_on_host, given, wext, weights, tmp1, tmp2)
         type(opensps_context_t), intent(inout) :: ctx
+        integer, intent(in)  :: n_mod, nt, nzw
 #if !defined(__flang__)
         type(params), intent(in), target :: pbuf(n_mod)
 #else
         integer(int64), intent(in), target :: pbuf(NPW, n_mod)
 #endif
-        integer, intent(in)  :: n_mod, nt, nzw
         logical, intent(in)  :: sums_on_host, given
         real(WP), intent(in) :: wext(nt * nzw, n_mod)
         real(WP), intent(inout) :: weights(nt, nzw, n_mod), tmp1(nt, n_mod), tmp2(nt, n_mod)
