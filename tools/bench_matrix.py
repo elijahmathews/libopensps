@@ -35,15 +35,16 @@ import sys
 # fields that act in the benchmark's configuration ("full", an exponentially declining SFH) and are not already free there
 ALONE = ['dust1', 'dust2', 'dust3', 'dust_index', 'dust1_index', 'frac_nodust', 'dust_tesc', 'duste_gamma', 'duste_qpah',
          'gas_logz', 'frac_obrun', 'fagn', 'agn_tau', 'zred', 'igm_factor',
-         'logzsol', 'fbhb', 'sbss', 'agb', 'pagb', 'redgb', 'delt', 'dell', 'imf1', 'imf2', 'imf3', 'vdmc', 'mdave', 'sigma_smooth']
+         'logzsol', 'afe', 'fbhb', 'sbss', 'agb', 'pagb', 'redgb', 'delt', 'dell', 'imf1', 'imf2', 'imf3', 'vdmc', 'mdave',
+         'sigma_smooth', 'imf_lower_limit', 'imf_upper_limit']
 PAIRS = ['logzsol+imf1', 'logzsol+fbhb', 'imf1+fbhb', 'imf1+delt', 'fbhb+delt', 'logzsol+delt', 'dust2+imf1', 'dust2+logzsol',
-         'zred+logzsol', 'agb+fbhb']
+         'zred+logzsol', 'agb+fbhb', 'afe+logzsol']
 ALL_SET = ['dust1', 'dust2', 'dust_index', 'duste_qpah', 'gas_logz', 'fagn', 'zred', 'igm_factor', 'logzsol', 'imf1', 'imf2',
            'imf3', 'agb', 'pagb', 'redgb']
 LINE = re.compile(r'^batch_(\d+)_(mags|spec)_us_per_model\s+([0-9.eE+-]+)')
 
 
-def run(exe, free, dist, sizes, config, env_extra, n_single=0, dump=None):
+def run(exe, free, dist, sizes, config, env_extra, n_single=0, dump=None, dump_grad=None):
     env = dict(os.environ)
     env['OPENSPS_BENCH_FREE'] = free if free else '-'
     env['OPENSPS_BENCH_DIST'] = dist
@@ -51,6 +52,8 @@ def run(exe, free, dist, sizes, config, env_extra, n_single=0, dump=None):
     env.update(env_extra)
     if dump:
         env['OPENSPS_BENCH_DUMP_FWD'] = dump
+    if dump_grad:
+        env['OPENSPS_BENCH_DUMP'] = dump_grad
     nmax = max(int(x) for x in sizes.split(','))
     nmin = min(int(x) for x in sizes.split(','))
     p = subprocess.run([exe, str(nmax), str(n_single), config, str(nmin)], env=env, capture_output=True, text=True)
@@ -67,8 +70,8 @@ def run(exe, free, dist, sizes, config, env_extra, n_single=0, dump=None):
     return out
 
 
-def median_runs(exe, free, dist, sizes, config, env_extra, reps, dump=None):
-    runs = [run(exe, free, dist, sizes, config, env_extra, dump=dump) for _ in range(reps)]
+def median_runs(exe, free, dist, sizes, config, env_extra, reps, dump=None, dump_grad=None):
+    runs = [run(exe, free, dist, sizes, config, env_extra, dump=dump, dump_grad=dump_grad) for _ in range(reps)]
     bad = [r for r in runs if r['status'] != 0]
     if bad:
         return {'status': bad[0]['status'], 'mags': {}, 'spec': {}}
@@ -151,6 +154,7 @@ def main():
     ap.add_argument('--config', default='full')
     ap.add_argument('--tsv', default=None)
     ap.add_argument('--dump', default=None, help='directory for the forward dumps (one file per distribution and free set,\n                    the largest size), to compare two commits with compare_forward_dump.py')
+    ap.add_argument('--dump-grad', default=None, help='directory for the gradient dumps (params_bar of the largest size, one file\n                    per distribution and free set; the benchmark then also runs the gradients), to compare two commits with\n                    tools/compare_builds/compare_grad_dump.py')
     ap.add_argument('--report', action='store_true')
     ap.add_argument('--resume', action='store_true', help='skip the (distribution, free set) rows already in --tsv and append the rest')
     ap.add_argument('--report-only', default=None)
@@ -195,7 +199,12 @@ def main():
             if a.dump:
                 os.makedirs(a.dump, exist_ok=True)
                 dump = os.path.join(a.dump, '%s__%s.bin' % (d, label.replace('+', '_')))
-            res = median_runs(a.exe, free, d, a.sizes, a.config, env_extra, a.reps, dump)
+            dump_grad = None
+            if a.dump_grad:
+                os.makedirs(a.dump_grad, exist_ok=True)
+                dump_grad = os.path.join(a.dump_grad, '%s__%s.grad' % (d, label.replace('+', '_')))
+            res = median_runs(a.exe, free, d, a.sizes, a.config + ('_grad' if a.dump_grad and '_grad' not in a.config else ''),
+                              env_extra, a.reps, dump, dump_grad)
             new_rows = []
             for n in sizes:
                 m = res['mags'].get(n)
