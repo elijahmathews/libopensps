@@ -113,7 +113,8 @@ module opensps_csp_batch
                                      smooth_sigma_adjoint
     use opensps_ssp, only: configure_imf_parameters
     use opensps_imf, only: imf_pack_params, IMF_NPAR, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE
-    use opensps_ssp_operator, only: ssp_op_mod_signature
+    use opensps_ssp_operator, only: ssp_op_mod_signature, ssp_mod_coefficients, ssp_mod_coefficient_derivatives, MOD_NGRP, &
+                                    N_MOD_SIG
     use opensps_ssp_batch, only: ssp_batch_age_sums_z, ssp_opset_t, ssp_batch_age_sums_adjoint, NIMFG, dot_lanes
     use opensps_sfh_tangent, only: sfh_weights_tangent, sfh_tangent_supported, NSFHT
 #if defined(OPENSPS_ACCEL_BLAS)
@@ -134,7 +135,8 @@ module opensps_csp_batch
               BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
               BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, &
               BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, BGRAD_VDMC, BGRAD_MDAVE, BGRAD_AGN_TAU, &
-              BGRAD_IGM_FACTOR, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, BGRAD_AFE, NBGRAD
+              BGRAD_IGM_FACTOR, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, BGRAD_AFE, BGRAD_FBHB, BGRAD_SBSS, &
+              BGRAD_AGB, BGRAD_PAGB, BGRAD_REDGB, NBGRAD
 
     !> Rows of params_bar (compute_csp_batch's gradients): the derivative of the caller's loss with
     !> respect to each parameter of the model. The list grows as the adjoints of more stages are
@@ -180,7 +182,10 @@ module opensps_csp_batch
     !> the derivatives of cue's networks (not the CLOUDY grids' interpolation), and these rows are
     !> the gas density log n_H, N/O and C/O (zero with the CLOUDY grids, where they do not act)
     integer, parameter :: BGRAD_GAS_LOGN = 34, BGRAD_GAS_LOGNO = 35, BGRAD_GAS_LOGCO = 36, BGRAD_AFE = 37
-    integer, parameter :: NBGRAD = 37
+    !> The isochrone modification factors free per model (ssp_opset_build_mods): fbhb, sbss, agb, pagb, redgb. One-sided at the
+    !> thresholds where the factors jump (fbhb above 1e-4, 1e-3 for Padova; sbss above 1e-3); zero without such a set
+    integer, parameter :: BGRAD_FBHB = 38, BGRAD_SBSS = 39, BGRAD_AGB = 40, BGRAD_PAGB = 41, BGRAD_REDGB = 42
+    integer, parameter :: NBGRAD = 42
     !> The rows of the SFH tangents' parameters (opensps_sfh_tangent: SFHT_TAGE .. SFHT_SF_SLOPE)
     integer, parameter :: SFHT_ROWS(8) = [17, 18, 19, 20, 21, 22, 25, 26]
     !> Rows BGRAD_DUST1 .. BGRAD_DUSTE_GAMMA, summed per model by the attenuation adjoint (10-12 as
@@ -379,7 +384,7 @@ contains
         real(WP), intent(out), optional     :: mass_young(:), mass_old(:), lbol_young(:), lbol_old(:)
         real(WP), intent(in), optional      :: zred_mags(:)
         real(WP), intent(in), optional      :: ssp_weights_z(:,:,:)
-        type(ssp_opset_t), intent(inout), optional :: ssp_ops
+        type(ssp_opset_t), intent(inout), optional, target :: ssp_ops
         real(WP), intent(in), optional      :: mags_bar(:,:), spec_bar(:,:)
         real(WP), intent(out), optional     :: params_bar(:,:), weights_bar(:,:)
         real(WP), intent(in), optional      :: mass_bar(:), lbol_bar(:)
@@ -389,6 +394,9 @@ contains
         real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk, wa_m
         logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw, host_m, imf, dev, zimf, grad
         logical  :: cue
+        type(ssp_opset_t), pointer :: refset => null()
+        real(WP), allocatable :: cgm(:,:), dcm(:,:,:)
+        real(WP) :: sigm(N_MOD_SIG)
         integer  :: st_cue
         real(WP), allocatable :: gas(:,:)
         ! Gradients: the band fluxes of the magnitudes, and each column's magnitude redshift
@@ -473,30 +481,34 @@ contains
         end if
         if (imf) then
             ! The operators of the SSPs (one metallicity: the batch's; several: one per metallicity of
-            ! the context, the metallicity free per model)
-            if (ssp_ops%nz < 1 .or. .not. allocated(ssp_ops%ops)) then
+            ! the context, the metallicity free per model). With free isochrone modifications the set is a container
+            ! of the groups' sets, whose plain group stands for the checks.
+            refset => ssp_ops
+            if (ssp_ops%free_mods) refset => ssp_ops%grp(0)
+            if (refset%nz < 1 .or. .not. allocated(refset%ops)) then
                 status = 1; return
             end if
-            if (zimf .and. ssp_ops%nz /= ctx%state%nz) then
+            if (zimf .and. refset%nz /= ctx%state%nz) then
                 status = 3; return
             end if
-            do m = 1, ssp_ops%nz
-                if (ssp_ops%ops(m)%n_pts == 0 .or. .not. allocated(ssp_ops%ops(m)%pt_q)) then
+            do m = 1, refset%nz
+                if (refset%ops(m)%n_pts == 0 .or. .not. allocated(refset%ops(m)%pt_q)) then
                     status = 1; return
                 end if
-                if (ssp_ops%ops(m)%nspec /= nspec .or. ssp_ops%ops(m)%n_ages /= nt) then
+                if (refset%ops(m)%nspec /= nspec .or. refset%ops(m)%n_ages /= nt) then
                     status = 3; return
                 end if
-                if (zimf .and. ssp_ops%ops(m)%zmet /= m) then
+                if (zimf .and. refset%ops(m)%zmet /= m) then
                     status = 3; return
                 end if
-                if (.not. all(ssp_ops%ops(m)%age_on)) then
+                if (.not. all(refset%ops(m)%age_on)) then
                     status = 2; return
                 end if
             end do
-            if (.not. zimf .and. ssp_ops%ops(1)%zmet /= psets(1)%zmet) then
+            if (.not. zimf .and. refset%ops(1)%zmet /= psets(1)%zmet) then
                 status = 3; return
             end if
+            ! (the gradients of the free modifications are the reverse pass of ssp_batch_age_sums_mods)
             if (present(ssp_weights_z) .or. ctx%add_neb_emission_val == 2 .or. ctx%add_xrb_emission_val == 1 .or. &
                 ctx%smooth_lsf_val == 1) then
                 status = 2; return
@@ -640,10 +652,30 @@ contains
                 end if
                 ! Isochrone modifications change which templates the stars use, so S is rebuilt for
                 ! them: not supported per model (status 2), and not different from the build either
-                if (any(ssp_op_mod_signature(psets(m)) /= ssp_ops%ops(1)%mod_sig)) then
+                if (ssp_ops%free_mods) then
+                    ! fbhb, sbss, agb, pagb and redgb are free; delt and dell must be zero, the cuts (agb_dust, masscut, evtype)
+                    ! those of the operators
+                    sigm = ssp_op_mod_signature(psets(m))
+                    if (any(sigm(8:10) /= refset%ops(1)%mod_sig(8:10)) .or. &
+                        psets(m)%delt /= 0.0_wp .or. psets(m)%dell /= 0.0_wp) then
+                        status = 2; return
+                    end if
+
+                else if (any(ssp_op_mod_signature(psets(m)) /= ssp_ops%ops(1)%mod_sig)) then
                     status = 2; return
                 end if
             end do
+        end if
+        if (imf) then
+            if (ssp_ops%free_mods) then
+                allocate(cgm(MOD_NGRP, n_mod))
+                if (present(params_bar)) allocate(dcm(MOD_NGRP, 5, n_mod))
+                do m = 1, n_mod
+                    cgm(:, m) = ssp_mod_coefficients(psets(m), trim(ctx%state%isoc_type) == 'pdva')
+                    if (allocated(dcm)) &
+                        dcm(:, :, m) = ssp_mod_coefficient_derivatives(psets(m), trim(ctx%state%isoc_type) == 'pdva')
+                end do
+            end if
         end if
         nw = 1
         if (given_w .or. host_w) nw = nt * nzw * n_mod
@@ -737,6 +769,24 @@ contains
                 call metallicity_interval(ctx, psets(m)%logzsol, zlo(m), dz(m))
                 zhi(m) = zlo(m) + 1
             end do
+        end if
+        ! The horizontal-branch modification (fbhb, sbss above their thresholds) at an age where its stars would not fit the
+        ! isochrone arrays is not in the operators of that metallicity (legacy FSPS stops there): such a model is refused
+        if (imf) then
+            if (ssp_ops%free_mods) then
+                do m = 1, n_mod
+                    if (psets(m)%fbhb > merge(1.0e-3_wp, 1.0e-4_wp, trim(ctx%state%isoc_type) == 'pdva') .or. &
+                        psets(m)%sbss > 1.0e-3_wp) then
+                        if (zmode) then
+                            if (refset%ops(zlo(m))%hb_blocked .or. (dz(m) /= 0.0_wp .and. refset%ops(zhi(m))%hb_blocked)) then
+                                status = 2; return
+                            end if
+                        else if (refset%ops(1)%hb_blocked) then
+                            status = 2; return
+                        end if
+                    end if
+                end do
+            end if
         end if
         if (naf > 1) then
             ! Plane interval and weight of the model's [alpha/Fe] (clamped to the grid: the flux of an
@@ -954,9 +1004,15 @@ contains
                     end if
                 end do
             end do
-            call ssp_batch_age_sums_z(ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &
-                                      ssp_ops, zlo, zhi, dz, pm, wsfh, it_tesc, nb%nt_neb, nb%whlylim, nb%fesc, yo, &
-                                      smass, slum, nb%q0)
+            if (ssp_ops%free_mods) then
+                call ssp_batch_age_sums_z(ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &
+                                          ssp_ops, zlo, zhi, dz, pm, wsfh, it_tesc, nb%nt_neb, nb%whlylim, nb%fesc, yo, &
+                                          smass, slum, nb%q0, cg=cgm)
+            else
+                call ssp_batch_age_sums_z(ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &
+                                          ssp_ops, zlo, zhi, dz, pm, wsfh, it_tesc, nb%nt_neb, nb%whlylim, nb%fesc, yo, &
+                                          smass, slum, nb%q0)
+            end if
         end if
 
         associate (bas_mass => ctx%state%ssp_basis_mass, bas_lbol => ctx%state%ssp_basis_lbol)
@@ -1369,7 +1425,7 @@ contains
                                     neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
                                     psets(1)%min_wave_smooth, psets(1)%max_wave_smooth, &
                                     imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzbl, &
-                                    mags_bar, spec_bar, params_bar, wbl, gas)
+                                    mags_bar, spec_bar, params_bar, wbl, gas, cgm, dcm)
             else
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
                                     it_tesc, zlo, zhi, dz, da, nzs, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
@@ -1377,7 +1433,7 @@ contains
                                     neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
                                     psets(1)%min_wave_smooth, psets(1)%max_wave_smooth, &
                                     imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzbl, &
-                                    mags_bar, spec_bar, params_bar, wbl, gas)
+                                    mags_bar, spec_bar, params_bar, wbl, gas, cgm, dcm)
             end if
             ! The mass output's cotangent: mass = sum over ages of w_k M_k (M interpolated in log Z with
             ! per-model metallicity, which then adds to logzsol's row)
@@ -4778,8 +4834,11 @@ contains
                               zlo, zhi, dz, da, nzs, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, yo, total, &
                               emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, neb, nb, w2, lzm, tsave, &
                               sigma, minl, maxl, imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzb_out, mags_bar, &
-                              spec_bar, params_bar, weights_bar, gas)
+                              spec_bar, params_bar, weights_bar, gas, cgm, dcm)
         type(opensps_context_t), intent(inout) :: ctx
+        !> The isochrone modification groups' coefficients and their derivatives with respect to fbhb .. redgb
+        !> (a set of ssp_opset_build_mods; absent: none free)
+        real(WP), intent(in), optional   :: cgm(:,:), dcm(:,:,:)
         integer, intent(in)              :: n_mod, nspec, nt, nbands
 #if !defined(__flang__)
         type(params), intent(in), target :: pbuf(n_mod)
@@ -4836,6 +4895,8 @@ contains
         ! The IMF's reverse pass: dL / dQ per nebular age, the SFH weights' cotangent, the IMF rows,
         ! fesc's and dz's cotangents
         real(WP), allocatable :: qb(:,:), wbi(:,:), imfb(:,:), fescb(:), zbi(:)
+        real(WP), allocatable :: cbm(:,:)
+        integer :: kk
         logical :: lgiven
         integer, allocatable  :: jmx(:)
         real(WP) :: msum_bar
@@ -5074,9 +5135,17 @@ contains
 #ifdef OMP_TARGET
             !$omp target update from(qb, nwb, gneb)
 #endif
-            call ssp_batch_age_sums_adjoint(ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &
-                                            ssp_ops, zlo, zhi, dz, pm, wsfh, it_tesc, nb%nt_neb, nb%whlylim, nb%fesc, &
-                                            gw, slum, lsum_bar, qb, wbi, imfb, fescb, zbi, smass, mbx / cscale)
+            if (present(cgm)) then
+                allocate(cbm(MOD_NGRP, n_mod))
+                call ssp_batch_age_sums_adjoint(ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &
+                                                ssp_ops, zlo, zhi, dz, pm, wsfh, it_tesc, nb%nt_neb, nb%whlylim, nb%fesc, &
+                                                gw, slum, lsum_bar, qb, wbi, imfb, fescb, zbi, smass, mbx / cscale, &
+                                                cg=cgm, cbar=cbm)
+            else
+                call ssp_batch_age_sums_adjoint(ctx%imf_type_val, ctx%add_stellar_remnants_val == 1, n_mod, nt, nspec, &
+                                                ssp_ops, zlo, zhi, dz, pm, wsfh, it_tesc, nb%nt_neb, nb%whlylim, nb%fesc, &
+                                                gw, slum, lsum_bar, qb, wbi, imfb, fescb, zbi, smass, mbx / cscale)
+            end if
             do m = 1, n_mod
                 w_bar(:, m) = wbi(:, m)
                 if (ntn > 0) w_bar(1:ntn, m) = w_bar(1:ntn, m) + nwb(1:ntn, m)
@@ -5124,6 +5193,11 @@ contains
                 params_bar(BGRAD_AGN_TAU, m) = tmbar(m) * cscale(m)
                 params_bar(BGRAD_IGM_FACTOR, m) = dpar(14, m) * cscale(m)
                 if (imf) params_bar(BGRAD_IMF1:BGRAD_MDAVE, m) = imfb(:, m) * cscale(m)
+                if (allocated(cbm) .and. present(dcm)) then
+                    do kk = 1, 5
+                        params_bar(BGRAD_FBHB + kk - 1, m) = sum(cbm(:, m) * dcm(:, kk, m)) * cscale(m)
+                    end do
+                end if
             end do
         end if
         if (present(weights_bar)) then

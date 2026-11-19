@@ -15,8 +15,8 @@ int main(void) {
 
     /* 1. Test metadata queries */
     opensps_get_nbgrad(&nbgrad);
-    if (nbgrad != OPENSPS_NBGRAD || nbgrad != 37) {
-        printf("FAIL: opensps_get_nbgrad=%d expected 33\n", nbgrad);
+    if (nbgrad != OPENSPS_NBGRAD || nbgrad != 42) {
+        printf("FAIL: opensps_get_nbgrad=%d expected 42\n", nbgrad);
         failures++;
     }
 
@@ -308,6 +308,80 @@ int main(void) {
         opensps_context_compute_csp_batch_ext(h, &o2, &r2, &status);
         if (status != 0) { printf("FAIL: struct entry point, default rows: status %d\n", status); failures++; }
         free(pb_ref); free(pb_rows); free(pb_small);
+    }
+
+    // ------------------------------------------------------------------------
+    // Test 4c: the isochrone modification factors free per model (opensps_context_build_ssp_ops_free_mods)
+    // ------------------------------------------------------------------------
+    {
+        opensps_get_grad_param_name(OPENSPS_BGRAD_FBHB, name_buf, 64, &status);
+        if (status != 0 || strcmp(name_buf, "fbhb") != 0) { printf("FAIL: name of BGRAD_FBHB '%s'\n", name_buf); failures++; }
+        opensps_get_grad_param_name(OPENSPS_BGRAD_REDGB, name_buf, 64, &status);
+        if (status != 0 || strcmp(name_buf, "redgb") != 0) { printf("FAIL: name of BGRAD_REDGB '%s'\n", name_buf); failures++; }
+
+        opensps_context_free_ssp_ops(h, &status);
+        const char *mn[6] = {"dust2", "fbhb", "sbss", "agb", "pagb", "redgb"};
+        double fb[N_MOD] = {0.3, 0.6}, sb[N_MOD] = {4.0, 9.0}, ag[N_MOD] = {0.6, 1.4}, pa[N_MOD] = {1.5, 0.5}, rg[N_MOD] = {0.8, 1.2};
+        const double *mv[6] = {dust2_val, fb, sb, ag, pa, rg};
+        double *par = (double *)calloc((size_t)OPENSPS_NBGRAD * N_MOD, sizeof(double));
+        double *mg = (double *)malloc(sizeof(double) * nbands * N_MOD);
+
+        /* Without the group operators the factors cannot vary per model */
+        opensps_context_compute_csp_batch(h, N_MOD, 6, mn, mv, NULL, mg, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &status);
+        if (status != 2) { printf("FAIL: factors without the group operators: status %d (expected 2)\n", status); failures++; }
+
+        opensps_context_set_int(h, "imf_type", 1, &status);
+        opensps_context_build_ssp_ops_free_mods(h, 0, &status);
+        if (status != 0) { printf("FAIL: build_ssp_ops_free_mods status %d\n", status); failures++; }
+        int has_ops = 0;
+        opensps_context_has_ssp_ops(h, &has_ops, &status);
+        if (!has_ops) { printf("FAIL: has_ssp_ops after the free-modification build\n"); failures++; }
+        opensps_context_compute_csp_batch_grad(h, N_MOD, 6, mn, mv, NULL, NULL, NULL, mags_bar, NULL, NULL, NULL,
+                                               mg, NULL, NULL, NULL, NULL, NULL, NULL, NULL, par, NULL, NULL, &status);
+        if (status != 0) {
+            printf("FAIL: gradients with the factors free: status %d\n", status);
+            failures++;
+        } else {
+            /* (kernel precision: steps of 1e-2 and the loose tolerance; the factors' thresholds are far below the values here) */
+            const double h_fd = (tol_dust > 1e-2) ? 1e-2 : 1e-5;
+            const int rows[5] = {OPENSPS_BGRAD_FBHB, OPENSPS_BGRAD_SBSS, OPENSPS_BGRAD_AGB, OPENSPS_BGRAD_PAGB, OPENSPS_BGRAD_REDGB};
+            double *vals[5] = {fb, sb, ag, pa, rg};
+            for (int r = 0; r < 5; r++) {
+                for (int m = 0; m < N_MOD; m++) {
+                    double x0 = vals[r][m], lp = 0.0, lm = 0.0;
+                    double *m2 = (double *)malloc(sizeof(double) * nbands * N_MOD);
+                    vals[r][m] = x0 + h_fd;
+                    opensps_context_compute_csp_batch(h, N_MOD, 6, mn, mv, NULL, m2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &status);
+                    for (int b = 0; b < nbands; b++) lp += m2[m * nbands + b];
+                    vals[r][m] = x0 - h_fd;
+                    opensps_context_compute_csp_batch(h, N_MOD, 6, mn, mv, NULL, m2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &status);
+                    for (int b = 0; b < nbands; b++) lm += m2[m * nbands + b];
+                    vals[r][m] = x0;
+                    free(m2);
+                    double fd = (lp - lm) / (2.0 * h_fd), ad = par[rows[r] + m * OPENSPS_NBGRAD];
+                    double rel = fabs(ad - fd) / fmax(fabs(fd), 1e-3);
+                    printf("[%s m=%d] adjoint=%e fd=%e rel_err=%e\n", mn[1 + r], m, ad, fd, rel);
+                    if (!(rel <= 20.0 * tol_dust)) { printf("FAIL: %s gradient mismatch m=%d\n", mn[1 + r], m); failures++; }
+                }
+            }
+        }
+
+        /* delt and dell are not free: status 2 */
+        const char *dn[2] = {"dust2", "delt"};
+        double dl[N_MOD] = {0.05, 0.05};
+        const double *dv[2] = {dust2_val, dl};
+        opensps_context_compute_csp_batch(h, N_MOD, 2, dn, dv, NULL, mg, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &status);
+        if (status != 2) { printf("FAIL: delt per model: status %d (expected 2)\n", status); failures++; }
+
+        /* One build per metallicity too (logzsol and the factors free) */
+        opensps_context_free_ssp_ops(h, &status);
+        opensps_context_build_ssp_ops_free_mods(h, 1, &status);
+        if (status != 0) { printf("FAIL: build_ssp_ops_free_mods for all metallicities: status %d\n", status); failures++; }
+        opensps_context_free_ssp_ops(h, &status);
+        free(par); free(mg);
+        opensps_context_build_ssp_ops(h, 0, &status);   /* the plain operator for the tests below */
+        opensps_context_set_int(h, "imf_type", 2, &status);
+        opensps_context_build_ssp_ops(h, 0, &status);
     }
 
     // ------------------------------------------------------------------------

@@ -26,7 +26,7 @@ module opensps_c_api
     use opensps_imf, only: compute_imf_weights, IMF_NPAR, imf_pack_params, &
                            IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_evaluate, ssp_operator_free
-    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free
+    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods
     use opensps_smoothing, only: apply_smoothing
     use opensps_cosmology, only: vacuum_to_air
     use opensps_interpolation, only: find_interval
@@ -45,7 +45,8 @@ module opensps_c_api
                                  BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, &
                                  BGRAD_SF_TRUNC, BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, &
                                  BGRAD_VDMC, BGRAD_MDAVE, BGRAD_AGN_TAU, BGRAD_IGM_FACTOR, &
-                                 BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, BGRAD_AFE, NBGRAD
+                                 BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, BGRAD_AFE, BGRAD_FBHB, BGRAD_SBSS, &
+                                 BGRAD_AGB, BGRAD_PAGB, BGRAD_REDGB, NBGRAD
     use opensps_context_types, only: opensps_context_t
 
     implicit none
@@ -701,12 +702,13 @@ contains
         integer, allocatable :: slot(:)
         real(WP), allocatable :: vals(:, :)
         integer(int64) :: wa((storage_size(PARAMS_CORE()) + 63) / 64), wb((storage_size(PARAMS_CORE()) + 63) / 64)
-        logical :: zmode, dirty, has_ops
+        logical :: zmode, dirty, has_ops, has_mods
         integer :: prows
         character(len=120) :: rows_msg
         real(WP), allocatable :: mass_l(:), lbol_l(:), mdust_l(:), sfr_l(:), eml_l(:, :)
         character(LEN=10), parameter :: NEB_PARAMS(3) = [character(LEN=10) :: 'gas_logu', 'gas_logz', 'frac_obrun']
         character(LEN=10), parameter :: IMF_PARAMS(5) = [character(LEN=10) :: 'imf1', 'imf2', 'imf3', 'vdmc', 'mdave']
+        character(LEN=10), parameter :: MOD_PARAMS(5) = [character(LEN=10) :: 'fbhb', 'sbss', 'agb', 'pagb', 'redgb']
 
         status = 0
         if (handle < 1 .or. .not. ALLOCATED(ctx_pool) .or. handle > SIZE(ctx_pool)) then
@@ -732,6 +734,8 @@ contains
         nt = ctx%state%ntfull
         nbands = ctx%state%nbands
         has_ops = ctx_store(handle)%have_opset
+        has_mods = has_ops
+        if (has_ops) has_mods = ctx_store(handle)%opset%free_mods
 
         ! Initialize all pointers
         spec => null()
@@ -763,7 +767,8 @@ contains
                 ! When ssp_ops is enabled on the context, IMF parameters may vary per model.
                 if (is_ssp_sensitive_float_param(trim(names(i))) .and. .not. &
                     (ctx%add_neb_emission_val /= 2 .and. any(trim(names(i)) == NEB_PARAMS)) .and. .not. &
-                    (has_ops .and. any(trim(names(i)) == IMF_PARAMS))) then
+                    (has_ops .and. any(trim(names(i)) == IMF_PARAMS)) .and. .not. &
+                    (has_mods .and. any(trim(names(i)) == MOD_PARAMS))) then
                     status = 2
                     call opensps_set_error(2, 'compute_csp_batch: '//trim(names(i))//' changes the SSPs')
                     return
@@ -1136,6 +1141,11 @@ contains
         case (BGRAD_GAS_LOGNO);      p_name = 'gas_logno'
         case (BGRAD_GAS_LOGCO);      p_name = 'gas_logco'
         case (BGRAD_AFE);            p_name = 'afe'
+        case (BGRAD_FBHB);           p_name = 'fbhb'
+        case (BGRAD_SBSS);           p_name = 'sbss'
+        case (BGRAD_AGB);            p_name = 'agb'
+        case (BGRAD_PAGB);           p_name = 'pagb'
+        case (BGRAD_REDGB);          p_name = 'redgb'
         case default
             status = 1
             call opensps_set_error(1, 'opensps_get_grad_param_name: unknown index')
@@ -1187,6 +1197,38 @@ contains
         st%have_opset = .true.
         end associate
     end subroutine opensps_context_build_ssp_ops_handle
+
+    !> Builds the operators of the isochrone modification groups (doc/ISO_MODS_PLAN.md) on the context instead of the
+    !> single operator: with them the factors fbhb, sbss, agb, pagb and redgb may vary per model (together with the IMF,
+    !> and with the metallicity when all_metallicities /= 0). delt and dell stay zero, evtype, masscut and agb_dust those of
+    !> the context. Status as opensps_context_build_ssp_ops.
+    subroutine opensps_context_build_ssp_ops_free_mods_handle(handle, all_metallicities, status) &
+        bind(C, name="opensps_context_build_ssp_ops_free_mods")
+        integer(c_int), value :: handle, all_metallicities
+        integer(c_int), intent(OUT) :: status
+        type(PARAMS) :: pset
+
+        status = 0
+        if (.not. handle_ok(handle)) then
+            status = 1
+            return
+        end if
+        associate(ctx => ctx_pool(handle)%c, st => ctx_store(handle))
+        if (.not. ctx%initialized .or. ctx%state%check_sps_setup == 0) then
+            status = 301
+            call opensps_set_error(301, 'opensps_context_build_ssp_ops_free_mods: context not set up')
+            return
+        end if
+        if (st%have_opset) then
+            call ssp_opset_free(st%opset)
+            st%have_opset = .false.
+        end if
+        call opensps_prepare_pset(ctx)
+        pset = ctx%pset
+        call ssp_opset_build_mods(ctx, pset, all_metallicities /= 0, st%opset)
+        st%have_opset = .true.
+        end associate
+    end subroutine opensps_context_build_ssp_ops_free_mods_handle
 
     !> Free context-managed SSP operators.
     subroutine opensps_context_free_ssp_ops_handle(handle, status) &

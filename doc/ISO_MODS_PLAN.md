@@ -81,59 +81,45 @@ linear in the IMF weights with coefficients that are simple functions of the par
 
 ## 4. Design
 
-### 4.1 Factors (`fbhb`, `sbss`, `agb`, `pagb`, `redgb`): coefficients on groups and virtual columns
+### 4.1 Factors (`fbhb`, `sbss`, `agb`, `pagb`, `redgb`): one operator set per group, combined with coefficients (as built)
 
-The operator is built once in a "free-modifications" form, at reference values chosen so that every structure
-exists (a blue HB star, a forced red-clump star, a straggler), with each entry divided by the reference factor
-that was applied, so that every entry is the unit-coefficient template weight of its star. Points (columns) are
-grouped by what scales them:
+The first design of this section (coefficients on groups of points and virtual columns, applied in the point-weight stage)
+needed edits to the weight kernels, one of them a HIP kernel. What was built leaves every kernel alone:
 
-* native points: group by phase (TP-AGB, post-AGB, phases 2-4, all other points: no group);
-* **virtual points** for derived stars: the original HB star at its own temperature, the original HB star at the
-  red-clump temperature, the blue stars, one per HB point of the parent (`parent(i)`, which the build already keeps),
-  and one straggler point per age. Their entries (and their mass, L_bol and ionizing-photon coefficients
-  `pt_cm`, `pt_cl`, `pt_q`) live in their own columns.
+* **The stars of an isochrone are partitioned into groups** by which factors scale their weight (`MOD_GRP_*` in
+  `opensps_ssp_operator`): plain (no factor), TP-AGB (`agb * redgb`), post-AGB (`pagb`), phases 2-4 (`redgb`), the horizontal-branch
+  stars at ages with the HB modification at their own temperature (with and without `redgb`), the original HB stars moved to
+  the red-clump temperature (MIST, BaSTI), the blue HB stars, and the stragglers. `ssp_operator_build(ctx, pset, op, group)`
+  builds the operator of one group: the group's stars only, from the reference modifications (identity; fbhb 0.5 and sbss 20 for
+  the groups of the HB modification and the stragglers) with the reference factors divided out of the entries, and only the native
+  points the entries use. The groups partition S: their sum with coefficient 1 is the operator of the reference.
+* **The coefficients** `ssp_mod_coefficients(pset, pdva)`: TP-AGB `agb * redgb`; post-AGB `pagb`; phases 2-4 `redgb`; Padova HB
+  `1 - ind fbhb` (times `redgb` when the star is in phases 2-4), blue `ind fbhb`; MIST and BaSTI HB `1 - ind`, moved
+  HB `ind (1 - fbhb) redgb`, blue `ind fbhb`; stragglers `sbss / 20` above `sbss = 1e-3`; `ind` is `fbhb` above its threshold (1e-4;
+  1e-3 for Padova), and the ages below `BHB_SBS_TIME` are in the plain and RGB groups. Their derivatives with respect to the factors
+  are `ssp_mod_coefficient_derivatives`.
+* **Forward** (`ssp_batch_age_sums_mods`): the unchanged `ssp_batch_age_sums_z` once per group set, its outputs combined per model
+  with the coefficients: the young and old age sums, the surviving mass and the ionizing photon rate are linear; L_bol is the
+  logarithmic blend, over the two bracketing metallicities, of the linear sum over groups of the groups' `sl` (which
+  `ssp_batch_age_sums_z` returns per metallicity pass on request); the remnants, which do not depend on the factors, come from
+  the plain group alone. The partition adds no cancellation: every term is a positive weight times a spectrum.
+* **Reverse** (`ssp_batch_age_sums_adjoint_mods`): per group the unchanged adjoint with the cotangents as given, except L_bol's,
+  and its outputs (SFH weights, IMF parameters, escaping fraction, metallicity weight) weighted by the coefficient; the cotangent
+  of each coefficient is the group's forward, recomputed, against the cotangents. L_bol's part is formed once from the groups'
+  sums, `d L / d sl(g, z) = L cz_z c_g / L_z`, and enters the group passes through one new input of `adj_lq` (the factor of the point
+  weights; the accelerated HIP kernel does not take it and is bypassed in this mode). The gradient rows are the chain rule from
+  the coefficients' cotangents.
+* **The isochrone arrays** (`NM = 2000` points per age; legacy FSPS stops where the HB modification would overflow them: MIST's
+  2nd and 12th metallicities): the operator of such a metallicity is built without the HB modification at those ages
+  (`hb_blocked`), and a model that needs it returns status 2.
+* **No cost where nothing varies:** the default operator and the resident basis are the code that existed; the group operators
+  are a separate build, requested by `opensps_context_build_ssp_ops_free_mods`. Verified: unit and regression suites unchanged and
+  identical outputs on those paths.
 
-Per model and age, the point-weight stage writes
-
-```
-x(p, m) = c_g(p)(m, age) * w_IMF(src(p), m) * w_sfh(age(p), m)
-```
-
-with `src(p)` the parent point (a native point is its own), `c_g` the group coefficient, and for the straggler
-point `src` replaced by the per-(age, model) sum of the HB points' IMF weights. The fold, the template product,
-and the mass / L_bol / Q reductions are untouched: they see more columns. The coefficients (`ind` is
-`fbhb > threshold` and age >= `BHB_SBS_TIME`, the latter static per age and baked into the column):
-
-| Group | Coefficient |
-|---|---|
-| TP-AGB | `agb * redgb` |
-| post-AGB | `pagb` |
-| phases 2-4 | `redgb` |
-| HB, original, own temperature | `1 - ind` (Padova: `1 - ind * fbhb`) |
-| HB, original, forced temperature (MIST) | `ind * (1 - fbhb)` |
-| blue HB stars | `ind * fbhb` (Padova: shared among the 10) |
-| straggler (of the age) | `(sbss / 20) * ind_s`, times the per-age HB sum |
-
-The Villaume factor, the Conroy-Gunn shifts and the metallicity are static and stay in the entries. The
-coefficients are formed in FP64 on the host per model and passed as a table `cg(n_groups, n_mod)`.
-
-**No cost when nothing varies.** The free-modifications operator is a separate build, requested explicitly
-(`opensps_context_build_ssp_ops` flag, `ssp_opset_build` argument). The default operator and the basis path are
-the code that exists. Inside the kernels the extra work for free modifications is one multiply on the point
-weights of the grouped points, in the weights stage, and the straggler reduction only when `sbss` varies; the
-host selects the call, not a branch per point.
-
-**Reverse.** The adjoint already produces, per model and point, the cotangent of the point weight. With
-
-```
-c_bar_g(m) = sum_{p in g} x_bar(p, m) * w_IMF(src(p), m) * w_sfh(age(p), m)
-```
-
-(a reduction over the grouped points only) the parameter rows follow analytically: `d c_g / d theta` is 0, 1,
-`-1`, `redgb` or `agb` (the products of the groups), and `(1 / 20) * ind_s * H` for `sbss`, where the straggler
-also sends its cotangent back to the HB points' IMF weights through `H`. `fbhb` is discontinuous at its threshold
-(`ind` jumps); the gradient is that of the side the model is on, and is documented as such.
+Checked against: the group operators combined with their coefficients against `generate_ssp_grid` with the factors on (spectra
+to 4e-15, MIST and Padova, factors at and below their thresholds); a 12-model batch against each model alone through the resident
+basis built with its factors (spectra 3e-15, magnitudes 7e-15, mass and L_bol 1e-15); the five gradient rows against central finite
+differences with full physics, with a free Kroupa IMF, and with a free metallicity.
 
 ### 4.2 `delt` and `dell`: one small operator per distinct pair
 

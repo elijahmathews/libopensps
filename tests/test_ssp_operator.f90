@@ -8,10 +8,12 @@ program test_ssp_operator
     !> point). Requires the FSPS data tree, like the regression tests.
 
     use opensps_precision, only: WP, KP
+    use opensps_constants, only: SAFE_FLOOR
     use opensps_types, only: PARAMS
     use opensps_api, only: opensps_create, opensps_setup, opensps_destroy
     use opensps_ssp, only: generate_ssp_grid, configure_imf_parameters
-    use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_evaluate, ssp_operator_free
+    use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_evaluate, ssp_operator_free, &
+                                    ssp_mod_coefficients, ssp_mod_coefficient_derivatives, MOD_NGRP
     use opensps_imf, only: imf_pack_params, IMF_NPAR
     use opensps_context, only: opensps_context_get_pset, opensps_context_prepare_pset, &
                             opensps_context_set_param_int, opensps_context_set_param_float, opensps_context_move_to_device
@@ -58,6 +60,30 @@ program test_ssp_operator
     call set_int('imf_type', 2)
     call set_float('imf1', 0.9_wp); call set_float('imf2', 1.9_wp); call set_float('imf3', 2.8_wp)
     call check("MIST modified, Kroupa 0.9/1.9/2.8")
+
+    ! The modification groups' operators, combined with the coefficients of the factors, against generate_ssp_grid
+    ! (delt, dell are not factors: zero here)
+    call set_float('delt', 0.0_wp); call set_float('dell', 0.0_wp)
+    call set_int('imf_type', 1)
+    call check_groups("MIST groups: fbhb 0.3, sbss 3, agb 0.6, pagb 2, redgb 1.2")
+    call set_float('fbhb', 0.0_wp)
+    call check_groups("MIST groups: no HB modification")
+    call set_float('fbhb', 5.0e-5_wp)
+    call check_groups("MIST groups: fbhb below its threshold")
+    call set_float('fbhb', 1.0e-3_wp)
+    call set_float('sbss', 0.0_wp)
+    call check_groups("MIST groups: fbhb 1e-3, no stragglers")
+    call set_float('sbss', 5.0e-4_wp)
+    call check_groups("MIST groups: sbss below its threshold")
+    call set_float('sbss', 12.0_wp)
+    call set_float('agb', 0.0_wp)
+    call check_groups("MIST groups: agb 0")
+    call set_float('agb', 1.0_wp); call set_float('pagb', 1.0_wp); call set_float('redgb', 0.5_wp)
+    call check_groups("MIST groups: redgb 0.5, sbss 12")
+    call set_float('fbhb', 0.3_wp); call set_float('agb', 0.6_wp); call set_float('pagb', 2.0_wp)
+    call set_int('imf_type', 2)
+    call check_groups("MIST groups: Kroupa, all factors")
+    call check_coefficient_derivatives()
     call ssp_operator_free(op)
     call opensps_destroy(ctx)
     deallocate(ctx)
@@ -81,6 +107,16 @@ program test_ssp_operator
     call set_int('imf_type', 3)
     call set_float('vdmc', 0.3_wp)
     call check("Padova modified, van Dokkum mc = 0.3")
+
+    call set_int('imf_type', 1)
+    call set_float('pagb', 1.5_wp); call set_float('redgb', 0.8_wp)
+    call check_groups("Padova groups: fbhb 0.3, sbss 2, agb 0.7, pagb 1.5, redgb 0.8")
+    call set_float('fbhb', 5.0e-4_wp)
+    call check_groups("Padova groups: fbhb below its threshold (above MIST's)")
+    call set_float('fbhb', 2.0e-3_wp)
+    call check_groups("Padova groups: fbhb 2e-3")
+    call set_float('fbhb', 0.0_wp); call set_float('sbss', 0.0_wp)
+    call check_groups("Padova groups: factors only")
     call ssp_operator_free(op)
     call opensps_destroy(ctx)
     deallocate(ctx)
@@ -177,6 +213,109 @@ contains
         call assert_true(dmass <= MASS_RTOL, label // ": masses", total_tests, total_failures)
         call assert_true(dlbol <= LBOL_ATOL, label // ": L_bol", total_tests, total_failures)
     end subroutine check
+
+    !> The operators of the modification groups (ssp_operator_build, group = 0 .. MOD_NGRP - 1), evaluated for the
+    !> context's IMF and combined with the coefficients of the context's factors (ssp_mod_coefficients), against
+    !> generate_ssp_grid with the factors on. Without remnants (the groups other than the plain one do not carry them).
+    subroutine check_groups(label)
+        character(len=*), intent(in) :: label
+        type(PARAMS) :: pset
+        type(ssp_operator_t) :: opg
+        real(WP), allocatable :: m_ref(:), l_ref(:), s_ref(:,:), m_g(:), l_g(:), s_g(:,:), m_sum(:), l_sum(:), s_sum(:,:)
+        real(WP) :: p(IMF_NPAR), c(0:MOD_NGRP - 1), dspec, dmass, dlbol
+        real(WP), parameter :: FLOOR_REL = 1.0e7_wp
+        integer :: nt, ns, t, i, g
+        character(len=200) :: msg
+
+        call set_int('add_stellar_remnants', 0)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        nt = ctx%state%ntfull
+        ns = ctx%state%nspec
+        allocate(m_ref(nt), l_ref(nt), s_ref(ns, nt), m_g(nt), l_g(nt), s_g(ns, nt), m_sum(nt), l_sum(nt), s_sum(ns, nt))
+        call generate_ssp_grid(ctx, pset, m_ref, l_ref, s_ref)
+        call configure_imf_parameters(ctx, pset)
+        call imf_pack_params(ctx, p)
+        c = ssp_mod_coefficients(pset, trim(ctx%state%isoc_type) == 'pdva')
+        s_sum = 0.0_wp; m_sum = 0.0_wp; l_sum = 0.0_wp
+        do g = 0, MOD_NGRP - 1
+            call ssp_operator_build(ctx, pset, opg, group=g)
+            call ssp_operator_evaluate(ctx, pset, opg, ctx%imf_type_val, p, m_g, l_g, s_g)
+            s_sum = s_sum + c(g) * s_g
+            m_sum = m_sum + c(g) * m_g
+            l_sum = l_sum + c(g) * 10.0_wp**l_g
+        end do
+        call ssp_operator_free(opg)
+        dspec = 0.0_wp; dmass = 0.0_wp; dlbol = 0.0_wp
+        do t = 1, nt
+            do i = 1, ns
+                ! (every group's spectrum is floored at the smallest normal number of the kernel precision where it has no
+                ! flux, so the sum over the MOD_NGRP groups carries up to MOD_NGRP * c of these floors, a relative error
+                ! of ~1e-3 at a pixel of 1e3 floors, which kernel rounding near the flush threshold makes appear on one
+                ! compiler and not another (nvfortran FP32): the pixels below 1e7 floors, where the floors exceed
+                ! the tolerance, are not compared relatively but only required to be as small)
+                if (s_ref(i, t) > FLOOR_REL * max(SAFE_FLOOR, real(tiny(1.0_KP), WP))) then
+                    dspec = max(dspec, abs(s_sum(i, t) / s_ref(i, t) - 1.0_wp))
+                else
+                    dspec = max(dspec, merge(0.0_wp, abs(s_sum(i, t)), &
+                                             abs(s_sum(i, t)) < 10.0_wp * FLOOR_REL * max(SAFE_FLOOR, real(tiny(1.0_KP), WP))))
+                end if
+            end do
+            if (m_ref(t) > 0.0_wp) then
+                dmass = max(dmass, abs(m_sum(t) / m_ref(t) - 1.0_wp))
+            else
+                dmass = max(dmass, abs(m_sum(t)))
+            end if
+            if (l_ref(t) > -90.0_wp) dlbol = max(dlbol, abs(log10(max(l_sum(t), 1.0e-300_wp)) - l_ref(t)))
+        end do
+        call print_group(label)
+        write(msg, '(a, es9.2, a, es9.2, a, es9.2)') 'spectra max rel ', dspec, ', mass max rel ', dmass, &
+            ', log L_bol max abs ', dlbol
+        write(*, '(a, a)') '#   ', trim(msg)
+        call assert_true(dspec <= SPEC_RTOL, label // ": spectra", total_tests, total_failures)
+        call assert_true(dmass <= MASS_RTOL, label // ": masses", total_tests, total_failures)
+        call assert_true(dlbol <= LBOL_ATOL, label // ": L_bol", total_tests, total_failures)
+        call set_int('add_stellar_remnants', 1)
+    end subroutine check_groups
+
+    !> ssp_mod_coefficient_derivatives against central differences of ssp_mod_coefficients, for MIST/BaSTI and for Padova
+    !> and on each side of the thresholds of fbhb (1e-4 for MIST, 1e-3 for Padova) and sbss (1e-3). The coefficients are
+    !> polynomials of degree 2 in the factors, so the differences are exact to rounding.
+    subroutine check_coefficient_derivatives()
+        real(WP), parameter :: FB(4) = [0.3_wp, 5.0e-5_wp, 5.0e-4_wp, 0.0_wp], SB(4) = [4.0_wp, 5.0e-4_wp, 12.0_wp, 0.0_wp]
+        real(WP), parameter :: H = 1.0e-6_wp
+        type(PARAMS) :: p0, pp, pm
+        real(WP) :: dc(0:MOD_NGRP - 1, 5), cp(0:MOD_NGRP - 1), cm(0:MOD_NGRP - 1), worst
+        integer :: ic, k, ipd
+        logical :: pdva
+
+        call print_group("Isochrone modification groups: coefficients' derivatives against central differences")
+        worst = 0.0_wp
+        do ipd = 1, 2
+            pdva = ipd == 2
+            do ic = 1, 4
+                p0 = PARAMS()
+                p0%fbhb = FB(ic); p0%sbss = SB(ic); p0%agb = 0.7_wp; p0%pagb = 1.3_wp; p0%redgb = 0.9_wp
+                dc = ssp_mod_coefficient_derivatives(p0, pdva)
+                do k = 1, 5
+                    pp = p0; pm = p0
+                    select case (k)
+                    case (1); pp%fbhb = p0%fbhb + H; pm%fbhb = p0%fbhb - H
+                    case (2); pp%sbss = p0%sbss + H; pm%sbss = p0%sbss - H
+                    case (3); pp%agb = p0%agb + H; pm%agb = p0%agb - H
+                    case (4); pp%pagb = p0%pagb + H; pm%pagb = p0%pagb - H
+                    case (5); pp%redgb = p0%redgb + H; pm%redgb = p0%redgb - H
+                    end select
+                    cp = ssp_mod_coefficients(pp, pdva)
+                    cm = ssp_mod_coefficients(pm, pdva)
+                    worst = max(worst, maxval(abs(dc(:, k) - (cp - cm) / (2.0_wp * H))))
+                end do
+            end do
+        end do
+        write(*, '(a, es9.2)') '#   largest difference ', worst
+        call assert_true(worst <= 1.0e-8_wp, "coefficient derivatives against central differences (MIST and Padova)", &
+                         total_tests, total_failures)
+    end subroutine check_coefficient_derivatives
 
     subroutine set_int(key, value)
         character(len=*), intent(in) :: key

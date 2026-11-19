@@ -47,12 +47,13 @@ program test_csp_batch_grad
                                  BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, BGRAD_AFE, BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, &
                                  BGRAD_FBURST, BGRAD_TBURST, BGRAD_SF_START, BGRAD_ZRED, BGRAD_SIGMA_SMOOTH, BGRAD_SF_TRUNC, &
                                  BGRAD_SF_SLOPE, BGRAD_IMF1, BGRAD_IMF2, BGRAD_IMF3, BGRAD_AGN_TAU, &
-                                 BGRAD_IGM_FACTOR, BGRAD_VDMC, BGRAD_MDAVE, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, NBGRAD
+                                 BGRAD_IGM_FACTOR, BGRAD_VDMC, BGRAD_MDAVE, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, &
+                                 NBGRAD, BGRAD_FBHB, BGRAD_SBSS, BGRAD_AGB, BGRAD_PAGB, BGRAD_REDGB
     use opensps_ssp, only: generate_ssp_grid
     use opensps_cue, only: cue_data_dir, cue_w, cue_load_dir, cue_unload, cue_weights_t
     use cue_test_library, only: cue_synthetic, cue_write_library
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build
-    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free
+    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                                opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
                                opensps_context_set_param_int, opensps_context_set_param_float
@@ -99,6 +100,12 @@ program test_csp_batch_grad
     real(WP) :: smooth_sigma = 0.0_wp   ! sigma_smooth of every model
     !> The IMF free per model: the batch takes the operator set opset (cb)
     logical :: use_ops = .false.
+    !> The isochrone modification factors are free per model (a set of ssp_opset_build_mods): their rows are checked, and the
+    !> models carry values of them
+    logical :: mods_on = .false.
+    !> Model 5's metallicity brackets an isochrone set of which the horizontal-branch stars do not fit the arrays (MIST,
+    !> the 2nd metallicity: legacy FSPS stops there): it is given no HB modification (such a model is refused)
+    logical :: hb_limited = .false.
     type(ssp_opset_t) :: opset
     !> The cotangents of the current check (the loss L is formed with them)
     real(WP), allocatable :: lbar_m(:, :), lbar_s(:, :)
@@ -221,6 +228,25 @@ program test_csp_batch_grad
     use_ops = .false.
     call ssp_opset_free(opset)
     call set_int('imf_type', 1)
+    ! The isochrone modification factors free per model (fbhb, sbss, agb, pagb, redgb: the group operators)
+    call build_opset_mods(.false.)
+    use_ops = .true.
+    mods_on = .true.
+    call set_int('add_neb_emission', 1)
+    call set_int('add_dust_emission', 1)
+    call check_grad(2, 0.513_wp, 1, 1, .false., "Modification factors free (group operators), z = 0.513, IGM, nebular, " // &
+                    "dust emission, AGN, SFH")
+    call set_int('add_dust_emission', 0)
+    call set_int('add_neb_emission', 0)
+    call check_grad(1, 0.0_wp, 0, 0, .true., "Modification factors free (group operators), z = 0, weight matrix")
+    call ssp_opset_free(opset)
+    call set_int('imf_type', 2)
+    call build_opset_mods(.false.)
+    call check_grad(1, 0.0_wp, 0, 0, .true., "Modification factors and Kroupa IMF free (group operators), z = 0, weight matrix")
+    call ssp_opset_free(opset)
+    call set_int('imf_type', 1)
+    mods_on = .false.
+    use_ops = .false.
     ! Per-model metallicity: every metallicity's basis resident (the SSPs interpolated in log Z)
     call opensps_setup(ctx, 0, isoc_type_in='mist', spec_type_in='miles', dust_type_in='DL07')
     call opensps_context_move_to_device(ctx)
@@ -269,6 +295,21 @@ program test_csp_batch_grad
     use_ops = .false.
     call ssp_opset_free(opset)
     call set_int('imf_type', 1)
+    ! The modification factors and the metallicity free per model: the L_bol blend over the two metallicities and its dz
+    call build_opset_mods(.true.)
+    use_ops = .true.
+    mods_on = .true.
+    hb_limited = .true.
+    call set_int('add_neb_emission', 1)
+    call set_int('add_dust_emission', 1)
+    call check_grad(4, 0.513_wp, 1, 1, .false., "Modification factors and logzsol free (group operators), z = 0.513, " // &
+                    "IGM, nebular, dust emission, AGN, SFH")
+    call set_int('add_dust_emission', 0)
+    call set_int('add_neb_emission', 0)
+    mods_on = .false.
+    hb_limited = .false.
+    use_ops = .false.
+    call ssp_opset_free(opset)
 
     ! Free what the program allocated: the sanitizer build (nightly ASan) reports it as leaked otherwise
     if (allocated(lbar_m)) deallocate(lbar_m, lbar_s, lbar_mass, lbar_lbol)
@@ -309,6 +350,35 @@ contains
         call ssp_operator_build(ctx, pset, ops(1))
         call ssp_opset_build(ops, opset)
     end subroutine build_opset
+
+    !> The group operators of the modification factors (ssp_opset_build_mods) for the context's metallicity, or for every
+    !> metallicity.
+    subroutine build_opset_mods(all_z)
+        logical, intent(in) :: all_z
+        type(PARAMS) :: pset
+        call set_float('fbhb', 0.0_wp); call set_float('sbss', 0.0_wp); call set_float('agb', 1.0_wp)
+        call set_float('pagb', 1.0_wp); call set_float('redgb', 1.0_wp)
+        call set_model(1, 0.0_wp)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        call ssp_opset_build_mods(ctx, pset, all_z, opset)
+    end subroutine build_opset_mods
+
+    !> The modification factors of model m (a model of each regime: below and above the thresholds of fbhb and sbss).
+    subroutine set_mods(p, m)
+        type(PARAMS), intent(inout) :: p
+        integer, intent(in) :: m
+        real(WP), parameter :: FB(6) = [0.0_wp, 0.3_wp, 0.6_wp, 0.15_wp, 0.8_wp, 0.45_wp]
+        real(WP), parameter :: SB(6) = [0.0_wp, 4.0_wp, 0.0_wp, 9.0_wp, 14.0_wp, 2.5_wp]
+        real(WP), parameter :: AG(6) = [1.0_wp, 0.6_wp, 1.4_wp, 0.9_wp, 1.8_wp, 0.5_wp]
+        real(WP), parameter :: PA(6) = [1.0_wp, 1.5_wp, 0.5_wp, 2.0_wp, 1.0_wp, 0.8_wp]
+        real(WP), parameter :: RG(6) = [1.0_wp, 0.8_wp, 1.2_wp, 1.0_wp, 0.7_wp, 1.4_wp]
+        p%fbhb = FB(m); p%sbss = SB(m); p%agb = AG(m); p%pagb = PA(m); p%redgb = RG(m)
+        if (hb_limited .and. m == 5) then
+            p%fbhb = 0.0_wp
+            p%sbss = 0.0_wp
+        end if
+    end subroutine set_mods
 
     !> An operator per metallicity of the context (the IMF and the metallicity free per model).
     subroutine build_opset_all()
@@ -526,6 +596,7 @@ contains
             call set_model(m, merge(ZLIST(m), zred, zred_per_model))
             call opensps_context_prepare_pset(ctx)
             call opensps_context_get_pset(ctx, psets(m))
+            if (mods_on) call set_mods(psets(m), m)
             call sfh_weights_core(ctx, psets(m), psets(m)%tage, 1, w(:, m:m), t1, t2)
         end do
 
@@ -921,32 +992,44 @@ contains
         type(PARAMS), intent(in) :: psets(:)
         real(WP), intent(in) :: w(:, :), pbar(:, :)
         logical, intent(in) :: given_w
-        integer, parameter :: NQ = 35
+        integer, parameter :: NQ = 40
+        integer :: nq_use
         integer, parameter :: ROWS(NQ) = [BGRAD_DUST1, BGRAD_DUST2, BGRAD_DUST3, BGRAD_DUST_INDEX, BGRAD_DUST1_INDEX, &
                                           BGRAD_FRAC_OBRUN, BGRAD_FRAC_NODUST, BGRAD_MWR, BGRAD_UVB, BGRAD_DUSTE_QPAH, &
                                           BGRAD_DUSTE_UMIN, BGRAD_DUSTE_GAMMA, BGRAD_GAS_LOGZ, BGRAD_GAS_LOGU, &
                                           BGRAD_LOGZSOL, BGRAD_TAGE, BGRAD_TAU, BGRAD_CONST, BGRAD_FBURST, BGRAD_TBURST, &
                                           BGRAD_SF_START, BGRAD_ZRED, BGRAD_SF_TRUNC, BGRAD_SF_SLOPE, BGRAD_IMF1, &
                                           BGRAD_IMF2, BGRAD_IMF3, BGRAD_AGN_TAU, BGRAD_IGM_FACTOR, &
-                                          BGRAD_VDMC, BGRAD_MDAVE, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, BGRAD_AFE]
+                                          BGRAD_VDMC, BGRAD_MDAVE, BGRAD_GAS_LOGN, BGRAD_GAS_LOGNO, BGRAD_GAS_LOGCO, BGRAD_AFE, &
+                                          BGRAD_FBHB, BGRAD_SBSS, BGRAD_AGB, BGRAD_PAGB, BGRAD_REDGB]
         character(len=12), parameter :: NAMES(NQ) = [character(len=12) :: 'dust1', 'dust2', 'dust3', 'dust_index', &
                                                      'dust1_index', 'frac_obrun', 'frac_nodust', 'mwr', 'uvb', &
                                                      'duste_qpah', 'duste_umin', 'duste_gamma', 'gas_logz', 'gas_logu', &
                                                      'logzsol', 'tage', 'tau', 'const', 'fburst', 'tburst', 'sf_start', &
                                                      'zred', 'sf_trunc', 'sf_slope', 'imf1', 'imf2', 'imf3', 'agn_tau', &
-                                                     'igm_factor', 'vdmc', 'mdave', 'gas_logn', 'gas_logno', 'gas_logco', 'afe']
+                                                     'igm_factor', 'vdmc', 'mdave', 'gas_logn', 'gas_logno', 'gas_logco', 'afe', &
+                                                     'fbhb', 'sbss', 'agb', 'pagb', 'redgb']
         type(PARAMS) :: pp(size(psets))
         real(WP) :: g_fd(NQ, size(psets)), lp, lm, l0, l3, x, h, worst(NQ), gmax
         integer :: q, m, worst_m(NQ)
         logical :: bound, bnd(NQ, size(psets))
 
-        do q = 1, NQ
+        nq_use = merge(NQ, 35, mods_on)
+        g_fd = 0.0_wp
+        do q = 1, nq_use
             do m = 1, size(psets)
                 pp = psets
                 x = get_par(pp(m), q)
                 ! Parameters at their bound 0 (masses of dust, fractions): one-sided, second order
                 bound = q /= 4 .and. q /= 5 .and. q /= 8 .and. q /= 9 .and. q /= 15 .and. q /= 24 .and. q < 32 .and. x <= 0.0_wp
                 bnd(q, m) = bound
+                ! (a batch with free modification factors: the rows the factors can touch, the factors, the metallicity and
+                ! the IMF's parameters, are checked; the others (dust, SFH, redshift, ...) are those of the groups above,
+                ! where the age sums are not combined from the groups, and cost ~500 forward batches of 8 groups here)
+                if (mods_on .and. .not. (q == 15 .or. (q >= 25 .and. q <= 27) .or. q == 30 .or. q == 31 .or. q >= 36)) then
+                    g_fd(q, m) = pbar(ROWS(q), m)
+                    cycle
+                end if
                 ! (sf_trunc = 0: no truncation, not a bound of a continuous parameter; not checked)
                 if (q == 23 .and. x <= 0.0_wp) then
                     g_fd(q, m) = pbar(ROWS(q), m)
@@ -954,6 +1037,13 @@ contains
                 end if
                 ! (zred: zero at z = 0 by definition, the rest frame; not checked there)
                 if (q == 22 .and. x <= 0.0_wp) then
+                    g_fd(q, m) = pbar(ROWS(q), m)
+                    cycle
+                end if
+                ! (fbhb and sbss act through thresholds, 1e-4 and 1e-3: the steps of kernel precision, 1e-2 and more,
+                ! cross them from a model below them, where the one-sided derivative is that of its side; not checked
+                ! there in FP32)
+                if (LINEAR_ONLY .and. (q == 36 .or. q == 37) .and. x < 0.05_wp) then
                     g_fd(q, m) = pbar(ROWS(q), m)
                     cycle
                 end if
@@ -1016,7 +1106,7 @@ contains
         worst_m = 0
         do m = 1, size(psets)
             gmax = maxval(abs(g_fd(:, m)))
-            do q = 1, NQ
+            do q = 1, nq_use
                 x = abs(pbar(ROWS(q), m) - g_fd(q, m)) / max(abs(g_fd(q, m)), &
                                                                merge(1.0e-2_wp, 1.0e-3_wp, LINEAR_ONLY) * gmax, &
                                                                merge(tiny(1.0_wp), 0.1_wp, LINEAR_ONLY))
@@ -1039,7 +1129,7 @@ contains
                 end if
             end do
         end do
-        do q = 1, NQ
+        do q = 1, nq_use
             write(*, '(A,A12,A,ES10.2,A,I0,A,2ES14.6)') "# ", NAMES(q), ": worst relative difference ", worst(q), &
                 " (model ", worst_m(q), "): ", pbar(ROWS(q), max(worst_m(q), 1)), g_fd(q, max(worst_m(q), 1))
         end do
@@ -1193,6 +1283,11 @@ contains
         case (32); get_par = p%gas_logn
         case (33); get_par = p%gas_logno
         case (34); get_par = p%gas_logco
+        case (36); get_par = p%fbhb
+        case (37); get_par = p%sbss
+        case (38); get_par = p%agb
+        case (39); get_par = p%pagb
+        case (40); get_par = p%redgb
         case default; get_par = p%afe
         end select
     end function get_par
@@ -1236,6 +1331,11 @@ contains
         case (32); p%gas_logn = x
         case (33); p%gas_logno = x
         case (34); p%gas_logco = x
+        case (36); p%fbhb = x
+        case (37); p%sbss = x
+        case (38); p%agb = x
+        case (39); p%pagb = x
+        case (40); p%redgb = x
         case default; p%afe = x
         end select
     end subroutine set_par

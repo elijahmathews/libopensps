@@ -30,7 +30,7 @@ program test_csp_batch
 #endif
     use opensps_ssp, only: generate_ssp_grid
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_free
-    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free
+    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                             opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
                             opensps_context_set_param_int, opensps_context_set_param_float, &
@@ -115,6 +115,7 @@ program test_csp_batch
     call check_imf_many_models()
     call check_imf_unsupported()
     call check_basis_mods_guard()
+    call check_mods_free_forward()
     ! compute_csp_scenario: all-ages outputs against single-age calls, in each mode, on the
     ! one-metallicity basis
     call build_basis()
@@ -166,6 +167,8 @@ program test_csp_batch
     call build_basis()
     ! Per-model metallicity: all bases resident, logzsol varied
     call check_batch_z()
+    call check_mods_hb_blocked()
+    call check_mods_set_validation()
     call check_batch_afe()
     call check_cue_z()
     call check_cue_afe()
@@ -652,6 +655,228 @@ contains
         end do
         deallocate(mags)
     end subroutine check_basis_mods_guard
+
+    !> The isochrone modification factors fbhb, sbss, agb, pagb and redgb free per model (a set from ssp_opset_build_mods): every
+    !> model of one batch against the same model alone through the context's resident basis built with its factors (the
+    !> basis path, which generate_ssp_grid and legacy parity check), spectra, magnitudes, mass, L_bol and dust mass.
+    subroutine check_mods_free_forward()
+        integer, parameter :: NMOD = 12
+        real(WP), parameter :: fb(NMOD) = [0.0_wp, 0.2_wp, 0.5_wp, 0.0_wp, 1.0e-5_wp, 0.7_wp, 0.1_wp, 0.0_wp, 0.3_wp, 0.9_wp, &
+                                           0.05_wp, 0.4_wp]
+        real(WP), parameter :: sb(NMOD) = [0.0_wp, 0.0_wp, 5.0_wp, 12.0_wp, 0.0_wp, 20.0_wp, 2.0_wp, 5.0e-4_wp, 8.0_wp, 0.0_wp, &
+                                           3.0_wp, 15.0_wp]
+        real(WP), parameter :: ag(NMOD) = [1.0_wp, 0.5_wp, 2.0_wp, 0.8_wp, 0.0_wp, 1.5_wp, 1.0_wp, 1.0_wp, 0.3_wp, 1.2_wp, &
+                                           1.0_wp, 0.9_wp]
+        real(WP), parameter :: pa(NMOD) = [1.0_wp, 1.0_wp, 1.0_wp, 2.0_wp, 0.5_wp, 3.0_wp, 1.0_wp, 0.0_wp, 1.0_wp, 1.5_wp, &
+                                           0.7_wp, 1.0_wp]
+        real(WP), parameter :: rg(NMOD) = [1.0_wp, 1.1_wp, 0.8_wp, 1.0_wp, 1.5_wp, 0.6_wp, 1.0_wp, 2.0_wp, 1.0_wp, 0.9_wp, &
+                                           1.3_wp, 0.5_wp]
+        type(PARAMS) :: pset, psets(NMOD)
+        type(ssp_opset_t) :: op
+        real(WP), allocatable :: spec(:, :), mags(:, :), ref_spec(:, :), ref_mags(:, :), s1(:, :), g1(:, :)
+        real(WP) :: mass(NMOD), lbol(NMOD), mdust(NMOD), ref_mass(NMOD), ref_lbol(NMOD), ref_mdust(NMOD)
+        real(WP) :: d_spec, d_mag, d_scal
+        integer :: m, status, nspec, nbands
+
+        call print_group("Batched CSP: isochrone modification factors free per model (group operators)")
+        nspec = ctx%state%nspec
+        nbands = ctx%state%nbands
+        allocate(spec(nspec, NMOD), mags(nbands, NMOD), ref_spec(nspec, NMOD), ref_mags(nbands, NMOD), s1(nspec, 1), &
+                 g1(nbands, 1))
+        call set_int('imf_type', 1)
+        call set_factors(0.0_wp, 0.0_wp, 1.0_wp, 1.0_wp, 1.0_wp)
+        call set_model(1, 0.5_wp)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        call ssp_opset_build_mods(ctx, pset, .false., op)
+        do m = 1, NMOD
+            call set_model(m, 0.5_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
+            psets(m)%fbhb = fb(m); psets(m)%sbss = sb(m); psets(m)%agb = ag(m); psets(m)%pagb = pa(m); psets(m)%redgb = rg(m)
+        end do
+        call compute_csp_batch(ctx, psets, mags, status, spec=spec, mass=mass, lbol=lbol, mdust=mdust, ssp_ops=op)
+        call assert_true(status == 0, "free factors: status 0", total_tests, total_failures)
+
+        do m = 1, NMOD
+            call set_factors(fb(m), sb(m), ag(m), pa(m), rg(m))
+            call build_basis()
+            call compute_csp_batch(ctx, psets(m:m), g1, status, spec=s1, mass=ref_mass(m:m), lbol=ref_lbol(m:m), &
+                                   mdust=ref_mdust(m:m))
+            ref_spec(:, m) = s1(:, 1)
+            ref_mags(:, m) = g1(:, 1)
+        end do
+        call set_factors(0.0_wp, 0.0_wp, 1.0_wp, 1.0_wp, 1.0_wp)
+        call build_basis()
+        call max_differences(spec, mags, ref_spec, ref_mags, d_spec, d_mag)
+        d_scal = max(maxval(abs(mass / ref_mass - 1.0_wp)), maxval(abs(lbol - ref_lbol)))
+        write(*, '(A,4ES10.2)') "# max difference (spectrum, mag, mass/lbol, mdust): ", d_spec, d_mag, d_scal, &
+            maxval(abs(mdust / ref_mdust - 1.0_wp))
+        call assert_true(d_spec <= IMF_SPEC_RTOL, "free factors: spectra", total_tests, total_failures)
+        call assert_true(d_mag <= MAG_TOL, "free factors: magnitudes", total_tests, total_failures)
+        call assert_true(d_scal <= IMF_SCAL_TOL, "free factors: mass, L_bol", total_tests, total_failures)
+        call assert_true(maxval(abs(mdust / ref_mdust - 1.0_wp)) <= IMF_SCAL_TOL, "free factors: dust mass", &
+                         total_tests, total_failures)
+
+        ! A delt or dell on a model: not free yet (status 2); a model with agb_dust or masscut of its own likewise
+        psets(2)%delt = 0.05_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 2, "free factors: delt on a model, status 2", total_tests, total_failures)
+        psets(2)%delt = 0.0_wp
+        psets(2)%masscut = 50.0_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 2, "free factors: masscut on a model, status 2", total_tests, total_failures)
+        call ssp_opset_free(op)
+        deallocate(spec, mags, ref_spec, ref_mags, s1, g1)
+    end subroutine check_mods_free_forward
+
+    !> The horizontal-branch limit of the group operators. Where the HB stars would not fit the isochrone arrays (NM = 2000:
+    !> MIST's 2nd and 12th metallicities, where legacy FSPS stops) the operator of that metallicity is built without the
+    !> modification: a model that needs it (fbhb or sbss above their thresholds) is refused with status 2, one that does not
+    !> is served. With one metallicity in the set and with the metallicity free per model (the blocked one either end of a
+    !> model's interval). Needs the context of every metallicity.
+    subroutine check_mods_hb_blocked()
+        integer, parameter :: NMOD = 6
+        type(PARAMS) :: pset, psets(NMOD)
+        type(ssp_opset_t) :: op
+        real(WP), allocatable :: mags(:, :)
+        real(WP) :: zc(3)
+        integer :: m, status, nbands, zm0, nzz
+
+        call print_group("Batched CSP: group operators at a metallicity whose horizontal-branch stars do not fit the arrays")
+        nbands = ctx%state%nbands
+        nzz = ctx%state%nz
+        allocate(mags(nbands, NMOD))
+        call opensps_context_get_pset(ctx, pset)
+        zm0 = pset%zmet
+        call set_int('imf_type', 1)
+        call set_factors(0.0_wp, 0.0_wp, 1.0_wp, 1.0_wp, 1.0_wp)
+        call set_int('zmet', 2)
+        do m = 1, NMOD
+            call set_model(m, 0.5_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
+        end do
+        call ssp_opset_build_mods(ctx, psets(1), .false., op)
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 0, "blocked metallicity, no HB modification: status 0", total_tests, total_failures)
+        psets(3)%fbhb = 0.5_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 2, "blocked metallicity, fbhb above its threshold: status 2", total_tests, total_failures)
+        psets(3)%fbhb = 0.0_wp
+        psets(4)%sbss = 12.0_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 2, "blocked metallicity, sbss above its threshold: status 2", total_tests, total_failures)
+        psets(4)%sbss = 0.0_wp
+        ! ... and with the metallicity free per model: the blocked one the lower or the upper of a model's interval
+        call ssp_opset_free(op)
+        call ssp_opset_build_mods(ctx, psets(1), .true., op)
+        zc(1) = 0.5_wp * (log10(ctx%state%zlegend(2) / ctx%state%zsol) + log10(ctx%state%zlegend(3) / ctx%state%zsol))
+        zc(2) = 0.5_wp * (log10(ctx%state%zlegend(nzz - 1) / ctx%state%zsol) + log10(ctx%state%zlegend(nzz) / ctx%state%zsol))
+        zc(3) = log10(ctx%state%zlegend(6) / ctx%state%zsol)
+        psets%logzsol = zc(3)
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 0, "free metallicity, no HB modification: status 0", total_tests, total_failures)
+        psets(1)%logzsol = zc(1); psets(1)%fbhb = 0.4_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 2, "free metallicity, the lower of the interval blocked: status 2", total_tests, total_failures)
+        psets(1)%logzsol = zc(3); psets(1)%fbhb = 0.0_wp
+        psets(5)%logzsol = zc(2); psets(5)%fbhb = 0.4_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 2, "free metallicity, the upper of the interval blocked: status 2", total_tests, total_failures)
+        call ssp_opset_free(op)
+        call set_int('zmet', zm0)
+        deallocate(mags)
+    end subroutine check_mods_hb_blocked
+
+    !> The checks of compute_csp_batch on the operator set of the free factors (the plain group's operators stand for
+    !> the set): a set that was never built (status 1), one that does not hold every metallicity of the context, with a
+    !> metallicity out of place, an empty operator, other spectra or ages than the context's (status 3, 3, 1, 3), an age
+    !> without stars (status 2), a single-metallicity set against models of another metallicity (status 3), and a shift
+    !> dell on a model (status 2 until the shifts are free). Each corruption is undone after its check.
+    subroutine check_mods_set_validation()
+        integer, parameter :: NMOD = 3
+        type(PARAMS) :: psets(NMOD)
+        type(ssp_opset_t) :: op, never
+        real(WP), allocatable :: mags(:, :)
+        integer :: m, status, zm0, nz_save, zmet_save, npts_save, nspec_save
+        logical :: age_save
+        type(PARAMS) :: pset
+
+        call print_group("Batched CSP: the checks of the operator set of the free factors")
+        allocate(mags(ctx%state%nbands, NMOD))
+        call opensps_context_get_pset(ctx, pset)
+        zm0 = pset%zmet
+        call set_int('imf_type', 1)
+        call set_factors(0.0_wp, 0.0_wp, 1.0_wp, 1.0_wp, 1.0_wp)
+        do m = 1, NMOD
+            call set_model(m, 0.5_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
+        end do
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=never)
+        call assert_true(status == 1, "a set that was never built: status 1", total_tests, total_failures)
+
+        call ssp_opset_build_mods(ctx, psets(1), .true., op)
+        psets%logzsol = 0.0_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 0, "the set of every metallicity: status 0", total_tests, total_failures)
+        nz_save = op%grp(0)%nz
+        op%grp(0)%nz = nz_save - 1
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 3, "a set without every metallicity of the context: status 3", total_tests, total_failures)
+        op%grp(0)%nz = nz_save
+        zmet_save = op%grp(0)%ops(1)%zmet
+        op%grp(0)%ops(1)%zmet = zmet_save + 4
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 3, "an operator of another metallicity than its place: status 3", total_tests, total_failures)
+        op%grp(0)%ops(1)%zmet = zmet_save
+        npts_save = op%grp(0)%ops(1)%n_pts
+        op%grp(0)%ops(1)%n_pts = 0
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 1, "an empty operator: status 1", total_tests, total_failures)
+        op%grp(0)%ops(1)%n_pts = npts_save
+        nspec_save = op%grp(0)%ops(1)%nspec
+        op%grp(0)%ops(1)%nspec = nspec_save + 1
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 3, "an operator of other spectra than the context's: status 3", total_tests, total_failures)
+        op%grp(0)%ops(1)%nspec = nspec_save
+        age_save = op%grp(0)%ops(1)%age_on(1)
+        op%grp(0)%ops(1)%age_on(1) = .false.
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 2, "an operator with an age without stars: status 2", total_tests, total_failures)
+        op%grp(0)%ops(1)%age_on(1) = age_save
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 0, "the set again as built: status 0", total_tests, total_failures)
+        call ssp_opset_free(op)
+
+        ! One metallicity in the set, models of another one
+        call set_int('zmet', 10)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        call ssp_opset_build_mods(ctx, pset, .false., op)
+        do m = 1, NMOD
+            psets(m)%zmet = 3
+        end do
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 3, "a set of one metallicity, models of another: status 3", total_tests, total_failures)
+        do m = 1, NMOD
+            psets(m)%zmet = 10
+        end do
+        ! (dell on a model: the shift is not free here)
+        psets(2)%dell = 0.05_wp
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 2, "dell on a model: status 2", total_tests, total_failures)
+        call ssp_opset_free(op)
+        call set_int('zmet', zm0)
+        deallocate(mags)
+    end subroutine check_mods_set_validation
+
+    subroutine set_factors(fbhb, sbss, agb, pagb, redgb)
+        real(WP), intent(in) :: fbhb, sbss, agb, pagb, redgb
+        call set_float('fbhb', fbhb); call set_float('sbss', sbss); call set_float('agb', agb)
+        call set_float('pagb', pagb); call set_float('redgb', redgb)
+    end subroutine set_factors
 
     subroutine imf_case(label, imf_type, mlo, mhi)
         character(len=*), intent(in) :: label
