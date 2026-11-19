@@ -67,13 +67,15 @@ the nebular continuum (forward and backward) and the interpolated mass and L_bol
 matches (five, plus the two of `model_sums`); the derivative forms and the sites with other structure stay as they are. The saving is
 a few lines: the point is one definition of the blend.
 
-**Step 4, the driver in stages (first part done, #134).** `compute_csp_batch` was 1037 lines; four blocks that were host-only code with a
-clear input and output are routines now (867 lines): `batch_check_shapes` (the sizes of the optional arguments, and the modes they
-make: parts, grad, given_w), `batch_check_models` (the values of the models this path does not support, and zvar),
-`batch_imf_vectors` (the IMF parameter vector of every model and the operators' work arrays) and `batch_chain_derivatives` (the chain-rule
-factors of the reverse pass). What is not done: the device-steered stages themselves (SFH weights, the nebular and attenuation calls,
-smoothing, photometry) are still inline in the driver; splitting them needs a workspace type for the pointers into `ipk`, `rpk`, `lpk`
-and `rout` and the arrays they share, and the device rules about mapping derived types make each cut something to check on the R9700.
+**Step 4, the driver in stages (two parts done, #134 and #135).** `compute_csp_batch` was 1037 lines; it is 809 now. Part 1 (#134): the
+host-only blocks with a clear input and output are routines: `batch_check_shapes` (the sizes of the optional arguments, and the modes
+they make), `batch_check_models` (the values of the models this path does not support, and zvar), `batch_imf_vectors` (the IMF parameter
+vector of every model and the operators' work arrays) and `batch_chain_derivatives` (the chain-rule factors of the reverse pass). Part 2
+(#135): `batch_model_indices` (the host loop of per-model indices: birth-cloud age, star formation rate, dust emission and AGN
+grids) and `batch_sfh_weights` (the SFH-weights stage, host and device loops). What is not done: the nebular and attenuation calls,
+smoothing and photometry are still inline, and the reverse pass (about 180 lines, 30 arguments of `batch_backward`); splitting those needs a
+workspace type for the packed arrays (`ipk`, `rpk`, `lpk`, `rout`) and the arrays the stages share, and the device rules about
+mapping derived types make each cut something to check on the R9700.
 
 **Step 5, backend consolidation (analysed, mostly not pursued).** The conditional count by kind (961 after step 2): about 586 are `OMP_TARGET`
 switches, of which 153 are the host arm (`#elif defined(_OPENMP)`) of one directive switch repeated at every parallel loop (`!$omp target

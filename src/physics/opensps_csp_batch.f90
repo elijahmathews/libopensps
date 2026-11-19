@@ -764,28 +764,7 @@ contains
         else
             lum_linear = 10.0_wp**ctx%state%ssp_basis_lbol(1:nt, 1)
         end if
-        do m = 1, n_mod
-            if (psets(m)%dust_tesc > SAFE_FLOOR) then
-                dust_age_log = psets(m)%dust_tesc
-            else
-                dust_age_log = 7.0_wp
-            end if
-            it_tesc(m) = max(1, min(find_interval(ctx%state%time_full, dust_age_log), nt))
-            if (present(sfr) .and. given_w) then
-                sfr(m) = ieee_value(1.0_wp, ieee_quiet_nan)
-            else if (present(sfr)) then
-                call get_sfh_properties_at_age(ctx, psets(m)%params_core, psets(m)%tage, mass_frac, sfr_norm, frac_linear)
-                if (mass_frac > SAFE_FLOOR) sfr_norm = sfr_norm / mass_frac
-                sfr(m) = sfr_norm
-            end if
-
-            emis(m) = ctx%add_dust_emission_val == 1 .and. &
-                      (psets(m)%dust1 > SAFE_FLOOR .or. psets(m)%dust2 > SAFE_FLOOR)
-            call dl07_indices(ctx, psets(m), iq(m), wq(m), iu(m), wu(m), gam(m))
-            ! (With gradients the AGN stage runs for every model, so that d/d fagn exists at fagn = 0,
-            ! where it adds exact zeros)
-            call agn_indices(ctx, psets(m), grad, agn_on(m), ita(m), wta(m))
-        end do
+        call batch_model_indices(ctx, psets, n_mod, nt, given_w, grad, sfr, it_tesc, emis, iq, wq, iu, wu, gam, agn_on, ita, wta)
         any_emis = any(emis)
         agn = any(agn_on)
         ! Only with a nebular grid: isochrone sets without one (BaSTI, Geneva) get no nebular
@@ -886,44 +865,7 @@ contains
         ! The host form of these loops is a plain loop, not the target construct with a false
         ! if clause: LLVM's libomp (flang 22) crashes in __kmpc_dist_for_static_init_4u when a
         ! "teams distribute parallel do" runs on the host with one OpenMP thread (#87)
-        if (host_m) then
-            do m = 1, n_mod
-                do k = 1, nt
-                    do z = 1, nzw
-                        weights(k, z, m) = wext((z - 1) * nt + k, m)
-                    end do
-                end do
-            end do
-        else if (given_w .or. host_w) then
-#if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do collapse(2)
-#elif defined(_OPENMP)
-            !$omp parallel do collapse(2)
-#endif
-            do m = 1, n_mod
-                do k = 1, nt
-                    do z = 1, nzw
-                        weights(k, z, m) = wext((z - 1) * nt + k, m)
-                    end do
-                end do
-            end do
-        else
-#if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do private(pl) &
-            !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%time_full, ctx%state%zlegend, ctx%state%ntfull, ctx%state%nz, &
-            !$omp     ctx%state%ntabsfh, ctx%state%sfh_tab, ctx%interpolation_type_val, ctx%tiny_logt_val)
-#elif defined(_OPENMP)
-            !$omp parallel do private(pl)
-#endif
-            do m = 1, n_mod
-#if !defined(__flang__)
-                pl => psets(m)%params_core
-#else
-                call c_f_pointer(c_loc(pbuf(1, m)), pl)
-#endif
-                call sfh_weights_core(ctx, pl, pl%tage, 1, weights(:, :, m), tmp1(:, m), tmp2(:, m))
-            end do
-        end if
+        call batch_sfh_weights(ctx, PBUF_ARG, n_mod, nt, nzw, host_m, given_w .or. host_w, wext, weights, tmp1, tmp2)
         ! IMF per model: the young and old age sums, and per age and model the mass, L_bol and
         ! ionizing photons, from the operator (opensps_ssp_batch), with the SFH weights masked as
         ! below
@@ -2121,6 +2063,105 @@ contains
         end do
         nobasis = 0.0_KP
     end subroutine batch_imf_vectors
+
+    !> The host part of every model's setup: the age index of its birth-cloud time (it_tesc, from dust_tesc), its star formation
+    !> rate at its age (sfr, if asked: NaN with given weights), whether it has dust emission (emis) and the interpolation indices
+    !> and weights of the dust emission grid (iq, wq, iu, wu, gam) and of the AGN template (agn_on, ita, wta: with gradients the
+    !> AGN stage runs for every model, so that d/d fagn exists at fagn = 0, where it adds exact zeros).
+    subroutine batch_model_indices(ctx, psets, n_mod, nt, given_w, grad, sfr, it_tesc, emis, iq, wq, iu, wu, gam, agn_on, ita, wta)
+        type(opensps_context_t), intent(inout) :: ctx
+        integer, intent(in)  :: n_mod, nt
+        type(params), intent(in) :: psets(n_mod)
+        logical, intent(in)  :: given_w, grad
+        real(WP), intent(out), optional :: sfr(:)
+        integer, intent(out) :: it_tesc(n_mod), iq(n_mod), iu(n_mod), ita(n_mod)
+        logical, intent(out) :: emis(n_mod), agn_on(n_mod)
+        real(WP), intent(out) :: wq(n_mod), wu(n_mod), gam(n_mod), wta(n_mod)
+        integer  :: m
+        real(WP) :: dust_age_log, mass_frac, sfr_norm, frac_linear
+
+        do m = 1, n_mod
+            if (psets(m)%dust_tesc > SAFE_FLOOR) then
+                dust_age_log = psets(m)%dust_tesc
+            else
+                dust_age_log = 7.0_wp
+            end if
+            it_tesc(m) = max(1, min(find_interval(ctx%state%time_full, dust_age_log), nt))
+            if (present(sfr) .and. given_w) then
+                sfr(m) = ieee_value(1.0_wp, ieee_quiet_nan)
+            else if (present(sfr)) then
+                call get_sfh_properties_at_age(ctx, psets(m)%params_core, psets(m)%tage, mass_frac, sfr_norm, frac_linear)
+                if (mass_frac > SAFE_FLOOR) sfr_norm = sfr_norm / mass_frac
+                sfr(m) = sfr_norm
+            end if
+
+            emis(m) = ctx%add_dust_emission_val == 1 .and. &
+                      (psets(m)%dust1 > SAFE_FLOOR .or. psets(m)%dust2 > SAFE_FLOOR)
+            call dl07_indices(ctx, psets(m), iq(m), wq(m), iu(m), wu(m), gam(m))
+            ! (With gradients the AGN stage runs for every model, so that d/d fagn exists at fagn = 0,
+            ! where it adds exact zeros)
+            call agn_indices(ctx, psets(m), grad, agn_on(m), ita(m), wta(m))
+        end do
+    end subroutine batch_model_indices
+
+    !> The SFH weights of every model, weights(:, :, m) over the ages (and metallicities): from the given matrix wext (the weights
+    !> given by the caller, or computed on the host: given), copied on the host for few models (host_m: the host form is a plain
+    !> loop, not the target construct with a false if clause, as LLVM's libomp, flang 22, crashes in __kmpc_dist_for_static_init_4u
+    !> when a "teams distribute parallel do" runs on the host with one OpenMP thread, #87) or on the device, or computed on the device
+    !> (sfh_weights_core, one thread per model; tmp1, tmp2 its scratch).
+    subroutine batch_sfh_weights(ctx, pbuf, n_mod, nt, nzw, host_m, given, wext, weights, tmp1, tmp2)
+        type(opensps_context_t), intent(inout) :: ctx
+        integer, intent(in)  :: n_mod, nt, nzw
+#if !defined(__flang__)
+        type(params), intent(in), target :: pbuf(n_mod)
+#else
+        integer(int64), intent(in), target :: pbuf(NPW, n_mod)
+#endif
+        logical, intent(in)  :: host_m, given
+        real(WP), intent(in) :: wext(nt * nzw, n_mod)
+        real(WP), intent(inout) :: weights(nt, nzw, n_mod), tmp1(nt, n_mod), tmp2(nt, n_mod)
+        type(params_core), pointer :: pl
+        integer :: m, k, z
+
+        if (host_m) then
+            do m = 1, n_mod
+                do k = 1, nt
+                    do z = 1, nzw
+                        weights(k, z, m) = wext((z - 1) * nt + k, m)
+                    end do
+                end do
+            end do
+        else if (given) then
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2)
+#endif
+            do m = 1, n_mod
+                do k = 1, nt
+                    do z = 1, nzw
+                        weights(k, z, m) = wext((z - 1) * nt + k, m)
+                    end do
+                end do
+            end do
+        else
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do private(pl) &
+            !$omp map(OMP_MAP_PRESENT_ALLOC: ctx%state%time_full, ctx%state%zlegend, ctx%state%ntfull, ctx%state%nz, &
+            !$omp     ctx%state%ntabsfh, ctx%state%sfh_tab, ctx%interpolation_type_val, ctx%tiny_logt_val)
+#elif defined(_OPENMP)
+            !$omp parallel do private(pl)
+#endif
+            do m = 1, n_mod
+#if !defined(__flang__)
+                pl => pbuf(m)%params_core
+#else
+                call c_f_pointer(c_loc(pbuf(1, m)), pl)
+#endif
+                call sfh_weights_core(ctx, pl, pl%tage, 1, weights(:, :, m), tmp1(:, m), tmp2(:, m))
+            end do
+        end if
+    end subroutine batch_sfh_weights
 
     !> The SSP source of a batch from the modes it was found to have: zw (weights over ages and metallicities), zmode (a basis
     !> per metallicity, interpolated at each model's logzsol), naf (the [alpha/Fe] planes of the context's stack, 1 without), nzb
