@@ -5,6 +5,34 @@ their magnitudes and spectra, and says where each step lives. Names are given in
 for the name. `doc/HOT_PATHS.md` says which parameters may be free per model and what each costs; `doc/HOT_PATHS_PLAN.md` is the plan for
 making the code match; this file is the map.
 
+## Calling it yourself
+
+From C (the complete programs are `tests/test_c_*.c`; `include/opensps.h` has every entry point and the status codes). A context holds the
+libraries and the parameters that are the same for every model; `names` / `values` give the parameters that differ, one value per model:
+
+```c
+int h, status, nbands;
+opensps_context_create(&h, &status);
+opensps_context_setup(-1, "mist", "miles", "DL07", h, &status);   // isochrones, stellar library, dust emission
+opensps_context_get_nbands(h, &nbands, &status);
+opensps_context_set_int(h, "add_neb_emission", 1, &status);       // settings shared by every model
+
+enum { N = 1000 };
+const char *names[2] = { "tage", "dust2" };                       // the parameters that differ per model
+double tage[N], dust2[N];                                         // ... fill one value per model ...
+const double *values[2] = { tage, dust2 };
+
+double *mags = malloc(sizeof(double) * nbands * N);               // column-major: band fastest, then model
+opensps_context_compute_csp_batch(h, N, 2, names, values, NULL /* ssp_weights */, mags,
+                                  NULL, NULL, NULL, NULL, NULL, NULL, NULL, &status);   // spec, mass, lbol, ... if wanted
+// status 0: done; 2: a parameter that this path cannot vary; 3: unknown parameter or bad shape (include/opensps.h)
+```
+
+From Fortran, `compute_csp_batch(ctx, psets, mags, status, spec=spec, ...)` takes one `params` per model (copy the context's with
+`opensps_context_get_pset`, then set the fields that differ) and the same optional outputs; `tests/test_csp_batch.f90` has a
+working example of every mode. For gradients add `mags_bar` (the caller's cotangent of the magnitudes) and `params_bar` (the result,
+`NBGRAD` rows): `tests/test_csp_batch_grad.f90`.
+
 ## The idea in one paragraph
 
 A *batch* is N models (parameter sets) evaluated together against the same libraries. The same physics as one model
