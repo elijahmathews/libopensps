@@ -23,7 +23,7 @@ module opensps_batch_registry
     private
 
     public :: registry_name, registry_class, registry_stage, registry_kind, registry_find, registry_get, registry_set
-    public :: registry_equal, registry_class_name, registry_stage_name, batch_classify, batch_info_set_path
+    public :: registry_equal, registry_range, registry_class_name, registry_stage_name, batch_classify, batch_info_set_path
     public :: batch_info_text, batch_info_print, batch_debug_path
 
     integer, parameter, public :: CLASS_S = 0, CLASS_C = 1, CLASS_L = 2, CLASS_W = 3, CLASS_G = 4
@@ -364,6 +364,56 @@ contains
             same = registry_get(a, i) == registry_get(b, i)
         end select
     end function registry_equal
+
+    !> The range a field that can be free is sampled over by tests and benchmarks (roughly a fit's prior, inside what the
+    !> batch supports). lo = hi = 0 for a field that is not varied: the shared ones, the file names, the switches, and the
+    !> SFH parameters of forms the base configurations do not use
+    subroutine registry_range(i, lo, hi)
+        integer, intent(in) :: i
+        real(WP), intent(out) :: lo, hi
+
+        lo = 0.0_wp
+        hi = 0.0_wp
+        select case (i)
+        case (F_TAU); lo = 0.3_wp; hi = 5.0_wp
+        case (F_TAGE); lo = 1.0_wp; hi = 12.0_wp
+        case (F_CONST); lo = 0.0_wp; hi = 0.4_wp
+        case (F_FBURST); lo = 0.0_wp; hi = 0.2_wp
+        case (F_TBURST); lo = 1.0_wp; hi = 3.0_wp
+        case (F_SF_START); lo = 0.0_wp; hi = 1.0_wp
+        case (F_DUST1); lo = 0.0_wp; hi = 1.5_wp
+        case (F_DUST2); lo = 0.0_wp; hi = 1.0_wp
+        case (F_DUST3); lo = 0.0_wp; hi = 0.3_wp
+        case (F_DUST_INDEX); lo = -1.0_wp; hi = 0.0_wp
+        case (F_DUST1_INDEX); lo = -1.5_wp; hi = -0.5_wp
+        case (F_FRAC_NODUST); lo = 0.0_wp; hi = 0.3_wp
+        case (F_DUST_TESC); lo = 6.5_wp; hi = 7.5_wp
+        case (F_DUSTE_GAMMA); lo = 0.001_wp; hi = 0.2_wp
+        case (F_DUSTE_UMIN); lo = 0.5_wp; hi = 20.0_wp
+        case (F_DUSTE_QPAH); lo = 0.5_wp; hi = 6.0_wp
+        case (F_GAS_LOGU); lo = -4.0_wp; hi = -1.0_wp
+        case (F_GAS_LOGZ); lo = -1.5_wp; hi = 0.4_wp
+        case (F_FRAC_OBRUN); lo = 0.0_wp; hi = 0.3_wp
+        case (F_FAGN); lo = 0.0_wp; hi = 0.5_wp
+        case (F_AGN_TAU); lo = 5.0_wp; hi = 150.0_wp
+        case (F_ZRED); lo = 0.1_wp; hi = 2.0_wp
+        case (F_IGM_FACTOR); lo = 0.5_wp; hi = 1.5_wp
+        case (F_LOGZSOL); lo = -1.5_wp; hi = 0.05_wp
+        case (F_AFE); lo = -0.2_wp; hi = 0.6_wp
+        case (F_FBHB); lo = 0.05_wp; hi = 0.75_wp
+        case (F_SBSS); lo = 1.0_wp; hi = 6.0_wp
+        case (F_AGB); lo = 0.5_wp; hi = 1.7_wp
+        case (F_PAGB); lo = 0.5_wp; hi = 1.9_wp
+        case (F_REDGB); lo = 0.7_wp; hi = 1.3_wp
+        case (F_DELT); lo = -0.1_wp; hi = 0.1_wp
+        case (F_DELL); lo = -0.1_wp; hi = 0.1_wp
+        case (F_IMF1); lo = 0.9_wp; hi = 1.5_wp
+        case (F_IMF2); lo = 1.8_wp; hi = 2.6_wp
+        case (F_IMF3); lo = 2.0_wp; hi = 2.8_wp
+        case (F_VDMC); lo = 0.05_wp; hi = 0.15_wp
+        case (F_MDAVE); lo = 0.3_wp; hi = 0.7_wp
+        end select
+    end subroutine registry_range
 
     !> Classifies a batch: which fields differ among the models, how many distinct values they take (counted up to
     !> DISTINCT_CAP against the first DISTINCT_CAP distinct ones), and whether a shared field differs. The path fields

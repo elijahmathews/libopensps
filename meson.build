@@ -603,6 +603,19 @@ test('csp_batch', csp_batch_exe,
     timeout : 900
 )
 
+# Any combination of free parameters gives each model what a batch of that model alone gives (the registry's fields alone,
+# seeded random subsets, all together)
+batch_equivalence_exe = executable('test_batch_equivalence', 'tests/test_batch_equivalence.f90',
+    dependencies : [opensps_dep, test_utils_dep],
+    link_language : 'fortran'
+)
+test('batch_equivalence', batch_equivalence_exe,
+    protocol : 'tap',
+    env : regression_env,
+    suite : 'regression',
+    timeout : 900
+)
+
 # Batches below HOST_SFH_MAX models at one OpenMP thread, against the same models in a larger batch (#87: the
 # host path of the offload builds crashed in libomp at one thread); the small test library, no other data
 csp_small_batch_exe = executable('test_csp_small_batch', 'tests/test_csp_small_batch.f90',

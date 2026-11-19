@@ -42,7 +42,8 @@ program benchmark_csp_batch
     use opensps_api, only: opensps_build_afe_basis
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build
     use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_build_mods, ssp_batch_share_imf
-    use opensps_batch_registry, only: registry_find, registry_set, registry_name, registry_class, N_FIELDS, CLASS_C, CLASS_L, &
+    use opensps_batch_registry, only: registry_find, registry_set, registry_name, registry_class, registry_range, N_FIELDS, &
+                                      CLASS_C, CLASS_L, &
                                       CLASS_W, CLASS_G, CLASS_S, F_LOGZSOL, F_AFE, F_FBHB, F_SBSS, F_AGB, F_PAGB, F_REDGB, &
                                       F_DELT, F_DELL, F_IMF1, F_IMF2, F_IMF3, F_VDMC, F_MDAVE
     use opensps_tuning, only: tuning_ct_count, tuning_ct_name, tuning_ct_value
@@ -55,7 +56,9 @@ program benchmark_csp_batch
     real(WP), allocatable :: spec_ssp(:, :), mass_ssp(:), lbol_ssp(:), mags(:, :), spec(:, :)
     character(len=32) :: arg, config = 'basic'
     logical :: afe = .false., lib = .false., full, zvar = .false., imf = .false., grad = .false., fit = .false., cue = .false.
-    logical :: mods = .false., imfs = .false., mods_build = .false., matrix = .false.
+    logical :: mods = .false., imfs = .false., mods_build = .false., matrix = .false., all_times = .false.
+    character(len=512) :: fname_dump
+    integer :: dump_len
     character(len=8) :: noshare
     !> Matrix mode: the registry indices of the free fields, the distribution, the IMF type of the free IMF field
     integer :: free_idx(N_FIELDS) = 0, nfree = 0, matrix_imf_type = 2
@@ -296,6 +299,19 @@ program benchmark_csp_batch
         write(*, '(A,I0,A,F14.3)') 'batch_', n, '_mags_us_per_model ', 1.0e6_wp * dt / n
         total = total + mags(1, 1)
 
+        ! Matrix mode times the magnitudes only (the free set is what varies, not the output): the spectra once, for a forward
+        ! dump, if asked; OPENSPS_BENCH_ALL_TIMES=1 keeps every timing
+        if (matrix .and. .not. all_times) then
+            call get_environment_variable('OPENSPS_BENCH_DUMP_FWD', fname_dump, length=dump_len)
+            if (dump_len > 0) then
+                allocate(spec(nspec, n))
+                call batch(n, .true.)
+                call dump_forward(n)
+                deallocate(spec)
+            end if
+            cycle
+        end if
+
         allocate(spec(nspec, n))
         call batch(n, .true.)   ! warm-up: first touch of spec (a fitting loop reuses its array)
         call system_clock(t0)
@@ -306,6 +322,7 @@ program benchmark_csp_batch
         dt = real(t1 - t0, WP) / rate / n_rep
         write(*, '(A,I0,A,F14.3)') 'batch_', n, '_spec_us_per_model ', 1.0e6_wp * dt / n
         total = total + spec(1000, 1)
+        call dump_forward(n)
         deallocate(spec)
 
         ! Spectra left on the device (callers working there): the batch without spec, then the
@@ -389,6 +406,21 @@ contains
         end if
     end subroutine batch
 
+    !> OPENSPS_BENCH_DUMP_FWD=<file>: the magnitudes and spectra (FP64, nbands x n and nspec x n) of the last batch size timed, to
+    !> compare two builds or two commits bit for bit (tools/compare_forward_dump.py). Each size overwrites the file.
+    subroutine dump_forward(n)
+        integer, intent(in) :: n
+        character(len=512) :: fname
+        integer :: flen, u
+        call get_environment_variable('OPENSPS_BENCH_DUMP_FWD', fname, flen)
+        if (flen <= 0) return
+        open(newunit=u, file=fname(1:flen), form='unformatted', access='stream', status='replace')
+        write(u) size(mags, 1), n, size(spec, 1)
+        write(u) real(mags(:, 1:n), WP)
+        write(u) real(spec(:, 1:n), WP)
+        close(u)
+    end subroutine dump_forward
+
     !> OPENSPS_BENCH_DUMP=<file>: the gradients (params_bar, NBGRAD x n, FP64) of the last batch size timed, to compare two
     !> builds (tools/compare_builds/compare_grad_dump.py). Each size overwrites the file.
     subroutine dump_gradients(n)
@@ -465,7 +497,8 @@ contains
     !> from their classes (see the program header). "list" prints the fields that can be varied and stops.
     subroutine parse_free()
         character(len=512) :: lst
-        integer :: llen, lstat, p0, p1, idx, k
+        character(len=8) :: alltimes_v
+        integer :: llen, lstat, astat, p0, p1, idx, k
         logical :: wfree, mfree
 
         call get_environment_variable('OPENSPS_BENCH_DIST', dist)
@@ -479,6 +512,8 @@ contains
             stop 0
         end if
         matrix = .true.
+        call get_environment_variable('OPENSPS_BENCH_ALL_TIMES', alltimes_v, status=astat)
+        all_times = astat == 0
         imfs = .true.         ! the free IMF fields come from vary_free, not from the config's ramp
         wfree = .false.
         mfree = .false.
@@ -529,56 +564,6 @@ contains
         end select
     end function spread
 
-    !> The range of the fields that can be free in the benchmark's configuration (a field outside it keeps its value)
-    subroutine field_range(idx, lo, hi)
-        integer, intent(in) :: idx
-        real(WP), intent(out) :: lo, hi
-        character(len=16) :: nm
-
-        nm = registry_name(idx)
-        lo = 0.0_wp
-        hi = 0.0_wp
-        select case (trim(nm))
-        case ('tau'); lo = 0.3_wp; hi = 5.0_wp
-        case ('tage'); lo = 1.0_wp; hi = 12.0_wp
-        case ('const'); lo = 0.0_wp; hi = 0.4_wp
-        case ('fburst'); lo = 0.0_wp; hi = 0.2_wp
-        case ('tburst'); lo = 1.0_wp; hi = 3.0_wp
-        case ('sf_start'); lo = 0.0_wp; hi = 1.0_wp
-        case ('dust1'); lo = 0.0_wp; hi = 1.5_wp
-        case ('dust2'); lo = 0.0_wp; hi = 1.0_wp
-        case ('dust3'); lo = 0.0_wp; hi = 0.3_wp
-        case ('dust_index'); lo = -1.0_wp; hi = 0.0_wp
-        case ('dust1_index'); lo = -1.5_wp; hi = -0.5_wp
-        case ('frac_nodust'); lo = 0.0_wp; hi = 0.3_wp
-        case ('dust_tesc'); lo = 6.5_wp; hi = 7.5_wp
-        case ('duste_gamma'); lo = 0.001_wp; hi = 0.2_wp
-        case ('duste_umin'); lo = 0.5_wp; hi = 20.0_wp
-        case ('duste_qpah'); lo = 0.5_wp; hi = 6.0_wp
-        case ('gas_logu'); lo = -4.0_wp; hi = -1.0_wp
-        case ('gas_logz'); lo = -1.5_wp; hi = 0.4_wp
-        case ('frac_obrun'); lo = 0.0_wp; hi = 0.3_wp
-        case ('fagn'); lo = 0.0_wp; hi = 0.5_wp
-        case ('agn_tau'); lo = 5.0_wp; hi = 150.0_wp
-        case ('zred'); lo = 0.1_wp; hi = 2.0_wp
-        case ('igm_factor'); lo = 0.5_wp; hi = 1.5_wp
-        case ('logzsol'); lo = -1.5_wp; hi = 0.05_wp
-        case ('afe'); lo = -0.2_wp; hi = 0.6_wp
-        case ('fbhb'); lo = 0.05_wp; hi = 0.75_wp
-        case ('sbss'); lo = 1.0_wp; hi = 6.0_wp
-        case ('agb'); lo = 0.5_wp; hi = 1.7_wp
-        case ('pagb'); lo = 0.5_wp; hi = 1.9_wp
-        case ('redgb'); lo = 0.7_wp; hi = 1.3_wp
-        case ('delt'); lo = -0.1_wp; hi = 0.1_wp
-        case ('dell'); lo = -0.1_wp; hi = 0.1_wp
-        case ('imf1'); lo = 0.9_wp; hi = 1.5_wp
-        case ('imf2'); lo = 1.8_wp; hi = 2.6_wp
-        case ('imf3'); lo = 2.0_wp; hi = 2.8_wp
-        case ('vdmc'); lo = 0.05_wp; hi = 0.15_wp
-        case ('mdave'); lo = 0.3_wp; hi = 0.7_wp
-        end select
-    end subroutine field_range
-
     !> Model i: the free fields of matrix mode set over their ranges. The grouped fields (delt, dell) take one of four levels
     !> (the models are grouped by distinct pair: a continuous spread would exceed the number of pairs a batch may hold)
     subroutine vary_free(p, i)
@@ -589,7 +574,7 @@ contains
 
         do k = 1, nfree
             idx = free_idx(k)
-            call field_range(idx, lo, hi)
+            call registry_range(idx, lo, hi)
             if (hi == lo) cycle
             if (registry_class(idx) == CLASS_G) then
                 u = (real(int(spread(i, 1) * 4.0_wp), WP) + 0.5_wp) / 4.0_wp
