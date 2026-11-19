@@ -18,6 +18,9 @@ GPU offload, batched SSPs and CSPs for SED fitting).
   and SFH weights, the public API); `KP` is the kernel precision, FP64 by default and FP32
   with `-Dkernel_precision=single` (which also takes the batched SSP's per-model IMF bin weights
   in FP32 arithmetic, stored in `WP`: `doc/MIXED_PRECISION.md`).
+- The hot path (what one batch call does, stage by stage, where each routine is, and a glossary of the Fortran and OpenMP in the
+  code) is walked through in `doc/HOT_PATH_TOUR.md`; start there to find your way. `doc/HOT_PATHS.md` says which parameters can be free
+  per model; `doc/HOT_PATHS_PLAN.md` is the work plan for making the code match it.
 - Assume the user is an astronomer and an SPS expert: explain software matters plainly; justify
   every physics decision with a reason that would satisfy a referee.
 
