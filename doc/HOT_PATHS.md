@@ -1,5 +1,7 @@
 # Hot paths: which parameters can be free in a batch, and what each costs
 
+(New to the code? `doc/HOT_PATH_TOUR.md` walks through one batch call, stage by stage, in plain terms.)
+
 A batch (`compute_csp_batch`, `opensps_context_compute_csp_batch*`) lets any member of `PARAMS_CORE` differ from
 model to model, within the exclusions of this document. The aim is that the cost of a batch is the sum of what its free
 parameters need, not a property of the combination, and that a new free parameter is a new instance of an existing
