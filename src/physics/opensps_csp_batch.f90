@@ -2510,6 +2510,9 @@ contains
         end do
     end subroutine age_sums_host
 
+    !> The age sums of a batch whose models blend four slabs of the resident basis: two metallicity slabs (zlo, zlo + 1) of each of
+    !> two [alpha/Fe] planes (nzs slabs apart), with the weights (1 - dz)(1 - da), dz (1 - da), (1 - dz) da and dz da formed in FP64
+    !> and cast once. Builds the per-model descriptor (slab(4, N), wt(4, N)) and calls the K = 4 instance of age_sums_slabs.inc.
     subroutine age_sums_z4(nspec, nt, nsl, nzs, n_mod, basis, w2flat, it_tesc, zlo, dz, da, yo)
         integer, intent(in)  :: nspec, nt, nsl, nzs, n_mod, it_tesc(n_mod), zlo(n_mod)
         real(KP), intent(in) :: basis(nspec, nt, nsl), w2flat(nt * 2 * n_mod)
@@ -2592,7 +2595,20 @@ contains
         end if
     end subroutine add_nebular_batch
 
-    !> The kernels of add_nebular_batch, on the components of its nebular_setup_t.
+    !> The kernels of add_nebular_batch for the CLOUDY grids (nebular_model = 0), on the components of its nebular_setup_t (device
+    !> code never refers to the derived type itself). In order, the numbered steps of the body:
+    !>   1. Q: the ionizing photons of each young basis spectrum (per age and basis slab), as process_ionizing_radiation integrates
+    !>      them; skipped with the IMF per model (q_model), where they come from the operators.
+    !>   2. EUV rows: the age sums of the pixels below the Lyman limit redone for the nebular ages, with the escaping fraction
+    !>      (frac_obrun) on the young spectrum.
+    !>   3. The continuum: per (pixel, model), the sum over the nebular ages of the SFH weight x Q x 10**(the CLOUDY grid,
+    !>      interpolated
+    !>      in gas log Z, log U and age); per CLOUDY age interval a geometric progression, in kernel precision with the large
+    !>      factors scaled out (rules 3 and 5 of doc/MIXED_PRECISION.md). Only if `grid`.
+    !>   4. The line luminosities per (line, model), young and old: the same sum with the line in place of the pixel (nb_lum, also
+    !>      returned in eml).
+    !>   5. The line profiles: each line spread over the pixels its profile reaches (line_profiles).
+    !> `grid` false (cue): steps 1 and 2 only, and cue_nebular does the rest.
     subroutine nebular_kernels(ctx, n_mod, nspec, nt, nzb, nb1, nb2, nb3, nq0, basis, w2, it_tesc, zlo, zhi, dz, da, nzs, &
                                nb_nt_neb, nb_whlylim, nb_cont, nb_lines_in_spec, nb_xrb, nb_ia, nb_wa, nb_dwa, &
                                nb_newr, nb_q0, nb_iz, nb_wz, nb_iu, nb_wu, nb_fesc, nb_fabs, nb_cy, nb_co, nb_lns, &
@@ -4712,6 +4728,18 @@ contains
     !> doc/MIXED_PRECISION.md). Work space gw (pixels x 2N): the gradient of fobs (1:N), of the
     !> final spectrum (N+1:2N), then of the young (1:N) and old (N+1:2N) age sums; yo (the
     !> forward's age sums) is read.
+    !>
+    !> The stages of the reverse pass, in the order of the routine (the forward ones in reverse; doc/HOT_PATH_TOUR.md):
+    !>   1. magnitudes -> band fluxes (the cotangents of the bands; the distance term; each column's magnitude redshift)
+    !>   2. the observed frame (backward_observed_frame): the filter integrals and the resampling; the IGM's short-wavelength cap
+    !>   3. velocity smoothing (smooth_*_adjoint): the gradient of sigma_smooth, then the transpose of the smoothing
+    !>   4. AGN (backward_agn), then the lbol output's cotangent joins L_bol's
+    !>   5. dust emission (backward_emission_sums): the cotangents of its two sums
+    !>   6. dust attenuation (backward_attenuation, atten_adjoint_chunk): the dust parameters; the young and old cotangents
+    !>   7. the lines outside the spectrum with dust emission (backward_line_absorption)
+    !>   8. nebular emission (backward_nebular for the CLOUDY grids, cue_nebular_backward for cue)
+    !>   9. the age sums: backward_age_sums (resident basis), backward_age_sums_w (weights over metallicities) or the operators'
+    !>      ssp_batch_age_sums_adjoint (the SFH weights, the IMF parameters, the escaping fraction, dz)
     subroutine batch_backward(ctx, pbuf, n_mod, nspec, nt, nbands, zred, igm_factor, mags, fband, zcm, it_tesc, &
                               zlo, zhi, dz, da, nzs, blend_z, igm, z_varies, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, &
                                   yo, total, &
