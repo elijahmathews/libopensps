@@ -508,6 +508,22 @@ contains
         ! Work arrays (pixels x models) at kernel precision
         real(KP), allocatable :: yo(:,:), absorbed(:,:), tdiff(:,:)
 
+        ! ------------------------------------------------------------------------------------------------------------------
+        ! THE STAGES OF A BATCH, in the order of this routine (doc/HOT_PATH_TOUR.md explains each in plain terms):
+        !   0. checks and the plan   batch_check_shapes, batch_check_models, ssp_source_select, ssp_source_describe,
+        !                            plan_smoothing: refuse what this path cannot do (status 2 - 5), choose where the SSPs come from
+        !   1. per-model setup       batch_model_indices (host), then the packed per-model arrays go to the device
+        !   2. SFH weights           batch_sfh_weights: mass formed in each age bin per model, split into young and old ages
+        !   3. age sums              ssp_source_age_sums (and ssp_source_scalars for mass and L_bol): spectrum = sum of weight x SSP
+        !   4. nebular emission      add_nebular_batch, attenuate_lines (optional)
+        !   5. dust attenuation      attenuate_batch: birth-cloud and diffuse dust, the absorbed light
+        !   6. dust emission, IGM, AGN   add_dust_emission, apply_igm_z / apply_igm, add_agn_batch
+        !   7. smoothing             smooth_groups (device) or smooth_columns_host
+        !   8. magnitudes, indices   compute_magnitudes_columns, compute_spectral_indices_columns
+        !   9. the reverse pass      (only if a gradient was asked) batch_chain_derivatives, batch_backward, then
+        !                            batch_mass_cotangent and batch_sfh_gradients for the mass output and the SFH parameters
+        ! ------------------------------------------------------------------------------------------------------------------
+
         ! Device builds: the batch runs on the device, so a context not yet there is moved
 #if defined(OMP_TARGET)
         if (.not. ctx%on_device) call opensps_context_move_to_device(ctx)
@@ -1090,47 +1106,7 @@ contains
                     !$omp target update from(weights)
                 end if
 #endif
-                do m = 1, n_mod
-                    do k = 1, nt
-                        if (zmode .and. nzs > 0) then
-                            wbl(k, m) = wbl(k, m) + mass_bar(m) * ( &
-                                (1.0_wp - da(m)) * ((1.0_wp - dz(m)) * ctx%state%ssp_basis_mass(k, zlo(m)) + &
-                                                    dz(m) * ctx%state%ssp_basis_mass(k, zhi(m))) + &
-                                da(m) * ((1.0_wp - dz(m)) * ctx%state%ssp_basis_mass(k, zlo(m) + nzs) + &
-                                         dz(m) * ctx%state%ssp_basis_mass(k, zhi(m) + nzs)))
-                        else if (zmode) then
-                            wbl(k, m) = wbl(k, m) + mass_bar(m) * ((1.0_wp - dz(m)) * ctx%state%ssp_basis_mass(k, zlo(m)) + &
-                                                                   dz(m) * ctx%state%ssp_basis_mass(k, zhi(m)))
-                        else
-                            wbl(k, m) = wbl(k, m) + mass_bar(m) * ctx%state%ssp_basis_mass(k, 1)
-                        end if
-                    end do
-                    if (zmode .and. present(params_bar)) then
-                        w = 0.0_wp
-                        wa_m = 0.0_wp
-                        do k = 1, nt
-                            if (weights(k, 1, m) > SAFE_FLOOR) then
-                                if (nzs > 0) then
-                                    w = w + weights(k, 1, m) * &
-                                        ((1.0_wp - da(m)) * (ctx%state%ssp_basis_mass(k, zhi(m)) - &
-                                                             ctx%state%ssp_basis_mass(k, zlo(m))) + &
-                                         da(m) * (ctx%state%ssp_basis_mass(k, zhi(m) + nzs) - &
-                                                  ctx%state%ssp_basis_mass(k, zlo(m) + nzs)))
-                                    wa_m = wa_m + weights(k, 1, m) * &
-                                        ((1.0_wp - dz(m)) * (ctx%state%ssp_basis_mass(k, zlo(m) + nzs) - &
-                                                             ctx%state%ssp_basis_mass(k, zlo(m))) + &
-                                         dz(m) * (ctx%state%ssp_basis_mass(k, zhi(m) + nzs) - &
-                                                  ctx%state%ssp_basis_mass(k, zhi(m))))
-                                else
-                                    w = w + weights(k, 1, m) * &
-                                        (ctx%state%ssp_basis_mass(k, zhi(m)) - ctx%state%ssp_basis_mass(k, zlo(m)))
-                                end if
-                            end if
-                        end do
-                        params_bar(BGRAD_LOGZSOL, m) = params_bar(BGRAD_LOGZSOL, m) + mass_bar(m) * w * dchain(7, m)
-                        if (nzs > 0) params_bar(BGRAD_AFE, m) = params_bar(BGRAD_AFE, m) + mass_bar(m) * wa_m * dchain(8, m)
-                    end if
-                end do
+                call batch_mass_cotangent(ctx, n_mod, nt, zmode, nzs, zlo, zhi, dz, da, weights, mass_bar, params_bar, dchain, wbl)
             end if
             if (zw) then
                 ! (ssp_weights_z: the mass's cotangent per age and metallicity)
@@ -1155,17 +1131,7 @@ contains
             ! The SFH parameters: dL / d theta = sum over ages of dL / d w_k  d w_k / d theta, with the
             ! weights' tangents in FP64 on the host (one model per thread)
             if (present(params_bar) .and. .not. given_w) then
-                allocate(tw(nt, n_mod), tdw(nt, n_mod), tsc(nt, 4, n_mod))
-#if defined(_OPENMP)
-                !$omp parallel do private(q)
-#endif
-                do m = 1, n_mod
-                    do q = 1, NSFHT
-                        call sfh_weights_tangent(ctx, psets(m)%params_core, psets(m)%tage, q, tw(:, m), tdw(:, m), &
-                                                 tsc(:, :, m))
-                        params_bar(SFHT_ROWS(q), m) = sum(wbl(:, m) * tdw(:, m))
-                    end do
-                end do
+                call batch_sfh_gradients(ctx, psets, n_mod, nt, wbl, params_bar)
             end if
         end if
         end associate
@@ -2162,6 +2128,88 @@ contains
             end do
         end if
     end subroutine batch_sfh_weights
+
+    !> The mass output's cotangent in the reverse pass (the resident basis, not the operators and not the weights over metallicities):
+    !> mass = sum over ages of w_k M_k, with M the model's blend of the basis' surviving masses, so wbl(k, m) (dL / d w_k) gains
+    !> mass_bar(m) M_k(m); and, with per-model metallicity and gradients (params_bar present), the rows of logzsol and of afe gain
+    !> mass_bar(m) times the derivative of the mass with respect to dz (times dchain(7, m)) and da (times dchain(8, m)).
+    subroutine batch_mass_cotangent(ctx, n_mod, nt, zmode, nzs, zlo, zhi, dz, da, weights, mass_bar, params_bar, dchain, wbl)
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)  :: n_mod, nt, nzs, zlo(n_mod), zhi(n_mod)
+        logical, intent(in)  :: zmode
+        real(WP), intent(in) :: dz(n_mod), da(n_mod), weights(:,:,:), mass_bar(:), dchain(8, n_mod)
+        real(WP), intent(inout), optional :: params_bar(:,:)
+        real(WP), intent(inout) :: wbl(nt, n_mod)
+        integer  :: m, k
+        real(WP) :: w, wa_m
+
+        do m = 1, n_mod
+            do k = 1, nt
+                if (zmode .and. nzs > 0) then
+                    wbl(k, m) = wbl(k, m) + mass_bar(m) * ( &
+                        (1.0_wp - da(m)) * ((1.0_wp - dz(m)) * ctx%state%ssp_basis_mass(k, zlo(m)) + &
+                                            dz(m) * ctx%state%ssp_basis_mass(k, zhi(m))) + &
+                        da(m) * ((1.0_wp - dz(m)) * ctx%state%ssp_basis_mass(k, zlo(m) + nzs) + &
+                                 dz(m) * ctx%state%ssp_basis_mass(k, zhi(m) + nzs)))
+                else if (zmode) then
+                    wbl(k, m) = wbl(k, m) + mass_bar(m) * ((1.0_wp - dz(m)) * ctx%state%ssp_basis_mass(k, zlo(m)) + &
+                                                           dz(m) * ctx%state%ssp_basis_mass(k, zhi(m)))
+                else
+                    wbl(k, m) = wbl(k, m) + mass_bar(m) * ctx%state%ssp_basis_mass(k, 1)
+                end if
+            end do
+            if (zmode .and. present(params_bar)) then
+                w = 0.0_wp
+                wa_m = 0.0_wp
+                do k = 1, nt
+                    if (weights(k, 1, m) > SAFE_FLOOR) then
+                        if (nzs > 0) then
+                            w = w + weights(k, 1, m) * &
+                                ((1.0_wp - da(m)) * (ctx%state%ssp_basis_mass(k, zhi(m)) - &
+                                                     ctx%state%ssp_basis_mass(k, zlo(m))) + &
+                                 da(m) * (ctx%state%ssp_basis_mass(k, zhi(m) + nzs) - &
+                                          ctx%state%ssp_basis_mass(k, zlo(m) + nzs)))
+                            wa_m = wa_m + weights(k, 1, m) * &
+                                ((1.0_wp - dz(m)) * (ctx%state%ssp_basis_mass(k, zlo(m) + nzs) - &
+                                                     ctx%state%ssp_basis_mass(k, zlo(m))) + &
+                                 dz(m) * (ctx%state%ssp_basis_mass(k, zhi(m) + nzs) - &
+                                          ctx%state%ssp_basis_mass(k, zhi(m))))
+                        else
+                            w = w + weights(k, 1, m) * &
+                                (ctx%state%ssp_basis_mass(k, zhi(m)) - ctx%state%ssp_basis_mass(k, zlo(m)))
+                        end if
+                    end if
+                end do
+                params_bar(BGRAD_LOGZSOL, m) = params_bar(BGRAD_LOGZSOL, m) + mass_bar(m) * w * dchain(7, m)
+                if (nzs > 0) params_bar(BGRAD_AFE, m) = params_bar(BGRAD_AFE, m) + mass_bar(m) * wa_m * dchain(8, m)
+            end if
+        end do
+    end subroutine batch_mass_cotangent
+
+    !> The gradients with respect to the SFH parameters (tage, tau, const, fburst, ...: the rows SFHT_ROWS of params_bar): dL / d theta =
+    !> sum over ages of dL / d w_k  d w_k / d theta, with the weights' tangents (sfh_weights_tangent) in FP64 on the host, one model per
+    !> thread; wbl(:, m) is dL / d w_k of model m.
+    subroutine batch_sfh_gradients(ctx, psets, n_mod, nt, wbl, params_bar)
+        type(opensps_context_t), intent(inout) :: ctx
+        integer, intent(in)  :: n_mod, nt
+        type(params), intent(in) :: psets(n_mod)
+        real(WP), intent(in) :: wbl(nt, n_mod)
+        real(WP), intent(inout) :: params_bar(:,:)
+        real(WP), allocatable :: tw(:,:), tdw(:,:), tsc(:,:,:)
+        integer :: m, q
+
+        allocate(tw(nt, n_mod), tdw(nt, n_mod), tsc(nt, 4, n_mod))
+#if defined(_OPENMP)
+        !$omp parallel do private(q)
+#endif
+        do m = 1, n_mod
+            do q = 1, NSFHT
+                call sfh_weights_tangent(ctx, psets(m)%params_core, psets(m)%tage, q, tw(:, m), tdw(:, m), &
+                                         tsc(:, :, m))
+                params_bar(SFHT_ROWS(q), m) = sum(wbl(:, m) * tdw(:, m))
+            end do
+        end do
+    end subroutine batch_sfh_gradients
 
     !> The SSP source of a batch from the modes it was found to have: zw (weights over ages and metallicities), zmode (a basis
     !> per metallicity, interpolated at each model's logzsol), naf (the [alpha/Fe] planes of the context's stack, 1 without), nzb
