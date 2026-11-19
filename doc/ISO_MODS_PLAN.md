@@ -167,6 +167,19 @@ the R9700 in FP32, against about 12 for the basis). Selected on the host by comp
 the same specialization applies to a free-IMF batch that happens to share its IMF. Gradient: the IMF rows are the
 sum over the models' common weights, as the reverse pass does when models share an IMF.
 
+**As built (PR 4), the forward pass only.** `ssp_batch_age_sums_z` finds the models of a chunk with the same IMF parameters
+(all of `pm`: the parameters and the limits) and metallicity (`chunk_unique_imf`, the last 16 distinct ones compared), has
+`imf_pieces_multi` (new argument `part`: 1 = the weights, 2 = the sums over the ages) compute the weights of the distinct
+ones into a scratch sized by their number, copies them to the columns of all the models (`share_expand`) and runs the
+sums over the ages for every model. The columns are copies of one computation, so the numbers are the same bit for bit
+(`check_share_imf`: spectra, magnitudes, mass and L_bol, with all models on one IMF, with groups sharing one and with every
+model on its own, and with the metallicity free per model). It is chosen per batch: when no two models share an IMF
+(`imf_shared_models`) the path is the one it always was, and batches smaller than `SHARE_IMF_MIN_BATCH` (default 1024,
+`doc/TUNING.md` M6) take it too. The reverse pass is not changed: it computes the weights of each model (its IMF cotangents
+are per model and sum correctly over models that share an IMF). Measured on the R9700: 3 - 13% per model from N = 1000
+(`doc/GPU_RESULTS.md`); on the CPU ~1%, as the weights are a small part of its cost. `ssp_batch_share_imf` switches it off
+for tests and benchmarks (`benchmark_csp_batch`: configs `_imfs`, `OPENSPS_BENCH_NOSHARE=1`).
+
 ## 5. C API and bindings
 
 * Names `fbhb`, `sbss`, `agb`, `pagb`, `redgb`, `delt`, `dell` are accepted per model when the context's

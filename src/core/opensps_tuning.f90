@@ -408,15 +408,20 @@ module opensps_tuning
     !> ~16 MiB measured best on the A100 node, PCIe 3: large enough to reach the DMA rate, small enough to
     !> overlap most of the conversion.
     integer, parameter, public :: TUNE_P_PINNED_CHUNK_BYTES = 3
+    !> Models in a batch from which the forward pass of the batched SSP computes the IMF weights of the models that share
+    !> their IMF parameters once and copies them: the sharing has a fixed cost per call of the age-sum kernels (one per
+    !> modification group, nine with free factors), which the saving per model covers from about this size (M6 of
+    !> doc/TUNING.md). 0 shares in every batch.
+    integer, parameter, public :: TUNE_P_SHARE_IMF_MIN_BATCH = 4
 
-    integer, parameter :: N_TUNE = 3
+    integer, parameter :: N_TUNE = 4
     integer, parameter :: NAME_LEN = 24
 
     character(len=NAME_LEN), parameter :: names(N_TUNE) = [character(len=NAME_LEN) :: &
-        'SSP_BATCH_CHUNK', 'HOST_SFH_MAX', 'PINNED_CHUNK_BYTES']
-    integer, parameter :: defaults(N_TUNE) = [2048, 16, 16 * 1024 * 1024]
-    integer, parameter :: lo_limit(N_TUNE) = [1, 0, 65536]
-    integer, parameter :: hi_limit(N_TUNE) = [1000000, 1000000, 1024 * 1024 * 1024]
+        'SSP_BATCH_CHUNK', 'HOST_SFH_MAX', 'PINNED_CHUNK_BYTES', 'SHARE_IMF_MIN_BATCH']
+    integer, parameter :: defaults(N_TUNE) = [2048, 16, 16 * 1024 * 1024, 1024]
+    integer, parameter :: lo_limit(N_TUNE) = [1, 0, 65536, 0]
+    integer, parameter :: hi_limit(N_TUNE) = [1000000, 1000000, 1024 * 1024 * 1024, 1000000]
 
     ! ---- Device profiles (each entry cites its measurement in doc/TUNING.md, "Measured device data") ----
     integer, parameter :: N_PROFILE = 3

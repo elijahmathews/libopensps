@@ -30,7 +30,8 @@ program test_csp_batch
 #endif
     use opensps_ssp, only: generate_ssp_grid
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_free
-    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods, MAX_TP_PAIRS
+    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods, MAX_TP_PAIRS, &
+                                 ssp_batch_share_imf, imf_shared_models, chunk_unique_imf
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                             opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
                             opensps_context_set_param_int, opensps_context_set_param_float, &
@@ -38,7 +39,9 @@ program test_csp_batch
     use opensps_context_types, only: opensps_context_t
     use opensps_interpolation, only: find_interval
     use test_utils_mod, only: tap_finish, skip_without_data, print_major_header, print_group, print_summary_line, assert_true
+    use opensps_tuning, only: tuning_set, TUNE_P_SHARE_IMF_MIN_BATCH
     implicit none
+    logical :: tuning_ok
 
     integer, parameter :: N_MOD = 12
     integer :: total_tests = 0
@@ -78,6 +81,10 @@ program test_csp_batch
 
     call skip_without_data()
     call print_major_header("Batched CSP")
+    ! Every batch shares the IMF weights of its models with one IMF (the default threshold, SHARE_IMF_MIN_BATCH, is above the
+    ! sizes of a test batch): the free-factor batches of this program all have one IMF, so they run that path
+    call tuning_set(TUNE_P_SHARE_IMF_MIN_BATCH, 0, tuning_ok)
+    if (.not. tuning_ok) error stop 'tuning_set failed'
 
     allocate(ctx)
     call opensps_create(ctx)
@@ -117,6 +124,7 @@ program test_csp_batch
     call check_basis_mods_guard()
     call check_mods_free_forward()
     call check_mods_pair_cache()
+    call check_share_imf()
     ! compute_csp_scenario: all-ages outputs against single-age calls, in each mode, on the
     ! one-metallicity basis
     call build_basis()
@@ -762,7 +770,7 @@ contains
         integer, parameter :: NMOD = 6
         type(PARAMS) :: pset, psets(NMOD)
         type(ssp_opset_t) :: op
-        real(WP), allocatable :: mags(:, :)
+        real(WP), allocatable :: mags(:, :), mr(:, :)
         real(WP) :: zc(3)
         integer :: m, status, nbands, zm0, nzz
 
@@ -807,6 +815,25 @@ contains
         psets(5)%logzsol = zc(2); psets(5)%fbhb = 0.4_wp
         call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
         call assert_true(status == 2, "free metallicity, the upper of the interval blocked: status 2", total_tests, total_failures)
+        ! The shared IMF weights with the metallicity free per model: the same IMF at different metallicities (the weights are
+        ! per metallicity, so not shared across them), at the same one, and one model with its own IMF
+        call set_int('imf_type', 2)
+        do m = 1, NMOD
+            psets(m)%fbhb = 0.0_wp; psets(m)%sbss = 0.0_wp
+            psets(m)%logzsol = -0.3_wp + 0.12_wp * m
+            psets(m)%imf1 = 1.3_wp; psets(m)%imf2 = 2.3_wp; psets(m)%imf3 = 2.3_wp
+        end do
+        psets(4)%logzsol = psets(1)%logzsol
+        psets(5)%imf1 = 0.9_wp; psets(5)%imf2 = 1.9_wp; psets(5)%imf3 = 2.8_wp
+        ssp_batch_share_imf = .false.
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        allocate(mr(nbands, NMOD))
+        mr = mags
+        ssp_batch_share_imf = .true.
+        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
+        call assert_true(status == 0 .and. maxval(abs(mags - mr)) <= MAG_TOL, &
+                         "free metallicity, shared IMF weights: the same magnitudes", total_tests, total_failures)
+        deallocate(mr)
         call ssp_opset_free(op)
         call set_int('zmet', zm0)
         deallocate(mags)
@@ -989,6 +1016,130 @@ contains
         end do
         call compute_csp_batch(ctx, q, out, st, ssp_ops=o)
     end subroutine pc_run
+
+    !> The IMF weights shared in the forward pass (ssp_batch_age_sums_z): the host helpers on constructed parameter columns, then
+    !> batches of free factors with all models on one IMF, with groups of models sharing one, and with every model on its own
+    !> (the path as before), each with the sharing off and on: the same numbers (the shared columns are copies of one
+    !> computation, so the models in a group with another IMF would be off by the difference of the IMFs if a column came
+    !> from the wrong model).
+    subroutine check_share_imf()
+        integer, parameter :: NB = 12
+        real(WP), parameter :: fb(NB) = [0.0_wp, 0.2_wp, 0.5_wp, 0.0_wp, 0.7_wp, 0.1_wp, 0.3_wp, 0.9_wp, 0.05_wp, 0.4_wp, &
+                                         0.0_wp, 0.6_wp]
+        real(WP), parameter :: sb(NB) = [0.0_wp, 0.0_wp, 5.0_wp, 12.0_wp, 0.0_wp, 2.0_wp, 8.0_wp, 0.0_wp, 3.0_wp, 15.0_wp, &
+                                         0.0_wp, 1.0_wp]
+        real(WP) :: pmt(5, 21), c(5)
+        integer :: perm(21), viz(21), pu(21), vu(21), cm(21), nu, m, icase
+        type(PARAMS) :: pset, psets(NB), pq(2)
+        type(ssp_opset_t) :: op
+        real(WP), allocatable :: s_on(:, :), s_off(:, :), g_on(:, :), g_off(:, :), s2(:, :), g2(:, :)
+        real(WP) :: m_on(NB), m_off(NB), l_on(NB), l_off(NB), d_spec, d_mag, d_scal
+        integer :: status, status_off, nspec, nbands
+        character(len=48) :: label
+
+        call print_group("Batched CSP: shared IMF weights")
+        ! The helpers. Columns: A A B A C B (A = column 1)
+        pmt = 0.0_wp
+        c = [1.3_wp, 2.3_wp, 2.3_wp, 0.1_wp, 100.0_wp]
+        do m = 1, 6
+            pmt(:, m) = c
+        end do
+        pmt(1, 3) = 0.9_wp; pmt(1, 6) = 0.9_wp; pmt(5, 5) = 120.0_wp
+        call assert_true(imf_shared_models(6, pmt(:, 1:6)), "shared IMF: columns with equal parameters are found", &
+                         total_tests, total_failures)
+        call assert_true(.not. imf_shared_models(1, pmt(:, 1:1)), "shared IMF: one model shares with none", &
+                         total_tests, total_failures)
+        do m = 1, 5
+            pmt(1, m) = 1.0_wp + 0.1_wp * m
+        end do
+        call assert_true(.not. imf_shared_models(5, pmt(:, 1:5)), "shared IMF: five different columns share nothing", &
+                         total_tests, total_failures)
+        pmt = 0.0_wp
+        do m = 1, 6
+            pmt(:, m) = c
+        end do
+        pmt(1, 3) = 0.9_wp; pmt(1, 6) = 0.9_wp; pmt(5, 5) = 120.0_wp
+        perm = [(m, m = 1, 21)]
+        viz = 1
+        call chunk_unique_imf(1, 6, perm, viz, pmt, pu, vu, cm, nu)
+        call assert_true(nu == 3 .and. all(cm(1:6) == [1, 1, 2, 1, 3, 2]) .and. all(pu(1:3) == [1, 3, 5]), &
+                         "shared IMF: the distinct models of a chunk", total_tests, total_failures)
+        viz(1:6) = [1, 1, 2, 2, 2, 2]
+        call chunk_unique_imf(1, 6, perm, viz, pmt, pu, vu, cm, nu)
+        call assert_true(nu == 4 .and. all(cm(1:6) == [1, 1, 2, 3, 4, 2]) .and. all(vu(1:4) == [1, 2, 2, 2]), &
+                         "shared IMF: the same IMF at another metallicity is another model", total_tests, total_failures)
+        viz = 1
+        call chunk_unique_imf(3, 3, perm, viz, pmt, pu, vu, cm, nu)
+        call assert_true(nu == 3 .and. all(cm(1:3) == [1, 2, 3]) .and. all(pu(1:3) == [3, 4, 5]), &
+                         "shared IMF: a chunk from the middle of the pass", total_tests, total_failures)
+        ! more distinct models than the window of comparison holds: a repeat of the first is its own
+        do m = 1, 20
+            pmt(1, m) = 0.5_wp + 0.01_wp * m
+        end do
+        pmt(:, 21) = pmt(:, 1)
+        call chunk_unique_imf(1, 21, perm, viz, pmt, pu, vu, cm, nu)
+        call assert_true(nu == 21 .and. cm(21) == 21, "shared IMF: only the last distinct models are compared", &
+                         total_tests, total_failures)
+
+        ! The batches
+        nspec = ctx%state%nspec
+        nbands = ctx%state%nbands
+        allocate(s_on(nspec, NB), s_off(nspec, NB), g_on(nbands, NB), g_off(nbands, NB))
+        call set_int('imf_type', 2)
+        call set_factors(0.0_wp, 0.0_wp, 1.0_wp, 1.0_wp, 1.0_wp)
+        call set_model(1, 0.5_wp)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        call ssp_opset_build_mods(ctx, pset, .false., op)
+        do icase = 1, 3
+            do m = 1, NB
+                call set_model(m, 0.5_wp)
+                call opensps_context_prepare_pset(ctx)
+                call opensps_context_get_pset(ctx, psets(m))
+                psets(m)%fbhb = fb(m); psets(m)%sbss = sb(m)
+                psets(m)%agb = 1.0_wp + 0.05_wp * m; psets(m)%pagb = 1.0_wp; psets(m)%redgb = 1.0_wp - 0.02_wp * m
+                select case (icase)
+                case (1)    ! every model on the same IMF
+                    continue
+                case (2)    ! 1-6 the same, 7-9 another, 10-12 each its own
+                    if (m >= 7 .and. m <= 9) then
+                        psets(m)%imf1 = 0.9_wp; psets(m)%imf2 = 1.9_wp; psets(m)%imf3 = 2.8_wp
+                    else if (m >= 10) then
+                        psets(m)%imf1 = 0.7_wp + 0.05_wp * m
+                    end if
+                case (3)    ! every model on its own
+                    psets(m)%imf1 = 1.0_wp + 0.03_wp * m
+                    psets(m)%imf2 = 2.0_wp + 0.02_wp * m
+                end select
+            end do
+            ssp_batch_share_imf = .false.
+            call compute_csp_batch(ctx, psets, g_off, status_off, spec=s_off, mass=m_off, lbol=l_off, ssp_ops=op)
+            ssp_batch_share_imf = .true.
+            call compute_csp_batch(ctx, psets, g_on, status, spec=s_on, mass=m_on, lbol=l_on, ssp_ops=op)
+            d_spec = maxval(abs(s_on - s_off)) / maxval(abs(s_off))
+            d_mag = maxval(abs(g_on - g_off))
+            d_scal = max(maxval(abs(m_on / m_off - 1.0_wp)), maxval(abs(l_on / l_off - 1.0_wp)))
+            write(label, '(a,i0)') 'shared IMF, case ', icase
+            call assert_true(status == 0 .and. status_off == 0, trim(label) // ": status 0", total_tests, total_failures)
+            call assert_true(d_spec <= IMF_SPEC_RTOL, trim(label) // ": spectra the same with and without sharing", &
+                             total_tests, total_failures)
+            call assert_true(d_mag <= MAG_TOL, trim(label) // ": magnitudes the same", total_tests, total_failures)
+            call assert_true(d_scal <= IMF_SCAL_TOL, trim(label) // ": mass and L_bol the same", total_tests, total_failures)
+            write(*, '(a,es9.2,a,es9.2,a,es9.2)') '#   max difference: spectra ', d_spec, ', magnitudes ', d_mag, &
+                ', scalars ', d_scal
+        end do
+        ssp_batch_share_imf = .true.
+        ! The comparisons are not vacuous: the IMF parameters change the spectrum of a model
+        pq(1) = psets(7); pq(2) = psets(7)
+        pq(1)%imf1 = 1.3_wp; pq(1)%imf2 = 2.3_wp; pq(1)%imf3 = 2.3_wp
+        pq(2)%imf1 = 0.9_wp; pq(2)%imf2 = 1.9_wp; pq(2)%imf3 = 2.8_wp
+        allocate(s2(nspec, 2), g2(nbands, 2))
+        call compute_csp_batch(ctx, pq, g2, status, spec=s2, ssp_ops=op)
+        call assert_true(status == 0 .and. maxval(abs(s2(:, 1) - s2(:, 2))) > 1.0e-3_wp * maxval(abs(s2(:, 1))), &
+                         "shared IMF: the IMF parameters change the numbers the cases compare", total_tests, total_failures)
+        call ssp_opset_free(op)
+        deallocate(s_on, s_off, g_on, g_off, s2, g2)
+    end subroutine check_share_imf
 
     subroutine set_factors(fbhb, sbss, agb, pagb, redgb)
         real(WP), intent(in) :: fbhb, sbss, agb, pagb, redgb

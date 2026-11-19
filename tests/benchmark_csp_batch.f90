@@ -34,7 +34,7 @@ program benchmark_csp_batch
     use opensps_context_types, only: opensps_context_t
     use opensps_api, only: opensps_build_afe_basis
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build
-    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_build_mods
+    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_build_mods, ssp_batch_share_imf
     use opensps_tuning, only: tuning_ct_count, tuning_ct_name, tuning_ct_value
     implicit none
 
@@ -45,7 +45,8 @@ program benchmark_csp_batch
     real(WP), allocatable :: spec_ssp(:, :), mass_ssp(:), lbol_ssp(:), mags(:, :), spec(:, :)
     character(len=32) :: arg, config = 'basic'
     logical :: afe = .false., lib = .false., full, zvar = .false., imf = .false., grad = .false., fit = .false., cue = .false.
-    logical :: mods = .false.
+    logical :: mods = .false., imfs = .false.
+    character(len=8) :: noshare
     real(WP), allocatable :: mbar(:, :), sbar(:, :), pbar(:, :), massv(:), lbolv(:), massb(:), lbolb(:)
     type(ssp_operator_t), allocatable :: ops(:)
     type(ssp_opset_t) :: opset
@@ -95,6 +96,11 @@ program benchmark_csp_batch
     ! "_mods" (with "_imf"): the isochrone modification factors fbhb, sbss, agb, pagb, redgb free per model too
     ! (the group operators)
     mods = index(config, '_mods') > 0 .and. imf
+    ! "_imfs" (also an "_imf" config): the operator path with every model on the same IMF (imf1-3 fixed), which the
+    ! forward pass computes once per chunk; OPENSPS_BENCH_NOSHARE=1 turns that off (the IMF weights of every model, as before)
+    imfs = index(config, '_imfs') > 0
+    call get_environment_variable('OPENSPS_BENCH_NOSHARE', noshare)
+    if (len_trim(noshare) > 0 .and. trim(noshare) /= '0') ssp_batch_share_imf = .false.
     grad = index(config, '_grad') > 0
     fit = index(config, '_fit') > 0
     cue = index(config, '_cue') > 0
@@ -159,6 +165,7 @@ program benchmark_csp_batch
     allocate(spec_ssp(nspec, ntfull), mass_ssp(ntfull), lbol_ssp(ntfull))
     call opensps_context_set_pset(ctx, pset)
     write(*, '(A,A)') 'config ', trim(config)
+    write(*, '(A,L1)') 'share_imf ', ssp_batch_share_imf
     do i = 1, tuning_ct_count()      ! the compile-time tuning parameters this build has (provenance of a sweep)
         write(*, '(A,A,A,I0)') 'tuning_ct_', trim(tuning_ct_name(i)), ' ', tuning_ct_value(i)
     end do
@@ -399,7 +406,7 @@ contains
         p%duste_umin = 1.0_wp + 0.2_wp * mod(i, 71)
         if (zvar) p%logzsol = -1.5_wp + 0.017_wp * mod(i, 97)
         if (afe) p%afe = -0.2_wp + 0.8_wp * real(mod(i, 89), WP) / 88.0_wp
-        if (imf) then
+        if (imf .and. .not. imfs) then
             p%imf1 = 0.9_wp + 0.01_wp * mod(i, 61)
             p%imf2 = 1.8_wp + 0.01_wp * mod(i, 83)
             p%imf3 = 2.0_wp + 0.01_wp * mod(i, 79)

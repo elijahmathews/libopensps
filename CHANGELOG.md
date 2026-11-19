@@ -16,6 +16,10 @@ major version is 0, a minor release may change the API, and each such change is 
   switch templates at thresholds; at most 8 distinct nonzero pairs per batch, 4 with every metallicity; **`OPENSPS_NBGRAD`
   is now 44**, size `params_bar` from `opensps_get_nbgrad()` or use the `_rows` entry point). The paths without it are unchanged.
   `doc/ISO_MODS_PLAN.md`, `doc/C_API.md`.
+- **Shared IMF weights in the batched SSP's forward pass** (#45): models of a batch that share their IMF parameters
+  (the operator path, e.g. the isochrone factors free with one IMF) have the point weights computed once per distinct IMF
+  and copied; the numbers are the same bit for bit. Batches below `SHARE_IMF_MIN_BATCH` models (default 1024;
+  `OPENSPS_TUNE_SHARE_IMF_MIN_BATCH`) take the path as before. 3 - 13% per model on the R9700 from N = 1000.
 - **`opensps_context_compute_csp_batch_grad_rows`**: the gradient entry point with the row count of the caller's
   `params_bar`. With fewer rows than `opensps_get_nbgrad()` it returns status 3 and writes nothing, instead of the
   heap overrun that a binding sized for fewer rows gets from `opensps_context_compute_csp_batch_grad` (#98).
