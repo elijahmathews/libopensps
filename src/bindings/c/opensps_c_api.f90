@@ -698,7 +698,7 @@ contains
         character(LEN=64), allocatable :: names(:)
         type(PARAMS) :: base
         type(PARAMS), allocatable :: psets(:)
-        integer :: i, m, st, nspec, nt, nbands, k
+        integer :: i, m, st, nspec, nt, nbands, k, ibs
         integer, allocatable :: slot(:)
         real(WP), allocatable :: vals(:, :)
         integer(int64) :: wa((storage_size(PARAMS_CORE()) + 63) / 64), wb((storage_size(PARAMS_CORE()) + 63) / 64)
@@ -851,7 +851,14 @@ contains
         ctx%pset = base
         ctx%state%ssp_basis_is_dirty = dirty
 
-        if (.not. has_ops) call ensure_batch_basis(ctx, zmode)
+        if (.not. has_ops) then
+            call ensure_batch_basis(ctx, zmode, ibs)
+            if (ibs /= 0) then
+                status = ibs
+                call opensps_set_error(ibs, 'compute_csp_batch: the SSP basis could not be generated')
+                return
+            end if
+        end if
 
         call c_f_pointer(c_mags, mags, [nbands, n])
         if (c_associated(c_spec)) call c_f_pointer(c_spec, spec, [nspec, n])
@@ -1167,7 +1174,7 @@ contains
         integer(c_int), intent(OUT) :: status
         type(PARAMS) :: pset
         type(ssp_operator_t), allocatable :: ops(:)
-        integer :: z, nz
+        integer :: z, nz, ist
 
         status = 0
         if (.not. handle_ok(handle)) then
@@ -1192,12 +1199,22 @@ contains
             allocate(ops(nz))
             do z = 1, nz
                 pset%zmet = z
-                call ssp_operator_build(ctx, pset, ops(z))
+                call ssp_operator_build(ctx, pset, ops(z), stat=ist)
+                if (ist /= 0) then
+                    status = ist
+                    call opensps_set_error(ist, 'opensps_context_build_ssp_ops: the SSP operator could not be built')
+                    return
+                end if
             end do
             call ssp_opset_build(ops, st%opset)
         else
             allocate(ops(1))
-            call ssp_operator_build(ctx, pset, ops(1))
+            call ssp_operator_build(ctx, pset, ops(1), stat=ist)
+            if (ist /= 0) then
+                status = ist
+                call opensps_set_error(ist, 'opensps_context_build_ssp_ops: the SSP operator could not be built')
+                return
+            end if
             call ssp_opset_build(ops, st%opset)
         end if
         st%have_opset = .true.
@@ -1213,6 +1230,7 @@ contains
         integer(c_int), value :: handle, all_metallicities
         integer(c_int), intent(OUT) :: status
         type(PARAMS) :: pset
+        integer :: ist
 
         status = 0
         if (.not. handle_ok(handle)) then
@@ -1231,7 +1249,12 @@ contains
         end if
         call opensps_prepare_pset(ctx)
         pset = ctx%pset
-        call ssp_opset_build_mods(ctx, pset, all_metallicities /= 0, st%opset)
+        call ssp_opset_build_mods(ctx, pset, all_metallicities /= 0, st%opset, stat=ist)
+        if (ist /= 0) then
+            status = ist
+            call opensps_set_error(ist, 'opensps_context_build_ssp_ops_free_mods: the SSP operators could not be built')
+            return
+        end if
         st%have_opset = .true.
         end associate
     end subroutine opensps_context_build_ssp_ops_free_mods_handle
@@ -1277,7 +1300,7 @@ contains
         real(WP) :: p(IMF_NPAR)
         real(c_double), pointer :: ip(:), mass_out(:), lbol_out(:), spec_out(:, :)
         type(PARAMS) :: pset
-        integer :: zidx, nt, nspec, it
+        integer :: zidx, nt, nspec, it, ist
 
         status = 0
         if (.not. handle_ok(handle)) then
@@ -1305,7 +1328,12 @@ contains
         call opensps_prepare_pset(ctx)
         pset = ctx%pset
         it = merge(imf_type, ctx%imf_type_val, imf_type >= 0)
-        call configure_imf_parameters(ctx, pset)
+        call configure_imf_parameters(ctx, pset, ist)
+        if (ist /= 0) then
+            status = ist
+            call opensps_set_error(ist, 'opensps_context_evaluate_ssp_op: invalid IMF type or user IMF file')
+            return
+        end if
         call imf_pack_params(ctx, p)
 
         if (c_associated(c_imf_params)) then
@@ -1328,13 +1356,17 @@ contains
 
     !> The context's SSP basis for compute_csp_batch: on the device in GPU builds, for the
     !> current SSP parameters, one metallicity (zmet) or, with zmode, all of them.
-    subroutine ensure_batch_basis(ctx, zmode)
+    subroutine ensure_batch_basis(ctx, zmode, stat)
         type(opensps_context_t), intent(inout) :: ctx
         logical, intent(in) :: zmode
+        !> OPENSPS_STAT_OK, or why an SSP could not be generated (generate_ssp_grid)
+        integer, intent(out) :: stat
+        integer :: ist
         type(PARAMS) :: pset
         real(WP), allocatable :: spec(:, :, :), mass(:, :), lbol(:, :)
         integer :: nz, z, zmet
 
+        stat = 0
 #if defined(OMP_TARGET)
         if (.not. ctx%on_device) call opensps_context_move_to_device(ctx)
 #endif
@@ -1349,7 +1381,12 @@ contains
         do z = 1, nz
             pset = ctx%pset
             if (zmode) pset%zmet = z
-            call generate_ssp_grid(ctx, pset, mass(:, z), lbol(:, z), spec(:, :, z))
+            call generate_ssp_grid(ctx, pset, mass(:, z), lbol(:, z), spec(:, :, z), stat=ist)
+            if (ist /= 0) then
+                ctx%pset%zmet = zmet
+                stat = ist
+                return
+            end if
         end do
         ctx%pset%zmet = zmet
         ctx%state%ssp_basis_is_dirty = .true.
@@ -1377,7 +1414,7 @@ contains
         real(c_double), pointer :: mass_ptr(:)
         real(c_double), pointer :: lbol_ptr(:)
         real(WP), allocatable :: spec(:, :), mass(:), lbol(:)
-        integer :: n_spec, n_time
+        integer :: n_spec, n_time, ist
 
         status = 0
         if (handle < 1 .or. .not. ALLOCATED(ctx_pool) .or. handle > SIZE(ctx_pool)) then
@@ -1396,7 +1433,12 @@ contains
         call c_f_pointer(c_lbol, lbol_ptr, [n_time])
         ! Computed in the working precision, returned as double (the C API is double throughout)
         allocate (spec(n_spec, n_time), mass(n_time), lbol(n_time))
-        call api_compute_ssp(ctx_pool(handle)%c, mass, lbol, spec)
+        call api_compute_ssp(ctx_pool(handle)%c, mass, lbol, spec, ist)
+        if (ist /= 0) then
+            status = ist
+            call opensps_set_error(ist, 'opensps_context_compute_ssp: the SSP could not be generated')
+            return
+        end if
         spec_ptr = spec
         mass_ptr = mass
         lbol_ptr = lbol
@@ -2191,13 +2233,16 @@ contains
     end subroutine unmap_ssp_zz
 
     !> The SSP grid of metallicity index z in the handle's store, computed if missing.
-    subroutine ensure_ssp(ctx, st, z)
+    subroutine ensure_ssp(ctx, st, z, stat)
         type(opensps_context_t), intent(INOUT) :: ctx
         type(ctx_store_t), intent(INOUT) :: st
         integer, intent(IN) :: z
+        !> OPENSPS_STAT_OK, or why the SSP could not be generated (generate_ssp_grid); the grid is then not marked as present
+        integer, intent(OUT) :: stat
         type(PARAMS) :: pset
         integer :: ns, nt, nz
 
+        stat = 0
         ns = ctx%state%nspec
         nt = ctx%state%ntfull
         nz = ctx%state%nz
@@ -2215,7 +2260,8 @@ contains
 #endif
         pset = ctx%pset
         pset%zmet = z
-        call generate_ssp_grid(ctx, pset, st%mass(:, z), st%lbol(:, z), st%spec(:, :, z))
+        call generate_ssp_grid(ctx, pset, st%mass(:, z), st%lbol(:, z), st%spec(:, :, z), stat=stat)
+        if (stat /= 0) return
         st%have(z) = .true.
     end subroutine ensure_ssp
 
@@ -2234,7 +2280,7 @@ contains
         integer(c_int), value :: handle, zcontinuous
         integer(c_int), intent(OUT) :: n_out, status
         real(WP), allocatable :: spec(:, :, :), mass(:, :), lbol(:, :)
-        integer :: z, nz, nzin, zlo, st
+        integer :: z, nz, nzin, zlo, st, ist
 
         n_out = 0
         status = 0
@@ -2260,7 +2306,12 @@ contains
                 call opensps_set_error(304, 'opensps_context_compute_csp: zmet out of range')
                 return
             end if
-            call ensure_ssp(ctx, store, z)
+            call ensure_ssp(ctx, store, z, ist)
+            if (ist /= 0) then
+                status = ist
+                call opensps_set_error(ist, 'opensps_context_compute_csp: an SSP could not be generated')
+                return
+            end if
             allocate (spec, source=store%spec(:, :, z:z))
             allocate (mass, source=store%mass(:, z:z))
             allocate (lbol, source=store%lbol(:, z:z))
@@ -2268,11 +2319,26 @@ contains
             if (zcontinuous == 1) then
                 zlo = MAX(MIN(find_interval(LOG10(ctx%state%zlegend(1:nz) / ctx%state%zsol), &
                                             ctx%pset%logzsol), nz - 1), 1)
-                call ensure_ssp(ctx, store, zlo)
-                call ensure_ssp(ctx, store, zlo + 1)
+                call ensure_ssp(ctx, store, zlo, ist)
+                if (ist /= 0) then
+                    status = ist
+                    call opensps_set_error(ist, 'opensps_context_compute_csp: an SSP could not be generated')
+                    return
+                end if
+                call ensure_ssp(ctx, store, zlo + 1, ist)
+                if (ist /= 0) then
+                    status = ist
+                    call opensps_set_error(ist, 'opensps_context_compute_csp: an SSP could not be generated')
+                    return
+                end if
             else
                 do z = 1, nz
-                    call ensure_ssp(ctx, store, z)
+                    call ensure_ssp(ctx, store, z, ist)
+                    if (ist /= 0) then
+                        status = ist
+                        call opensps_set_error(ist, 'opensps_context_compute_csp: an SSP could not be generated')
+                        return
+                    end if
                 end do
             end if
             allocate (spec(ctx%state%nspec, ctx%state%ntfull, 1), mass(ctx%state%ntfull, 1), &
@@ -2297,7 +2363,12 @@ contains
             call MOVE_ALLOC(ctx%state%lbol_ssp_zz, store%lbol)
         case (3)
             do z = 1, nz
-                call ensure_ssp(ctx, store, z)
+                call ensure_ssp(ctx, store, z, ist)
+                if (ist /= 0) then
+                    status = ist
+                    call opensps_set_error(ist, 'opensps_context_compute_csp: an SSP could not be generated')
+                    return
+                end if
             end do
             nzin = nz
             allocate (spec, source=store%spec)
@@ -2315,7 +2386,12 @@ contains
                 call opensps_set_error(311, 'opensps_context_compute_csp: sfh = 3 without a tabular SFH')
                 return
             end if
-            call load_tabular_sfh(ctx, ctx%pset, nzin)
+            call load_tabular_sfh(ctx, ctx%pset, nzin, ist)
+            if (ist /= 0) then
+                status = ist
+                call opensps_set_error(ist, 'opensps_context_compute_csp: the tabular SFH could not be loaded')
+                return
+            end if
         end if
         ctx%state%ssp_basis_is_dirty = .true.
         call opensps_context_update_ssp_basis(ctx, spec, mass, lbol, nzin)
@@ -2802,7 +2878,14 @@ contains
         allocate (ssp_lbol(n_time))
         allocate (ssp_spec(n_spec, n_time))
 
-        call generate_ssp_grid(opensps_default_ctx, global_pset, ssp_mass, ssp_lbol, ssp_spec)
+        block
+            integer :: ist
+            call generate_ssp_grid(opensps_default_ctx, global_pset, ssp_mass, ssp_lbol, ssp_spec, stat=ist)
+            if (ist /= 0) then
+                call opensps_set_error(ist, '[OPENSPS-C] Error: the SSP could not be generated')
+                return
+            end if
+        end block
 
         if (global_pset%sfh .eq. 0) then
             ! --- SSP Mode ---
@@ -2825,7 +2908,14 @@ contains
             ssp_spec_zz(:, :, 1) = ssp_spec
 
             if (global_pset%sfh == 2 .or. global_pset%sfh == 3) then
-                call load_tabular_sfh(opensps_default_ctx, global_pset, 1)
+                block
+                    integer :: ist
+                    call load_tabular_sfh(opensps_default_ctx, global_pset, 1, ist)
+                    if (ist /= 0) then
+                        call opensps_set_error(ist, '[OPENSPS-C] Error: the tabular SFH could not be loaded')
+                        return
+                    end if
+                end block
             end if
 
             block
@@ -2888,8 +2978,17 @@ contains
 
         old_z = global_pset%zmet
         global_pset%zmet = zidx
-        call generate_ssp_grid(opensps_default_ctx, global_pset, opensps_default_ctx%state%mass_ssp_zz(:, zidx), &
-                               opensps_default_ctx%state%lbol_ssp_zz(:, zidx), opensps_default_ctx%state%spec_ssp_zz(:, :, zidx))
+        block
+            integer :: ist
+            call generate_ssp_grid(opensps_default_ctx, global_pset, opensps_default_ctx%state%mass_ssp_zz(:, zidx), &
+                                   opensps_default_ctx%state%lbol_ssp_zz(:, zidx), &
+                                   opensps_default_ctx%state%spec_ssp_zz(:, :, zidx), stat=ist)
+            if (ist /= 0) then
+                global_pset%zmet = old_z
+                call opensps_set_error(ist, '[OPENSPS-C] Error: the SSP could not be generated')
+                return
+            end if
+        end block
         has_ssp(zidx) = 1
         has_ssp_age(zidx, :) = global_pset%ssp_gen_age
         global_pset%zmet = old_z
@@ -2935,7 +3034,14 @@ contains
             zmet = global_pset%zmet
             if (has_ssp(zmet) == 0) call opensps_compute_ssp(zmet)
             if (global_pset%sfh == 2 .or. global_pset%sfh == 3) then
-                call load_tabular_sfh(opensps_default_ctx, global_pset, 1)
+                block
+                    integer :: ist
+                    call load_tabular_sfh(opensps_default_ctx, global_pset, 1, ist)
+                    if (ist /= 0) then
+                        call opensps_set_error(ist, '[OPENSPS-C] Error: the tabular SFH could not be loaded')
+                        return
+                    end if
+                end block
             end if
             block
                 type(COMPSPOUT), allocatable :: results(:)
@@ -2965,7 +3071,14 @@ contains
             lbol_zz(:, 1) = lbol
             spec_zz(:, :, 1) = spec
             if (global_pset%sfh == 2 .or. global_pset%sfh == 3) then
-                call load_tabular_sfh(opensps_default_ctx, global_pset, 1)
+                block
+                    integer :: ist
+                    call load_tabular_sfh(opensps_default_ctx, global_pset, 1, ist)
+                    if (ist /= 0) then
+                        call opensps_set_error(ist, '[OPENSPS-C] Error: the tabular SFH could not be loaded')
+                        return
+                    end if
+                end block
             end if
             block
                 type(COMPSPOUT), allocatable :: results(:)
@@ -2990,7 +3103,14 @@ contains
             lbol_zz(:, 1) = lbol
             spec_zz(:, :, 1) = spec
             if (global_pset%sfh == 2 .or. global_pset%sfh == 3) then
-                call load_tabular_sfh(opensps_default_ctx, global_pset, 1)
+                block
+                    integer :: ist
+                    call load_tabular_sfh(opensps_default_ctx, global_pset, 1, ist)
+                    if (ist /= 0) then
+                        call opensps_set_error(ist, '[OPENSPS-C] Error: the tabular SFH could not be loaded')
+                        return
+                    end if
+                end block
             end if
             block
                 type(COMPSPOUT), allocatable :: results(:)
@@ -3010,7 +3130,14 @@ contains
                 if (has_ssp(zmet) == 0) call opensps_compute_ssp(zmet)
             end do
             if (global_pset%sfh == 2 .or. global_pset%sfh == 3) then
-                call load_tabular_sfh(opensps_default_ctx, global_pset, opensps_default_ctx%state%nz)
+                block
+                    integer :: ist
+                    call load_tabular_sfh(opensps_default_ctx, global_pset, opensps_default_ctx%state%nz, ist)
+                    if (ist /= 0) then
+                        call opensps_set_error(ist, '[OPENSPS-C] Error: the tabular SFH could not be loaded')
+                        return
+                    end if
+                end block
             end if
             block
                 type(COMPSPOUT), allocatable :: results(:)
@@ -3602,7 +3729,7 @@ contains
     subroutine opensps_write_isochrone(c_outfile) bind(C, name="opensps_write_isochrone")
         character(KIND=c_char), dimension(*), intent(IN) :: c_outfile
         character(LEN=100) :: outfile
-        integer :: i, tt, zz
+        integer :: i, tt, zz, ist_iso
         real(WP) :: dz, loggi, hb_wght
         real(WP), dimension(NM) :: wght
         real(WP), allocatable :: spec(:)
@@ -3664,14 +3791,24 @@ contains
                 wght = 0.0_wp
                 call compute_imf_weights(opensps_default_ctx, mini(tt, :), wght, nmass(tt))
 
-                if (global_pset%fbhb .gt. 0.0 .or. global_pset%sbss .gt. 1e-3) &
+                if (global_pset%fbhb .gt. 0.0 .or. global_pset%sbss .gt. 1e-3) then
                     call modify_horizontal_branch(opensps_default_ctx, tt, global_pset%fbhb, timestep_isoc(zz, tt), hb_wght, &
                         nmass, &
-                                                  mini, mact, logl, logt, logg, phase, wght)
+                                                  mini, mact, logl, logt, logg, phase, wght, stat=ist_iso)
+                    if (ist_iso /= 0) then
+                        call opensps_set_error(ist_iso, '[OPENSPS-C] Error: the isochrone arrays are full')
+                        return
+                    end if
+                end if
 
-                if (timestep_isoc(zz, tt) .ge. BHB_SBS_TIME .and. global_pset%sbss .gt. 1e-3) &
+                if (timestep_isoc(zz, tt) .ge. BHB_SBS_TIME .and. global_pset%sbss .gt. 1e-3) then
                     call apply_blue_stragglers(opensps_default_ctx, tt, zz, global_pset%sbss, hb_wght, nmass, &
-                                               mini, mact, logl, logt, logg, phase, wght)
+                                               mini, mact, logl, logt, logg, phase, wght, stat=ist_iso)
+                    if (ist_iso /= 0) then
+                        call opensps_set_error(ist_iso, '[OPENSPS-C] Error: the isochrone arrays are full')
+                        return
+                    end if
+                end if
 
                 call modify_giant_branch(opensps_default_ctx, tt, zz, timestep_isoc(zz, tt), nmass(tt), global_pset%delt, &
                                     global_pset%dell, global_pset%pagb, global_pset%redgb, global_pset%agb, logl, logt, phase, wght)

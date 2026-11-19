@@ -334,7 +334,8 @@ contains
     !> @param[in]    psets   Parameter sets, one per model (prepared: opensps_context_prepare_pset).
     !> @param[out]   mags    Magnitudes (nbands, N); bands not requested in psets(1)%mag_compute
     !>                       are NaN, as in compute_magnitudes.
-    !> @param[out]   status  0 on success; 1 no setup or basis; 2 unsupported option; 3 bad shape;
+    !> @param[out]   status  0 on success; 1 no setup or basis; 2 unsupported option; 3 bad shape or IMF (imf_type outside 0..5, an
+    !>                       unreadable or empty user IMF file);
     !>                       4 data missing (nebular_model = 1 without cue's weights: OPENSPS_CUE_DATA);
     !>                       5 an offload build running its target regions on the host (no device, or
     !>                       OMP_TARGET_OFFLOAD=DISABLED) that cannot run this call: with fewer than two OpenMP
@@ -425,7 +426,7 @@ contains
         type(smooth_plan_t) :: splan
         integer :: st_sm
         integer, allocatable :: ipair(:)
-        integer :: ng, st_pair
+        integer :: ng, st_pair, st_imf
         real(WP) :: sigm(N_MOD_SIG)
         integer  :: st_cue
         real(WP), allocatable :: gas(:,:)
@@ -936,7 +937,10 @@ contains
         ! characteristic and break masses), the operator on the device
         dev = .false.
         if (imf) then
-            call configure_imf_parameters(ctx, psets(1))
+            call configure_imf_parameters(ctx, psets(1), st_imf)
+            if (st_imf /= 0) then
+                status = 3; return
+            end if
             allocate(pm(IMF_NPAR, n_mod), smass(nt, n_mod), slum(nt, n_mod), wsfh(n_mod, nt), nobasis(1, 1, 1))
             call imf_pack_params(ctx, pm(:, 1))
             do m = 1, n_mod

@@ -1,6 +1,6 @@
 module test_opensps_stellar_modifications_mod
     use opensps_precision, only: WP
-    use opensps_constants, only: NM, BHB_SBS_TIME
+    use opensps_constants, only: NM, BHB_SBS_TIME, OPENSPS_STAT_OK, OPENSPS_STAT_ISO_FULL
     use opensps_types, only: params
     use opensps_context_types, only: opensps_context_t
     use opensps_stellar_modifications
@@ -25,6 +25,7 @@ contains
         call print_minor_header("opensps_stellar_modifications")
 
         call test_bs_perfect_line_zams()
+        call test_arrays_full_status()
         call test_bs_cache_safety()
         call test_bs_distribution()
         call test_bs_zams_vs_current()
@@ -141,6 +142,97 @@ contains
         deallocate(ctx)
         deallocate(mass_ini, mass_act, log_l, log_t, log_g, phase, weights)
     end subroutine test_bs_perfect_line_zams
+
+
+    !> Arrays with no room for the stars to add: a status (OPENSPS_STAT_ISO_FULL), not a stop of the program, and
+    !> nothing added; with room, status 0.
+    subroutine test_arrays_full_status()
+        type(opensps_context_t), allocatable :: ctx
+        integer, parameter :: n_time = 2
+        integer, dimension(n_time) :: n_mass
+        real(WP), allocatable :: mass_ini(:,:), mass_act(:,:), log_l(:,:), log_t(:,:), log_g(:,:), phase(:,:)
+        real(WP), allocatable :: weights(:)
+        real(WP) :: hb_total_weight
+        integer :: i, stat, n_curr
+
+        call print_group("Arrays full: status, no stop")
+
+        allocate(ctx)
+        call setup_zams_context(ctx)
+        allocate(mass_ini(n_time, NM), mass_act(n_time, NM), log_l(n_time, NM), log_t(n_time, NM), log_g(n_time, NM), &
+                 phase(n_time, NM), weights(NM))
+        mass_ini = 0.0_wp; mass_act = 0.0_wp; log_l = 0.0_wp; log_t = 0.0_wp; log_g = 0.0_wp; phase = 0.0_wp
+        weights = 0.0_wp
+
+        ! the ZAMS line and a turn-off at 20, as in the perfect-line test, with 5 free places (the 20 stragglers need 20)
+        n_curr = NM - 5
+        do i = 1, NM
+            log_t(1, i) = 0.1_wp * real(i, WP)
+            log_l(1, i) = log_t(1, i)
+            mass_ini(1, i) = log_l(1, i) + 1.0_wp
+            mass_act(1, i) = mass_ini(1, i)
+            ctx%state%logt_isoc(1, 1, i) = log_t(1, i)
+            ctx%state%logl_isoc(1, 1, i) = log_l(1, i)
+            ctx%state%mini_isoc(1, 1, i) = mass_ini(1, i)
+        end do
+        do i = 1, n_curr
+            log_t(2, i) = log_t(1, i)
+            log_l(2, i) = log_t(2, i)
+            if (i > 20) log_l(2, i) = log_t(2, i) + 1.0_wp
+            mass_ini(2, i) = log_l(2, i) + 1.0_wp
+            mass_act(2, i) = mass_ini(2, i)
+            weights(i) = 1.0_wp
+        end do
+        n_mass = n_curr
+        ctx%zin = 0
+        stat = -1
+        call apply_blue_stragglers(ctx, 2, 1, 1.0_wp, 10.0_wp, n_mass, mass_ini, mass_act, log_l, log_t, log_g, phase, weights, &
+                                   stat)
+        call assert_int_equals(OPENSPS_STAT_ISO_FULL, stat, "blue stragglers: no room is a status", total_tests, total_failures)
+        call assert_int_equals(n_curr, n_mass(2), "blue stragglers: nothing was added", total_tests, total_failures)
+        n_mass = n_curr - 25
+        stat = -1
+        call apply_blue_stragglers(ctx, 2, 1, 1.0_wp, 10.0_wp, n_mass, mass_ini, mass_act, log_l, log_t, log_g, phase, weights, &
+                                   stat)
+        call assert_int_equals(OPENSPS_STAT_OK, stat, "blue stragglers: with room the status is 0", total_tests, total_failures)
+        call teardown_zams_context(ctx)
+
+        ! MIST horizontal branch: one blue star per HB star, no room for the first
+        ctx%state%isoc_type = 'mist'
+        mass_ini = 0.0_wp; mass_act = 0.0_wp; log_l = 0.0_wp; log_t = 0.0_wp; log_g = 0.0_wp; phase = 0.0_wp
+        n_curr = NM
+        do i = 1, 5
+            mass_ini(1, i) = 1.0_wp + 0.1_wp * real(i - 1, WP)
+            mass_act(1, i) = mass_ini(1, i)
+            log_l(1, i) = 1.0_wp
+            phase(1, i) = 3.0_wp
+        end do
+        log_t(1, 1:5) = [3.8_wp, 3.7_wp, 3.6_wp, 3.65_wp, 3.75_wp]
+        weights = 1.0_wp
+        n_mass(1) = n_curr
+        stat = -1
+        call modify_horizontal_branch(ctx, 1, 0.4_wp, BHB_SBS_TIME + 0.1_wp, hb_total_weight, n_mass, mass_ini, mass_act, &
+                                      log_l, log_t, log_g, phase, weights, stat=stat)
+        call assert_int_equals(OPENSPS_STAT_ISO_FULL, stat, "MIST HB: no room is a status", total_tests, total_failures)
+        call assert_int_equals(n_curr, n_mass(1), "MIST HB: nothing was added", total_tests, total_failures)
+
+        ! Padova: a drop of log L at a bright point starts the HB; ten blue stars per HB star, and 5 places are free
+        ctx%state%isoc_type = 'pdva'
+        mass_ini = 0.0_wp; mass_act = 0.0_wp; log_l = 0.0_wp; log_t = 0.0_wp; log_g = 0.0_wp; phase = 0.0_wp
+        mass_ini(1, 1:2) = 1.0_wp
+        mass_act(1, 1:2) = 1.0_wp
+        log_l(1, 1) = 3.0_wp
+        log_l(1, 2) = 1.0_wp
+        log_t(1, 1:2) = 3.7_wp
+        n_mass(1) = NM - 5
+        stat = -1
+        call modify_horizontal_branch(ctx, 1, 0.4_wp, BHB_SBS_TIME + 0.1_wp, hb_total_weight, n_mass, mass_ini, mass_act, &
+                                      log_l, log_t, log_g, phase, weights, stat=stat)
+        call assert_int_equals(OPENSPS_STAT_ISO_FULL, stat, "Padova HB: no room is a status", total_tests, total_failures)
+        call assert_int_equals(NM - 5, n_mass(1), "Padova HB: nothing was added", total_tests, total_failures)
+        deallocate(ctx)
+        deallocate(mass_ini, mass_act, log_l, log_t, log_g, phase, weights)
+    end subroutine test_arrays_full_status
 
     subroutine test_bs_cache_safety()
         type(opensps_context_t), allocatable :: ctx

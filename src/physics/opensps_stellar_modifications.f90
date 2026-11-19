@@ -12,7 +12,7 @@ module opensps_stellar_modifications
     !> - X-ray Binary (XRB) spectral contribution (formerly xrb_add.f90)
 
     use opensps_precision, only: WP
-    use opensps_constants, only: NM, GRAVITY_L_M_T_COEFF, BHB_SBS_TIME
+    use opensps_constants, only: NM, GRAVITY_L_M_T_COEFF, BHB_SBS_TIME, OPENSPS_STAT_OK, OPENSPS_STAT_ISO_FULL
     use opensps_types, only: params
     use opensps_context_types, only: opensps_context_t, isoc_is_mist
     use opensps_imf, only: get_imf_value, integrate_imf_interval_analytic, imf_integral_p, imf_pack_params, &
@@ -93,8 +93,10 @@ contains
     !> @param[inout] weights      Array of weights (modified).
     subroutine apply_blue_stragglers(ctx, time_idx, metal_idx, s_bs, hb_weight, n_mass, &
                                      mass_ini, mass_act, log_l, log_t, log_g, phase, &
-                                     weights)
+                                     weights, stat)
         type(opensps_context_t), intent(inout) :: ctx
+        !> OPENSPS_STAT_OK, or OPENSPS_STAT_ISO_FULL when the arrays have no room for the stars (nothing is added)
+        integer, intent(out), optional :: stat
         integer, intent(in) :: time_idx, metal_idx
         real(WP), intent(in) :: s_bs
         real(WP), intent(in) :: hb_weight
@@ -112,6 +114,8 @@ contains
         real(WP) :: lum_expected_on_zams, diff_from_zams
         real(WP) :: new_logl, new_logt, new_mass
         real(WP) :: inv_nbs
+
+        if (present(stat)) stat = OPENSPS_STAT_OK
 
         ! 1. Safety Check (Legacy: IF (ctx%zin < -999999))
         if (ctx%zin < -9.0e5_wp) return
@@ -143,8 +147,9 @@ contains
 
         ! 4. Add Blue Straggler Stars
         if (n_curr + N_BS_STARS > NM) then
-            write(*,*) '[OPENSPS-STELLAR] Error: Arrays full in apply_blue_stragglers.'
-            stop
+            if (.not. present(stat)) write(*,*) '[OPENSPS-STELLAR] Error: Arrays full in apply_blue_stragglers.'
+            if (present(stat)) stat = OPENSPS_STAT_ISO_FULL
+            return
         end if
 
         idx_msto = idx_msto - 1
@@ -490,8 +495,10 @@ contains
     !> @param[inout] weights      Weights array (modified).
     subroutine modify_horizontal_branch(ctx, time_idx, f_bhb, hb_time, hb_total_weight, &
                                         n_mass, mass_ini, mass_act, log_l, log_t, &
-                                        log_g, phase, weights, hb_flag, parent)
+                                        log_g, phase, weights, hb_flag, parent, stat)
         type(opensps_context_t), intent(inout) :: ctx
+        !> OPENSPS_STAT_OK, or OPENSPS_STAT_ISO_FULL when the arrays have no room for the new stars (the stars added so far stay)
+        integer, intent(out), optional :: stat
         integer, intent(in) :: time_idx
         real(WP), intent(in) :: f_bhb, hb_time
         real(WP), intent(out) :: hb_total_weight
@@ -518,6 +525,7 @@ contains
         integer :: total_hb_stars
         integer :: mist_counter
 
+        if (present(stat)) stat = OPENSPS_STAT_OK
         hb_total_weight = 0.0_wp
         n_curr = n_mass(time_idx)
 
@@ -562,8 +570,10 @@ contains
                         
                         ! Ensure we have space in arrays
                         if (n_mass(time_idx) + N_HB_SUBSTEPS > NM) then
-                            write(*,*) '[OPENSPS-STELLAR] Error: Arrays full in modify_horizontal_branch (Padova).'
-                            stop
+                            if (.not. present(stat)) &
+                                write(*,*) '[OPENSPS-STELLAR] Error: Arrays full in modify_horizontal_branch (Padova).'
+                            if (present(stat)) stat = OPENSPS_STAT_ISO_FULL
+                            return
                         end if
 
                         ! Add N_HB_SUBSTEPS (10) new stars
@@ -643,8 +653,10 @@ contains
                     if (f_bhb > 1.0e-4_wp .and. hb_time >= BHB_SBS_TIME) then
                         
                          if (n_mass(time_idx) + 1 > NM) then
-                            write(*,*) '[OPENSPS-STELLAR] Error: Arrays full in modify_horizontal_branch (MIST).'
-                            stop
+                            if (.not. present(stat)) &
+                                write(*,*) '[OPENSPS-STELLAR] Error: Arrays full in modify_horizontal_branch (MIST).'
+                            if (present(stat)) stat = OPENSPS_STAT_ISO_FULL
+                            return
                         end if
 
                         ! Add ONE new blue star per HB star
