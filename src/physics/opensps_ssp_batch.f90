@@ -35,7 +35,7 @@ module opensps_ssp_batch
                            integrate_powerlaw, powerlaw_dj_de
     use opensps_stellar_modifications, only: add_remnant_mass_p
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_to_device, ssp_operator_from_device, ssp_operator_build, &
-                                    MOD_NGRP
+                                    MOD_NGRP, MOD_GRP_TPAGB
     use opensps_types, only: params
     use opensps_context_types, only: opensps_context_t
     use opensps_trace, only: opensps_trace_push, opensps_trace_pop
@@ -44,10 +44,28 @@ module opensps_ssp_batch
 
     public :: ssp_batch_age_sums_z, ssp_batch_age_sums_adjoint, NIMFG, dot_lanes
     public :: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods, ssp_batch_age_sums_mods, &
-               ssp_batch_age_sums_adjoint_mods
+               ssp_batch_age_sums_adjoint_mods, ssp_mods_prepare_pairs, MAX_TP_PAIRS, MAX_TP_PAIRS_ALLZ, TP_FD_STEP
 
     !> The IMF parameters of the gradients (imf1, imf2, imf3, vdmc, mdave)
     integer, parameter :: NIMFG = 5
+    !> The distinct nonzero (delt, dell) pairs of a context's batches the free-modification set keeps operators of
+    !> The most distinct nonzero (delt, dell) pairs a free-modification set holds sets for (and a batch may use). Each pair
+    !> keeps one set of the TP-AGB group (the operators of the set's metallicities: ~90 MB for one at the regression data's
+    !> size, see MAX_TP_PAIRS_ALLZ for all) and the gradients build one more at a time for their central differences, so the
+    !> cap bounds the memory at that of MAX_TP_PAIRS + 1 sets. (A cap of 32, with the four shifted sets of every pair kept,
+    !> took 10 GB in the finite-difference tests, whose every step is a new pair.)
+    integer, parameter :: MAX_TP_PAIRS = 8
+    !> The same for a set whose operators cover every metallicity (ssp_opset_build_mods with all_z: the logzsol of each
+    !> model free): a pair's set holds the operators of all of them, ~1 GB with MIST's 12 at the regression data's size
+    integer, parameter :: MAX_TP_PAIRS_ALLZ = 4
+    !> The step of the central differences of the TP-AGB group's outputs in delt and dell (dex). Not small: the spectra of the
+    !> TP-AGB stars switch templates at thresholds, so the age sums are step functions of delt (measured, MIST, one model: steps
+    !> of 1e-7 to 1e-4 in L, 50 to 150 of them per 2e-3 dex, i.e. every ~2e-5 dex), and a difference over a step below that
+    !> returns one step (5.07, -7.56, -1.62 at 1e-5 where the slope averaged over the steps is 2.1, -2.9, -1.4). From 2e-4 dex
+    !> up the central difference is the slope averaged over some tens of steps (2.12, 2.10, 2.15 at 2e-4, 5e-4, 1e-3), the
+    !> response of the loss to delt on the scale a fit explores. With FP32 kernels the step is 1e-3, as the outputs' rounding
+    !> (1e-7) is divided by it.
+    real(WP), parameter :: TP_FD_STEP = merge(5.0e-4_wp, 1.0e-3_wp, KP == WP)
 
     !> The kernels run on the device in OpenMP target builds and as OpenMP host loops otherwise
 #ifdef OMP_TARGET
@@ -101,6 +119,20 @@ module opensps_ssp_batch
         !> coefficient of each model times the group's age sums (ssp_batch_age_sums_mods)
         logical :: free_mods = .false.
         type(ssp_opset_t), pointer :: grp(:) => null()
+        !> The TP-AGB shifts delt and dell (the next groups): the sets of the TP-AGB group at the distinct nonzero pairs the
+        !> batches so far used (ext(1:n_ext), pairs ext_t, ext_l; built when a batch needs one, ssp_mods_prepare_pairs); each is
+        !> one more group of the batch with the coefficient of the TP-AGB group for the models at that pair. (The gradients'
+        !> shifted sets, +-TP_FD_STEP in delt and in dell, are built one pair at a time in the reverse pass and freed after it:
+        !> each is the size of a set of the TP-AGB group at every metallicity)
+        !> n_ext: the highest slot of ext in use (a slot whose ext_ok is false is free: a pair a batch did not use is evicted
+        !> when a new pair needs the room); max_ext: the pairs a batch may use
+        integer :: n_ext = 0, max_ext = MAX_TP_PAIRS
+        logical :: ext_ok(MAX_TP_PAIRS) = .false.
+        type(ssp_opset_t), pointer :: ext(:) => null()
+        real(WP) :: ext_t(MAX_TP_PAIRS) = 0.0_wp, ext_l(MAX_TP_PAIRS) = 0.0_wp
+        !> What the groups were built from (the pairs' sets are built with the same)
+        type(params) :: base_pset
+        logical :: all_z = .false.
         !> The linear L_bol sums sl of each group at each age, model and metallicity pass of the last batch (the reverse pass)
         real(WP), allocatable :: slp(:,:,:,:)
     end type ssp_opset_t
@@ -215,7 +247,128 @@ contains
         set%free_mods = .true.
         set%nz = set%grp(0)%nz
         set%nt = set%grp(0)%nt
+        set%base_pset = pset
+        set%all_z = all_z
+        allocate(set%ext(MAX_TP_PAIRS))
+        set%n_ext = 0
+        set%ext_ok = .false.
+        set%max_ext = merge(MAX_TP_PAIRS_ALLZ, MAX_TP_PAIRS, all_z)
     end subroutine ssp_opset_build_mods
+
+    !> The set of group g of a free-modification set: the groups of ssp_opset_build_mods (0 .. MOD_NGRP - 1), then the TP-AGB
+    !> group at each pair of ext (MOD_NGRP + k - 1 for ext(k))
+    function gset(set, g) result(sg)
+        type(ssp_opset_t), intent(in), target :: set
+        integer, intent(in) :: g
+        type(ssp_opset_t), pointer :: sg
+        if (g < MOD_NGRP) then
+            sg => set%grp(g)
+        else
+            sg => set%ext(g - MOD_NGRP + 1)
+        end if
+    end function gset
+
+    !> The operators of the TP-AGB group at the shifts (delt, dell), for the metallicities of the set (as ssp_opset_build_mods)
+    subroutine ssp_opset_build_tp(ctx, base, delt, dell, out)
+        type(opensps_context_t), target, intent(inout) :: ctx
+        type(ssp_opset_t), intent(in) :: base
+        real(WP), intent(in) :: delt, dell
+        type(ssp_opset_t), intent(inout) :: out
+        type(ssp_operator_t), allocatable :: ops(:)
+        type(params) :: p
+        integer :: z, nzo
+
+        nzo = 1
+        if (base%all_z) nzo = ctx%state%nz
+        allocate(ops(nzo))
+        p = base%base_pset
+        do z = 1, nzo
+            if (base%all_z) p%zmet = z
+            call ssp_operator_build(ctx, p, ops(z), group=MOD_GRP_TPAGB, shift_t=delt, shift_l=dell)
+        end do
+        call ssp_opset_build(ops, out)
+    end subroutine ssp_opset_build_tp
+
+    !> The pair of each model (ipair: 0 for delt = dell = 0, else k of ext(k)), building the sets of the pairs not seen yet,
+    !> in a free slot or one whose pair this batch does not use. status 2: a batch with more than set%max_ext distinct pairs.
+    subroutine ssp_mods_prepare_pairs(ctx, set, delt, dell, ipair, status)
+        type(opensps_context_t), target, intent(inout) :: ctx
+        type(ssp_opset_t), intent(inout) :: set
+        real(WP), intent(in) :: delt(:), dell(:)
+        integer, intent(out) :: ipair(:), status
+        integer :: m, k, ip, nnew, slot
+        real(WP) :: nt_(MAX_TP_PAIRS), nl_(MAX_TP_PAIRS)
+        integer :: where_(MAX_TP_PAIRS)
+        logical :: inuse(MAX_TP_PAIRS)
+
+        status = 0
+        ipair = 0
+        ! The distinct pairs of this batch
+        nnew = 0
+        do m = 1, size(delt)
+            if (delt(m) == 0.0_wp .and. dell(m) == 0.0_wp) cycle
+            do k = 1, nnew
+                if (nt_(k) == delt(m) .and. nl_(k) == dell(m)) exit
+            end do
+            if (k > nnew) then
+                if (nnew == set%max_ext) then
+                    status = 2
+                    return
+                end if
+                nnew = nnew + 1
+                nt_(nnew) = delt(m)
+                nl_(nnew) = dell(m)
+            end if
+        end do
+        ! The slots of the pairs already built (those are kept), then the new pairs into free or unused slots
+        inuse = .false.
+        where_ = 0
+        do k = 1, nnew
+            do ip = 1, set%n_ext
+                if (set%ext_ok(ip) .and. set%ext_t(ip) == nt_(k) .and. set%ext_l(ip) == nl_(k)) then
+                    where_(k) = ip
+                    inuse(ip) = .true.
+                    exit
+                end if
+            end do
+        end do
+        do k = 1, nnew
+            if (where_(k) > 0) cycle
+            slot = 0
+            do ip = 1, MAX_TP_PAIRS
+                if (.not. set%ext_ok(ip)) then
+                    slot = ip
+                    exit
+                end if
+            end do
+            if (slot == 0) then
+                do ip = 1, MAX_TP_PAIRS
+                    if (.not. inuse(ip)) then
+                        slot = ip
+                        exit
+                    end if
+                end do
+                call ssp_opset_free(set%ext(slot))
+                set%ext_ok(slot) = .false.
+            end if
+            call ssp_opset_build_tp(ctx, set, nt_(k), nl_(k), set%ext(slot))
+            set%ext_t(slot) = nt_(k)
+            set%ext_l(slot) = nl_(k)
+            set%ext_ok(slot) = .true.
+            set%n_ext = max(set%n_ext, slot)
+            inuse(slot) = .true.
+            where_(k) = slot
+        end do
+        do m = 1, size(delt)
+            if (delt(m) == 0.0_wp .and. dell(m) == 0.0_wp) cycle
+            do k = 1, nnew
+                if (nt_(k) == delt(m) .and. nl_(k) == dell(m)) then
+                    ipair(m) = where_(k)
+                    exit
+                end if
+            end do
+        end do
+    end subroutine ssp_mods_prepare_pairs
 
     !> The template entries of each point (pe_ptr, pe_k, pe_e): counts, then a fill in template order.
     subroutine entries_by_point(set, np, nen)
@@ -261,7 +414,7 @@ contains
 
     recursive subroutine ssp_opset_free(set)
         type(ssp_opset_t), intent(inout) :: set
-        integer :: iz, ig
+        integer :: iz, ig, ip
         if (associated(set%grp)) then
             do ig = lbound(set%grp, 1), ubound(set%grp, 1)
                 call ssp_opset_free(set%grp(ig))
@@ -270,6 +423,15 @@ contains
             nullify(set%grp)
         end if
         if (allocated(set%slp)) deallocate(set%slp)
+        if (associated(set%ext)) then
+            do ig = 1, size(set%ext)
+                call ssp_opset_free(set%ext(ig))
+            end do
+            deallocate(set%ext)
+            nullify(set%ext)
+        end if
+        set%n_ext = 0
+        set%ext_ok = .false.
         set%free_mods = .false.
 #ifdef OMP_TARGET
         if (set%on_device) then
@@ -565,7 +727,8 @@ contains
         real(KP), intent(inout), contiguous :: yo(:,:)
         real(WP), intent(inout), contiguous :: smass(:,:), slum(:,:), q0(:,:)
 
-        integer :: g, m, t, k, col, ntq, p
+        integer :: g, m, t, k, col, ntq, p, ng
+        type(ssp_opset_t), pointer :: sg
         real(KP), allocatable :: yg(:,:)
         real(WP), allocatable :: sm_g(:,:), sl_g(:,:), q_g(:,:), slp(:,:,:,:)
         real(WP) :: lz, sx, czp
@@ -573,11 +736,12 @@ contains
         logical, allocatable :: used(:)
 
         ntq = size(q0, 1)
-        allocate(used(MOD_NGRP))
-        do g = 1, MOD_NGRP
+        ng = size(cg, 1)
+        allocate(used(ng))
+        do g = 1, ng
             used(g) = any(cg(g, 1:n_mod) /= 0.0_wp)
         end do
-        allocate(yg(nspec, 2 * n_mod), sm_g(nt, n_mod), sl_g(nt, n_mod), q_g(ntq, n_mod), slp(nt, n_mod, 2, MOD_NGRP))
+        allocate(yg(nspec, 2 * n_mod), sm_g(nt, n_mod), sl_g(nt, n_mod), q_g(ntq, n_mod), slp(nt, n_mod, 2, ng))
 #ifdef OMP_TARGET
         !$omp target data map(alloc: yg, sm_g, sl_g, q_g) map(from: slp) map(to: cg)
 #endif
@@ -624,9 +788,10 @@ contains
                 q0(t, m) = 0.0_wp
             end do
         end do
-        do g = 0, MOD_NGRP - 1
+        do g = 0, ng - 1
             if (.not. used(g + 1)) cycle
-            call ssp_batch_age_sums_z(imf_type, remnants .and. g == 0, n_mod, nt, nspec, set%grp(g), zlo, zhi, dz, pm, wsfh, &
+            sg => gset(set, g)
+            call ssp_batch_age_sums_z(imf_type, remnants .and. g == 0, n_mod, nt, nspec, sg, zlo, zhi, dz, pm, wsfh, &
                                       it_tesc, nt_neb, whl, fesc, yg, sm_g, sl_g, q_g, slpass=slp(:, :, :, g + 1))
 #if defined(OMP_TARGET)
             !$omp target teams distribute parallel do collapse(2) private(m, ck)
@@ -679,7 +844,7 @@ contains
                     end if
                     if (czp /= 0.0_wp) then
                         lz = 0.0_wp
-                        do g = 1, MOD_NGRP
+                        do g = 1, ng
                             lz = lz + cg(g, m) * slp(t, m, p, g)
                         end do
                         sx = sx + czp * log10(max(lz, SAFE_FLOOR))
@@ -714,7 +879,7 @@ contains
     !> fold's templates share ages and points.
     recursive subroutine ssp_batch_age_sums_adjoint(imf_type, remnants, n_mod, nt, nspec, set, zlo, zhi, dz, pm, wsfh, it_tesc, &
                                           nt_neb, whl, fesc, gw, slum, lsum_bar, qbar, wbar, imf_bar, fesc_bar, zbar, &
-                                          smass, msum_bar, cg, cbar, lfac)
+                                          smass, msum_bar, cg, cbar, lfac, ipair, dshift, ctx)
         logical, intent(in)  :: remnants
         integer, intent(in)  :: imf_type, n_mod, nt, nspec, nt_neb, whl
         type(ssp_opset_t), intent(inout) :: set
@@ -734,6 +899,10 @@ contains
         !> wsfh(t) lfac(t, m, pass) instead of lsum_bar wsfh(t) L(t) cz / sl (the sum over groups of a batch with free
         !> modifications has another L(t) / sl); used by ssp_batch_age_sums_adjoint_mods
         real(WP), intent(in), optional, contiguous :: lfac(:,:,:)
+        !> The TP-AGB shifts of a batch with free modifications: see ssp_batch_age_sums_adjoint_mods
+        integer, intent(in), optional, contiguous :: ipair(:)
+        real(WP), intent(out), optional, contiguous :: dshift(:,:)
+        type(opensps_context_t), target, intent(inout), optional :: ctx
 
         integer, parameter :: CHG = TUNE_IMF_GRAD_CHG
         integer, parameter :: PROWS(NIMFG) = [IMF_P_ALPHA, IMF_P_ALPHA + 1, IMF_P_ALPHA + 2, IMF_P_VDMC, IMF_P_MDAVE]
@@ -756,9 +925,10 @@ contains
         if (set%free_mods) then
             if (.not. present(cg) .or. .not. present(cbar)) &
                 error stop 'ssp_batch_age_sums_adjoint: a set with free modifications needs cg and cbar'
+            ! (absent optional arguments are passed on as absent: without the shifts' arguments, no shift gradients)
             call ssp_batch_age_sums_adjoint_mods(imf_type, remnants, n_mod, nt, nspec, set, cg, zlo, zhi, dz, pm, wsfh, &
                                                  it_tesc, nt_neb, whl, fesc, gw, slum, lsum_bar, qbar, wbar, imf_bar, &
-                                                 fesc_bar, zbar, smass, msum_bar, cbar)
+                                                 fesc_bar, zbar, smass, msum_bar, cbar, ipair, dshift, ctx)
             return
         end if
         nz = set%nz
@@ -973,7 +1143,7 @@ contains
     !> mass's cotangent of the SFH weights is that of the total mass, given to the plain group's pass.
     recursive subroutine ssp_batch_age_sums_adjoint_mods(imf_type, remnants, n_mod, nt, nspec, set, cg, zlo, zhi, dz, pm, wsfh, &
                                                it_tesc, nt_neb, whl, fesc, gw, slum, lsum_bar, qbar, wbar, imf_bar, &
-                                               fesc_bar, zbar, smass, msum_bar, cbar)
+                                               fesc_bar, zbar, smass, msum_bar, cbar, ipair, dshift, ctx)
         logical, intent(in)  :: remnants
         integer, intent(in)  :: imf_type, n_mod, nt, nspec, nt_neb, whl
         type(ssp_opset_t), intent(inout) :: set
@@ -983,13 +1153,24 @@ contains
         real(KP), intent(in), contiguous :: gw(:,:)
         real(WP), intent(out), contiguous :: wbar(:,:), imf_bar(:,:), fesc_bar(:), zbar(:), cbar(:,:)
         real(WP), intent(in), contiguous :: smass(:,:), msum_bar(:)
+        !> With the TP-AGB shifts: the pair of each model (ssp_mods_prepare_pairs, with the shifted sets for the gradients) and out
+        !> the cotangents of delt and dell (2, n_mod): the coefficient of the model's TP-AGB group times the central
+        !> differences, in TP_FD_STEP, of the cotangent against the TP-AGB group's outputs at the shifted sets
+        integer, intent(in), optional, contiguous :: ipair(:)
+        real(WP), intent(out), optional, contiguous :: dshift(:,:)
+        !> The context the shifted sets are built from (with ipair and dshift)
+        type(opensps_context_t), target, intent(inout), optional :: ctx
 
-        integer :: g, m, t, p, k, ntq, ni
+        integer :: g, m, t, p, k, ntq, ni, ng, ip, j, row
+        real(WP) :: t0, l0
+        real(WP), allocatable :: slp_fd(:,:,:), cfd(:,:)
+        type(ssp_opset_t) :: fds(1)
+        type(ssp_opset_t), pointer :: sg
         real(KP), allocatable :: yg(:,:)
         real(WP), allocatable :: sm_g(:,:), sl_g(:,:), q_g(:,:), sm_zero(:,:), wb_g(:,:), ib_g(:,:), fe_g(:), zb_g(:), &
                                  lfac(:,:,:), slp_l(:,:,:,:), zl(:), cb(:), lzero(:)
         real(WP) :: lzp(2), czp(2), sx, ltot, acc, ac2
-        logical :: used(MOD_NGRP)
+        logical, allocatable :: used(:)
 
         if (.not. allocated(set%slp)) error stop 'ssp_batch_age_sums_adjoint_mods: no forward pass of this batch'
         ! (lsum_bar is built on the device by the caller, whose host copy is current only when the lbol output has a cotangent: the
@@ -999,7 +1180,9 @@ contains
 #endif
         ntq = size(qbar, 1)
         ni = size(imf_bar, 1)
-        do g = 1, MOD_NGRP
+        ng = size(cg, 1)
+        allocate(used(ng))
+        do g = 1, ng
             used(g) = any(cg(g, 1:n_mod) /= 0.0_wp)
         end do
         allocate(slp_l, source=set%slp)
@@ -1022,7 +1205,7 @@ contains
                 sx = 0.0_wp
                 do p = 1, 2
                     lzp(p) = 0.0_wp
-                    do g = 1, MOD_NGRP
+                    do g = 1, ng
                         lzp(p) = lzp(p) + cg(g, m) * slp_l(t, m, p, g)
                     end do
                     if (czp(p) /= 0.0_wp) sx = sx + czp(p) * log10(max(lzp(p), SAFE_FLOOR))
@@ -1065,7 +1248,7 @@ contains
                 sx = 0.0_wp
                 do p = 1, 2
                     lzp(p) = 0.0_wp
-                    do g = 1, MOD_NGRP
+                    do g = 1, ng
                         lzp(p) = lzp(p) + cg(g, m) * slp_l(t, m, p, g)
                     end do
                     if (czp(p) /= 0.0_wp) sx = sx + czp(p) * log10(max(lzp(p), SAFE_FLOOR))
@@ -1079,46 +1262,22 @@ contains
             end do
             zl(m) = acc
         end do
-        do g = 0, MOD_NGRP - 1
+        do g = 0, ng - 1
             if (.not. used(g + 1)) cycle
+            sg => gset(set, g)
             if (g > 0) then
                 ! The group's forward again, for the cotangent of its coefficient
-                call ssp_batch_age_sums_z(imf_type, .false., n_mod, nt, nspec, set%grp(g), zlo, zhi, dz, pm, wsfh, it_tesc, &
+                call ssp_batch_age_sums_z(imf_type, .false., n_mod, nt, nspec, sg, zlo, zhi, dz, pm, wsfh, it_tesc, &
                                           nt_neb, whl, fesc, yg, sm_g, sl_g, q_g)
-#if defined(OMP_TARGET)
-                !$omp target teams distribute parallel do private(k, t, p, acc, ac2)
-#elif defined(_OPENMP)
-                !$omp parallel do private(k, t, p, acc, ac2)
-#endif
-                do m = 1, n_mod
-                    acc = 0.0_wp
-                    do k = 1, nspec
-                        acc = acc + real(gw(k, m), WP) * real(yg(k, m), WP) + &
-                                    real(gw(k, n_mod + m), WP) * real(yg(k, n_mod + m), WP)
-                    end do
-                    ac2 = 0.0_wp
-                    do t = 1, nt
-                        ac2 = ac2 + msum_bar(m) * wsfh(m, t) * sm_g(t, m)
-                        do p = 1, 2
-                            ac2 = ac2 + wsfh(m, t) * lfac(t, m, p) * slp_l(t, m, p, g + 1)
-                        end do
-                    end do
-                    do t = 1, ntq
-                        ac2 = ac2 + qbar(t, m) * q_g(t, m)
-                    end do
-                    cb(m) = acc + ac2
-                end do
-#ifdef OMP_TARGET
-                !$omp target update from(cb)
-#endif
+                call group_cotangent(slp_l(:, :, :, g + 1))
                 cbar(g + 1, 1:n_mod) = cb(1:n_mod)
             end if
             if (g == 0) then
-                call ssp_batch_age_sums_adjoint(imf_type, remnants, n_mod, nt, nspec, set%grp(g), zlo, zhi, dz, pm, wsfh, &
+                call ssp_batch_age_sums_adjoint(imf_type, remnants, n_mod, nt, nspec, sg, zlo, zhi, dz, pm, wsfh, &
                                                 it_tesc, nt_neb, whl, fesc, gw, slum, lzero, qbar, wb_g, ib_g, fe_g, zb_g, &
                                                 smass, msum_bar, lfac=lfac)
             else
-                call ssp_batch_age_sums_adjoint(imf_type, .false., n_mod, nt, nspec, set%grp(g), zlo, zhi, dz, pm, wsfh, &
+                call ssp_batch_age_sums_adjoint(imf_type, .false., n_mod, nt, nspec, sg, zlo, zhi, dz, pm, wsfh, &
                                                 it_tesc, nt_neb, whl, fesc, gw, slum, lzero, qbar, wb_g, ib_g, fe_g, zb_g, &
                                                 sm_zero, msum_bar, lfac=lfac)
             end if
@@ -1129,10 +1288,83 @@ contains
                 zbar(m) = zbar(m) + cg(g + 1, m) * zb_g(m)
             end do
         end do
+        ! The TP-AGB shifts: central differences of the cotangent against the TP-AGB group's outputs at the shifted sets
+        if (present(dshift) .and. present(ipair) .and. present(ctx)) then
+            dshift = 0.0_wp
+            allocate(slp_fd(nt, n_mod, 2), cfd(4, n_mod))
+#ifdef OMP_TARGET
+            !$omp target data map(alloc: slp_fd)
+#endif
+            do ip = 0, set%n_ext
+                if (.not. any(ipair(1:n_mod) == ip)) cycle
+                t0 = 0.0_wp
+                l0 = 0.0_wp
+                if (ip > 0) then
+                    t0 = set%ext_t(ip)
+                    l0 = set%ext_l(ip)
+                end if
+                ! (the four shifted sets of this pair, one at a time: the memory of one set, then freed)
+                do j = 1, 4
+                    call ssp_opset_build_tp(ctx, set, t0 + merge(TP_FD_STEP, 0.0_wp, j == 1) - merge(TP_FD_STEP, 0.0_wp, j == 2), &
+                                            l0 + merge(TP_FD_STEP, 0.0_wp, j == 3) - merge(TP_FD_STEP, 0.0_wp, j == 4), fds(1))
+                    call ssp_batch_age_sums_z(imf_type, .false., n_mod, nt, nspec, fds(1), zlo, zhi, dz, pm, wsfh, &
+                                              it_tesc, nt_neb, whl, fesc, yg, sm_g, sl_g, q_g, slpass=slp_fd)
+                    call group_cotangent(slp_fd)
+                    cfd(j, 1:n_mod) = cb(1:n_mod)
+                    call ssp_opset_free(fds(1))
+                end do
+                row = 2
+                if (ip > 0) row = MOD_NGRP + ip
+                do m = 1, n_mod
+                    if (ipair(m) /= ip) cycle
+                    dshift(1, m) = cg(row, m) * (cfd(1, m) - cfd(2, m)) / (2.0_wp * TP_FD_STEP)
+                    dshift(2, m) = cg(row, m) * (cfd(3, m) - cfd(4, m)) / (2.0_wp * TP_FD_STEP)
+                end do
+            end do
+#ifdef OMP_TARGET
+            !$omp end target data
+#endif
+        end if
 #ifdef OMP_TARGET
         !$omp end target data
 #endif
         zbar = zbar + zl
+
+    contains
+
+        !> cb(m) = the cotangents against the outputs of the group whose forward just ran (yg, sm_g, q_g and the sums sl of its
+        !> passes, slp3): the spectra, the surviving mass, the ionizing photon rate and the L_bol sums
+        subroutine group_cotangent(slp3)
+            real(WP), intent(in), contiguous :: slp3(:,:,:)
+            integer :: m, k, t, p
+            real(WP) :: acc, ac2
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do private(k, t, p, acc, ac2)
+#elif defined(_OPENMP)
+            !$omp parallel do private(k, t, p, acc, ac2)
+#endif
+            do m = 1, n_mod
+                acc = 0.0_wp
+                do k = 1, nspec
+                    acc = acc + real(gw(k, m), WP) * real(yg(k, m), WP) + &
+                                real(gw(k, n_mod + m), WP) * real(yg(k, n_mod + m), WP)
+                end do
+                ac2 = 0.0_wp
+                do t = 1, nt
+                    ac2 = ac2 + msum_bar(m) * wsfh(m, t) * sm_g(t, m)
+                    do p = 1, 2
+                        ac2 = ac2 + wsfh(m, t) * lfac(t, m, p) * slp3(t, m, p)
+                    end do
+                end do
+                do t = 1, ntq
+                    ac2 = ac2 + qbar(t, m) * q_g(t, m)
+                end do
+                cb(m) = acc + ac2
+            end do
+#ifdef OMP_TARGET
+            !$omp target update from(cb)
+#endif
+        end subroutine group_cotangent
     end subroutine ssp_batch_age_sums_adjoint_mods
 
     !> The IMF rows of Kroupa and Dave analytically: dw/d theta of each point weight w = N / M (N the

@@ -280,7 +280,7 @@ contains
     !> @brief Builds the IMF-independent operator S of metallicity pset%zmet.
     !> @details The context must be set up (opensps_setup). pset supplies the non-IMF parameters
     !> listed in the module notes; its IMF parameters are not used.
-    subroutine ssp_operator_build(ctx, pset, op, group)
+    subroutine ssp_operator_build(ctx, pset, op, group, shift_t, shift_l)
         type(opensps_context_t), target, intent(inout) :: ctx
         type(params), intent(in)              :: pset
         type(ssp_operator_t), intent(inout)   :: op
@@ -290,6 +290,9 @@ contains
         !> group's stars derive from. Absent: the operator of the parameters as they are (the batch paths'
         !> default, unchanged).
         integer, intent(in), optional         :: group
+        !> With group = MOD_GRP_TPAGB: the shifts delt and dell of the TP-AGB stars' log T and log L the group is built
+        !> at (the other groups are not affected by them; without the arguments, zero)
+        real(WP), intent(in), optional        :: shift_t, shift_l
 
         type(isochrone_buffer_t) :: buf, buf1
         type(params) :: pset_use, pset1
@@ -327,6 +330,10 @@ contains
             pset_use%fbhb = 0.0_wp; pset_use%sbss = 0.0_wp
             pset_use%agb = 1.0_wp; pset_use%pagb = 1.0_wp; pset_use%redgb = 1.0_wp
             pset_use%delt = 0.0_wp; pset_use%dell = 0.0_wp
+            if (grp == MOD_GRP_TPAGB) then
+                if (present(shift_t)) pset_use%delt = shift_t
+                if (present(shift_l)) pset_use%dell = shift_l
+            end if
             if (grp >= MOD_GRP_HBB) then
                 pset_use%fbhb = MOD_FBHB_REF
                 pset_use%sbss = MOD_SBSS_REF

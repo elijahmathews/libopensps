@@ -30,7 +30,7 @@ program test_csp_batch
 #endif
     use opensps_ssp, only: generate_ssp_grid
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_free
-    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods
+    use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods, MAX_TP_PAIRS
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                             opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
                             opensps_context_set_param_int, opensps_context_set_param_float, &
@@ -116,6 +116,7 @@ program test_csp_batch
     call check_imf_unsupported()
     call check_basis_mods_guard()
     call check_mods_free_forward()
+    call check_mods_pair_cache()
     ! compute_csp_scenario: all-ages outputs against single-age calls, in each mode, on the
     ! one-metallicity basis
     call build_basis()
@@ -671,12 +672,19 @@ contains
                                            0.7_wp, 1.0_wp]
         real(WP), parameter :: rg(NMOD) = [1.0_wp, 1.1_wp, 0.8_wp, 1.0_wp, 1.5_wp, 0.6_wp, 1.0_wp, 2.0_wp, 1.0_wp, 0.9_wp, &
                                            1.3_wp, 0.5_wp]
+        ! (the TP-AGB shifts: models 2, 5, 9 share a pair, so do 4 and 10: one set serves each; models 3, 7, 8, 12: own sets)
+        real(WP), parameter :: dt(NMOD) = [0.0_wp, 0.05_wp, 0.0_wp, -0.1_wp, 0.05_wp, 0.0_wp, 0.12_wp, 0.0_wp, 0.05_wp, &
+                                           -0.1_wp, 0.0_wp, 0.03_wp]
+        real(WP), parameter :: dl(NMOD) = [0.0_wp, 0.0_wp, 0.1_wp, -0.08_wp, 0.0_wp, 0.0_wp, -0.15_wp, 0.05_wp, 0.0_wp, &
+                                           -0.08_wp, 0.0_wp, 0.02_wp]
         type(PARAMS) :: pset, psets(NMOD)
         type(ssp_opset_t) :: op
         real(WP), allocatable :: spec(:, :), mags(:, :), ref_spec(:, :), ref_mags(:, :), s1(:, :), g1(:, :)
         real(WP) :: mass(NMOD), lbol(NMOD), mdust(NMOD), ref_mass(NMOD), ref_lbol(NMOD), ref_mdust(NMOD)
         real(WP) :: d_spec, d_mag, d_scal
         integer :: m, status, nspec, nbands
+        type(PARAMS), allocatable :: many(:)
+        real(WP), allocatable :: mg2(:, :)
 
         call print_group("Batched CSP: isochrone modification factors free per model (group operators)")
         nspec = ctx%state%nspec
@@ -694,12 +702,14 @@ contains
             call opensps_context_prepare_pset(ctx)
             call opensps_context_get_pset(ctx, psets(m))
             psets(m)%fbhb = fb(m); psets(m)%sbss = sb(m); psets(m)%agb = ag(m); psets(m)%pagb = pa(m); psets(m)%redgb = rg(m)
+            psets(m)%delt = dt(m); psets(m)%dell = dl(m)
         end do
         call compute_csp_batch(ctx, psets, mags, status, spec=spec, mass=mass, lbol=lbol, mdust=mdust, ssp_ops=op)
         call assert_true(status == 0, "free factors: status 0", total_tests, total_failures)
 
         do m = 1, NMOD
             call set_factors(fb(m), sb(m), ag(m), pa(m), rg(m))
+            call set_float('delt', dt(m)); call set_float('dell', dl(m))
             call build_basis()
             call compute_csp_batch(ctx, psets(m:m), g1, status, spec=s1, mass=ref_mass(m:m), lbol=ref_lbol(m:m), &
                                    mdust=ref_mdust(m:m))
@@ -707,6 +717,7 @@ contains
             ref_mags(:, m) = g1(:, 1)
         end do
         call set_factors(0.0_wp, 0.0_wp, 1.0_wp, 1.0_wp, 1.0_wp)
+        call set_float('delt', 0.0_wp); call set_float('dell', 0.0_wp)
         call build_basis()
         call max_differences(spec, mags, ref_spec, ref_mags, d_spec, d_mag)
         d_scal = max(maxval(abs(mass / ref_mass - 1.0_wp)), maxval(abs(lbol - ref_lbol)))
@@ -718,11 +729,23 @@ contains
         call assert_true(maxval(abs(mdust / ref_mdust - 1.0_wp)) <= IMF_SCAL_TOL, "free factors: dust mass", &
                          total_tests, total_failures)
 
-        ! A delt or dell on a model: not free yet (status 2); a model with agb_dust or masscut of its own likewise
-        psets(2)%delt = 0.05_wp
-        call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
-        call assert_true(status == 2, "free factors: delt on a model, status 2", total_tests, total_failures)
-        psets(2)%delt = 0.0_wp
+        call assert_true(op%n_ext == 6, "free factors: six distinct TP-AGB shift pairs in the set", total_tests, total_failures)
+        ! The same batch again: the pairs are kept (no new sets), same results
+        call compute_csp_batch(ctx, psets, mags, status, spec=ref_spec, ssp_ops=op)
+        call assert_true(status == 0 .and. op%n_ext == 6 .and. maxval(abs(ref_spec - spec)) <= 1.0e-12_wp * maxval(abs(spec)), &
+                         "free factors: the pairs of the first batch are reused", total_tests, total_failures)
+        ! More distinct pairs than the set keeps (max_ext) in one batch: status 2
+        allocate(many(op%max_ext + 1))
+        many = psets(1)
+        do m = 1, size(many)
+            many(m)%delt = 0.01_wp * m
+        end do
+        allocate(mg2(nbands, size(many)))
+        call compute_csp_batch(ctx, many, mg2, status, ssp_ops=op)
+        call assert_true(status == 2, "free factors: more distinct shift pairs than the set keeps in one batch: status 2", &
+                         total_tests, total_failures)
+        deallocate(many, mg2)
+        ! A model with agb_dust or masscut of its own: status 2
         psets(2)%masscut = 50.0_wp
         call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
         call assert_true(status == 2, "free factors: masscut on a model, status 2", total_tests, total_failures)
@@ -793,7 +816,7 @@ contains
     !> the set): a set that was never built (status 1), one that does not hold every metallicity of the context, with a
     !> metallicity out of place, an empty operator, other spectra or ages than the context's (status 3, 3, 1, 3), an age
     !> without stars (status 2), a single-metallicity set against models of another metallicity (status 3), and a shift
-    !> dell on a model (status 2 until the shifts are free). Each corruption is undone after its check.
+    !> dell on a model (free: status 0). Each corruption is undone after its check.
     subroutine check_mods_set_validation()
         integer, parameter :: NMOD = 3
         type(PARAMS) :: psets(NMOD)
@@ -863,14 +886,109 @@ contains
         do m = 1, NMOD
             psets(m)%zmet = 10
         end do
-        ! (dell on a model: the shift is not free here)
+        ! (dell on a model: the shifts are free)
         psets(2)%dell = 0.05_wp
         call compute_csp_batch(ctx, psets, mags, status, ssp_ops=op)
-        call assert_true(status == 2, "dell on a model: status 2", total_tests, total_failures)
+        call assert_true(status == 0, "dell on a model: status 0", total_tests, total_failures)
         call ssp_opset_free(op)
         call set_int('zmet', zm0)
         deallocate(mags)
     end subroutine check_mods_set_validation
+
+    !> The cache of the TP-AGB shift pairs of a free-factor set (ssp_mods_prepare_pairs): the cap of distinct pairs filled by one
+    !> batch; a batch of new pairs evicting the pairs it does not use; a batch with a resident pair and a new one evicting
+    !> only the unused; and every batch against a set with no history (the same numbers: the pair's set is the same however
+    !> it came to be in the cache).
+    subroutine check_mods_pair_cache()
+        integer, parameter :: NB = 8
+        type(PARAMS) :: pb(NB), pset
+        type(ssp_opset_t) :: op, fresh
+        real(WP), allocatable :: mg(:, :), mr(:, :)
+        real(WP) :: dt(NB), dl(NB)
+        integer :: m, status
+
+        call print_group("Batched CSP: the cache of the TP-AGB shift pairs")
+        allocate(mg(ctx%state%nbands, NB), mr(ctx%state%nbands, NB))
+        call set_int('imf_type', 1)
+        call set_factors(0.0_wp, 0.0_wp, 1.0_wp, 1.0_wp, 1.0_wp)
+        call set_model(1, 0.5_wp)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        call ssp_opset_build_mods(ctx, pset, .false., op)
+        do m = 1, NB
+            call set_model(m, 0.5_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pb(m))
+        end do
+        call assert_true(op%max_ext == MAX_TP_PAIRS, "pair cache: the cap of a one-metallicity set", total_tests, total_failures)
+
+        ! the cap: eight distinct pairs in one batch
+        call pc_pairs(1, dt, dl)
+        call pc_run(pb, dt, dl, op, mg, status)
+        call assert_true(status == 0 .and. op%n_ext == NB .and. all(op%ext_ok(1:NB)), &
+                         "pair cache: a batch of as many pairs as the cap", total_tests, total_failures)
+        call ssp_opset_build_mods(ctx, pset, .false., fresh)
+        call pc_run(pb, dt, dl, fresh, mr, status)
+        call assert_true(maxval(abs(mg - mr)) <= MAG_TOL, "pair cache: the same as a set with no history", &
+                         total_tests, total_failures)
+        call ssp_opset_free(fresh)
+
+        ! two new pairs: they take the places of pairs the batch does not use
+        call pc_pairs(9, dt, dl)
+        dt(3:NB) = 0.0_wp; dl(3:NB) = 0.0_wp
+        call pc_run(pb, dt, dl, op, mg, status)
+        call assert_true(status == 0 .and. op%n_ext == NB .and. all(op%ext_ok(1:NB)), "pair cache: new pairs evict unused ones", &
+                         total_tests, total_failures)
+        call assert_true(op%ext_t(1) == dt(1) .and. op%ext_t(2) == dt(2) .and. op%ext_t(3) == 0.011_wp * 3, &
+                         "pair cache: the evicted places hold the new pairs, the others stay", total_tests, total_failures)
+        call ssp_opset_build_mods(ctx, pset, .false., fresh)
+        call pc_run(pb, dt, dl, fresh, mr, status)
+        call assert_true(maxval(abs(mg - mr)) <= MAG_TOL, "pair cache: eviction: the same as a set with no history", &
+                         total_tests, total_failures)
+        call ssp_opset_free(fresh)
+
+        ! a resident pair (3) with a new one (11): the resident one stays
+        dt = 0.0_wp; dl = 0.0_wp
+        dt(1) = 0.011_wp * 3; dl(1) = -0.013_wp * 3
+        dt(2) = 0.011_wp * 11; dl(2) = -0.013_wp * 11
+        call pc_run(pb, dt, dl, op, mg, status)
+        call assert_true(status == 0 .and. op%ext_t(3) == 0.011_wp * 3 .and. op%ext_t(1) == dt(2), &
+                         "pair cache: a resident pair is kept when a new one comes", total_tests, total_failures)
+        call ssp_opset_build_mods(ctx, pset, .false., fresh)
+        call pc_run(pb, dt, dl, fresh, mr, status)
+        call assert_true(maxval(abs(mg - mr)) <= MAG_TOL, "pair cache: resident and new: the same as a set with no history", &
+                         total_tests, total_failures)
+        call ssp_opset_free(fresh)
+        call ssp_opset_free(op)
+        deallocate(mg, mr)
+
+    end subroutine check_mods_pair_cache
+
+    subroutine pc_pairs(first, t, l)
+        integer, intent(in) :: first
+        real(WP), intent(out) :: t(:), l(:)
+        integer :: i
+        do i = 1, size(t)
+            t(i) = 0.011_wp * (first + i - 1)
+            l(i) = -0.013_wp * (first + i - 1)
+        end do
+    end subroutine pc_pairs
+
+    subroutine pc_run(p, t, l, o, out, st)
+        type(PARAMS), intent(in) :: p(:)
+        real(WP), intent(in) :: t(:), l(:)
+        type(ssp_opset_t), intent(inout) :: o
+        real(WP), intent(out) :: out(:, :)
+        integer, intent(out) :: st
+        type(PARAMS) :: q(size(p))
+        integer :: i
+        q = p
+        do i = 1, size(q)
+            q(i)%delt = t(i)
+            q(i)%dell = l(i)
+        end do
+        call compute_csp_batch(ctx, q, out, st, ssp_ops=o)
+    end subroutine pc_run
 
     subroutine set_factors(fbhb, sbss, agb, pagb, redgb)
         real(WP), intent(in) :: fbhb, sbss, agb, pagb, redgb
