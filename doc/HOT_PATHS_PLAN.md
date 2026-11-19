@@ -36,13 +36,20 @@ per kernel family. The purpose is maintainability (one path to read, test and tu
 
 ## The steps
 
-**Step 0, the safety nets.** The gradient dumps of the matrix (`bench_matrix.py --dump-grad`, directory mode and exact
+**Step 0, the safety nets (done, #129).** The gradient dumps of the matrix (`bench_matrix.py --dump-grad`, directory mode and exact
 comparison in `compare_grad_dump.py`), free [alpha/Fe] (`afe`, `afe+logzsol`) and the IMF limits in the matrix, so that the four-slab
-kernels and the gradients have dumps. Status: in progress.
+kernels and the gradients have dumps.
 
-**Step 1, the adjoint on the slab template.** `backward_age_sums` and `backward_age_sums_afe` on the descriptor of
-`age_sums_slabs.inc`, with one include template for the adjoint device and host branches (about 280 lines to about 150).
-Gate: the gradient dumps bit-identical, `test_csp_batch_grad` and `c_batch_grad`, the matrix.
+**Step 1, the adjoint on the slab template (done, #130).** `backward_age_sums` and `backward_age_sums_afe` became one template
+(`age_sums_adj_slabs.inc`, K = 1, 2, 4 on the descriptor of `age_sums_slabs.inc`) of per-slab dot products and an FP64
+combination: the adjoint of a linear blend is the dot of each slab with the cotangents, and w_bar and the dz and da derivatives are
+combinations of those dots with the weights and their derivatives. The CPU K = 2 path already worked this way (and passed its FP32
+tests); now host and device, and K = 1, 2, 4, share it. Not bit-identical for K = 2, 4 on the device and K = 4 on the host (the sums
+are formed differently): the host FP64 gradient dumps equal the old ones bit for bit for K = 1 and K = 2 and to 1e-12 for K = 4; on the
+R9700 (FP32) the changed rows differ from the old by 2e-8 - 1e-7 of their scale and their error against the FP64 reference stays at
+1e-7 (the [alpha/Fe] row 2e-7 against 1 - 1.5e-7 before). The saving is smaller than the forward side's (about 280 lines of the two
+routines to about 200 of the template and its wrapper), since the per-pixel difference forms, the CPU dot-product branch and the K-specific
+loops are gone but the combination code remains.
 
 **Step 2, one "SSP source" interface** (the biggest change to how the code reads). A small type that says where the SSP sums come
 from (resident basis with K slabs, weights over metallicities, operators), built by the planner (`batch_info` already reports it);
@@ -67,6 +74,13 @@ of sharing); a language change (nothing in the plan needs one).
 Order: Steps 0 and 1 first (safe, clear payoff), then 2; re-evaluate before 3 - 5.
 
 ## How to check a step (recipes)
+
+* **Force a rebuild of the tree under test.** Ninja goes by modification times: in a build directory shared between a baseline and a
+  new tree, a tree whose files are older than the objects of the previous build is not rebuilt, and the comparison is of a build
+  with itself (it happened once: the first R9700 dumps of stage 2 were that, and were redone). The runner scripts `touch` every source
+  of the tree first, and the container script fails unless `csp_batch.f90` was compiled.
+* **Compile the nvfortran device build for every device kernel change.** nvfortran rejects what flang accepts (a `BLOCK` construct inside
+  a parallel region; private arrays are fine there and a callee with local arrays is fine for both).
 
 * Forward dumps on the CPU: build the benchmark of the parent and of the new commit, `bench_matrix.py EXE --sizes 1000 --reps 1
   --dists uniform --dump DIR`, then `compare_forward_dump.py DIR_A DIR_B` (move the TSV out of the dump directory). The benchmark

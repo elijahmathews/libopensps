@@ -6280,282 +6280,54 @@ contains
         logical, intent(in)     :: zmode
         real(WP), intent(out)   :: w_bar(nt, n_mod)
         real(WP), intent(inout) :: gneb(6, n_mod)   ! (4): set here; (5), (6): added to
+        integer, allocatable :: slab(:,:)
+        integer :: m
 
-        integer  :: m, k, i, col, zl, zh, nlim
-        real(KP) :: sk, ck, term, tsum, d, bk, ek, ce, fk, dk, cd, dbk, bkl, bkh
-        real(WP) :: lk, sf, sd
-        real(WP) :: sr, se, hr, he, sw, ew, dw
-        real(WP), allocatable :: euv(:,:), zd(:,:)
-
+        ! The descriptor of the models (as age_sums_z, age_sums_z4: one slab, the two metallicity slabs, or those of two
+        ! [alpha/Fe] planes), and the instance of that many slabs
         if (nzs > 0) then
-            call backward_age_sums_afe(n_mod, nspec, nt, nzb, nzs, basis_t, blbol, it_tesc, zlo, dz, da, lsum_bar, gw, &
-                                       w_bar, ntn, whlylim, fesc, w2, nwb, gneb)
-            return
+            allocate(slab(4, n_mod))
+            do m = 1, n_mod
+                slab(:, m) = [zlo(m), zlo(m) + 1, zlo(m) + nzs, zlo(m) + nzs + 1]
+            end do
+            call age_sums_adj_slab4(n_mod, nspec, nt, nzb, basis, basis_t, blbol, it_tesc, slab, dz, da, lum_linear, lsum_bar, &
+                                    gw, w_bar, ntn, whlylim, fesc, w2, nwb, gneb)
+        else if (zmode) then
+            allocate(slab(2, n_mod))
+            do m = 1, n_mod
+                slab(1, m) = zlo(m); slab(2, m) = zhi(m)
+            end do
+            call age_sums_adj_slab2(n_mod, nspec, nt, nzb, basis, basis_t, blbol, it_tesc, slab, dz, da, lum_linear, lsum_bar, &
+                                    gw, w_bar, ntn, whlylim, fesc, w2, nwb, gneb)
+        else
+            allocate(slab(1, n_mod))
+            slab = 1
+            call age_sums_adj_slab1(n_mod, nspec, nt, nzb, basis, basis_t, blbol, it_tesc, slab, dz, da, lum_linear, lsum_bar, &
+                                    gw, w_bar, ntn, whlylim, fesc, w2, nwb, gneb)
         end if
-
-        ! zd(k, m): with per-model metallicity, d L / d dz through age k (the basis, its EUV rows and
-        ! L_bol, interpolated in log Z)
-        allocate(euv(max(1, ntn), n_mod), zd(nt, n_mod))
-#ifdef OMP_TARGET
-        !$omp target data map(alloc: euv, zd)
-#endif
-#if !defined(OMP_TARGET)
-        ! CPUs: per (model, age) lane-vectorized dot products of the basis columns with the cotangents
-        ! (dot_lanes): the non-EUV and EUV pixels, of the two metallicities with per-model metallicity
-        !$omp parallel do collapse(2) private(col, zl, zh, nlim, fk, lk, sr, se, hr, he, sw, ew, dw)
-        do m = 1, n_mod
-            do k = 1, nt
-                col = n_mod + m
-                if (k <= it_tesc(m)) col = m
-                nlim = 0
-                if (k <= ntn) nlim = whlylim
-                fk = 1.0_KP
-                if (k <= ntn) fk = real(fesc(m), KP)
-                if (zmode) then
-                    zl = zlo(m); zh = zhi(m)
-                    sr = dot_lanes(nspec - nlim, basis(nlim + 1, k, zl), gw(nlim + 1, col))
-                    hr = dot_lanes(nspec - nlim, basis(nlim + 1, k, zh), gw(nlim + 1, col))
-                    se = dot_lanes(nlim, basis(1, k, zl), gw(1, col))
-                    he = dot_lanes(nlim, basis(1, k, zh), gw(1, col))
-                    sw = (1.0_wp - dz(m)) * sr + dz(m) * hr
-                    ew = (1.0_wp - dz(m)) * se + dz(m) * he
-                    dw = (hr - sr) + real(fk, WP) * (he - se)
-                    lk = 10.0_wp**((1.0_wp - dz(m)) * blbol(k, zl) + dz(m) * blbol(k, zh))
-                else
-                    zl = 1; zh = 1
-                    sw = dot_lanes(nspec - nlim, basis(nlim + 1, k, 1), gw(nlim + 1, col))
-                    ew = dot_lanes(nlim, basis(1, k, 1), gw(1, col))
-                    dw = 0.0_wp
-                    lk = lum_linear(k)
-                end if
-                if (k <= ntn) euv(k, m) = ew * real(w2(k, col), WP)
-                w_bar(k, m) = sw + real(fk, WP) * ew + lsum_bar(m) * lk
-                zd(k, m) = 0.0_wp
-                if (zmode) zd(k, m) = real(w2(k, col), WP) * (dw + lsum_bar(m) * lk * log(10.0_wp) * &
-                                                               (blbol(k, zh) - blbol(k, zl)))
-                if (k <= ntn) w_bar(k, m) = w_bar(k, m) + nwb(k, m)
-            end do
-        end do
-#else
-#if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(i, col, zl, zh, sk, ck, term, tsum, d, bk, lk, &
-        !$omp& ek, ce, fk, nlim, dk, cd, dbk, bkl, bkh)
-#elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(i, col, zl, zh, sk, ck, term, tsum, d, bk, lk, ek, ce, fk, nlim, dk, cd, dbk, bkl, bkh)
-#endif
-        do m = 1, n_mod
-            do k = 1, nt
-                col = n_mod + m
-                if (k <= it_tesc(m)) col = m
-                ! The EUV pixels of a nebular age: summed apart (ek), then weighted by fesc
-                nlim = 0
-                if (k <= ntn) nlim = whlylim
-                sk = 0.0_KP
-                ck = 0.0_KP
-                ek = 0.0_KP
-                ce = 0.0_KP
-                dk = 0.0_KP
-                cd = 0.0_KP
-                fk = 1.0_KP
-                if (k <= ntn) fk = real(fesc(m), KP)
-                if (zmode) then
-                    zl = zlo(m); zh = zhi(m)
-                    d = real(dz(m), KP)
-                    if (nlim > 0) then
-                        do i = 1, nlim
-                            bkl = basis_t(k, i, zl)
-                            bkh = basis_t(k, i, zh)
-                            bk = (1.0_KP - d) * bkl + d * bkh
-                            dbk = (bkh - bkl) * fk
-                            term = dbk * gw(i, col) - cd
-                            tsum = dk + term
-                            cd = (tsum - dk) - term
-                            dk = tsum
-                            term = bk * gw(i, col) - ce
-                            tsum = ek + term
-                            ce = (tsum - ek) - term
-                            ek = tsum
-                        end do
-                    end if
-                    do i = nlim + 1, nspec
-                        bkl = basis_t(k, i, zl)
-                        bkh = basis_t(k, i, zh)
-                        bk = (1.0_KP - d) * bkl + d * bkh
-                        dbk = bkh - bkl
-                        term = dbk * gw(i, col) - cd
-                        tsum = dk + term
-                        cd = (tsum - dk) - term
-                        dk = tsum
-                        term = bk * gw(i, col) - ck
-                        tsum = sk + term
-                        ck = (tsum - sk) - term
-                        sk = tsum
-                    end do
-                    lk = 10.0_wp**((1.0_wp - dz(m)) * blbol(k, zl) + dz(m) * blbol(k, zh))
-                else
-                    if (nlim > 0) then
-                        do i = 1, nlim
-                            bk = basis_t(k, i, 1)
-                            term = bk * gw(i, col) - ce
-                            tsum = ek + term
-                            ce = (tsum - ek) - term
-                            ek = tsum
-                        end do
-                    end if
-                    do i = nlim + 1, nspec
-                        bk = basis_t(k, i, 1)
-                        term = bk * gw(i, col) - ck
-                        tsum = sk + term
-                        ck = (tsum - sk) - term
-                        sk = tsum
-                    end do
-                    lk = lum_linear(k)
-                end if
-                if (k <= ntn) euv(k, m) = real(ek, WP) * real(w2(k, col), WP)
-                w_bar(k, m) = real(sk, WP) + real(fk, WP) * real(ek, WP) + lsum_bar(m) * lk
-                zd(k, m) = 0.0_wp
-                if (zmode) zd(k, m) = real(w2(k, col), WP) * (real(dk, WP) + lsum_bar(m) * lk * log(10.0_wp) * &
-                                                               (blbol(k, zh) - blbol(k, zl)))
-                if (k <= ntn) w_bar(k, m) = w_bar(k, m) + nwb(k, m)
-            end do
-        end do
-#endif
-        ! d L / d fesc per model
-#if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do private(k, sf, sd)
-#elif defined(_OPENMP)
-        !$omp parallel do private(k, sf, sd)
-#endif
-        do m = 1, n_mod
-            sf = 0.0_wp
-            do k = 1, ntn
-                sf = sf + euv(k, m)
-            end do
-            gneb(4, m) = sf
-            sd = 0.0_wp
-            do k = 1, nt
-                sd = sd + zd(k, m)
-            end do
-            gneb(5, m) = gneb(5, m) + sd
-        end do
-#ifdef OMP_TARGET
-        !$omp end target data
-#endif
     end subroutine backward_age_sums
 
-    !> Adjoint of the age sums and of L_bol with per-model metallicity and [alpha/Fe] (four slabs): as
-    !> backward_age_sums' device branch, with the bilinear blend; besides w_bar and d L / d fesc (gneb(4)) it
-    !> forms d L / d dz (added to gneb(5)) and d L / d da (added to gneb(6)) per age and model, summed. One thread
-    !> per (model, age), serial over the pixels, the sums compensated at kernel precision.
-    subroutine backward_age_sums_afe(n_mod, nspec, nt, nzb, nzs, basis_t, blbol, it_tesc, zlo, dz, da, lsum_bar, gw, &
-                                     w_bar, ntn, whlylim, fesc, w2, nwb, gneb)
-        integer, intent(in)     :: n_mod, nspec, nt, nzb, nzs, it_tesc(n_mod), zlo(n_mod), ntn, whlylim
-        real(KP), intent(in)    :: basis_t(nt, nspec, nzb), gw(nspec, 2 * n_mod), w2(nt, 2 * n_mod)
-        real(WP), intent(in)    :: blbol(nt, nzb), dz(n_mod), da(n_mod), lsum_bar(n_mod), fesc(n_mod)
-        real(WP), intent(in)    :: nwb(max(1, ntn), n_mod)
-        real(WP), intent(out)   :: w_bar(nt, n_mod)
-        real(WP), intent(inout) :: gneb(6, n_mod)   ! (4): set here; (5), (6): added to
-
-        integer  :: m, k, i, col, s0, nlim
-        real(KP) :: sk, ck, term, tsum, d, a, bk, ek, ce, fk, dk, cd, ak, ca, b00, b10, b01, b11, dbz, dba
-        real(KP) :: c00, c10, c01, c11
-        real(WP) :: lk, sf, sd, sa, dlz, dla
-        real(WP), allocatable :: euv(:,:), zd(:,:), ad(:,:)
-
-        allocate(euv(max(1, ntn), n_mod), zd(nt, n_mod), ad(nt, n_mod))
-#ifdef OMP_TARGET
-        !$omp target data map(alloc: euv, zd, ad)
-#endif
-#if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(i, col, s0, sk, ck, term, tsum, d, a, bk, lk, ek, &
-        !$omp& ce, fk, nlim, dk, cd, ak, ca, b00, b10, b01, b11, dbz, dba, c00, c10, c01, c11, dlz, dla)
-#elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(i, col, s0, sk, ck, term, tsum, d, a, bk, lk, ek, ce, fk, nlim, dk, cd, ak, &
-        !$omp& ca, b00, b10, b01, b11, dbz, dba, c00, c10, c01, c11, dlz, dla)
-#endif
-        do m = 1, n_mod
-            do k = 1, nt
-                col = n_mod + m
-                if (k <= it_tesc(m)) col = m
-                nlim = 0
-                if (k <= ntn) nlim = whlylim
-                sk = 0.0_KP; ck = 0.0_KP; ek = 0.0_KP; ce = 0.0_KP
-                dk = 0.0_KP; cd = 0.0_KP; ak = 0.0_KP; ca = 0.0_KP
-                fk = 1.0_KP
-                if (k <= ntn) fk = real(fesc(m), KP)
-                s0 = zlo(m)
-                d = real(dz(m), KP)
-                a = real(da(m), KP)
-                c00 = (1.0_KP - a) * (1.0_KP - d)
-                c10 = (1.0_KP - a) * d
-                c01 = a * (1.0_KP - d)
-                c11 = a * d
-                do i = 1, nspec
-                    b00 = basis_t(k, i, s0)
-                    b10 = basis_t(k, i, s0 + 1)
-                    b01 = basis_t(k, i, s0 + nzs)
-                    b11 = basis_t(k, i, s0 + nzs + 1)
-                    bk = c00 * b00 + c10 * b10 + c01 * b01 + c11 * b11
-                    dbz = (1.0_KP - a) * (b10 - b00) + a * (b11 - b01)
-                    dba = (1.0_KP - d) * (b01 - b00) + d * (b11 - b10)
-                    if (i <= nlim) then
-                        ! the EUV pixels of a nebular age: the blend itself apart (ek), the derivatives with fesc
-                        dbz = dbz * fk
-                        dba = dba * fk
-                        term = bk * gw(i, col) - ce
-                        tsum = ek + term
-                        ce = (tsum - ek) - term
-                        ek = tsum
-                    else
-                        term = bk * gw(i, col) - ck
-                        tsum = sk + term
-                        ck = (tsum - sk) - term
-                        sk = tsum
-                    end if
-                    term = dbz * gw(i, col) - cd
-                    tsum = dk + term
-                    cd = (tsum - dk) - term
-                    dk = tsum
-                    term = dba * gw(i, col) - ca
-                    tsum = ak + term
-                    ca = (tsum - ak) - term
-                    ak = tsum
-                end do
-                lk = 10.0_wp**((1.0_wp - da(m)) * ((1.0_wp - dz(m)) * blbol(k, s0) + dz(m) * blbol(k, s0 + 1)) + &
-                               da(m) * ((1.0_wp - dz(m)) * blbol(k, s0 + nzs) + dz(m) * blbol(k, s0 + nzs + 1)))
-                dlz = (1.0_wp - da(m)) * (blbol(k, s0 + 1) - blbol(k, s0)) + da(m) * (blbol(k, s0 + nzs + 1) - blbol(k, s0 + nzs))
-                dla = (1.0_wp - dz(m)) * (blbol(k, s0 + nzs) - blbol(k, s0)) + dz(m) * (blbol(k, s0 + nzs + 1) - blbol(k, s0 + 1))
-                if (k <= ntn) euv(k, m) = real(ek, WP) * real(w2(k, col), WP)
-                w_bar(k, m) = real(sk, WP) + real(fk, WP) * real(ek, WP) + lsum_bar(m) * lk
-                zd(k, m) = real(w2(k, col), WP) * (real(dk, WP) + lsum_bar(m) * lk * log(10.0_wp) * dlz)
-                ad(k, m) = real(w2(k, col), WP) * (real(ak, WP) + lsum_bar(m) * lk * log(10.0_wp) * dla)
-                if (k <= ntn) w_bar(k, m) = w_bar(k, m) + nwb(k, m)
-            end do
-        end do
-#if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do private(k, sf, sd, sa)
-#elif defined(_OPENMP)
-        !$omp parallel do private(k, sf, sd, sa)
-#endif
-        do m = 1, n_mod
-            sf = 0.0_wp
-            do k = 1, ntn
-                sf = sf + euv(k, m)
-            end do
-            gneb(4, m) = sf
-            sd = 0.0_wp
-            sa = 0.0_wp
-            do k = 1, nt
-                sd = sd + zd(k, m)
-                sa = sa + ad(k, m)
-            end do
-            gneb(5, m) = gneb(5, m) + sd
-            gneb(6, m) = gneb(6, m) + sa
-        end do
-#ifdef OMP_TARGET
-        !$omp end target data
-#endif
-    end subroutine backward_age_sums_afe
+#define AS_NAME age_sums_adj_slab1
+#define AS_ONE age_adj_one1
+#define AS_K 1
+#include "age_sums_adj_slabs.inc"
+#undef AS_NAME
+#undef AS_ONE
+#undef AS_K
+#define AS_NAME age_sums_adj_slab2
+#define AS_ONE age_adj_one2
+#define AS_K 2
+#include "age_sums_adj_slabs.inc"
+#undef AS_NAME
+#undef AS_ONE
+#undef AS_K
+#define AS_NAME age_sums_adj_slab4
+#define AS_ONE age_adj_one4
+#define AS_K 4
+#include "age_sums_adj_slabs.inc"
+#undef AS_NAME
+#undef AS_ONE
+#undef AS_K
 
     !> Adjoint of nebular_kernels' continuum and lines (add_neb_emission = 1, not the IMF per model):
     !> the young (old) sums gain, per nebular age t of the model's young (old) ages,
