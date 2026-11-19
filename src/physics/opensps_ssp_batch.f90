@@ -25,6 +25,7 @@ module opensps_ssp_batch
 
     use, intrinsic :: iso_c_binding, only: c_float
     use opensps_precision, only: WP, KP
+    use opensps_value_classes, only: classify_columns
     use opensps_tuning, only: TUNE_P_SSP_BATCH_CHUNK, TUNE_P_SHARE_IMF_MIN_BATCH, TUNE_TEMPLATE_MT, TUNE_TEMPLATE_PT, &
                               TUNE_TEMPLATE_PIX_BLOCK, &
                               TUNE_TEMPLATE_KB, TUNE_GEMM_KB, TUNE_GEMM_NC_BATCHED, TUNE_IMF_GRAD_CHG, TUNE_HIP_GEMM_RM, &
@@ -304,30 +305,39 @@ contains
         type(ssp_opset_t), intent(inout) :: set
         real(WP), intent(in) :: delt(:), dell(:)
         integer, intent(out) :: ipair(:), status
-        integer :: m, k, ip, nnew, slot
+        integer :: m, k, ip, nnew, slot, n_b, nidx
         real(WP) :: nt_(MAX_TP_PAIRS), nl_(MAX_TP_PAIRS)
+        real(WP), allocatable :: vals(:,:)
+        integer, allocatable :: idx(:), cls(:), reps(:)
+        logical :: overflow
         integer :: where_(MAX_TP_PAIRS)
         logical :: inuse(MAX_TP_PAIRS)
 
         status = 0
         ipair = 0
-        ! The distinct pairs of this batch
-        nnew = 0
-        do m = 1, size(delt)
+        ! The distinct nonzero pairs of this batch (opensps_value_classes): more than the set holds is status 2
+        n_b = size(delt)
+        allocate(vals(2, n_b), idx(n_b), cls(n_b), reps(max(set%max_ext, 1)))
+        vals(1, :) = delt
+        vals(2, :) = dell
+        nidx = 0
+        do m = 1, n_b
             if (delt(m) == 0.0_wp .and. dell(m) == 0.0_wp) cycle
-            do k = 1, nnew
-                if (nt_(k) == delt(m) .and. nl_(k) == dell(m)) exit
-            end do
-            if (k > nnew) then
-                if (nnew == set%max_ext) then
-                    status = 2
-                    return
-                end if
-                nnew = nnew + 1
-                nt_(nnew) = delt(m)
-                nl_(nnew) = dell(m)
-            end if
+            nidx = nidx + 1
+            idx(nidx) = m
         end do
+        nnew = 0
+        if (nidx > 0) then
+            call classify_columns(vals, set%max_ext, 0, cls(1:nidx), reps, nnew, overflow, idx=idx(1:nidx))
+            if (overflow) then
+                status = 2
+                return
+            end if
+            do k = 1, nnew
+                nt_(k) = delt(idx(reps(k)))
+                nl_(k) = dell(idx(reps(k)))
+            end do
+        end if
         ! The slots of the pairs already built (those are kept), then the new pairs into free or unused slots
         inuse = .false.
         where_ = 0
@@ -2818,27 +2828,15 @@ contains
         real(WP), intent(in) :: pm(:,:)
         integer, intent(inout), contiguous :: perm_u(:), viz_u(:), cmap(:)
         integer, intent(out) :: nuniq
-        integer :: j, r, m
-        logical :: found
+        integer :: c
+        integer, allocatable :: rep(:)
+        logical :: overflow
 
-        nuniq = 0
-        do j = 1, nc
-            m = perm(m0 + j - 1)
-            found = .false.
-            do r = max(1, nuniq - 15), nuniq
-                if (viz_u(r) /= viz(m0 + j - 1)) cycle
-                if (all(pm(:, m) == pm(:, perm_u(r)))) then
-                    cmap(j) = r
-                    found = .true.
-                    exit
-                end if
-            end do
-            if (.not. found) then
-                nuniq = nuniq + 1
-                perm_u(nuniq) = m
-                viz_u(nuniq) = viz(m0 + j - 1)
-                cmap(j) = nuniq
-            end if
+        allocate(rep(nc))
+        call classify_columns(pm, nc, 16, cmap(1:nc), rep, nuniq, overflow, idx=perm(m0:m0 + nc - 1), key=viz(m0:m0 + nc - 1))
+        do c = 1, nuniq
+            perm_u(c) = perm(m0 + rep(c) - 1)
+            viz_u(c) = viz(m0 + rep(c) - 1)
         end do
     end subroutine chunk_unique_imf
 

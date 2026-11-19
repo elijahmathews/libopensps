@@ -119,16 +119,22 @@ def report(rows, alone_limit, pair_limit, dist_limit):
             if c is not None and base:
                 print('  all together: %.2f (x%.2f of the baseline)' % (c, c / base))
     if 'uniform' in dists:
-        print('\n== dependence on the distribution (cost / cost with the uniform spread)')
+        print('\n== dependence on the distribution (cost / cost with the uniform spread, divided by the same ratio of the '
+              'baseline, which no distribution touches: it removes a drift of the clocks between the runs)')
         for d in dists:
             if d == 'uniform':
                 continue
             for n in sizes:
+                b_d, b_u = cost.get((d, '-', n)), cost.get(('uniform', '-', n))
+                corr = (b_d / b_u) if (b_d and b_u) else 1.0
+                print('  %-9s N=%-6d baseline ratio x%.2f (the noise floor of this comparison)' % (d, n, corr))
                 for f in frees:
+                    if f == '-':
+                        continue
                     c, u = cost.get((d, f, n)), cost.get((('uniform'), f, n))
                     if c is None or u is None:
                         continue
-                    r = c / u
+                    r = c / u / corr
                     if r > dist_limit or r < 1.0 / dist_limit:
                         print('  %-9s N=%-6d %-22s x%.2f *' % (d, n, f, r))
 
@@ -179,8 +185,10 @@ def main():
     sets = [('-', '')] + [(f, f) for f in fields] + [(p, p.replace('+', ',')) for p in pairs]
     if allset:
         sets.append(('ALL', ','.join(allset)))
-    for d in a.dists.split(','):
-        for label, free in sets:
+    # the distributions of one free set are measured one after the other (set outer): a drift of the device's clocks over the
+    # run then does not become a difference between distributions
+    for label, free in sets:
+        for d in a.dists.split(','):
             if (d, label) in done:
                 continue
             dump = None

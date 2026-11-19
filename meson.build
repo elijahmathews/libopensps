@@ -317,6 +317,7 @@ lib_sources = files(
     # Core FSPS Modules
     'src/core/opensps_trace.f90',
     'src/core/opensps_batch_registry.f90',
+    'src/core/opensps_value_classes.f90',
     'src/core/opensps_offload.f90',
     'src/core/opensps_tuning.f90',
     'src/core/opensps_cache.f90',
@@ -694,6 +695,20 @@ test('unit_tuning_literals', find_program('python3'),
 # The validation of -Dtuning_overrides (names against the registry)
 test('unit_tuning_overrides', find_program('python3'),
     args : [files('tests/test_tuning_overrides.py')],
+    suite : 'unit',
+    timeout : 60
+)
+
+# The grouping of models by the exact values of some of their parameters (doc/HOT_PATHS.md)
+value_classes_exe = executable('test_value_classes', 'tests/test_value_classes.f90',
+    dependencies : [opensps_dep, test_utils_dep],
+    link_language : 'fortran'
+)
+value_classes_env = environment()
+value_classes_env.set('FSPS_TEST_TAP', '1')
+test('unit_value_classes', value_classes_exe,
+    protocol : 'tap',
+    env : value_classes_env,
     suite : 'unit',
     timeout : 60
 )

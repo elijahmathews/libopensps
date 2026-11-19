@@ -59,8 +59,42 @@ classification costs a pass over the models and is made only on request, so the 
 * The operator path with `afe`, `ssp_weights_z`, `add_neb_emission = 2`, `add_xrb_emission = 1` or `smooth_lsf`; cue with
   a free IMF; `agb_dust`, `masscut`, `evtype` (they select stars: a rebuild per distinct value).
 
-## Where the cost goes
+## Where the cost goes: the free-parameter matrix
 
-Measured per-model costs at N = 10^4 (FP32; `doc/GPU_RESULTS.md`, `doc/TUNING.md` M6): resident basis 6.6 - 7.3 us on the
-R9700, IMF free through the operator 23, plus the isochrone factors 32 - 34. The matrix benchmark of the stack's second
-PR measures each parameter alone and in pairs against these.
+`tools/bench_matrix.py` runs `benchmark_csp_batch` with each parameter alone free on top of the baseline (`full`: dust,
+dust emission, nebular emission, IGM, AGN; `tau`, `tage`, `duste_umin`, `gas_logu` always vary), then pairs and all together,
+under three distributions. Microseconds per model at N = 10^4, magnitudes only; ratio to the baseline in parentheses
+(2026-11-18, MIST + MILES; the CPU is FP64 with 8 OpenMP threads, the R9700 FP32 kernels through the ROCm container):
+
+| Free (alone) | CPU (baseline 322.8) | R9700 (baseline 8.41) |
+|---|---|---|
+| any of 21 closed-form fields (`dust1`-`dust3`, `dust_index`, `dust1_index`, `dust_tesc`, `frac_nodust`, `duste_gamma`, `duste_qpah`, `gas_logz`, `frac_obrun`, `fagn`, `agn_tau`, `zred`, `igm_factor`) | x0.99 - x1.06 | x1.02 - x1.09 |
+| `logzsol` (resident bases) | x1.04 | x1.23 |
+| `imf1`, `imf2`, `imf3` (operator path) | x3.7 | x2.7 |
+| `mdave` | x3.7 | x4.1 |
+| `vdmc` (the van Dokkum IMF) | x4.8 | **x12.3** |
+| `fbhb`, `sbss`, `agb`, `pagb`, `redgb` (group operators) | x4.3 | x3.5 - 3.7 |
+| `delt` or `dell` (four distinct pairs) | x6.7 | x5.4 |
+| all of dust, gas, AGN, `zred`, `logzsol`, IMF, `agb`, `pagb`, `redgb` together | x6.6 | x6.6 |
+
+* **The CSP stage is not fragmented by free-parameter set:** the closed-form fields cost nothing beyond the baseline, in any
+  number (all together adds only the SSP-level steps).
+* **The cost steps are the classes.** The operator path (a free IMF, a factor or a shift) is x2.7 - 3.7; the group operators
+  (class L) add the groups; the shifts (class G) cost with their distinct pairs: with every model on one pair, `delt` is x0.64
+  (CPU) and x0.66 (R9700) of the uniform spread, one group instead of four.
+* **Interactions.** Metallicity free on the operator path costs more than the sum of its parts (cost(A+B) / (cost(A) + cost(B) -
+  baseline)): with an IMF field x1.43 (CPU) and x1.51 (R9700), with a factor x1.57 and x1.58, with a shift x1.78 and x1.81:
+  the operator runs once per bracketing metallicity (K = 2). On the resident basis the metallicity is a blend (x1.04, x1.23).
+  IMF + factors (x0.61 CPU, x0.76 R9700) and factors + shifts (x0.69, x0.68) are sub-additive: they share the group operators'
+  entry cost.
+* **Distribution.** Clustering `logzsol` or the IMF parameters into four tight groups, or putting every model at one value,
+  does not change the cost (CPU: all fields x1.0; R9700, distributions interleaved per set so the clocks' drift does not
+  show up as a difference, noise floor 5%: `logzsol`, `imf1`, `fbhb` and `logzsol` + `imf1` within it). The exception is
+  class G above. (A first R9700 run with the distributions in long blocks showed x0.6 - 1.4 differences for every field,
+  baseline included: a drift of the clocks between the blocks; the driver now interleaves them.)
+* **Where to look next.** `vdmc` x12.3 (the van Dokkum IMF's weights are the single most expensive field on the R9700, x2.5
+  over the Kroupa ones: the per-bin integrals of the lognormal); metallicity on the operator path (x1.5 over additive); the
+  shifts (a group per distinct pair).
+
+The TSV and the reports of these runs are not in the repository (they depend on the machine); `tools/bench_matrix.py EXE --tsv
+out.tsv --report` reproduces them, `--dump DIR` writes forward dumps for `tools/compare_forward_dump.py`.
