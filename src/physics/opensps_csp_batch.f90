@@ -148,6 +148,10 @@ module opensps_csp_batch
     !> Where model_sums takes the SSP's mass and L_bol from: the model's own (IMF per model), the resident basis blended in
     !> metallicity and [alpha/Fe], or its first plane
     integer, parameter :: MSUMS_OWN = 0, MSUMS_BLEND = 1, MSUMS_FIXED = 2
+    !> The arguments of compute_csp_batch whose extents batch_check_shapes tests (the rows of its ext array)
+    integer, parameter :: SHP_MAGS = 1, SHP_SPEC = 2, SHP_EMLINES = 3, SHP_INDX = 4, SHP_ZRED = 5, SHP_SPEC_YOUNG = 6, &
+        SHP_SPEC_OLD = 7, SHP_MASS_YOUNG = 8, SHP_MASS_OLD = 9, SHP_LBOL_YOUNG = 10, SHP_LBOL_OLD = 11, SHP_MAGS_BAR = 12, &
+        SHP_SPEC_BAR = 13, SHP_PARAMS_BAR = 14, SHP_WEIGHTS_BAR = 15, SHP_WEIGHTS_Z_BAR = 16, SHP_SSP_WEIGHTS = 17, N_SHP = 17
 
     !> Where the SSPs of a batch come from (the "SSP source" of doc/HOT_PATHS.md): the resident basis (one SSP, blended in
     !> metallicity from two slabs, or in metallicity and [alpha/Fe] from four), the resident bases with the weights over ages and
@@ -459,6 +463,7 @@ contains
         type(batch_info_t), intent(out), optional :: info
 
         integer :: n_mod, nt, nspec, nbands, m, k
+        integer :: ext(2, N_SHP)
         type(batch_info_t) :: binfo
         type(ssp_source_t) :: src
         real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk, wa_m
@@ -605,9 +610,28 @@ contains
                 status = 2; return
             end if
         end if
-        call batch_check_shapes(ctx, n_mod, nt, nspec, nbands, mags, spec, emlines, indx, zred_mags, spec_young, spec_old, &
-                                mass_young, mass_old, lbol_young, lbol_old, mags_bar, spec_bar, params_bar, weights_bar, &
-                                weights_z_bar, ssp_weights, status, parts, grad, weights_given)
+        ! The extents of the arguments (-1 for an absent optional one), taken here: an absent optional array must not be passed on
+        ! to another routine, because gfortran then reads the bounds of its (undefined) descriptor to make a new one, which
+        ! UBSan reports as a signed overflow
+        ext = -1
+        ext(:, SHP_MAGS) = shape(mags)
+        if (present(spec)) ext(:, SHP_SPEC) = shape(spec)
+        if (present(emlines)) ext(:, SHP_EMLINES) = shape(emlines)
+        if (present(indx)) ext(:, SHP_INDX) = shape(indx)
+        if (present(zred_mags)) ext(1, SHP_ZRED) = size(zred_mags)
+        if (present(spec_young)) ext(:, SHP_SPEC_YOUNG) = shape(spec_young)
+        if (present(spec_old)) ext(:, SHP_SPEC_OLD) = shape(spec_old)
+        if (present(mass_young)) ext(1, SHP_MASS_YOUNG) = size(mass_young)
+        if (present(mass_old)) ext(1, SHP_MASS_OLD) = size(mass_old)
+        if (present(lbol_young)) ext(1, SHP_LBOL_YOUNG) = size(lbol_young)
+        if (present(lbol_old)) ext(1, SHP_LBOL_OLD) = size(lbol_old)
+        if (present(mags_bar)) ext(:, SHP_MAGS_BAR) = shape(mags_bar)
+        if (present(spec_bar)) ext(:, SHP_SPEC_BAR) = shape(spec_bar)
+        if (present(params_bar)) ext(:, SHP_PARAMS_BAR) = shape(params_bar)
+        if (present(weights_bar)) ext(:, SHP_WEIGHTS_BAR) = shape(weights_bar)
+        if (present(weights_z_bar)) ext(1, SHP_WEIGHTS_Z_BAR) = size(weights_z_bar, 1)
+        if (present(ssp_weights)) ext(:, SHP_SSP_WEIGHTS) = shape(ssp_weights)
+        call batch_check_shapes(ctx, n_mod, nt, nspec, nbands, ext, status, parts, grad, weights_given)
         if (status /= 0) return
         ! Weights over ages and metallicities: every resident basis summed with its own weights
         nzb = 1
@@ -1218,84 +1242,80 @@ contains
     ! Refuse what this path cannot do; choose where the SSPs come from (the SSP source) and the slabs each model blends.
     ! ======================================================================================================================
 
-    !> The sizes of the arguments of compute_csp_batch against the batch (status 3 when an output or a cotangent is too small, 2 for
-    !> redshifted colours without zred_mags), and the modes the optional arguments make: parts (the young and old parts), grad (any
-    !> gradient), weights_given (the SFH weights are given). No device code, nothing is computed.
-    subroutine batch_check_shapes(ctx, n_mod, nt, nspec, nbands, mags, spec, emlines, indx, zred_mags, spec_young, spec_old, &
-                                  mass_young, mass_old, lbol_young, lbol_old, mags_bar, spec_bar, params_bar, weights_bar, &
-                                  weights_z_bar, ssp_weights, status, parts, grad, weights_given)
+    !> The extents of the arguments of compute_csp_batch (ext(:, SHP_...), -1 for an absent optional argument; a rank-1 argument
+    !> has its size in ext(1, ...)) against the batch (status 3 when an output or a cotangent is too small, 2 for redshifted
+    !> colours without zred_mags), and the modes the optional arguments make: parts (the young and old parts), grad (any
+    !> gradient), weights_given (the SFH weights are given). No device code, nothing is computed. Extents, not the arrays: see
+    !> the comment at the call.
+    subroutine batch_check_shapes(ctx, n_mod, nt, nspec, nbands, ext, status, parts, grad, weights_given)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)  :: n_mod, nt, nspec, nbands
-        real(WP), intent(in) :: mags(:,:)
-        real(WP), intent(in), optional :: spec(:,:), emlines(:,:), indx(:,:), zred_mags(:)
-        real(WP), intent(in), optional :: spec_young(:,:), spec_old(:,:), mass_young(:), mass_old(:), lbol_young(:), lbol_old(:)
-        real(WP), intent(in), optional :: mags_bar(:,:), spec_bar(:,:), params_bar(:,:), weights_bar(:,:), weights_z_bar(:,:,:)
-        real(WP), intent(in), optional :: ssp_weights(:,:)
+        integer, intent(in)  :: ext(2, N_SHP)
         integer, intent(out) :: status
         logical, intent(out) :: parts, grad, weights_given
 
         status = 0
-        if (size(mags, 1) < nbands .or. size(mags, 2) < n_mod) then
+        if (ext(1, SHP_MAGS) < nbands .or. ext(2, SHP_MAGS) < n_mod) then
             status = 3; return
         end if
-        if (present(spec)) then
-            if (size(spec, 1) < nspec .or. size(spec, 2) < n_mod) then
+        if (ext(1, SHP_SPEC) >= 0) then
+            if (ext(1, SHP_SPEC) < nspec .or. ext(2, SHP_SPEC) < n_mod) then
                 status = 3; return
             end if
         end if
-        if (present(emlines)) then
-            if (size(emlines, 1) < NEMLINE .or. size(emlines, 2) < n_mod) then
+        if (ext(1, SHP_EMLINES) >= 0) then
+            if (ext(1, SHP_EMLINES) < NEMLINE .or. ext(2, SHP_EMLINES) < n_mod) then
                 status = 3; return
             end if
         end if
-        if (present(indx)) then
-            if (size(indx, 1) < ctx%state%nindx .or. size(indx, 2) < n_mod) then
+        if (ext(1, SHP_INDX) >= 0) then
+            if (ext(1, SHP_INDX) < ctx%state%nindx .or. ext(2, SHP_INDX) < n_mod) then
                 status = 3; return
             end if
         end if
-        if (ctx%redshift_colors_val /= 0 .and. .not. present(zred_mags)) then
+        if (ctx%redshift_colors_val /= 0 .and. ext(1, SHP_ZRED) < 0) then
             status = 2; return
         end if
-        if (present(zred_mags)) then
-            if (size(zred_mags) < n_mod) then
+        if (ext(1, SHP_ZRED) >= 0) then
+            if (ext(1, SHP_ZRED) < n_mod) then
                 status = 3; return
             end if
         end if
-        parts = present(spec_young) .and. present(spec_old) .and. present(mass_young) .and. &
-                present(mass_old) .and. present(lbol_young) .and. present(lbol_old)
+        parts = ext(1, SHP_SPEC_YOUNG) >= 0 .and. ext(1, SHP_SPEC_OLD) >= 0 .and. ext(1, SHP_MASS_YOUNG) >= 0 .and. &
+                ext(1, SHP_MASS_OLD) >= 0 .and. ext(1, SHP_LBOL_YOUNG) >= 0 .and. ext(1, SHP_LBOL_OLD) >= 0
         if (parts) then
-            if (size(spec_young, 1) < nspec .or. size(spec_young, 2) < n_mod .or. &
-                size(spec_old, 1) < nspec .or. size(spec_old, 2) < n_mod .or. size(mass_young) < n_mod .or. &
-                size(mass_old) < n_mod .or. size(lbol_young) < n_mod .or. size(lbol_old) < n_mod) then
+            if (ext(1, SHP_SPEC_YOUNG) < nspec .or. ext(2, SHP_SPEC_YOUNG) < n_mod .or. &
+                ext(1, SHP_SPEC_OLD) < nspec .or. ext(2, SHP_SPEC_OLD) < n_mod .or. ext(1, SHP_MASS_YOUNG) < n_mod .or. &
+                ext(1, SHP_MASS_OLD) < n_mod .or. ext(1, SHP_LBOL_YOUNG) < n_mod .or. ext(1, SHP_LBOL_OLD) < n_mod) then
                 status = 3; return
             end if
         end if
-        grad = present(params_bar) .or. present(weights_bar) .or. present(weights_z_bar)
+        grad = ext(1, SHP_PARAMS_BAR) >= 0 .or. ext(1, SHP_WEIGHTS_BAR) >= 0 .or. ext(1, SHP_WEIGHTS_Z_BAR) >= 0
         if (grad) then
-            if (present(mags_bar)) then
-                if (size(mags_bar, 1) < nbands .or. size(mags_bar, 2) < n_mod) then
+            if (ext(1, SHP_MAGS_BAR) >= 0) then
+                if (ext(1, SHP_MAGS_BAR) < nbands .or. ext(2, SHP_MAGS_BAR) < n_mod) then
                     status = 3; return
                 end if
             end if
-            if (present(spec_bar)) then
-                if (size(spec_bar, 1) < nspec .or. size(spec_bar, 2) < n_mod) then
+            if (ext(1, SHP_SPEC_BAR) >= 0) then
+                if (ext(1, SHP_SPEC_BAR) < nspec .or. ext(2, SHP_SPEC_BAR) < n_mod) then
                     status = 3; return
                 end if
             end if
-            if (present(params_bar)) then
-                if (size(params_bar, 1) < NBGRAD .or. size(params_bar, 2) < n_mod) then
+            if (ext(1, SHP_PARAMS_BAR) >= 0) then
+                if (ext(1, SHP_PARAMS_BAR) < NBGRAD .or. ext(2, SHP_PARAMS_BAR) < n_mod) then
                     status = 3; return
                 end if
             end if
-            if (present(weights_bar)) then
-                if (size(weights_bar, 1) < nt .or. size(weights_bar, 2) < n_mod) then
+            if (ext(1, SHP_WEIGHTS_BAR) >= 0) then
+                if (ext(1, SHP_WEIGHTS_BAR) < nt .or. ext(2, SHP_WEIGHTS_BAR) < n_mod) then
                     status = 3; return
                 end if
             end if
         end if
-        weights_given = present(ssp_weights)
+        weights_given = ext(1, SHP_SSP_WEIGHTS) >= 0
         if (weights_given) then
-            if (size(ssp_weights, 1) < nt .or. size(ssp_weights, 2) < n_mod) then
+            if (ext(1, SHP_SSP_WEIGHTS) < nt .or. ext(2, SHP_SSP_WEIGHTS) < n_mod) then
                 status = 3; return
             end if
         end if
