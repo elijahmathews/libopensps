@@ -51,15 +51,15 @@ R9700 (FP32) the changed rows differ from the old by 2e-8 - 1e-7 of their scale 
 routines to about 200 of the template and its wrapper), since the per-pixel difference forms, the CPU dot-product branch and the K-specific
 loops are gone but the combination code remains.
 
-**Step 2, one "SSP source" interface (first slice done, #131; the rest not started).** A small type that says where the SSP sums come
-from (resident basis with K slabs, weights over metallicities, operators), built by the planner (`batch_info` already reports it);
-the SSP section of `compute_csp_batch` calls one entry point and the flags become its fields. The operator path keeps its own
-implementation (its physics differs: IMF weights, group operators) behind the same interface. First slice: `ssp_source_t`,
-`ssp_source_select` (the kind, the number of slabs and the path label, formerly an inline chain in the driver) and
-`ssp_source_age_sums` (the dispatcher over the resident-basis kernels). What is left: the flags `zmode`, `zw`, `imf`, `zimf`, `naf` are
-still locals of the driver (about 70 uses: the mass and L_bol block, the nebular calls, the whole backward pass), and the descriptor
-arrays (`zlo`, `zhi`, `dz`, `da`, `nzs`) are still formed there; moving those behind the source (as procedures of it, or by passing it to
-the stage routines of Step 4) is what makes the driver read as one path.
+**Step 2, one "SSP source" interface (two slices done, #131 and #132; the rest not started).** A small type that says where the SSP sums
+come from (resident basis with K slabs, weights over metallicities, operators), built by the planner (`batch_info` already reports it);
+the driver calls the source and the flags become its fields. The operator path keeps its own implementation (its physics differs: IMF
+weights, group operators) behind the same interface. Slice 1: `ssp_source_t`, `ssp_source_select` (the kind, the number of slabs and the
+path label, formerly an inline chain in the driver) and `ssp_source_age_sums` (the dispatcher over the resident-basis kernels). Slice 2:
+`ssp_source_describe` (the per-model slab descriptor `zlo`, `zhi`, `dz`, `da`, `nzs`, and the refusal of a horizontal-branch modification that
+is not in the operators) and `ssp_source_scalars` (the mass, L_bol and weights block, with its host and device loops). What is left: the
+flags `zmode`, `zw`, `imf`, `zimf`, `naf` are still locals of the driver (the nebular calls, the backward pass, the checks), and the stages
+after the SSP sums still take them as arguments; passing the source to them is what Step 4 (stage routines) does.
 
 **Step 3, the descriptor in the other blends.** The nebular Q and ionizing-flux blends, the L_bol blend and the mass blend repeat the
 cascade `(1 - da) ((1 - dz) a + dz b) + ...`; with the descriptor they become one helper. Only the exact-match sites (the

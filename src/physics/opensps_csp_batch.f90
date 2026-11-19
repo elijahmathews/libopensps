@@ -856,43 +856,8 @@ contains
             status = 5; return
         end if
 #endif
-        zlo = 1; zhi = 1; dz = 0.0_wp
-        da = 0.0_wp
-        nzs = 0
-        if (zmode) then
-            do m = 1, n_mod
-                call metallicity_interval(ctx, psets(m)%logzsol, zlo(m), dz(m))
-                zhi(m) = zlo(m) + 1
-            end do
-        end if
-        ! The horizontal-branch modification (fbhb, sbss above their thresholds) at an age where its stars would not fit the
-        ! isochrone arrays is not in the operators of that metallicity (legacy FSPS stops there): such a model is refused
-        if (imf) then
-            if (ssp_ops%free_mods) then
-                do m = 1, n_mod
-                    if (psets(m)%fbhb > merge(1.0e-3_wp, 1.0e-4_wp, trim(ctx%state%isoc_type) == 'pdva') .or. &
-                        psets(m)%sbss > 1.0e-3_wp) then
-                        if (zmode) then
-                            if (refset%ops(zlo(m))%hb_blocked .or. (dz(m) /= 0.0_wp .and. refset%ops(zhi(m))%hb_blocked)) then
-                                status = 2; return
-                            end if
-                        else if (refset%ops(1)%hb_blocked) then
-                            status = 2; return
-                        end if
-                    end if
-                end do
-            end if
-        end if
-        if (naf > 1) then
-            ! Plane interval and weight of the model's [alpha/Fe] (clamped to the grid: the flux of an
-            ! extrapolated plane could be negative), zlo, zhi the slabs of the lower plane
-            nzs = ctx%state%nz
-            do m = 1, n_mod
-                call afe_interval(ctx%state%afe_basis, psets(m)%afe, ia_lo, da(m))
-                zlo(m) = zlo(m) + nzs * (ia_lo - 1)
-                zhi(m) = zlo(m) + 1
-            end do
-        end if
+        call ssp_source_describe(zmode, naf, ctx, psets, ssp_ops, refset, n_mod, zlo, zhi, dz, da, nzs, status)
+        if (status /= 0) return
 
         ! ------------------------------------------------------------------
         ! 1. Host: per-model indices (birth-cloud age, dust emission grid, nebular grid, AGN
@@ -1119,60 +1084,8 @@ contains
             end if
         end if
 
-        associate (bas_mass => ctx%state%ssp_basis_mass, bas_lbol => ctx%state%ssp_basis_lbol)
-        if (zw) then
-            ! Weights over ages and metallicities: mass and L_bol summed over both (metallicities
-            ! outer, as compute_csp_scenario with nzin > 1), the weights cast once to KP
-            if (host_m) then
-                do m = 1, n_mod
-                    call model_sums_zw(nt, nzw, it_tesc(m), weights(:, :, m), bas_mass, bas_lbol, wz(:, :, m), &
-                                       msum(m), lsum(m), msy(m), mso(m), lsy(m), lso(m))
-                end do
-            else
-#if defined(OMP_TARGET)
-                !$omp target teams distribute parallel do &
-                !$omp& map(OMP_MAP_PRESENT_ALLOC: bas_lbol, bas_mass)
-#elif defined(_OPENMP)
-                !$omp parallel do
-#endif
-                do m = 1, n_mod
-                    call model_sums_zw(nt, nzw, it_tesc(m), weights(:, :, m), bas_mass, bas_lbol, wz(:, :, m), &
-                                       msum(m), lsum(m), msy(m), mso(m), lsy(m), lso(m))
-                end do
-            end if
-        else if (imf) then
-            ! The model's own SSPs (IMF per model): the surviving mass and L_bol per age and model
-#if defined(OMP_TARGET)
-            !$omp target teams distribute parallel do if(target: dev)
-#elif defined(_OPENMP)
-            !$omp parallel do
-#endif
-            do m = 1, n_mod
-                call model_sums(MSUMS_OWN, m, n_mod, nt, it_tesc(m), 0, weights(:, 1, m), smass, slum, smass, slum, &
-                                lum_linear, zlo, zhi, dz, da, w2, msum(m), lsum(m), msy(m), mso(m), lsy(m), lso(m))
-            end do
-        else
-            if (host_m) then
-                do m = 1, n_mod
-                    call model_sums(merge(MSUMS_BLEND, MSUMS_FIXED, zmode), m, n_mod, nt, it_tesc(m), nzs, weights(:, 1, m), &
-                                    bas_mass, bas_lbol, bas_mass, bas_lbol, lum_linear, zlo, zhi, dz, da, w2, &
-                                    msum(m), lsum(m), msy(m), mso(m), lsy(m), lso(m))
-                end do
-            else
-#if defined(OMP_TARGET)
-                !$omp target teams distribute parallel do &
-                !$omp& map(OMP_MAP_PRESENT_ALLOC: bas_lbol, bas_mass)
-#elif defined(_OPENMP)
-                !$omp parallel do
-#endif
-                do m = 1, n_mod
-                    call model_sums(merge(MSUMS_BLEND, MSUMS_FIXED, zmode), m, n_mod, nt, it_tesc(m), nzs, weights(:, 1, m), &
-                                    bas_mass, bas_lbol, bas_mass, bas_lbol, lum_linear, zlo, zhi, dz, da, w2, &
-                                    msum(m), lsum(m), msy(m), mso(m), lsy(m), lso(m))
-                end do
-            end if
-        end if
-        end associate
+        call ssp_source_scalars(src, ctx, n_mod, nt, nzw, nzs, host_m, dev, weights, wz, w2, smass, slum, lum_linear, &
+                                it_tesc, zlo, zhi, dz, da, msum, lsum, msy, mso, lsy, lso)
 
         if (host_m) then
 #ifdef OMP_TARGET
@@ -2190,6 +2103,136 @@ contains
             call age_sums(nspec, nt, n_mod, ctx%state%ssp_basis_spec(:, :, 1), w2, it_tesc, yo)
         end select
     end subroutine ssp_source_age_sums
+
+    !> The slabs of the resident basis (or the operators) that each model of a batch blends, as the descriptor of its SSP source: zlo
+    !> (the first slab), zhi (the second), dz (its position between them, from its logzsol, with a basis per metallicity: zmode) and,
+    !> with the [alpha/Fe] planes of the context's stack (naf > 1), the plane stride nzs, the position da between the two planes
+    !> and zlo, zhi the slabs of the lower plane. status 2: a model whose horizontal-branch modification is not in the operators
+    !> of its metallicity (legacy FSPS stops there).
+    subroutine ssp_source_describe(zmode, naf, ctx, psets, ssp_ops, refset, n_mod, zlo, zhi, dz, da, nzs, status)
+        logical, intent(in)  :: zmode
+        integer, intent(in)  :: naf, n_mod
+        type(opensps_context_t), intent(in) :: ctx
+        type(params), intent(in) :: psets(n_mod)
+        type(ssp_opset_t), intent(in), optional :: ssp_ops
+        type(ssp_opset_t), pointer, intent(in) :: refset
+        integer, intent(out) :: zlo(n_mod), zhi(n_mod), nzs, status
+        real(WP), intent(out) :: dz(n_mod), da(n_mod)
+        integer :: m, ia_lo
+
+        status = 0
+        zlo = 1; zhi = 1; dz = 0.0_wp
+        da = 0.0_wp
+        nzs = 0
+        if (zmode) then
+            do m = 1, n_mod
+                call metallicity_interval(ctx, psets(m)%logzsol, zlo(m), dz(m))
+                zhi(m) = zlo(m) + 1
+            end do
+        end if
+        ! The horizontal-branch modification (fbhb, sbss above their thresholds) at an age where its stars would not fit the
+        ! isochrone arrays is not in the operators of that metallicity (legacy FSPS stops there): such a model is refused
+        if (present(ssp_ops)) then
+            if (ssp_ops%free_mods) then
+                do m = 1, n_mod
+                    if (psets(m)%fbhb > merge(1.0e-3_wp, 1.0e-4_wp, trim(ctx%state%isoc_type) == 'pdva') .or. &
+                        psets(m)%sbss > 1.0e-3_wp) then
+                        if (zmode) then
+                            if (refset%ops(zlo(m))%hb_blocked .or. (dz(m) /= 0.0_wp .and. refset%ops(zhi(m))%hb_blocked)) then
+                                status = 2; return
+                            end if
+                        else if (refset%ops(1)%hb_blocked) then
+                            status = 2; return
+                        end if
+                    end if
+                end do
+            end if
+        end if
+        if (naf > 1) then
+            ! Plane interval and weight of the model's [alpha/Fe] (clamped to the grid: the flux of an
+            ! extrapolated plane could be negative), zlo, zhi the slabs of the lower plane
+            nzs = ctx%state%nz
+            do m = 1, n_mod
+                call afe_interval(ctx%state%afe_basis, psets(m)%afe, ia_lo, da(m))
+                zlo(m) = zlo(m) + nzs * (ia_lo - 1)
+                zhi(m) = zlo(m) + 1
+            end do
+        end if
+    end subroutine ssp_source_describe
+
+    !> The mass and L_bol per model of a batch, summed over the ages, young and old apart (msum, lsum; msy, mso, lsy, lso), and
+    !> the weights split into young and old at the model's dust_tesc age and cast to kernel precision (w2; wz over ages and
+    !> metallicities for SSP_SRC_BASIS_W), from the SSP source: the weights over metallicities (model_sums_zw), the model's own
+    !> surviving mass and L_bol per age (the operators: smass, slum, present only then) or the resident basis (blended or its first
+    !> plane). On the host (host_m: few models, the weights from the host) or on the device.
+    subroutine ssp_source_scalars(src, ctx, n_mod, nt, nzw, nzs, host_m, dev, weights, wz, w2, smass, slum, lum_linear, &
+                                  it_tesc, zlo, zhi, dz, da, msum, lsum, msy, mso, lsy, lso)
+        type(ssp_source_t), intent(in) :: src
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)     :: n_mod, nt, nzw, nzs, it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
+        logical, intent(in)     :: host_m, dev
+        real(WP), intent(in)    :: weights(nt, nzw, n_mod), lum_linear(nt), dz(n_mod), da(n_mod)
+        real(KP), intent(inout) :: wz(nt, nzw, n_mod), w2(nt, 2 * n_mod)
+        real(WP), intent(in), optional :: smass(nt, n_mod), slum(nt, n_mod)
+        real(WP), intent(inout) :: msum(n_mod), lsum(n_mod), msy(n_mod), mso(n_mod), lsy(n_mod), lso(n_mod)
+        integer :: m, mode
+
+        mode = merge(MSUMS_BLEND, MSUMS_FIXED, src%kind == SSP_SRC_BASIS_Z .or. src%kind == SSP_SRC_BASIS_ZA)
+        associate (bas_mass => ctx%state%ssp_basis_mass, bas_lbol => ctx%state%ssp_basis_lbol)
+        if (src%kind == SSP_SRC_BASIS_W) then
+            ! Weights over ages and metallicities: mass and L_bol summed over both (metallicities
+            ! outer, as compute_csp_scenario with nzin > 1), the weights cast once to KP
+            if (host_m) then
+                do m = 1, n_mod
+                    call model_sums_zw(nt, nzw, it_tesc(m), weights(:, :, m), bas_mass, bas_lbol, wz(:, :, m), &
+                                       msum(m), lsum(m), msy(m), mso(m), lsy(m), lso(m))
+                end do
+            else
+#if defined(OMP_TARGET)
+                !$omp target teams distribute parallel do &
+                !$omp& map(OMP_MAP_PRESENT_ALLOC: bas_lbol, bas_mass)
+#elif defined(_OPENMP)
+                !$omp parallel do
+#endif
+                do m = 1, n_mod
+                    call model_sums_zw(nt, nzw, it_tesc(m), weights(:, :, m), bas_mass, bas_lbol, wz(:, :, m), &
+                                       msum(m), lsum(m), msy(m), mso(m), lsy(m), lso(m))
+                end do
+            end if
+        else if (src%kind == SSP_SRC_OPERATOR) then
+            ! The model's own SSPs (IMF per model): the surviving mass and L_bol per age and model
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do if(target: dev)
+#elif defined(_OPENMP)
+            !$omp parallel do
+#endif
+            do m = 1, n_mod
+                call model_sums(MSUMS_OWN, m, n_mod, nt, it_tesc(m), 0, weights(:, 1, m), smass, slum, smass, slum, &
+                                lum_linear, zlo, zhi, dz, da, w2, msum(m), lsum(m), msy(m), mso(m), lsy(m), lso(m))
+            end do
+        else
+            if (host_m) then
+                do m = 1, n_mod
+                    call model_sums(mode, m, n_mod, nt, it_tesc(m), nzs, weights(:, 1, m), &
+                                    bas_mass, bas_lbol, bas_mass, bas_lbol, lum_linear, zlo, zhi, dz, da, w2, &
+                                    msum(m), lsum(m), msy(m), mso(m), lsy(m), lso(m))
+                end do
+            else
+#if defined(OMP_TARGET)
+                !$omp target teams distribute parallel do &
+                !$omp& map(OMP_MAP_PRESENT_ALLOC: bas_lbol, bas_mass)
+#elif defined(_OPENMP)
+                !$omp parallel do
+#endif
+                do m = 1, n_mod
+                    call model_sums(mode, m, n_mod, nt, it_tesc(m), nzs, weights(:, 1, m), &
+                                    bas_mass, bas_lbol, bas_mass, bas_lbol, lum_linear, zlo, zhi, dz, da, w2, &
+                                    msum(m), lsum(m), msy(m), mso(m), lsy(m), lso(m))
+                end do
+            end if
+        end if
+        end associate
+    end subroutine ssp_source_scalars
 
     !> The mass and L_bol of one model of a batch whose SSP weights run over ages and metallicities (zw): summed over both
     !> (metallicities outer, as compute_csp_scenario with nzin > 1), split at the model's dust_tesc age index into young
