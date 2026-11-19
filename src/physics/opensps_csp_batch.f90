@@ -565,70 +565,10 @@ contains
                 status = 2; return
             end if
         end if
-        if (size(mags, 1) < nbands .or. size(mags, 2) < n_mod) then
-            status = 3; return
-        end if
-        if (present(spec)) then
-            if (size(spec, 1) < nspec .or. size(spec, 2) < n_mod) then
-                status = 3; return
-            end if
-        end if
-        if (present(emlines)) then
-            if (size(emlines, 1) < NEMLINE .or. size(emlines, 2) < n_mod) then
-                status = 3; return
-            end if
-        end if
-        if (present(indx)) then
-            if (size(indx, 1) < ctx%state%nindx .or. size(indx, 2) < n_mod) then
-                status = 3; return
-            end if
-        end if
-        if (ctx%redshift_colors_val /= 0 .and. .not. present(zred_mags)) then
-            status = 2; return
-        end if
-        if (present(zred_mags)) then
-            if (size(zred_mags) < n_mod) then
-                status = 3; return
-            end if
-        end if
-        parts = present(spec_young) .and. present(spec_old) .and. present(mass_young) .and. &
-                present(mass_old) .and. present(lbol_young) .and. present(lbol_old)
-        if (parts) then
-            if (size(spec_young, 1) < nspec .or. size(spec_young, 2) < n_mod .or. &
-                size(spec_old, 1) < nspec .or. size(spec_old, 2) < n_mod .or. size(mass_young) < n_mod .or. &
-                size(mass_old) < n_mod .or. size(lbol_young) < n_mod .or. size(lbol_old) < n_mod) then
-                status = 3; return
-            end if
-        end if
-        grad = present(params_bar) .or. present(weights_bar) .or. present(weights_z_bar)
-        if (grad) then
-            if (present(mags_bar)) then
-                if (size(mags_bar, 1) < nbands .or. size(mags_bar, 2) < n_mod) then
-                    status = 3; return
-                end if
-            end if
-            if (present(spec_bar)) then
-                if (size(spec_bar, 1) < nspec .or. size(spec_bar, 2) < n_mod) then
-                    status = 3; return
-                end if
-            end if
-            if (present(params_bar)) then
-                if (size(params_bar, 1) < NBGRAD .or. size(params_bar, 2) < n_mod) then
-                    status = 3; return
-                end if
-            end if
-            if (present(weights_bar)) then
-                if (size(weights_bar, 1) < nt .or. size(weights_bar, 2) < n_mod) then
-                    status = 3; return
-                end if
-            end if
-        end if
-        given_w = present(ssp_weights)
-        if (given_w) then
-            if (size(ssp_weights, 1) < nt .or. size(ssp_weights, 2) < n_mod) then
-                status = 3; return
-            end if
-        end if
+        call batch_check_shapes(ctx, n_mod, nt, nspec, nbands, mags, spec, emlines, indx, zred_mags, spec_young, spec_old, &
+                                mass_young, mass_old, lbol_young, lbol_old, mags_bar, spec_bar, params_bar, weights_bar, &
+                                weights_z_bar, ssp_weights, status, parts, grad, given_w)
+        if (status /= 0) return
         ! Weights over ages and metallicities: every resident basis summed with its own weights
         nzb = 1
         if (.not. imf) nzb = size(ctx%state%ssp_basis_spec, 3)
@@ -661,66 +601,13 @@ contains
             end if
         end if
         zred = psets(1)%zred
-        zvar = .false.
-        do m = 1, n_mod
-            if ((psets(m)%tage <= 0.0_wp .and. .not. given_w) .or. &
-                psets(m)%uvb < 0.0_wp .or. psets(m)%wgp1 < 1 .or. psets(m)%wgp2 < 1) then
-                status = 2; return
-            end if
-            if (psets(m)%zred /= zred .or. psets(m)%igm_factor /= psets(1)%igm_factor) zvar = .true.
-        end do
-        ! Gradients of the SFH parameters: the forms opensps_sfh_tangent covers
-        if (present(params_bar) .and. .not. given_w) then
-            do m = 1, n_mod
-                if (.not. sfh_tangent_supported(psets(m)%params_core, psets(m)%tage)) then
-                    status = 2; return
-                end if
-            end do
-        end if
+        call batch_check_models(ctx, psets, n_mod, given_w, present(params_bar), ssp_ops, refset, zimf, zvar, status)
+        if (status /= 0) return
         HOST_SFH_MAX = tuning_get(TUNE_P_HOST_SFH_MAX)
         host_w = .false.
 #if defined(OMP_TARGET)
         host_w = (.not. given_w) .and. n_mod < HOST_SFH_MAX
 #endif
-        ! Without operators the SSPs are the context's resident basis, built with the context's isochrone modifications:
-        ! a model with others would silently get the basis's (the C API refuses such parameters; this guards the Fortran one)
-        if (.not. imf) then
-            do m = 1, n_mod
-                if (any(ssp_op_mod_signature(psets(m)) /= ssp_op_mod_signature(ctx%pset)) .or. &
-                    psets(m)%imf_lower_limit /= ctx%pset%imf_lower_limit .or. &
-                    psets(m)%imf_upper_limit /= ctx%pset%imf_upper_limit) then
-                    status = 2; return
-                end if
-            end do
-        end if
-        ! IMF per model: one metallicity (the operator's)
-        if (imf) then
-            do m = 1, n_mod
-                if (.not. zimf) then
-                    if (psets(m)%zmet /= psets(1)%zmet) then
-                        status = 2; return
-                    end if
-                end if
-                ! A user IMF file (type 5) has its own mass limits: other ones per model would be ignored silently
-                if (ctx%imf_type_val == 5 .and. (psets(m)%imf_lower_limit /= ctx%pset%imf_lower_limit .or. &
-                                                 psets(m)%imf_upper_limit /= ctx%pset%imf_upper_limit)) then
-                    status = 2; return
-                end if
-                ! Isochrone modifications change which templates the stars use, so S is rebuilt for
-                ! them: not supported per model (status 2), and not different from the build either
-                if (ssp_ops%free_mods) then
-                    ! fbhb, sbss, agb, pagb, redgb, delt and dell are free; the cuts (agb_dust, masscut, evtype) are those of the
-                    ! operators
-                    sigm = ssp_op_mod_signature(psets(m))
-                    if (any(sigm(8:10) /= refset%ops(1)%mod_sig(8:10))) then
-                        status = 2; return
-                    end if
-
-                else if (any(ssp_op_mod_signature(psets(m)) /= ssp_ops%ops(1)%mod_sig)) then
-                    status = 2; return
-                end if
-            end do
-        end if
         if (imf) then
             if (ssp_ops%free_mods) then
                 ! The TP-AGB group at each (delt, dell) of the batch: one more group per distinct nonzero pair, built here when
@@ -915,28 +802,10 @@ contains
         ! characteristic and break masses), the operator on the device
         dev = .false.
         if (imf) then
-            call configure_imf_parameters(ctx, psets(1), st_imf)
+            call batch_imf_vectors(ctx, psets, n_mod, nt, pm, smass, slum, wsfh, nobasis, st_imf)
             if (st_imf /= 0) then
                 status = 3; return
             end if
-            allocate(pm(IMF_NPAR, n_mod), smass(nt, n_mod), slum(nt, n_mod), wsfh(n_mod, nt), nobasis(1, 1, 1))
-            call imf_pack_params(ctx, pm(:, 1))
-            do m = 1, n_mod
-                pm(:, m) = pm(:, 1)
-                pm(IMF_P_ALPHA, m) = psets(m)%imf1
-                pm(IMF_P_ALPHA + 1, m) = psets(m)%imf2
-                pm(IMF_P_ALPHA + 2, m) = psets(m)%imf3
-                pm(IMF_P_VDMC, m) = psets(m)%vdmc
-                pm(IMF_P_MDAVE, m) = psets(m)%mdave
-                ! The mass limits of the IMF (and with them the lower edge of the first bin, unless the isochrones fix it)
-                ! (a user IMF file, type 5, has its own limits)
-                if (ctx%imf_type_val /= 5) then
-                    pm(IMF_P_LOWER_LIMIT, m) = psets(m)%imf_lower_limit
-                    pm(IMF_P_UPPER_LIMIT, m) = psets(m)%imf_upper_limit
-                    if (trim(ctx%state%isoc_type) /= 'gnva') pm(IMF_P_LOWER_BOUND, m) = psets(m)%imf_lower_limit
-                end if
-            end do
-            nobasis = 0.0_KP
 #if defined(OMP_TARGET)
             dev = ctx%on_device
 #endif
@@ -1253,46 +1122,7 @@ contains
             ! the bracketing interval, clamped to the grid; one-sided at the nodes)
             allocate(dchain(8, n_mod))
             dchain = 0.0_wp
-            ! Per-model metallicity: dz / d logzsol (metallicity_interval, not clamped)
-            if (zmode) then
-                do m = 1, n_mod
-                    ! (zlo is a slab of plane ia: its metallicity index is zlo - nzs (ia - 1))
-                    iz0 = zlo(m)
-                    if (nzs > 0) iz0 = zlo(m) - nzs * ((zlo(m) - 1) / nzs)
-                    dchain(7, m) = 1.0_wp / (log10(ctx%state%zlegend(iz0 + 1) / ctx%state%zsol) - &
-                                             log10(ctx%state%zlegend(iz0) / ctx%state%zsol))
-                    ! [alpha/Fe]: d da / d afe, 1 / (the plane interval's width) inside the grid, zero where clamped
-                    if (nzs > 0) then
-                        ia_lo = (zlo(m) - 1) / nzs + 1
-                        if (psets(m)%afe >= ctx%state%afe_basis(1) .and. psets(m)%afe <= ctx%state%afe_basis(naf)) &
-                            dchain(8, m) = 1.0_wp / (ctx%state%afe_basis(ia_lo + 1) - ctx%state%afe_basis(ia_lo))
-                    end if
-                end do
-            end if
-            ! Nebular: gas_logz and gas_logu as get_grid_indices_weights (linear in the interval,
-            ! clamped to the grid), frac_obrun as the escaping fraction (clamped to [0, 1])
-            if (neb) then
-                do m = 1, n_mod
-                    associate (za => ctx%state%nebem_logz, ua => ctx%state%nebem_logu, p => psets(m))
-                    if (p%gas_logz >= za(nb%iz(m)) .and. p%gas_logz <= za(nb%iz(m) + 1)) &
-                        dchain(4, m) = 1.0_wp / (za(nb%iz(m) + 1) - za(nb%iz(m)))
-                    if (p%gas_logu >= ua(nb%iu(m)) .and. p%gas_logu <= ua(nb%iu(m) + 1)) &
-                        dchain(5, m) = 1.0_wp / (ua(nb%iu(m) + 1) - ua(nb%iu(m)))
-                    if (p%frac_obrun >= 0.0_wp .and. p%frac_obrun <= 1.0_wp) dchain(6, m) = 1.0_wp
-                    end associate
-                end do
-            end if
-            if (any_emis) then
-                do m = 1, n_mod
-                    associate (qa => ctx%state%qpaharr, ua => ctx%state%uminarr, p => psets(m))
-                    if (p%duste_qpah >= qa(iq(m)) .and. p%duste_qpah <= qa(iq(m) + 1)) &
-                        dchain(1, m) = 1.0_wp / (qa(iq(m) + 1) - qa(iq(m)))
-                    if (p%duste_umin >= ua(iu(m)) .and. p%duste_umin <= ua(iu(m) + 1)) &
-                        dchain(2, m) = 1.0_wp / (ua(iu(m) + 1) - ua(iu(m)))
-                    if (p%duste_gamma >= 0.0_wp .and. p%duste_gamma <= 1.0_wp) dchain(3, m) = 1.0_wp
-                    end associate
-                end do
-            end if
+            call batch_chain_derivatives(ctx, psets, n_mod, zmode, naf, nzs, zlo, neb, nb, any_emis, iq, iu, dchain)
             if (any_emis) then
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
                                     it_tesc, zlo, zhi, dz, da, nzs, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
@@ -2039,6 +1869,258 @@ contains
         wu = max(0.0_wp, min(wu, 1.0_wp))
         gam = max(0.0_wp, min(pset%duste_gamma, 1.0_wp))
     end subroutine dl07_indices
+
+    !> The sizes of the arguments of compute_csp_batch against the batch (status 3 when an output or a cotangent is too small, 2 for
+    !> redshifted colours without zred_mags), and the modes the optional arguments make: parts (the young and old parts), grad (any
+    !> gradient), given_w (the SFH weights are given). No device code, nothing is computed.
+    subroutine batch_check_shapes(ctx, n_mod, nt, nspec, nbands, mags, spec, emlines, indx, zred_mags, spec_young, spec_old, &
+                                  mass_young, mass_old, lbol_young, lbol_old, mags_bar, spec_bar, params_bar, weights_bar, &
+                                  weights_z_bar, ssp_weights, status, parts, grad, given_w)
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)  :: n_mod, nt, nspec, nbands
+        real(WP), intent(in) :: mags(:,:)
+        real(WP), intent(in), optional :: spec(:,:), emlines(:,:), indx(:,:), zred_mags(:)
+        real(WP), intent(in), optional :: spec_young(:,:), spec_old(:,:), mass_young(:), mass_old(:), lbol_young(:), lbol_old(:)
+        real(WP), intent(in), optional :: mags_bar(:,:), spec_bar(:,:), params_bar(:,:), weights_bar(:,:), weights_z_bar(:,:,:)
+        real(WP), intent(in), optional :: ssp_weights(:,:)
+        integer, intent(out) :: status
+        logical, intent(out) :: parts, grad, given_w
+
+        status = 0
+        if (size(mags, 1) < nbands .or. size(mags, 2) < n_mod) then
+            status = 3; return
+        end if
+        if (present(spec)) then
+            if (size(spec, 1) < nspec .or. size(spec, 2) < n_mod) then
+                status = 3; return
+            end if
+        end if
+        if (present(emlines)) then
+            if (size(emlines, 1) < NEMLINE .or. size(emlines, 2) < n_mod) then
+                status = 3; return
+            end if
+        end if
+        if (present(indx)) then
+            if (size(indx, 1) < ctx%state%nindx .or. size(indx, 2) < n_mod) then
+                status = 3; return
+            end if
+        end if
+        if (ctx%redshift_colors_val /= 0 .and. .not. present(zred_mags)) then
+            status = 2; return
+        end if
+        if (present(zred_mags)) then
+            if (size(zred_mags) < n_mod) then
+                status = 3; return
+            end if
+        end if
+        parts = present(spec_young) .and. present(spec_old) .and. present(mass_young) .and. &
+                present(mass_old) .and. present(lbol_young) .and. present(lbol_old)
+        if (parts) then
+            if (size(spec_young, 1) < nspec .or. size(spec_young, 2) < n_mod .or. &
+                size(spec_old, 1) < nspec .or. size(spec_old, 2) < n_mod .or. size(mass_young) < n_mod .or. &
+                size(mass_old) < n_mod .or. size(lbol_young) < n_mod .or. size(lbol_old) < n_mod) then
+                status = 3; return
+            end if
+        end if
+        grad = present(params_bar) .or. present(weights_bar) .or. present(weights_z_bar)
+        if (grad) then
+            if (present(mags_bar)) then
+                if (size(mags_bar, 1) < nbands .or. size(mags_bar, 2) < n_mod) then
+                    status = 3; return
+                end if
+            end if
+            if (present(spec_bar)) then
+                if (size(spec_bar, 1) < nspec .or. size(spec_bar, 2) < n_mod) then
+                    status = 3; return
+                end if
+            end if
+            if (present(params_bar)) then
+                if (size(params_bar, 1) < NBGRAD .or. size(params_bar, 2) < n_mod) then
+                    status = 3; return
+                end if
+            end if
+            if (present(weights_bar)) then
+                if (size(weights_bar, 1) < nt .or. size(weights_bar, 2) < n_mod) then
+                    status = 3; return
+                end if
+            end if
+        end if
+        given_w = present(ssp_weights)
+        if (given_w) then
+            if (size(ssp_weights, 1) < nt .or. size(ssp_weights, 2) < n_mod) then
+                status = 3; return
+            end if
+        end if
+    end subroutine batch_check_shapes
+
+    !> The values of the models of a batch that this path does not support (status 2): a non-positive age without given weights,
+    !> an invalid UVB or birth-cloud parameter, a SFH whose gradient is not covered, isochrone modifications or IMF mass limits that differ from
+    !> those of the SSPs (the resident basis, or the operators), several metallicities without per-metallicity operators; and zvar,
+    !> whether the redshifts or igm_factor differ among the models. Nothing is computed.
+    subroutine batch_check_models(ctx, psets, n_mod, given_w, want_pbar, ssp_ops, refset, zimf, zvar, status)
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)  :: n_mod
+        type(params), intent(in) :: psets(n_mod)
+        logical, intent(in)  :: given_w, want_pbar, zimf
+        type(ssp_opset_t), intent(in), optional :: ssp_ops
+        type(ssp_opset_t), pointer, intent(in) :: refset
+        logical, intent(out) :: zvar
+        integer, intent(out) :: status
+        integer :: m
+        real(WP) :: zred, sigm(N_MOD_SIG)
+        logical  :: imf
+
+        status = 0
+        imf = present(ssp_ops)
+        zred = psets(1)%zred
+        zvar = .false.
+        do m = 1, n_mod
+            if ((psets(m)%tage <= 0.0_wp .and. .not. given_w) .or. &
+                psets(m)%uvb < 0.0_wp .or. psets(m)%wgp1 < 1 .or. psets(m)%wgp2 < 1) then
+                status = 2; return
+            end if
+            if (psets(m)%zred /= zred .or. psets(m)%igm_factor /= psets(1)%igm_factor) zvar = .true.
+        end do
+        ! Gradients of the SFH parameters: the forms opensps_sfh_tangent covers
+        if (want_pbar .and. .not. given_w) then
+            do m = 1, n_mod
+                if (.not. sfh_tangent_supported(psets(m)%params_core, psets(m)%tage)) then
+                    status = 2; return
+                end if
+            end do
+        end if
+        ! Without operators the SSPs are the context's resident basis, built with the context's isochrone modifications:
+        ! a model with others would silently get the basis's (the C API refuses such parameters; this guards the Fortran one)
+        if (.not. imf) then
+            do m = 1, n_mod
+                if (any(ssp_op_mod_signature(psets(m)) /= ssp_op_mod_signature(ctx%pset)) .or. &
+                    psets(m)%imf_lower_limit /= ctx%pset%imf_lower_limit .or. &
+                    psets(m)%imf_upper_limit /= ctx%pset%imf_upper_limit) then
+                    status = 2; return
+                end if
+            end do
+        end if
+        ! IMF per model: one metallicity (the operator's)
+        if (imf) then
+            do m = 1, n_mod
+                if (.not. zimf) then
+                    if (psets(m)%zmet /= psets(1)%zmet) then
+                        status = 2; return
+                    end if
+                end if
+                ! A user IMF file (type 5) has its own mass limits: other ones per model would be ignored silently
+                if (ctx%imf_type_val == 5 .and. (psets(m)%imf_lower_limit /= ctx%pset%imf_lower_limit .or. &
+                                                 psets(m)%imf_upper_limit /= ctx%pset%imf_upper_limit)) then
+                    status = 2; return
+                end if
+                ! Isochrone modifications change which templates the stars use, so S is rebuilt for
+                ! them: not supported per model (status 2), and not different from the build either
+                if (ssp_ops%free_mods) then
+                    ! fbhb, sbss, agb, pagb, redgb, delt and dell are free; the cuts (agb_dust, masscut, evtype) are those of the
+                    ! operators
+                    sigm = ssp_op_mod_signature(psets(m))
+                    if (any(sigm(8:10) /= refset%ops(1)%mod_sig(8:10))) then
+                        status = 2; return
+                    end if
+
+                else if (any(ssp_op_mod_signature(psets(m)) /= ssp_ops%ops(1)%mod_sig)) then
+                    status = 2; return
+                end if
+            end do
+        end if
+    end subroutine batch_check_models
+
+    !> The factors of the chain rule from the interpolation positions to the parameters, per model, for the reverse pass (dchain(:, m),
+    !> zero where a position is clamped to its grid): 1 - 3 the dust emission's q_PAH, U_min and gamma (the bracketing interval of
+    !> dl07_indices), 4, 5 the nebular gas_logz and gas_logu (get_grid_indices_weights), 6 frac_obrun (the escaping fraction, clamped
+    !> to [0, 1]), 7 d dz / d logzsol (metallicity_interval, not clamped), 8 d da / d afe. dchain is zero on entry.
+    subroutine batch_chain_derivatives(ctx, psets, n_mod, zmode, naf, nzs, zlo, neb, nb, any_emis, iq, iu, dchain)
+        type(opensps_context_t), intent(in) :: ctx
+        integer, intent(in)  :: n_mod, naf, nzs, zlo(n_mod), iq(n_mod), iu(n_mod)
+        type(params), intent(in) :: psets(n_mod)
+        logical, intent(in)  :: zmode, neb, any_emis
+        type(nebular_setup_t), intent(in) :: nb
+        real(WP), intent(inout) :: dchain(8, n_mod)
+        integer :: m, iz0, ia_lo
+
+        ! Per-model metallicity: dz / d logzsol (metallicity_interval, not clamped)
+        if (zmode) then
+            do m = 1, n_mod
+                ! (zlo is a slab of plane ia: its metallicity index is zlo - nzs (ia - 1))
+                iz0 = zlo(m)
+                if (nzs > 0) iz0 = zlo(m) - nzs * ((zlo(m) - 1) / nzs)
+                dchain(7, m) = 1.0_wp / (log10(ctx%state%zlegend(iz0 + 1) / ctx%state%zsol) - &
+                                         log10(ctx%state%zlegend(iz0) / ctx%state%zsol))
+                ! [alpha/Fe]: d da / d afe, 1 / (the plane interval's width) inside the grid, zero where clamped
+                if (nzs > 0) then
+                    ia_lo = (zlo(m) - 1) / nzs + 1
+                    if (psets(m)%afe >= ctx%state%afe_basis(1) .and. psets(m)%afe <= ctx%state%afe_basis(naf)) &
+                        dchain(8, m) = 1.0_wp / (ctx%state%afe_basis(ia_lo + 1) - ctx%state%afe_basis(ia_lo))
+                end if
+            end do
+        end if
+        ! Nebular: gas_logz and gas_logu as get_grid_indices_weights (linear in the interval,
+        ! clamped to the grid), frac_obrun as the escaping fraction (clamped to [0, 1])
+        if (neb) then
+            do m = 1, n_mod
+                associate (za => ctx%state%nebem_logz, ua => ctx%state%nebem_logu, p => psets(m))
+                if (p%gas_logz >= za(nb%iz(m)) .and. p%gas_logz <= za(nb%iz(m) + 1)) &
+                    dchain(4, m) = 1.0_wp / (za(nb%iz(m) + 1) - za(nb%iz(m)))
+                if (p%gas_logu >= ua(nb%iu(m)) .and. p%gas_logu <= ua(nb%iu(m) + 1)) &
+                    dchain(5, m) = 1.0_wp / (ua(nb%iu(m) + 1) - ua(nb%iu(m)))
+                if (p%frac_obrun >= 0.0_wp .and. p%frac_obrun <= 1.0_wp) dchain(6, m) = 1.0_wp
+                end associate
+            end do
+        end if
+        if (any_emis) then
+            do m = 1, n_mod
+                associate (qa => ctx%state%qpaharr, ua => ctx%state%uminarr, p => psets(m))
+                if (p%duste_qpah >= qa(iq(m)) .and. p%duste_qpah <= qa(iq(m) + 1)) &
+                    dchain(1, m) = 1.0_wp / (qa(iq(m) + 1) - qa(iq(m)))
+                if (p%duste_umin >= ua(iu(m)) .and. p%duste_umin <= ua(iu(m) + 1)) &
+                    dchain(2, m) = 1.0_wp / (ua(iu(m) + 1) - ua(iu(m)))
+                if (p%duste_gamma >= 0.0_wp .and. p%duste_gamma <= 1.0_wp) dchain(3, m) = 1.0_wp
+                end associate
+            end do
+        end if
+    end subroutine batch_chain_derivatives
+
+    !> The IMF of every model of a batch with the operators: the IMF parameter vector pm(:, m) of each model (the context's IMF with the
+    !> model's slopes, characteristic and break masses and, unless a user IMF file has its own, its mass limits and the lower edge
+    !> of the first bin), and the work arrays of the operators' pass: the surviving mass and linear L_bol per age and model (smass,
+    !> slum), the SFH weights (wsfh) and a placeholder basis. status: that of configure_imf_parameters (0, or an IMF type or file
+    !> that cannot be used).
+    subroutine batch_imf_vectors(ctx, psets, n_mod, nt, pm, smass, slum, wsfh, nobasis, status)
+        type(opensps_context_t), intent(inout) :: ctx
+        integer, intent(in)  :: n_mod, nt
+        type(params), intent(in) :: psets(n_mod)
+        real(WP), allocatable, intent(out) :: pm(:,:), smass(:,:), slum(:,:), wsfh(:,:)
+        real(KP), allocatable, intent(out) :: nobasis(:,:,:)
+        integer, intent(out) :: status
+        integer :: m
+
+        status = 0
+        call configure_imf_parameters(ctx, psets(1), status)
+        if (status /= 0) return
+        allocate(pm(IMF_NPAR, n_mod), smass(nt, n_mod), slum(nt, n_mod), wsfh(n_mod, nt), nobasis(1, 1, 1))
+        call imf_pack_params(ctx, pm(:, 1))
+        do m = 1, n_mod
+            pm(:, m) = pm(:, 1)
+            pm(IMF_P_ALPHA, m) = psets(m)%imf1
+            pm(IMF_P_ALPHA + 1, m) = psets(m)%imf2
+            pm(IMF_P_ALPHA + 2, m) = psets(m)%imf3
+            pm(IMF_P_VDMC, m) = psets(m)%vdmc
+            pm(IMF_P_MDAVE, m) = psets(m)%mdave
+            ! The mass limits of the IMF (and with them the lower edge of the first bin, unless the isochrones fix it)
+            ! (a user IMF file, type 5, has its own limits)
+            if (ctx%imf_type_val /= 5) then
+                pm(IMF_P_LOWER_LIMIT, m) = psets(m)%imf_lower_limit
+                pm(IMF_P_UPPER_LIMIT, m) = psets(m)%imf_upper_limit
+                if (trim(ctx%state%isoc_type) /= 'gnva') pm(IMF_P_LOWER_BOUND, m) = psets(m)%imf_lower_limit
+            end if
+        end do
+        nobasis = 0.0_KP
+    end subroutine batch_imf_vectors
 
     !> The SSP source of a batch from the modes it was found to have: zw (weights over ages and metallicities), zmode (a basis
     !> per metallicity, interpolated at each model's logzsol), naf (the [alpha/Fe] planes of the context's stack, 1 without), nzb
