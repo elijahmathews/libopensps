@@ -69,9 +69,14 @@ derivative forms stay).
 AGN, IGM, smoothing, photometry) with a shared workspace type. Mechanical, long; the risk is the device rules (mapping derived
 types, temporaries): check on the R9700 after every cut.
 
-**Step 5, backend consolidation, one kernel family at a time.** By conditional count: IGM (`apply_igm_z`, `igm_cap_pixels`), nebular,
-attenuation; the include-template pattern where it fits. The vendor branches that exist because a compiler needs a different loop
-structure stay.
+**Step 5, backend consolidation (analysed, mostly not pursued).** The conditional count by kind (961 after step 2): about 586 are `OMP_TARGET`
+switches, of which 153 are the host arm (`#elif defined(_OPENMP)`) of one directive switch repeated at every parallel loop (`!$omp target
+teams distribute parallel do` on the device, `!$omp parallel do` on the host, nothing without OpenMP); about 50 are LLVM flang specifics,
+79 HIP, BLAS or precision selection. The directive switches are not copies of kernels, so no include template removes them; doing so
+would need macros that emit OpenMP directives (not portable across gfortran, flang, nvfortran and ifx) or OpenMP 5 `metadirective`
+(not supported by the compilers in use). The kernel families that did have a copy per backend (the age sums, forward and adjoint) are
+done; the remaining flang/nvfortran/HIP branches are tuned variants of different algorithms (tiles, products, native HIP kernels), which
+is where the code differs because the hardware wants it to. Not pursued unless a specific family shows a copy of the same algorithm.
 
 Not proposed: merging the operator path with the resident-basis path (different physics; the interface of Step 2 is the right level
 of sharing); a language change (nothing in the plan needs one).
