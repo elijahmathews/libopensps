@@ -161,7 +161,7 @@ module opensps_csp_batch
         character(len=32) :: label = ''        !< the name of the path (batch_info)
     end type ssp_source_t
 #ifdef OMP_TARGET
-    !$omp declare target(model_sums_zw, model_sums)
+    !$omp declare target(model_sums_zw, model_sums, slab_blend_wp, slab_blend_kp)
 #endif
     integer, parameter :: BGRAD_FAGN = 1
     !> The dust parameters of attenuate_batch (mwr and uvb act with dust_type 1 only; a caller with
@@ -2104,8 +2104,9 @@ contains
         end select
     end subroutine ssp_source_age_sums
 
-    !> The slabs of the resident basis (or the operators) that each model of a batch blends, as the descriptor of its SSP source: zlo
-    !> (the first slab), zhi (the second), dz (its position between them, from its logzsol, with a basis per metallicity: zmode) and,
+    !> The slabs of the resident basis (or the operators) that each model of a batch blends, as the descriptor of its SSP source:
+    !> zlo (the first slab), zhi (the second), dz (its position between them, from its logzsol, with a basis per metallicity:
+    !> zmode) and,
     !> with the [alpha/Fe] planes of the context's stack (naf > 1), the plane stride nzs, the position da between the two planes
     !> and zlo, zhi the slabs of the lower plane. status 2: a model whose horizontal-branch modification is not in the operators
     !> of its metallicity (legacy FSPS stops there).
@@ -2234,6 +2235,41 @@ contains
         end associate
     end subroutine ssp_source_scalars
 
+    !> The value at column t of the model's blend of the slabs of x(ld, :): the metallicity slabs zlo, zhi at dz and, with the
+    !> [alpha/Fe] planes (nzs > 0, the plane stride), the same two slabs of the next plane at da; the first slab alone (nzb = 1: a
+    !> single basis). The blend that every per-age and per-model table of the resident basis (ionizing photons, mass, L_bol) takes.
+    pure function slab_blend_wp(x, ld, t, zlo, zhi, dz, da, nzs, nzb) result(r)
+        integer, intent(in)  :: ld, t, zlo, zhi, nzs, nzb
+        real(WP), intent(in) :: x(ld, *), dz, da
+        real(WP) :: r
+
+        if (nzs > 0) then
+            r = (1.0_wp - da) * ((1.0_wp - dz) * x(t, zlo) + dz * x(t, zhi)) + &
+                da * ((1.0_wp - dz) * x(t, zlo + nzs) + dz * x(t, zhi + nzs))
+        else if (nzb > 1) then
+            r = (1.0_wp - dz) * x(t, zlo) + dz * x(t, zhi)
+        else
+            r = x(t, 1)
+        end if
+    end function slab_blend_wp
+
+    !> As slab_blend_wp for the basis of spectra at kernel precision, pixel i at age column t of x(n1, n2, :): dzk and dak are
+    !> the metallicity and [alpha/Fe] positions at kernel precision.
+    pure function slab_blend_kp(x, n1, n2, i, t, zlo, zhi, dzk, dak, nzs, nzb) result(r)
+        integer, intent(in)  :: n1, n2, i, t, zlo, zhi, nzs, nzb
+        real(KP), intent(in) :: x(n1, n2, *), dzk, dak
+        real(KP) :: r
+
+        if (nzs > 0) then
+            r = (1.0_KP - dak) * ((1.0_KP - dzk) * x(i, t, zlo) + dzk * x(i, t, zhi)) + &
+                dak * ((1.0_KP - dzk) * x(i, t, zlo + nzs) + dzk * x(i, t, zhi + nzs))
+        else if (nzb > 1) then
+            r = (1.0_KP - dzk) * x(i, t, zlo) + dzk * x(i, t, zhi)
+        else
+            r = x(i, t, 1)
+        end if
+    end function slab_blend_kp
+
     !> The mass and L_bol of one model of a batch whose SSP weights run over ages and metallicities (zw): summed over both
     !> (metallicities outer, as compute_csp_scenario with nzin > 1), split at the model's dust_tesc age index into young
     !> and old parts (summed separately: no differences), and the weights cast once to kernel precision. One body for the
@@ -2299,14 +2335,8 @@ contains
                     lk = w * slum(k, m)
                 else if (mode == MSUMS_BLEND) then
                     ! The interpolated SSP's mass and L_bol (compute_interpolated_ssp)
-                    mk = (1.0_wp - dz(m)) * bmass(k, zlo(m)) + dz(m) * bmass(k, zhi(m))
-                    lk = (1.0_wp - dz(m)) * blbol(k, zlo(m)) + dz(m) * blbol(k, zhi(m))
-                    if (nzs > 0) then
-                        mk = (1.0_wp - da(m)) * mk + da(m) * ((1.0_wp - dz(m)) * bmass(k, zlo(m) + nzs) + &
-                                                              dz(m) * bmass(k, zhi(m) + nzs))
-                        lk = (1.0_wp - da(m)) * lk + da(m) * ((1.0_wp - dz(m)) * blbol(k, zlo(m) + nzs) + &
-                                                              dz(m) * blbol(k, zhi(m) + nzs))
-                    end if
+                    mk = slab_blend_wp(bmass, nt, k, zlo(m), zhi(m), dz(m), da(m), nzs, 2)
+                    lk = slab_blend_wp(blbol, nt, k, zlo(m), zhi(m), dz(m), da(m), nzs, 2)
                     mk = w * mk
                     lk = w * 10.0_wp**lk
                 else
@@ -2669,16 +2699,8 @@ contains
                 s = 0.0_KP
                 dzk = real(dz(c0 + m), KP)
                 do t = 1, nt_neb
-                    if (nzs > 0) then
-                        bk = (1.0_KP - real(da(c0 + m), KP)) * ((1.0_KP - dzk) * basis(i, t, zlo(c0 + m)) + &
-                                                                dzk * basis(i, t, zhi(c0 + m))) + &
-                             real(da(c0 + m), KP) * ((1.0_KP - dzk) * basis(i, t, zlo(c0 + m) + nzs) + &
-                                                     dzk * basis(i, t, zhi(c0 + m) + nzs))
-                    else if (nzb > 1) then
-                        bk = (1.0_KP - dzk) * basis(i, t, zlo(c0 + m)) + dzk * basis(i, t, zhi(c0 + m))
-                    else
-                        bk = basis(i, t, 1)
-                    end if
+                    bk = slab_blend_kp(basis, size(basis, 1), size(basis, 2), i, t, zlo(c0 + m), zhi(c0 + m), dzk, &
+                                       real(da(c0 + m), KP), nzs, nzb)
                     s = s + (w2(t, c0 + m) + w2(t, n_mod + c0 + m)) * bk
                 end do
                 sion(i, m) = s
@@ -2693,17 +2715,7 @@ contains
             qy(m) = 0.0_wp
             qo(m) = 0.0_wp
             do t = 1, nt_neb
-                if (nzs > 0) then
-                    q = abs(((1.0_wp - da(c0 + m)) * ((1.0_wp - dz(c0 + m)) * q0(t, zlo(c0 + m)) + &
-                                                       dz(c0 + m) * q0(t, zhi(c0 + m))) + &
-                             da(c0 + m) * ((1.0_wp - dz(c0 + m)) * q0(t, zlo(c0 + m) + nzs) + &
-                                           dz(c0 + m) * q0(t, zhi(c0 + m) + nzs))) * fabs(c0 + m))
-                else if (nzb > 1) then
-                    q = abs(((1.0_wp - dz(c0 + m)) * q0(t, zlo(c0 + m)) + dz(c0 + m) * q0(t, zhi(c0 + m))) * &
-                            fabs(c0 + m))
-                else
-                    q = abs(q0(t, 1) * fabs(c0 + m))
-                end if
+                q = abs(slab_blend_wp(q0, nt_neb, t, zlo(c0 + m), zhi(c0 + m), dz(c0 + m), da(c0 + m), nzs, nzb) * fabs(c0 + m))
                 if (t <= it_tesc(c0 + m)) then
                     qy(m) = qy(m) + real(w2(t, c0 + m), WP) * q
                 else
@@ -2906,16 +2918,7 @@ contains
 #endif
             do m = 1, nc
                 do t = 1, nt_neb
-                    if (nzs > 0) then
-                        lin = (1.0_wp - da(c0 + m)) * ((1.0_wp - dz(c0 + m)) * q0(t, zlo(c0 + m)) + &
-                                                        dz(c0 + m) * q0(t, zhi(c0 + m))) + &
-                              da(c0 + m) * ((1.0_wp - dz(c0 + m)) * q0(t, zlo(c0 + m) + nzs) + &
-                                            dz(c0 + m) * q0(t, zhi(c0 + m) + nzs))
-                    else if (nzb > 1) then
-                        lin = (1.0_wp - dz(c0 + m)) * q0(t, zlo(c0 + m)) + dz(c0 + m) * q0(t, zhi(c0 + m))
-                    else
-                        lin = q0(t, 1)
-                    end if
+                    lin = slab_blend_wp(q0, nt_neb, t, zlo(c0 + m), zhi(c0 + m), dz(c0 + m), da(c0 + m), nzs, nzb)
                     qt = abs(lin * fabs(c0 + m))
                     sg = sign(1.0_wp, lin * fabs(c0 + m))
                     ! (the weight of the age: in the young column up to it_tesc, else in the old)
@@ -3116,16 +3119,8 @@ contains
                     o = 0.0_KP
                     dzk = real(dz(m), KP)
                     do k = 1, nt
-                        if (nzs > 0) then
-                            bk = (1.0_KP - real(da(m), KP)) * ((1.0_KP - dzk) * basis(i, k, zlo(m)) + &
-                                                               dzk * basis(i, k, zhi(m))) + &
-                                 real(da(m), KP) * ((1.0_KP - dzk) * basis(i, k, zlo(m) + nzs) + &
-                                                    dzk * basis(i, k, zhi(m) + nzs))
-                        else if (nzb > 1) then
-                            bk = (1.0_KP - dzk) * basis(i, k, zlo(m)) + dzk * basis(i, k, zhi(m))
-                        else
-                            bk = basis(i, k, 1)
-                        end if
+                        bk = slab_blend_kp(basis, size(basis, 1), size(basis, 2), i, k, zlo(m), zhi(m), dzk, real(da(m), KP), &
+                                           nzs, nzb)
                         if (k <= nt_neb) bk = bk * real(nb_fesc(m), KP)
                         if (k <= it_tesc(m)) then
                             y = y + w2(k, m) * bk

@@ -61,9 +61,11 @@ is not in the operators) and `ssp_source_scalars` (the mass, L_bol and weights b
 flags `zmode`, `zw`, `imf`, `zimf`, `naf` are still locals of the driver (the nebular calls, the backward pass, the checks), and the stages
 after the SSP sums still take them as arguments; passing the source to them is what Step 4 (stage routines) does.
 
-**Step 3, the descriptor in the other blends.** The nebular Q and ionizing-flux blends, the L_bol blend and the mass blend repeat the
-cascade `(1 - da) ((1 - dz) a + dz b) + ...`; with the descriptor they become one helper. Only the exact-match sites (the
-derivative forms stay).
+**Step 3, the descriptor in the other blends (done, small).** `slab_blend_wp` and `slab_blend_kp`: the cascade `(1 - da) ((1 - dz) a + dz b) +
+da (...)` / `(1 - dz) a + dz b` / `a` over the metallicity slabs and [alpha/Fe] planes, for the ionizing-photon table and the spectra of
+the nebular continuum (forward and backward) and the interpolated mass and L_bol of the SSP source. Only the sites that were exact
+matches (five, plus the two of `model_sums`); the derivative forms and the sites with other structure stay as they are. The saving is
+a few lines: the point is one definition of the blend.
 
 **Step 4, the driver in stages.** Split `compute_csp_batch` into stage routines (SFH weights, SSP sums, nebular, attenuation, emission,
 AGN, IGM, smoothing, photometry) with a shared workspace type. Mechanical, long; the risk is the device rules (mapping derived
