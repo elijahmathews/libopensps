@@ -589,13 +589,16 @@ contains
         if (mod(imf_type, 10) == 0 .or. mod(imf_type, 10) == 2 .or. mod(imf_type, 10) == 4) fwd_w = .false.
 #endif
         if (fwd_w) then
-            allocate(w(nc_max, set%n_pts_max))
+            allocate(w(nc_max, max(1, set%n_pts_max)))
         else
             allocate(w(1, 1))
         end if
-        allocate(wk(nc_max, set%n_pts_max), tot(nc_max), v(set%n_eff_max, 2 * nc_max))
-        allocate(veuv(set%n_eff_max, max(1, neb_cols * 2 * nc_max)), vp(nc_max, 4, set%n_seg_max), &
-                 pps(nc_max, 3, set%n_pc_max))
+        ! Extents of at least one: a zero-size array in the target data map below (a set with no points, effective
+        ! entries, segments or pieces) leaves a stale present-table entry under nvfortran, which then collides with the
+        ! next array that lands on its host address ("partially present")
+        allocate(wk(nc_max, max(1, set%n_pts_max)), tot(nc_max), v(max(1, set%n_eff_max), 2 * nc_max))
+        allocate(veuv(max(1, set%n_eff_max), max(1, neb_cols * 2 * nc_max)), vp(nc_max, 4, max(1, set%n_seg_max)), &
+                 pps(nc_max, 3, max(1, set%n_pc_max)))
         ! Some models of the batch share an IMF (and a chunk may hold their weights once): the scratch of the unique ones;
         ! none shared (a free-IMF batch): one-element arrays, and the path as before
         share_min = tuning_get(TUNE_P_SHARE_IMF_MIN_BATCH)
@@ -624,11 +627,11 @@ contains
         end if
         if (share) then
             if (fwd_w) then
-                allocate(w_u(ncu, set%n_pts_max))
+                allocate(w_u(ncu, max(1, set%n_pts_max)))
             else
                 allocate(w_u(1, 1))
             end if
-            allocate(wk_u(ncu, set%n_pts_max), tot_u(ncu), pps_u(ncu, 3, set%n_pc_max))
+            allocate(wk_u(ncu, max(1, set%n_pts_max)), tot_u(ncu), pps_u(ncu, 3, max(1, set%n_pc_max)))
         else
             if (allocated(perm_u)) deallocate(perm_u, viz_u, cmap)
             allocate(w_u(1, 1), wk_u(1, 1), tot_u(1), pps_u(1, 1, 1), perm_u(1), viz_u(1), cmap(1))
@@ -1048,10 +1051,15 @@ contains
         allocate(perm1(n_mod), perm2(n_mod), viz1(n_mod), viz2(n_mod), ptr(nz + 1), cnt(nz + 1), &
                  cz1(n_mod), cz2(n_mod), zsg1(n_mod), zsg2(n_mod), ones(n_mod), &
                  it1(n_mod), it2(n_mod), fe1(n_mod), fe2(n_mod))
-        allocate(w(nc_max, set%n_pts_max), wm(nc_max, set%n_pts_max), wk(nc_max, set%n_pts_max), tot(nc_max), &
-                 pps(nc_max, 3, set%n_pc_max), slz(nt, nc_max), sqz(nt, nc_max), wpb(nc_max, set%n_pts_max), &
-                 vb(set%n_eff_max, 4, nc_max), dsm(nt, n_mod), dsl(nt, n_mod), dsq(nt, n_mod), pmp(size(pm, 1), n_mod), &
-                 part(set%n_pc_max, nc_max), dsp(nt, n_mod), sxa(nt, nc_max), sea(nt, nc_max), &
+        ! (extents of at least one: a zero-size array in a target data map leaves a stale present-table entry under
+        ! nvfortran, which then collides with the next allocation that lands on its host address)
+        allocate(w(nc_max, max(1, set%n_pts_max)), wm(nc_max, max(1, set%n_pts_max)), &
+                 wk(nc_max, max(1, set%n_pts_max)), tot(nc_max), &
+                 pps(nc_max, 3, max(1, set%n_pc_max)), slz(nt, nc_max), sqz(nt, nc_max), &
+                 wpb(nc_max, max(1, set%n_pts_max)), &
+                 vb(max(1, set%n_eff_max), 4, nc_max), dsm(nt, n_mod), dsl(nt, n_mod), dsq(nt, n_mod), &
+                 pmp(size(pm, 1), n_mod), &
+                 part(max(1, set%n_pc_max), nc_max), dsp(nt, n_mod), sxa(nt, nc_max), sea(nt, nc_max), &
                  apt(NIMFG, nc_max), amp(NIMFG, nt, nc_max), dtt(NIMFG, nc_max), &
                  remp(nt, nc_max), remm(nt, nc_max), agt(NIMFG, nt, nc_max))
         ones = 1.0_wp
