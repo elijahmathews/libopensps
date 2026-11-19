@@ -127,6 +127,7 @@ program test_csp_batch
     call check_mods_free_forward()
     call check_mods_pair_cache()
     call check_share_imf()
+    call check_imf_limits()
     call check_batch_info()
     call check_smooth_per_model()
     ! compute_csp_scenario: all-ages outputs against single-age calls, in each mode, on the
@@ -1145,6 +1146,77 @@ contains
         deallocate(s_on, s_off, g_on, g_off, s2, g2)
     end subroutine check_share_imf
 
+    !> The IMF mass limits per model (imf_lower_limit, imf_upper_limit, with the IMF per model: the operator path): each model of
+    !> a batch equals a batch of that model alone, the limits change the numbers, and without operators (the resident basis,
+    !> built with the context's limits) a model with other limits is refused.
+    subroutine check_imf_limits()
+        integer, parameter :: NB = 6
+        real(WP), parameter :: lo(NB) = [0.08_wp, 0.1_wp, 0.3_wp, 0.5_wp, 0.08_wp, 0.2_wp]
+        real(WP), parameter :: hi(NB) = [120.0_wp, 120.0_wp, 100.0_wp, 120.0_wp, 60.0_wp, 40.0_wp]
+        type(PARAMS) :: pset, psets(NB)
+        type(ssp_opset_t) :: op
+        real(WP), allocatable :: s_b(:, :), s_1(:, :), g_b(:, :), g_1(:, :)
+        real(WP) :: m_b(NB), l_b(NB), m_1(1), l_1(1), d_spec, d_mag, d_scal
+        integer :: m, status, nspec, nbands
+        character(len=48) :: label
+
+        call print_group("Batched CSP: IMF mass limits per model")
+        nspec = ctx%state%nspec
+        nbands = ctx%state%nbands
+        allocate(s_b(nspec, NB), s_1(nspec, 1), g_b(nbands, NB), g_1(nbands, 1))
+        call set_int('imf_type', 2)
+        call set_factors(0.0_wp, 0.0_wp, 1.0_wp, 1.0_wp, 1.0_wp)
+        call set_model(1, 0.5_wp)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        call ssp_opset_build_mods(ctx, pset, .false., op)
+        do m = 1, NB
+            call set_model(m, 0.5_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
+            psets(m)%imf_lower_limit = lo(m)
+            psets(m)%imf_upper_limit = hi(m)
+        end do
+        call compute_csp_batch(ctx, psets, g_b, status, spec=s_b, mass=m_b, lbol=l_b, ssp_ops=op)
+        call assert_true(status == 0, "limits per model: status 0", total_tests, total_failures)
+        d_spec = 0.0_wp; d_mag = 0.0_wp; d_scal = 0.0_wp
+        do m = 1, NB
+            call compute_csp_batch(ctx, psets(m:m), g_1, status, spec=s_1, mass=m_1, lbol=l_1, ssp_ops=op)
+            write(label, '(a,i0,a)') 'limits per model: model ', m, ' alone'
+            call assert_true(status == 0, trim(label) // ": status 0", total_tests, total_failures)
+            d_spec = max(d_spec, maxval(abs(s_b(:, m) - s_1(:, 1))) / maxval(abs(s_1(:, 1))))
+            d_mag = max(d_mag, maxval(abs(g_b(:, m) - g_1(:, 1))))
+            d_scal = max(d_scal, abs(m_b(m) / m_1(1) - 1.0_wp), abs(l_b(m) / l_1(1) - 1.0_wp))
+        end do
+        call assert_true(d_spec <= IMF_SPEC_RTOL, "limits per model: spectra equal each model alone", total_tests, total_failures)
+        call assert_true(d_mag <= MAG_TOL, "limits per model: magnitudes equal each model alone", total_tests, total_failures)
+        call assert_true(d_scal <= IMF_SCAL_TOL, "limits per model: mass and L_bol equal each model alone", &
+                         total_tests, total_failures)
+        write(*, '(a,es9.2,a,es9.2,a,es9.2)') '#   max difference: spectra ', d_spec, ', magnitudes ', d_mag, ', scalars ', d_scal
+        ! not vacuous: the limits change the surviving mass (the lower limit removes the dwarfs, the upper the massive stars)
+        call assert_true(abs(m_b(4) / m_b(1) - 1.0_wp) > 1.0e-2_wp .and. abs(m_b(6) / m_b(1) - 1.0_wp) > 1.0e-2_wp, &
+                         "limits per model: they change the mass of a model", total_tests, total_failures)
+        ! the resident basis has the context's limits: other limits are refused
+        call compute_csp_batch(ctx, psets, g_b, status)
+        call assert_true(status == 2, "limits per model without operators: status 2", total_tests, total_failures)
+        ! (each of the two limits alone)
+        psets(1:2) = psets(5:6)
+        psets(1)%imf_lower_limit = pset%imf_lower_limit; psets(1)%imf_upper_limit = pset%imf_upper_limit
+        psets(2) = psets(1)
+        psets(2)%imf_upper_limit = pset%imf_upper_limit - 1.0_wp
+        call compute_csp_batch(ctx, psets(1:2), g_b(:, 1:2), status)
+        call assert_true(status == 2, "an upper limit alone per model without operators: status 2", total_tests, total_failures)
+        psets(2) = psets(1)
+        psets(2)%imf_lower_limit = pset%imf_lower_limit + 0.1_wp
+        call compute_csp_batch(ctx, psets(1:2), g_b(:, 1:2), status)
+        call assert_true(status == 2, "a lower limit alone per model without operators: status 2", total_tests, total_failures)
+        psets(2) = psets(1)
+        call compute_csp_batch(ctx, psets(1:2), g_b(:, 1:2), status)
+        call assert_true(status == 0, "the context's own limits without operators: status 0", total_tests, total_failures)
+        call ssp_opset_free(op)
+        deallocate(s_b, s_1, g_b, g_1)
+    end subroutine check_imf_limits
+
     !> The batch info of compute_csp_batch (opensps_batch_registry): the SSP source and the free fields of a batch on the
     !> resident basis and of one with the isochrone factors and a TP-AGB shift free through the group operators. A call
     !> without info is every other call of this program.
@@ -1342,6 +1414,17 @@ contains
                                ssp_ops=op)
         if (status /= 0) write(*, '(A,I0)') "# status = ", status
         call assert_true(status == 0, label // ": status 0", total_tests, total_failures)
+        if (imf_type == 5) then
+            ! a user IMF file has its own limits: other ones per model (either of them) would be ignored, so are refused
+            psets(2)%imf_upper_limit = mhi - 1.0_wp
+            call compute_csp_batch(ctx, psets(1:2), mags(:, 1:2), status, ssp_ops=op)
+            call assert_true(status == 2, label // ": another upper limit per model is refused", total_tests, total_failures)
+            psets(2)%imf_upper_limit = mhi
+            psets(2)%imf_lower_limit = mlo + 0.1_wp
+            call compute_csp_batch(ctx, psets(1:2), mags(:, 1:2), status, ssp_ops=op)
+            call assert_true(status == 2, label // ": another lower limit per model is refused", total_tests, total_failures)
+            psets(2)%imf_lower_limit = mlo
+        end if
 
         ! Reference: each model with its own basis
         do m = 1, N_MOD

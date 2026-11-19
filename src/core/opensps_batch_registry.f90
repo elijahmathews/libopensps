@@ -33,7 +33,7 @@ module opensps_batch_registry
     !> Distinct values are counted up to this many (a field with more is reported as at least this)
     integer, parameter, public :: DISTINCT_CAP = 16
 
-    integer, parameter, public :: N_FIELDS = 63
+    integer, parameter, public :: N_FIELDS = 65
     integer, parameter, public :: F_TAU = 1
     integer, parameter, public :: F_CONST = 2
     integer, parameter, public :: F_TAGE = 3
@@ -58,75 +58,77 @@ module opensps_batch_registry
     integer, parameter, public :: F_IMF3 = 22
     integer, parameter, public :: F_VDMC = 23
     integer, parameter, public :: F_MDAVE = 24
-    integer, parameter, public :: F_MASSCUT = 25
-    integer, parameter, public :: F_AGB_DUST = 26
-    integer, parameter, public :: F_EVTYPE = 27
-    integer, parameter, public :: F_ZMET = 28
-    integer, parameter, public :: F_PMETALS = 29
-    integer, parameter, public :: F_IMF_FILENAME = 30
-    integer, parameter, public :: F_WGP1 = 31
-    integer, parameter, public :: F_WGP2 = 32
-    integer, parameter, public :: F_WGP3 = 33
-    integer, parameter, public :: F_FCSTAR = 34
-    integer, parameter, public :: F_FRAC_XRB = 35
-    integer, parameter, public :: F_DUST1 = 36
-    integer, parameter, public :: F_DUST2 = 37
-    integer, parameter, public :: F_DUST3 = 38
-    integer, parameter, public :: F_DUST_INDEX = 39
-    integer, parameter, public :: F_DUST1_INDEX = 40
-    integer, parameter, public :: F_DUST_CLUMPS = 41
-    integer, parameter, public :: F_FRAC_NODUST = 42
-    integer, parameter, public :: F_DUST_TESC = 43
-    integer, parameter, public :: F_UVB = 44
-    integer, parameter, public :: F_MWR = 45
-    integer, parameter, public :: F_DUSTE_GAMMA = 46
-    integer, parameter, public :: F_DUSTE_UMIN = 47
-    integer, parameter, public :: F_DUSTE_QPAH = 48
-    integer, parameter, public :: F_GAS_LOGU = 49
-    integer, parameter, public :: F_GAS_LOGZ = 50
-    integer, parameter, public :: F_GAS_LOGN = 51
-    integer, parameter, public :: F_GAS_LOGNO = 52
-    integer, parameter, public :: F_GAS_LOGCO = 53
-    integer, parameter, public :: F_FRAC_OBRUN = 54
-    integer, parameter, public :: F_FAGN = 55
-    integer, parameter, public :: F_AGN_TAU = 56
-    integer, parameter, public :: F_ZRED = 57
-    integer, parameter, public :: F_IGM_FACTOR = 58
-    integer, parameter, public :: F_SIGMA_SMOOTH = 59
-    integer, parameter, public :: F_MIN_WAVE_SMOOTH = 60
-    integer, parameter, public :: F_MAX_WAVE_SMOOTH = 61
-    integer, parameter, public :: F_COMPUTE_MAGS = 62
-    integer, parameter, public :: F_COMPUTE_INDICES = 63
+    integer, parameter, public :: F_IMF_LOWER_LIMIT = 25
+    integer, parameter, public :: F_IMF_UPPER_LIMIT = 26
+    integer, parameter, public :: F_MASSCUT = 27
+    integer, parameter, public :: F_AGB_DUST = 28
+    integer, parameter, public :: F_EVTYPE = 29
+    integer, parameter, public :: F_ZMET = 30
+    integer, parameter, public :: F_PMETALS = 31
+    integer, parameter, public :: F_IMF_FILENAME = 32
+    integer, parameter, public :: F_WGP1 = 33
+    integer, parameter, public :: F_WGP2 = 34
+    integer, parameter, public :: F_WGP3 = 35
+    integer, parameter, public :: F_FCSTAR = 36
+    integer, parameter, public :: F_FRAC_XRB = 37
+    integer, parameter, public :: F_DUST1 = 38
+    integer, parameter, public :: F_DUST2 = 39
+    integer, parameter, public :: F_DUST3 = 40
+    integer, parameter, public :: F_DUST_INDEX = 41
+    integer, parameter, public :: F_DUST1_INDEX = 42
+    integer, parameter, public :: F_DUST_CLUMPS = 43
+    integer, parameter, public :: F_FRAC_NODUST = 44
+    integer, parameter, public :: F_DUST_TESC = 45
+    integer, parameter, public :: F_UVB = 46
+    integer, parameter, public :: F_MWR = 47
+    integer, parameter, public :: F_DUSTE_GAMMA = 48
+    integer, parameter, public :: F_DUSTE_UMIN = 49
+    integer, parameter, public :: F_DUSTE_QPAH = 50
+    integer, parameter, public :: F_GAS_LOGU = 51
+    integer, parameter, public :: F_GAS_LOGZ = 52
+    integer, parameter, public :: F_GAS_LOGN = 53
+    integer, parameter, public :: F_GAS_LOGNO = 54
+    integer, parameter, public :: F_GAS_LOGCO = 55
+    integer, parameter, public :: F_FRAC_OBRUN = 56
+    integer, parameter, public :: F_FAGN = 57
+    integer, parameter, public :: F_AGN_TAU = 58
+    integer, parameter, public :: F_ZRED = 59
+    integer, parameter, public :: F_IGM_FACTOR = 60
+    integer, parameter, public :: F_SIGMA_SMOOTH = 61
+    integer, parameter, public :: F_MIN_WAVE_SMOOTH = 62
+    integer, parameter, public :: F_MAX_WAVE_SMOOTH = 63
+    integer, parameter, public :: F_COMPUTE_MAGS = 64
+    integer, parameter, public :: F_COMPUTE_INDICES = 65
 
     character(len=16), parameter :: field_names(N_FIELDS) = [character(len=16) :: &
         'tau', 'const', 'tage', 'fburst', 'tburst', &
         'sf_start', 'sf_trunc', 'sf_slope', 'sfh', 'sfh_filename', &
         'logzsol', 'afe', 'fbhb', 'sbss', 'agb', &
         'pagb', 'redgb', 'delt', 'dell', 'imf1', &
-        'imf2', 'imf3', 'vdmc', 'mdave', 'masscut', &
-        'agb_dust', 'evtype', 'zmet', 'pmetals', 'imf_filename', &
-        'wgp1', 'wgp2', 'wgp3', 'fcstar', 'frac_xrb', &
-        'dust1', 'dust2', 'dust3', 'dust_index', 'dust1_index', &
-        'dust_clumps', 'frac_nodust', 'dust_tesc', 'uvb', 'mwr', &
-        'duste_gamma', 'duste_umin', 'duste_qpah', 'gas_logu', 'gas_logz', &
-        'gas_logn', 'gas_logno', 'gas_logco', 'frac_obrun', 'fagn', &
-        'agn_tau', 'zred', 'igm_factor', 'sigma_smooth', 'min_wave_smooth', &
-        'max_wave_smooth', 'compute_mags', 'compute_indices']
+        'imf2', 'imf3', 'vdmc', 'mdave', 'imf_lower_limit', &
+        'imf_upper_limit', 'masscut', 'agb_dust', 'evtype', 'zmet', &
+        'pmetals', 'imf_filename', 'wgp1', 'wgp2', 'wgp3', &
+        'fcstar', 'frac_xrb', 'dust1', 'dust2', 'dust3', &
+        'dust_index', 'dust1_index', 'dust_clumps', 'frac_nodust', 'dust_tesc', &
+        'uvb', 'mwr', 'duste_gamma', 'duste_umin', 'duste_qpah', &
+        'gas_logu', 'gas_logz', 'gas_logn', 'gas_logno', 'gas_logco', &
+        'frac_obrun', 'fagn', 'agn_tau', 'zred', 'igm_factor', &
+        'sigma_smooth', 'min_wave_smooth', 'max_wave_smooth', 'compute_mags', 'compute_indices']
     integer, parameter :: field_class(N_FIELDS) = [ &
         1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 2, 2, 2, 2, 2, 2, 2, 4, 4, 3, &
-        3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, &
-        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 4, 4, &
-        4, 0, 0]
+        3, 3, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, &
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, &
+        4, 4, 4, 0, 0]
     integer, parameter :: field_stage(N_FIELDS) = [ &
         1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, &
-        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, &
-        3, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5, 5, 5, 5, 6, 6, 7, 7, 8, 8, &
-        8, 9, 9]
+        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, &
+        3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5, 5, 5, 5, 6, 6, 7, 7, &
+        8, 8, 8, 9, 9]
     integer, parameter :: field_kind(N_FIELDS) = [ &
         1, 1, 1, 1, 1, 1, 1, 1, 2, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, &
-        1, 1, 1, 1, 1, 1, 2, 2, 1, 3, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, &
+        1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 1, 3, 2, 2, 2, 1, 1, 1, 1, 1, &
         1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, &
-        1, 2, 2]
+        1, 1, 1, 2, 2]
 
     character(len=8), parameter :: class_names(0:4) = [character(len=8) :: 'shared', 'closed', 'linear', 'weights', 'grouped']
     character(len=8), parameter :: stage_names(9) = [character(len=8) :: 'sfh', 'ssp', 'dust', 'dust-em', 'nebular', 'agn', &
@@ -240,6 +242,8 @@ contains
         case (F_IMF3); v = p%imf3
         case (F_VDMC); v = p%vdmc
         case (F_MDAVE); v = p%mdave
+        case (F_IMF_LOWER_LIMIT); v = p%imf_lower_limit
+        case (F_IMF_UPPER_LIMIT); v = p%imf_upper_limit
         case (F_MASSCUT); v = p%masscut
         case (F_AGB_DUST); v = p%agb_dust
         case (F_EVTYPE); v = real(p%evtype, WP)
@@ -311,6 +315,8 @@ contains
         case (F_IMF3); p%imf3 = v
         case (F_VDMC); p%vdmc = v
         case (F_MDAVE); p%mdave = v
+        case (F_IMF_LOWER_LIMIT); p%imf_lower_limit = v
+        case (F_IMF_UPPER_LIMIT); p%imf_upper_limit = v
         case (F_MASSCUT); p%masscut = v
         case (F_AGB_DUST); p%agb_dust = v
         case (F_EVTYPE); p%evtype = nint(v)
@@ -413,6 +419,8 @@ contains
         case (F_IMF3); lo = 2.0_wp; hi = 2.8_wp
         case (F_VDMC); lo = 0.05_wp; hi = 0.15_wp
         case (F_MDAVE); lo = 0.3_wp; hi = 0.7_wp
+        case (F_IMF_LOWER_LIMIT); lo = 0.08_wp; hi = 0.5_wp
+        case (F_IMF_UPPER_LIMIT); lo = 60.0_wp; hi = 120.0_wp
         end select
     end subroutine registry_range
 

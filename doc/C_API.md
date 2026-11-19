@@ -337,7 +337,7 @@ void opensps_context_evaluate_ssp_op(
     int *status
 );
 ```
-When `ssp_ops` is active on a context, IMF parameters (`imf1`, `imf2`, `imf3`, `vdmc`, `mdave`) can vary per model in `opensps_context_compute_csp_batch` and `opensps_context_compute_csp_batch_grad`.
+When `ssp_ops` is active on a context, IMF parameters (`imf1`, `imf2`, `imf3`, `vdmc`, `mdave`, `imf_lower_limit`, `imf_upper_limit`) can vary per model in `opensps_context_compute_csp_batch` and `opensps_context_compute_csp_batch_grad`.
 
 ### Zero-Copy GPU Memory Pointers
 

@@ -122,7 +122,7 @@ metallicity free per model. `ops` (`ssp_opset_t`, `src/physics/opensps_ssp_batch
 one operator S per metallicity (`ssp_operator_build` per metallicity, then `ssp_opset_build`;
 built once, ~0.1 s each); one metallicity is a set of one. The IMF
 type is shared per batch; the slopes, `vdmc` and `mdave` vary per model, the mass limits are
-shared. The IMF weights of every isochrone point are computed per model on the device, power-law
+shared (per model since the IMF-limits PR, `doc/HOT_PATHS.md`). The IMF weights of every isochrone point are computed per model on the device, power-law
 bins as (c/e) m1^e expm1(e ln(m2/m1)) from per-point logs (no cancellation in narrow bins: 30% of
 MIST's bins are narrower than 1e-6), lognormal bins by erf or Gauss-Legendre (#43). Checked
 against per-model `generate_ssp_grid` bases for every IMF type, a range of parameters, mass

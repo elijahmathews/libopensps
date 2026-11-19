@@ -707,7 +707,8 @@ contains
         character(len=120) :: rows_msg
         real(WP), allocatable :: mass_l(:), lbol_l(:), mdust_l(:), sfr_l(:), eml_l(:, :)
         character(LEN=10), parameter :: NEB_PARAMS(3) = [character(LEN=10) :: 'gas_logu', 'gas_logz', 'frac_obrun']
-        character(LEN=10), parameter :: IMF_PARAMS(5) = [character(LEN=10) :: 'imf1', 'imf2', 'imf3', 'vdmc', 'mdave']
+        character(LEN=16), parameter :: IMF_PARAMS(7) = [character(LEN=16) :: 'imf1', 'imf2', 'imf3', 'vdmc', 'mdave', &
+                                                                            'imf_lower_limit', 'imf_upper_limit']
         character(LEN=10), parameter :: MOD_PARAMS(7) = [character(LEN=10) :: 'fbhb', 'sbss', 'agb', 'pagb', 'redgb', &
                                                                             'delt', 'dell']
         character(LEN=16), parameter :: SMOOTH_PARAMS(3) = [character(LEN=16) :: 'sigma_smooth', 'min_wave_smooth', &
