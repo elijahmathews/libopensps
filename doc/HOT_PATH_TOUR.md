@@ -129,6 +129,28 @@ Step 3 needs an SSP (a spectrum per age) for each model. There are three ways to
 
 `batch_info` (printed to standard error with `OPENSPS_DEBUG_PATH=1`) says which one a batch took and which parameters were free.
 
+## The operator path (the third SSP source) in a few lines
+
+With the resident basis, the SSPs are built once and every model blends them. That cannot work when the IMF (or the isochrone
+modification factors, the TP-AGB shifts, the IMF mass limits) differ per model, because each model would need its own SSP. The operator
+path (`src/physics/opensps_ssp_operator.f90`, `src/physics/opensps_ssp_batch.f90`) does it differently, using one fact: every star's
+contribution to an SSP is *linear* in the IMF weight of its isochrone point, and the isochrone, the spectral library and the other
+parameters fix everything else. So:
+
+* **Once per context** (`ssp_operator_build`): build a sparse matrix **S** whose columns are the isochrone points of all ages and whose
+  rows are the library templates (and the surviving-mass and L_bol sums). S does not depend on any IMF parameter. For the isochrone
+  modifications there is one S per *group* of modified stars (`ssp_opset_build_mods`: fbhb, sbss, agb, pagb, redgb, one per distinct TP-AGB
+  shift), and a model's SSP is a sum of the groups' with its own coefficients.
+* **Per model** (`ssp_batch_age_sums_z`, the forward pass; `ssp_batch_age_sums_adjoint`, the reverse): compute the IMF weight of every
+  isochrone point (`imf_pieces_multi`, FP64: the closed-form bin integrals of `opensps_imf`; models with the same IMF share them,
+  `ssp_batch_share_imf`), fold in the model's SFH weights first, then one sparse product gives the template weights, and the young and old
+  age sums follow as one product with the templates (`template_columns`). Folding the SFH first is what makes it one product per model
+  instead of one per age.
+* **After the age sums** everything is the same as with a basis: the driver's steps 4 - 9 do not know which source produced `yo`.
+
+`tests/test_ssp_operator.f90` checks the operator against `generate_ssp_grid` (all six IMF types, slopes, limits, MIST and Padova), and
+`tests/test_csp_batch.f90` checks a batch of free IMFs against each model's own basis.
+
 ## Reading a kernel: the age sums
 
 The simplest real kernel, `age_sums_host` (`opensps_csp_batch.f90`), is a good first read. For each model and block of 256 pixels it loops
