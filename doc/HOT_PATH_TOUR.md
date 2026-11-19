@@ -17,7 +17,9 @@ that routine from top to bottom is reading the hot path.
 1. **A caller** (the C API or Fortran) fills one parameter set per model and calls `compute_csp_batch`. The C entry points are
    `opensps_context_compute_csp_batch*` in `src/bindings/c/opensps_c_api.f90` (`batch_handle` is the shared body: it turns "parameter
    names and per-model values" into one `params` structure per model).
-2. **`compute_csp_batch`** does, in this order (the numbers are those of the comments in the routine):
+2. **`compute_csp_batch`** does, in this order (the numbers are those of the comments in the routine). The file `opensps_csp_batch.f90`
+   is arranged the same way: the driver first, then one banner-headed section per stage in this order (search for `Stage 3:` to jump to
+   the age sums), then the reverse pass; a table of contents sits right after the `contains` line.
 
 | Step | What happens, in astronomy terms | Where (routine, file) |
 |---|---|---|
