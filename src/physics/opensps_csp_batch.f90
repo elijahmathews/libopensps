@@ -4728,6 +4728,18 @@ contains
     !> doc/MIXED_PRECISION.md). Work space gw (pixels x 2N): the gradient of fobs (1:N), of the
     !> final spectrum (N+1:2N), then of the young (1:N) and old (N+1:2N) age sums; yo (the
     !> forward's age sums) is read.
+    !>
+    !> The stages of the reverse pass, in the order of the routine (the forward ones in reverse; doc/HOT_PATH_TOUR.md):
+    !>   1. magnitudes -> band fluxes (the cotangents of the bands; the distance term; each column's magnitude redshift)
+    !>   2. the observed frame (backward_observed_frame): the filter integrals and the resampling; the IGM's short-wavelength cap
+    !>   3. velocity smoothing (smooth_*_adjoint): the gradient of sigma_smooth, then the transpose of the smoothing
+    !>   4. AGN (backward_agn), then the lbol output's cotangent joins L_bol's
+    !>   5. dust emission (backward_emission_sums): the cotangents of its two sums
+    !>   6. dust attenuation (backward_attenuation, atten_adjoint_chunk): the dust parameters; the young and old cotangents
+    !>   7. the lines outside the spectrum with dust emission (backward_line_absorption)
+    !>   8. nebular emission (backward_nebular for the CLOUDY grids, cue_nebular_backward for cue)
+    !>   9. the age sums: backward_age_sums (resident basis), backward_age_sums_w (weights over metallicities) or the operators'
+    !>      ssp_batch_age_sums_adjoint (the SFH weights, the IMF parameters, the escaping fraction, dz)
     subroutine batch_backward(ctx, pbuf, n_mod, nspec, nt, nbands, zred, igm_factor, mags, fband, zcm, it_tesc, &
                               zlo, zhi, dz, da, nzs, blend_z, igm, z_varies, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, &
                                   yo, total, &
