@@ -52,6 +52,13 @@ classification costs a pass over the models and is made only on request, so the 
   `tools/compare_forward_dump.py DIR_A DIR_B` compares two runs (`--tol 0`, the default, needs identical bits, which the same
   build on the same device gives).
 
+## Guardrails
+
+`tools/check_hotpath_structure.py` (the `unit_hotpath_structure` test) holds the number of preprocessor conditionals per
+directory of `src/` and of bare `stop` statements in the library at a committed baseline
+(`tools/hotpath_structure_baseline.json`): they may fall, never grow without the baseline saying so in the same change. The
+rules for new parameters, kernel variants and library routines are in `AGENTS.md` and `CONTRIBUTING.md`.
+
 ## Not yet free per model (each its own piece of work)
 
 * (`sigma_smooth` and its range are per model since the smoothing PR: the models are grouped by their distinct (sigma, range)

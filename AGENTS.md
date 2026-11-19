@@ -107,6 +107,21 @@ format, conversion, packing; format and workflows in `doc/DATA_FORMAT.md`).
   batch (one model per output age). A physics change goes there, and is checked by the
   oracles and identities of `test_csp_batch` and `test_physics_oracles` and against legacy
   FSPS.
+- Hot paths (`doc/HOT_PATHS.md`): any parameter of `PARAMS_CORE` may be free per model, and the cost of a
+  batch is the sum of what its free parameters need, not a property of the combination.
+  - A new per-model parameter is registered in `src/core/opensps_batch_registry.f90` with a class
+    (closed form, linear mixture, weights, grouped discrete, shared; `unit_batch_registry_covers_params`
+    fails without it) and is served by the mechanism of its class, not by a new kernel family.
+  - A new variant of a kernel (for a vendor, a precision, a mode or a set of free parameters) replaces
+    an existing one or is bit-for-bit equal to a named baseline (`tools/compare_forward_dump.py`), and
+    shows no regression in the free-parameter matrix (`tools/bench_matrix.py`). Vendor and precision
+    specializations live behind one interface, not in the drivers.
+  - The preprocessor conditionals of `src/` and the bare `stop` statements of the library do not grow
+    (`tools/check_hotpath_structure.py`, baseline `tools/hotpath_structure_baseline.json`; a deliberate
+    increase raises the baseline in the same change, with the reason). A library routine returns a
+    status; it never stops the host program.
+  - A batch with any set of free parameters equals each model alone (`test_batch_equivalence`): a new
+    parameter gets its range in `registry_range` and thereby its cases.
 
 ## Git workflow
 

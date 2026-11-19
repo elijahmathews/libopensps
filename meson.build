@@ -692,6 +692,12 @@ test('unit_tuning_literals', find_program('python3'),
     suite : 'unit',
     timeout : 60
 )
+# The structure of the hot paths does not grow: preprocessor conditionals and stops of the library (doc/HOT_PATHS.md)
+test('unit_hotpath_structure', find_program('python3'),
+    args : [files('tools/check_hotpath_structure.py'), meson.project_source_root()],
+    suite : 'unit',
+    timeout : 60
+)
 # The validation of -Dtuning_overrides (names against the registry)
 test('unit_tuning_overrides', find_program('python3'),
     args : [files('tests/test_tuning_overrides.py')],
