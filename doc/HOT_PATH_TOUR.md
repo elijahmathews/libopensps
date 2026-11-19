@@ -35,6 +35,40 @@ that routine from top to bottom is reading the hot path.
 
 The module header comment of `opensps_csp_batch.f90` describes steps 2 - 8 in physics terms and is the best companion to the table.
 
+## The flags of the driver
+
+`compute_csp_batch` records what kind of batch it was given in a few logical variables (and integers). Their names say what they mean:
+
+| Variable | True / value when |
+|---|---|
+| `use_operators`, `operators_per_z` | the SSPs come from the operators (`ssp_ops` was given); one operator per metallicity of the context |
+| `weights_over_z` | `ssp_weights_z` was given: SSP weights over ages and metallicities |
+| `blend_z` | each model blends the resident bases at its own `logzsol` (a basis per metallicity) |
+| `n_afe_planes` | the [alpha/Fe] planes of the context's stack (1: no [alpha/Fe] axis) |
+| `weights_given`, `weights_on_host` | the SFH weights were supplied by the caller; or, for few models, are computed on the host |
+| `sums_on_host` | for few models the weights and per-model sums are run on the host, not the device |
+| `z_varies` | the redshifts or `igm_factor` differ among the models |
+| `neb`, `agn`, `igm`, `smooth`, `cue`, `parts`, `grad` | nebular emission, AGN, IGM absorption, smoothing, the cue nebular model, young/old parts asked, any gradient asked |
+
+## The main arrays of the driver
+
+Short names in `compute_csp_batch`, and what they hold (N = the number of models, `nt` = SSP ages, `nspec` = wavelength pixels):
+
+| Array | Shape | Holds |
+|---|---|---|
+| `weights` | (`nt`, [metallicities,] N), FP64 | the mass formed in each SSP age bin, per model (step 2) |
+| `w2` | (`nt`, 2N), kernel precision | the same weights split at `dust_tesc`: columns 1..N the young ages, N+1..2N the old ones |
+| `yo` | (`nspec`, 2N), kernel precision | the age sums: columns 1..N the young spectrum of each model, N+1..2N the old one (nebular emission is added into the young) |
+| `total` | (`nspec`, N) | the model spectra: built from `yo` by the attenuation, then dust emission, IGM, AGN, smoothing; what the magnitudes read. It is the context's persistent output buffer (`ctx%state%batch_out%spec`) |
+| `absorbed` | (`nspec`, N) | the light absorbed by dust (the energy balance of the dust emission); reused as scratch afterwards |
+| `tdiff` | (`nspec`, N) | the diffuse-dust transmission, kept for the AGN emission |
+| `eml` | (lines, N) | emission-line luminosities |
+| `msum`, `lsum`; `msy`, `mso`, `lsy`, `lso` | N | per-model surviving mass and L_bol summed over ages; and their young and old parts |
+| `ipk`, `rpk`, `lpk`, `rout` | packed | the per-model integers, reals and flags going to the device, and the results coming back, each in one array so that they move in one transfer; the named pointers (`it_tesc`, `iq`, `iu`, `ita`, `zlo`, `zhi`, `dz`, `da`, `wq`, `wu`, `gam`, `wta`, `emis`, `agn_on`, ...) are views into them |
+| `pm`, `smass`, `slum`, `wsfh` | operators only | the IMF parameter vector of each model, the surviving mass and L_bol per age, the SFH weights |
+| `nb` | `nebular_setup_t` | the nebular setup: ionizing photons Q per age, grid indices and weights, line lists |
+| `fbk`, `zcm`, `dchain`, `wbl`, `lbx`, `mbx` | reverse pass | the band fluxes, each column's magnitude redshift, the chain-rule factors, dL/d(SSP weight) and the cotangents of L_bol and mass |
+
 ## Nebular emission: two models, forward and reverse
 
 Step 4 is the largest group of routines (about 2000 lines), because it holds two different physical models, each with a forward and a
@@ -108,5 +142,5 @@ and K = 4) with a tile of models per GPU thread. Its adjoint (step 9) is `age_su
 ## What is not yet this simple
 
 The driver still holds, inline, the nebular and attenuation calls, the smoothing and photometry calls and the reverse pass; the three
-SSP sources are told apart by flags (`zmode`, `zw`, `imf`) in a few places instead of by the `ssp_source_t` alone. `doc/HOT_PATHS_PLAN.md`
+SSP sources are told apart by flags (`blend_z`, `weights_over_z`, `use_operators`: formerly `zmode`, `zw`, `imf`) in a few places instead of by the `ssp_source_t` alone. `doc/HOT_PATHS_PLAN.md`
 lists what is done and what is next.
