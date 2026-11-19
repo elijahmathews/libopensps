@@ -61,17 +61,24 @@ is not in the operators) and `ssp_source_scalars` (the mass, L_bol and weights b
 flags `zmode`, `zw`, `imf`, `zimf`, `naf` are still locals of the driver (the nebular calls, the backward pass, the checks), and the stages
 after the SSP sums still take them as arguments; passing the source to them is what Step 4 (stage routines) does.
 
-**Step 3, the descriptor in the other blends.** The nebular Q and ionizing-flux blends, the L_bol blend and the mass blend repeat the
-cascade `(1 - da) ((1 - dz) a + dz b) + ...`; with the descriptor they become one helper. Only the exact-match sites (the
-derivative forms stay).
+**Step 3, the descriptor in the other blends (done, small).** `slab_blend_wp` and `slab_blend_kp`: the cascade `(1 - da) ((1 - dz) a + dz b) +
+da (...)` / `(1 - dz) a + dz b` / `a` over the metallicity slabs and [alpha/Fe] planes, for the ionizing-photon table and the spectra of
+the nebular continuum (forward and backward) and the interpolated mass and L_bol of the SSP source. Only the sites that were exact
+matches (five, plus the two of `model_sums`); the derivative forms and the sites with other structure stay as they are. The saving is
+a few lines: the point is one definition of the blend.
 
 **Step 4, the driver in stages.** Split `compute_csp_batch` into stage routines (SFH weights, SSP sums, nebular, attenuation, emission,
 AGN, IGM, smoothing, photometry) with a shared workspace type. Mechanical, long; the risk is the device rules (mapping derived
 types, temporaries): check on the R9700 after every cut.
 
-**Step 5, backend consolidation, one kernel family at a time.** By conditional count: IGM (`apply_igm_z`, `igm_cap_pixels`), nebular,
-attenuation; the include-template pattern where it fits. The vendor branches that exist because a compiler needs a different loop
-structure stay.
+**Step 5, backend consolidation (analysed, mostly not pursued).** The conditional count by kind (961 after step 2): about 586 are `OMP_TARGET`
+switches, of which 153 are the host arm (`#elif defined(_OPENMP)`) of one directive switch repeated at every parallel loop (`!$omp target
+teams distribute parallel do` on the device, `!$omp parallel do` on the host, nothing without OpenMP); about 50 are LLVM flang specifics,
+79 HIP, BLAS or precision selection. The directive switches are not copies of kernels, so no include template removes them; doing so
+would need macros that emit OpenMP directives (not portable across gfortran, flang, nvfortran and ifx) or OpenMP 5 `metadirective`
+(not supported by the compilers in use). The kernel families that did have a copy per backend (the age sums, forward and adjoint) are
+done; the remaining flang/nvfortran/HIP branches are tuned variants of different algorithms (tiles, products, native HIP kernels), which
+is where the code differs because the hardware wants it to. Not pursued unless a specific family shows a copy of the same algorithm.
 
 Not proposed: merging the operator path with the resident-basis path (different physics; the interface of Step 2 is the right level
 of sharing); a language change (nothing in the plan needs one).
