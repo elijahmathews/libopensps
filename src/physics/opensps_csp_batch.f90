@@ -2601,7 +2601,8 @@ contains
     !>      them; skipped with the IMF per model (q_model), where they come from the operators.
     !>   2. EUV rows: the age sums of the pixels below the Lyman limit redone for the nebular ages, with the escaping fraction
     !>      (frac_obrun) on the young spectrum.
-    !>   3. The continuum: per (pixel, model), the sum over the nebular ages of the SFH weight x Q x 10**(the CLOUDY grid, interpolated
+    !>   3. The continuum: per (pixel, model), the sum over the nebular ages of the SFH weight x Q x 10**(the CLOUDY grid,
+    !>      interpolated
     !>      in gas log Z, log U and age); per CLOUDY age interval a geometric progression, in kernel precision with the large
     !>      factors scaled out (rules 3 and 5 of doc/MIXED_PRECISION.md). Only if `grid`.
     !>   4. The line luminosities per (line, model), young and old: the same sum with the line in place of the pixel (nb_lum, also
