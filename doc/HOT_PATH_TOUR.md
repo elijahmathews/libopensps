@@ -35,6 +35,20 @@ that routine from top to bottom is reading the hot path.
 
 The module header comment of `opensps_csp_batch.f90` describes steps 2 - 8 in physics terms and is the best companion to the table.
 
+## Nebular emission: two models, forward and reverse
+
+Step 4 is the largest group of routines (about 2000 lines), because it holds two different physical models, each with a forward and a
+reverse pass. They are not copies of each other:
+
+| | Forward | Reverse (gradients) |
+|---|---|---|
+| **CLOUDY grids** (default, `nebular_model = 0`): continuum and lines interpolated from the precomputed CLOUDY tables in gas log Z, log U and age, scaled by the ionizing photons Q of the young SSPs | `nebular_setup` (per-model grid indices and weights, on the host), then `add_nebular_batch`, which calls `nebular_kernels` (redoes the EUV pixels of the age sums with the escaping fraction, forms the continuum with `nebular_continuum_tiled`, sums line luminosities over ages and spreads them over their profiles with `line_profiles`) | `backward_nebular` (with `neb_run_block`), `line_profiles_adjoint` |
+| **cue** (`nebular_model = 1`, `src/physics/opensps_cue.f90`): Li et al. 2024, CLOUDY emulated by neural networks from a four-part power-law fit to the ionizing spectrum, free gas density, metallicity, N/O and C/O | `add_nebular_batch` with the `gas` argument, which calls `cue_nebular` (and `cue_chunk_sources`, the per-model ionizing-spectrum fits in chunks) | `cue_nebular_backward` |
+
+Common to both: `attenuate_lines` (the lines pass through the dust: `line_attenuated`, and, for lines outside the spectrum with dust
+emission, `line_absorption_model`), with `backward_line_absorption` in reverse. The weights of the young ages come from step 2, and the
+Q table from the SSP source (`nb%q0` is per metallicity slab for the resident basis, per model for the operators).
+
 ## Where the SSPs come from: the "SSP source"
 
 Step 3 needs an SSP (a spectrum per age) for each model. There are three ways to get one, chosen once per batch by `ssp_source_select`:

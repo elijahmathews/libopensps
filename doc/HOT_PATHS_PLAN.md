@@ -76,6 +76,12 @@ inline, as is the call of `batch_backward` with its 30 arguments; splitting thos
 `rpk`, `lpk`, `rout`) and the arrays the stages share, and the device rules about mapping derived types make each cut something to check
 on the R9700.
 
+**The nebular code, surveyed (no step).** The family of about 2000 lines (`nebular_setup`, `add_nebular_batch`, `nebular_kernels`,
+`nebular_continuum_tiled`, `cue_nebular`, `cue_nebular_backward`, `backward_nebular`, `neb_run_block`, the line routines) is two
+physical models (the CLOUDY grids; cue, Li et al. 2024, a neural-network emulation of CLOUDY), each with a forward and a reverse pass,
+plus the line profiles and the dust absorption of the lines. They share the interface (`add_nebular_batch`) and the line handling, not
+code; merging them would merge two algorithms. `doc/HOT_PATH_TOUR.md` has a section that maps them for a reader.
+
 **Step 5, backend consolidation (analysed, mostly not pursued).** The conditional count by kind (961 after step 2): about 586 are `OMP_TARGET`
 switches, of which 153 are the host arm (`#elif defined(_OPENMP)`) of one directive switch repeated at every parallel loop (`!$omp target
 teams distribute parallel do` on the device, `!$omp parallel do` on the host, nothing without OpenMP); about 50 are LLVM flang specifics,
