@@ -3907,6 +3907,9 @@ contains
         real(KP), intent(in)             :: basis(nspec, nt, nz), w2(nt, 2 * n_mod), w2flat(nt * 2 * n_mod)
         real(WP), intent(in)             :: dz(n_mod)
         real(KP), intent(out)            :: yo(nspec, 2 * n_mod)
+        integer, allocatable  :: slab(:,:)
+        real(KP), allocatable :: wt(:,:)
+        integer :: m
 #if defined(OPENSPS_HIP) && defined(OMP_TARGET) && defined(KERNEL_SINGLE_PRECISION)
         logical :: hip_done
         ! The two slabs of every model's pair adjacent (always, with the metallicity interval): a product per pair
@@ -3915,170 +3918,27 @@ contains
             if (hip_done) return
         end if
 #endif
-        call age_sums_z_generic(nspec, nt, nz, n_mod, basis, w2, w2flat, it_tesc, zlo, zhi, dz, yo)
-    end subroutine age_sums_z
-
-    subroutine age_sums_z_generic(nspec, nt, nz, n_mod, basis, w2, w2flat, it_tesc, zlo, zhi, dz, yo)
-        ! Explicit-shape dummies (no array descriptors in the kernel)
-        integer, intent(in)              :: nspec, nt, nz, n_mod, it_tesc(n_mod), zlo(n_mod), zhi(n_mod)
-        real(KP), intent(in)             :: basis(nspec, nt, nz), w2(nt, 2 * n_mod), w2flat(nt * 2 * n_mod)
-        real(WP), intent(in)             :: dz(n_mod)
-        real(KP), intent(out)            :: yo(nspec, 2 * n_mod)
-#if defined(OMP_TARGET) && defined(__flang__)
-        ! LLVM flang / AMD. The models are visited sorted by their metallicity interval, so that a tile
-        ! of MT consecutive models usually shares one pair of basis slabs; each thread does PT pixels
-        ! (strided, so that the loads are coalesced) of the tile, which shares the per-model weight
-        ! loads among the pixels. The per-model offsets are formed once, outside the age loop (inside
-        ! it, address arithmetic and loads were ~97% of the instructions). The arithmetic per model
-        ! is unchanged (same results bit for bit).
-        ! Tile of PT pixels x MT models per thread. FP64 on the 780M: 4 pixels spill registers (890 ms at
-        ! N = 10^4; 658 ms with 2; 8 models x 1-4 pixels is the best range, 16 or more models 6-8 s)
-        integer, parameter :: MT = TUNE_AGE_SUMS_Z_FLANG_MT, PT = TUNE_AGE_SUMS_Z_FLANG_PT
-        integer  :: m, mq, ip, npt, key, nzk
-        integer, allocatable :: zord(:), starts(:)
-
-        nzk = maxval(zhi(1:n_mod))
-        allocate(zord(n_mod), starts(nzk + 1))
-        starts = 0
-        do m = 1, n_mod
-            starts(zlo(m) + 1) = starts(zlo(m) + 1) + 1
-        end do
-        starts(1) = 1
-        do key = 2, nzk + 1
-            starts(key) = starts(key) + starts(key - 1)
-        end do
-        do m = 1, n_mod
-            zord(starts(zlo(m))) = m
-            starts(zlo(m)) = starts(zlo(m)) + 1
-        end do
-
-        npt = (nspec + PT - 1) / PT
-        ! (Work arrays in a block of the loop body: flang maps `private` arrays, a copy each way per launch)
-        !$omp target teams distribute parallel do collapse(2) map(to: zord)
-        do mq = 1, (n_mod + MT - 1) / MT
-            do ip = 1, npt
-              block
-                integer  :: i, k, l, p, mm(MT), ii(PT), zl, zh, it(MT), oy(MT), oo(MT)
-                real(KP) :: b_lo(PT), b_hi(PT), bk, wy, y(PT, MT), o(PT, MT), d(MT)
-                logical  :: same
-                do l = 1, MT
-                    mm(l) = zord(min((mq - 1) * MT + l, n_mod))
-                    d(l) = real(dz(mm(l)), KP)
-                    it(l) = it_tesc(mm(l))
-                    oy(l) = (mm(l) - 1) * nt          ! offsets of the model's young and old weight columns
-                    oo(l) = (n_mod + mm(l) - 1) * nt
-                end do
-                do p = 1, PT
-                    ii(p) = min(ip + (p - 1) * npt, nspec)
-                end do
-                y = 0.0_KP
-                o = 0.0_KP
-                same = .true.
-                do l = 2, MT
-                    if (zlo(mm(l)) /= zlo(mm(1)) .or. zhi(mm(l)) /= zhi(mm(1))) same = .false.
-                end do
-                if (same) then
-                    zl = zlo(mm(1))
-                    zh = zhi(mm(1))
-                    do k = 1, nt
-                        do p = 1, PT
-                            b_lo(p) = basis(ii(p), k, zl)
-                            b_hi(p) = basis(ii(p), k, zh)
-                        end do
-                        do l = 1, MT
-                            if (k <= it(l)) then
-                                wy = w2flat(oy(l) + k)
-                                do p = 1, PT
-                                    bk = (1.0_KP - d(l)) * b_lo(p) + d(l) * b_hi(p)
-                                    y(p, l) = y(p, l) + wy * bk
-                                end do
-                            else
-                                wy = w2flat(oo(l) + k)
-                                do p = 1, PT
-                                    bk = (1.0_KP - d(l)) * b_lo(p) + d(l) * b_hi(p)
-                                    o(p, l) = o(p, l) + wy * bk
-                                end do
-                            end if
-                        end do
-                    end do
-                else
-                    do k = 1, nt
-                        do l = 1, MT
-                            if (k <= it(l)) then
-                                wy = w2flat(oy(l) + k)
-                                do p = 1, PT
-                                    bk = (1.0_KP - d(l)) * basis(ii(p), k, zlo(mm(l))) + d(l) * basis(ii(p), k, zhi(mm(l)))
-                                    y(p, l) = y(p, l) + wy * bk
-                                end do
-                            else
-                                wy = w2flat(oo(l) + k)
-                                do p = 1, PT
-                                    bk = (1.0_KP - d(l)) * basis(ii(p), k, zlo(mm(l))) + d(l) * basis(ii(p), k, zhi(mm(l)))
-                                    o(p, l) = o(p, l) + wy * bk
-                                end do
-                            end if
-                        end do
-                    end do
-                end if
-                do l = 1, MT
-                    do p = 1, PT
-                        yo(ii(p), mm(l)) = y(p, l)
-                        yo(ii(p), n_mod + mm(l)) = o(p, l)
-                    end do
-                end do
-              end block
-            end do
-        end do
-#elif defined(OMP_TARGET)
-        integer, parameter :: MT = TUNE_AGE_SUMS_Z_NVF_MT
-        integer  :: mq, i, k, l, mm(MT)
-        real(KP) :: bk, y(MT), o(MT), d(MT)
-
-#if defined(OMP_TARGET)
-        !$omp target teams distribute parallel do collapse(2) private(k, l, bk, mm, y, o, d)
-#elif defined(_OPENMP)
-        !$omp parallel do collapse(2) private(k, l, bk, mm, y, o, d)
-#endif
-        do mq = 1, (n_mod + MT - 1) / MT
-            do i = 1, nspec
-                do l = 1, MT
-                    mm(l) = min((mq - 1) * MT + l, n_mod)
-                    d(l) = real(dz(mm(l)), KP)
-                    y(l) = 0.0_KP
-                    o(l) = 0.0_KP
-                end do
-                do k = 1, nt
-                    do l = 1, MT
-                        bk = (1.0_KP - d(l)) * basis(i, k, zlo(mm(l))) + d(l) * basis(i, k, zhi(mm(l)))
-                        if (k <= it_tesc(mm(l))) then
-                            y(l) = y(l) + w2(k, mm(l)) * bk
-                        else
-                            o(l) = o(l) + w2(k, n_mod + mm(l)) * bk
-                        end if
-                    end do
-                end do
-                do l = 1, MT
-                    yo(i, mm(l)) = y(l)
-                    yo(i, n_mod + mm(l)) = o(l)
-                end do
-            end do
-        end do
-#else
-        ! Host: the descriptor of the two metallicity slabs per model (the same arithmetic per element as the loops of the
-        ! device branch: (1 - d) b_lo + d b_hi with d at kernel precision)
-        integer, allocatable :: slab(:,:)
-        real(KP), allocatable :: wt(:,:)
-        integer :: m
-
+        ! The descriptor of the two metallicity slabs: (1 - d) b_lo + d b_hi with d at kernel precision
         allocate(slab(2, n_mod), wt(2, n_mod))
         do m = 1, n_mod
             slab(1, m) = zlo(m); slab(2, m) = zhi(m)
             wt(2, m) = real(dz(m), KP)
             wt(1, m) = 1.0_KP - wt(2, m)
         end do
-        call age_sums_host(2, nspec, nt, nz, n_mod, basis, w2flat, it_tesc, slab, wt, yo)
-#endif
-    end subroutine age_sums_z_generic
+        call age_sums_slab2(nspec, nt, nz, n_mod, basis, w2flat, it_tesc, slab, wt, yo)
+    end subroutine age_sums_z
+
+#define AS_NAME age_sums_slab2
+#define AS_K 2
+#define AS_FLANG_MT TUNE_AGE_SUMS_Z_FLANG_MT
+#define AS_FLANG_PT TUNE_AGE_SUMS_Z_FLANG_PT
+#define AS_NVF_MT TUNE_AGE_SUMS_Z_NVF_MT
+#include "age_sums_slabs.inc"
+#undef AS_NAME
+#undef AS_K
+#undef AS_FLANG_MT
+#undef AS_FLANG_PT
+#undef AS_NVF_MT
 
     !> Age sums with per-model metallicity and [alpha/Fe]: each model's basis is the bilinear blend of four
     !> slabs, (1 - da) [(1 - dz) b(zlo) + dz b(zlo + 1)] + da [(1 - dz) b(zlo + nzs) + dz b(zlo + nzs + 1)]
@@ -4161,157 +4021,12 @@ contains
         real(KP), intent(in) :: basis(nspec, nt, nsl), w2flat(nt * 2 * n_mod)
         real(WP), intent(in) :: dz(n_mod), da(n_mod)
         real(KP), intent(out) :: yo(nspec, 2 * n_mod)
-#if defined(OMP_TARGET) && defined(__flang__)
-        ! LLVM flang / AMD: as age_sums_z (models sorted by their cell so that a tile shares its four slabs;
-        ! PT pixels per thread, MT models per tile). Measured on the R9700 against age_sums_z (N = 1e4, 107
-        ! ages): 1.4x at 5994 pixels with MT = 8, PT = 2; the tile shape matters (spills)
-        integer, parameter :: MT = TUNE_AGE_SUMS_Z4_FLANG_MT, PT = TUNE_AGE_SUMS_Z4_FLANG_PT
-        integer  :: m, mq, ip, npt, key, ncell
-        integer, allocatable :: zord(:), starts(:)
-
-        ncell = maxval(zlo(1:n_mod))
-        allocate(zord(n_mod), starts(ncell + 2))
-        starts = 0
-        do m = 1, n_mod
-            starts(zlo(m) + 1) = starts(zlo(m) + 1) + 1
-        end do
-        starts(1) = 1
-        do key = 2, ncell + 1
-            starts(key) = starts(key) + starts(key - 1)
-        end do
-        do m = 1, n_mod
-            zord(starts(zlo(m))) = m
-            starts(zlo(m)) = starts(zlo(m)) + 1
-        end do
-
-        npt = (nspec + PT - 1) / PT
-        !$omp target teams distribute parallel do collapse(2) map(to: zord)
-        do mq = 1, (n_mod + MT - 1) / MT
-            do ip = 1, npt
-              block
-                integer  :: i, k, l, p, mm(MT), ii(PT), s0, s1, s2, s3, it(MT), oy(MT), oo(MT)
-                real(KP) :: b0(PT), b1(PT), b2(PT), b3(PT), bk, wy, y(PT, MT), o(PT, MT)
-                real(KP) :: c0(MT), c1(MT), c2(MT), c3(MT)
-                logical  :: same
-                do l = 1, MT
-                    mm(l) = zord(min((mq - 1) * MT + l, n_mod))
-                    c0(l) = real((1.0_wp - dz(mm(l))) * (1.0_wp - da(mm(l))), KP)
-                    c1(l) = real(dz(mm(l)) * (1.0_wp - da(mm(l))), KP)
-                    c2(l) = real((1.0_wp - dz(mm(l))) * da(mm(l)), KP)
-                    c3(l) = real(dz(mm(l)) * da(mm(l)), KP)
-                    it(l) = it_tesc(mm(l))
-                    oy(l) = (mm(l) - 1) * nt
-                    oo(l) = (n_mod + mm(l) - 1) * nt
-                end do
-                do p = 1, PT
-                    ii(p) = min(ip + (p - 1) * npt, nspec)
-                end do
-                y = 0.0_KP
-                o = 0.0_KP
-                same = .true.
-                do l = 2, MT
-                    if (zlo(mm(l)) /= zlo(mm(1))) same = .false.
-                end do
-                if (same) then
-                    s0 = zlo(mm(1))
-                    s1 = s0 + 1
-                    s2 = s0 + nzs
-                    s3 = s2 + 1
-                    do k = 1, nt
-                        do p = 1, PT
-                            b0(p) = basis(ii(p), k, s0)
-                            b1(p) = basis(ii(p), k, s1)
-                            b2(p) = basis(ii(p), k, s2)
-                            b3(p) = basis(ii(p), k, s3)
-                        end do
-                        do l = 1, MT
-                            if (k <= it(l)) then
-                                wy = w2flat(oy(l) + k)
-                                do p = 1, PT
-                                    bk = c0(l) * b0(p) + c1(l) * b1(p) + c2(l) * b2(p) + c3(l) * b3(p)
-                                    y(p, l) = y(p, l) + wy * bk
-                                end do
-                            else
-                                wy = w2flat(oo(l) + k)
-                                do p = 1, PT
-                                    bk = c0(l) * b0(p) + c1(l) * b1(p) + c2(l) * b2(p) + c3(l) * b3(p)
-                                    o(p, l) = o(p, l) + wy * bk
-                                end do
-                            end if
-                        end do
-                    end do
-                else
-                    do k = 1, nt
-                        do l = 1, MT
-                            s0 = zlo(mm(l))
-                            if (k <= it(l)) then
-                                wy = w2flat(oy(l) + k)
-                                do p = 1, PT
-                                    bk = c0(l) * basis(ii(p), k, s0) + c1(l) * basis(ii(p), k, s0 + 1) + &
-                                         c2(l) * basis(ii(p), k, s0 + nzs) + c3(l) * basis(ii(p), k, s0 + nzs + 1)
-                                    y(p, l) = y(p, l) + wy * bk
-                                end do
-                            else
-                                wy = w2flat(oo(l) + k)
-                                do p = 1, PT
-                                    bk = c0(l) * basis(ii(p), k, s0) + c1(l) * basis(ii(p), k, s0 + 1) + &
-                                         c2(l) * basis(ii(p), k, s0 + nzs) + c3(l) * basis(ii(p), k, s0 + nzs + 1)
-                                    o(p, l) = o(p, l) + wy * bk
-                                end do
-                            end if
-                        end do
-                    end do
-                end if
-                do l = 1, MT
-                    do p = 1, PT
-                        yo(ii(p), mm(l)) = y(p, l)
-                        yo(ii(p), n_mod + mm(l)) = o(p, l)
-                    end do
-                end do
-              end block
-            end do
-        end do
-#elif defined(OMP_TARGET)
-        integer, parameter :: MT = TUNE_AGE_SUMS_Z4_NVF_MT
-        integer  :: mq, i, k, l, mm(MT), s0
-        real(KP) :: bk, y(MT), o(MT), c0(MT), c1(MT), c2(MT), c3(MT)
-
-        !$omp target teams distribute parallel do collapse(2) private(k, l, bk, mm, y, o, c0, c1, c2, c3, s0)
-        do mq = 1, (n_mod + MT - 1) / MT
-            do i = 1, nspec
-                do l = 1, MT
-                    mm(l) = min((mq - 1) * MT + l, n_mod)
-                    c0(l) = real((1.0_wp - dz(mm(l))) * (1.0_wp - da(mm(l))), KP)
-                    c1(l) = real(dz(mm(l)) * (1.0_wp - da(mm(l))), KP)
-                    c2(l) = real((1.0_wp - dz(mm(l))) * da(mm(l)), KP)
-                    c3(l) = real(dz(mm(l)) * da(mm(l)), KP)
-                    y(l) = 0.0_KP
-                    o(l) = 0.0_KP
-                end do
-                do k = 1, nt
-                    do l = 1, MT
-                        s0 = zlo(mm(l))
-                        bk = c0(l) * basis(i, k, s0) + c1(l) * basis(i, k, s0 + 1) + &
-                             c2(l) * basis(i, k, s0 + nzs) + c3(l) * basis(i, k, s0 + nzs + 1)
-                        if (k <= it_tesc(mm(l))) then
-                            y(l) = y(l) + w2flat(k + (mm(l) - 1) * nt) * bk
-                        else
-                            o(l) = o(l) + w2flat(k + (n_mod + mm(l) - 1) * nt) * bk
-                        end if
-                    end do
-                end do
-                do l = 1, MT
-                    yo(i, mm(l)) = y(l)
-                    yo(i, n_mod + mm(l)) = o(l)
-                end do
-            end do
-        end do
-#else
-        ! Host: the descriptor of four slabs (two [alpha/Fe] planes x the two metallicity slabs) per model
-        integer, allocatable :: slab(:,:)
+        integer, allocatable  :: slab(:,:)
         real(KP), allocatable :: wt(:,:)
         integer :: m
 
+        ! The descriptor of four slabs (two [alpha/Fe] planes x the two metallicity slabs) per model; the four products are
+        ! formed in FP64 and cast once
         allocate(slab(4, n_mod), wt(4, n_mod))
         do m = 1, n_mod
             slab(:, m) = [zlo(m), zlo(m) + 1, zlo(m) + nzs, zlo(m) + nzs + 1]
@@ -4320,9 +4035,20 @@ contains
             wt(3, m) = real((1.0_wp - dz(m)) * da(m), KP)
             wt(4, m) = real(dz(m) * da(m), KP)
         end do
-        call age_sums_host(4, nspec, nt, nsl, n_mod, basis, w2flat, it_tesc, slab, wt, yo)
-#endif
+        call age_sums_slab4(nspec, nt, nsl, n_mod, basis, w2flat, it_tesc, slab, wt, yo)
     end subroutine age_sums_z4
+
+#define AS_NAME age_sums_slab4
+#define AS_K 4
+#define AS_FLANG_MT TUNE_AGE_SUMS_Z4_FLANG_MT
+#define AS_FLANG_PT TUNE_AGE_SUMS_Z4_FLANG_PT
+#define AS_NVF_MT TUNE_AGE_SUMS_Z4_NVF_MT
+#include "age_sums_slabs.inc"
+#undef AS_NAME
+#undef AS_K
+#undef AS_FLANG_MT
+#undef AS_FLANG_PT
+#undef AS_NVF_MT
 
     !> IGM transmission per model (redshift and igm_factor per model), as compute_igm_transmission:
     !> the optical depth at KP, capped below the wavelength of its maximum, then exp(-tau factor).

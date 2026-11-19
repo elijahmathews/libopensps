@@ -26,7 +26,7 @@ baseline_path = root / 'tools' / 'hotpath_structure_baseline.json'
 
 COND = re.compile(r'^\s*#\s*(if|ifdef|ifndef|elif)\b')
 STOP = re.compile(r'^\s*stop\b', re.IGNORECASE)
-SRC_EXT = {'.f90', '.F90', '.c', '.h', '.cpp', '.hpp', '.cu', '.hip'}
+SRC_EXT = {'.f90', '.F90', '.inc', '.c', '.h', '.cpp', '.hpp', '.cu', '.hip'}
 
 
 def count():
@@ -40,7 +40,7 @@ def count():
         for line in path.read_text(errors='replace').split('\n'):
             if COND.match(line):
                 c['conditionals'] += 1
-            elif path.suffix in ('.f90', '.F90') and STOP.match(line.split('!')[0]):
+            elif path.suffix in ('.f90', '.F90', '.inc') and STOP.match(line.split('!')[0]):
                 c['stops'] += 1
     counts['total'] = {'conditionals': sum(c['conditionals'] for c in counts.values()),
                        'stops': sum(c['stops'] for c in counts.values())}
