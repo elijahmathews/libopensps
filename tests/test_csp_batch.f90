@@ -32,6 +32,8 @@ program test_csp_batch
     use opensps_ssp_operator, only: ssp_operator_t, ssp_operator_build, ssp_operator_free
     use opensps_ssp_batch, only: ssp_opset_t, ssp_opset_build, ssp_opset_free, ssp_opset_build_mods, MAX_TP_PAIRS, &
                                  ssp_batch_share_imf, imf_shared_models, chunk_unique_imf
+    use opensps_batch_registry, only: batch_info_t, F_DUST2, F_FBHB, F_DELT, F_TAU, F_LOGZSOL, CLASS_C, CLASS_L, CLASS_G, &
+                                      batch_info_text
     use opensps_context, only: opensps_context_update_ssp_basis, opensps_context_move_to_device, &
                             opensps_context_set_pset, opensps_context_get_pset, opensps_context_prepare_pset, &
                             opensps_context_set_param_int, opensps_context_set_param_float, &
@@ -125,6 +127,7 @@ program test_csp_batch
     call check_mods_free_forward()
     call check_mods_pair_cache()
     call check_share_imf()
+    call check_batch_info()
     ! compute_csp_scenario: all-ages outputs against single-age calls, in each mode, on the
     ! one-metallicity basis
     call build_basis()
@@ -1140,6 +1143,57 @@ contains
         call ssp_opset_free(op)
         deallocate(s_on, s_off, g_on, g_off, s2, g2)
     end subroutine check_share_imf
+
+    !> The batch info of compute_csp_batch (opensps_batch_registry): the SSP source and the free fields of a batch on the
+    !> resident basis and of one with the isochrone factors and a TP-AGB shift free through the group operators. A call
+    !> without info is every other call of this program.
+    subroutine check_batch_info()
+        integer, parameter :: NB = 4
+        type(PARAMS) :: pset, pb(NB)
+        type(ssp_opset_t) :: op
+        type(batch_info_t) :: info
+        real(WP), allocatable :: mg(:, :)
+        integer :: m, status
+
+        call print_group("Batched CSP: the batch info")
+        allocate(mg(ctx%state%nbands, NB))
+        call set_int('imf_type', 1)
+        call set_factors(0.0_wp, 0.0_wp, 1.0_wp, 1.0_wp, 1.0_wp)
+        call build_basis()
+        call set_model(1, 0.5_wp)
+        call opensps_context_prepare_pset(ctx)
+        call opensps_context_get_pset(ctx, pset)
+        do m = 1, NB
+            call set_model(m, 0.5_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, pb(m))
+        end do
+        ! the resident basis: tau and dust2 vary through set_model, nothing at the SSP level
+        call compute_csp_batch(ctx, pb, mg, status, info=info)
+        call assert_true(status == 0 .and. trim(info%ssp_source) == 'resident basis' .and. info%k_sources == 1 .and. &
+                         info%n_models == NB, "resident basis: the SSP source and K", total_tests, total_failures)
+        call assert_true(info%free(F_TAU) .and. info%free(F_DUST2) .and. .not. info%free(F_LOGZSOL) .and. &
+                         .not. info%free(F_FBHB) .and. info%n_free_class(CLASS_L) == 0 .and. &
+                         info%n_free_class(CLASS_C) >= 2, "resident basis: the free fields are the closed-form ones", &
+                         total_tests, total_failures)
+        ! the group operators: the factors and a shift free as well
+        call ssp_opset_build_mods(ctx, pset, .false., op)
+        pb(2)%fbhb = 0.3_wp
+        pb(3)%fbhb = 0.5_wp
+        pb(4)%delt = 0.0437_wp; pb(4)%dell = -0.0523_wp
+        call compute_csp_batch(ctx, pb, mg, status, ssp_ops=op, info=info)
+        call assert_true(status == 0 .and. trim(info%ssp_source) == 'operator groups' .and. &
+                         info%k_sources == 9 + op%n_ext .and. op%n_ext == 1, "group operators: the SSP source and K", &
+                         total_tests, total_failures)
+        call assert_true(info%free(F_FBHB) .and. info%free(F_DELT) .and. info%n_distinct(F_FBHB) == 3 .and. &
+                         info%n_free_class(CLASS_L) == 1 .and. info%n_free_class(CLASS_G) == 2, &
+                         "group operators: fbhb (linear, three values), delt and dell (grouped) are free", &
+                         total_tests, total_failures)
+        call assert_true(index(batch_info_text(info), 'fbhb[linear,3]') > 0, "the text names the class and the values", &
+                         total_tests, total_failures)
+        call ssp_opset_free(op)
+        deallocate(mg)
+    end subroutine check_batch_info
 
     subroutine set_factors(fbhb, sbss, agb, pagb, redgb)
         real(WP), intent(in) :: fbhb, sbss, agb, pagb, redgb

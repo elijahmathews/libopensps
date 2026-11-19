@@ -1,0 +1,53 @@
+# Hot paths: which parameters can be free in a batch, and what each costs
+
+A batch (`compute_csp_batch`, `opensps_context_compute_csp_batch*`) lets any member of `PARAMS_CORE` differ from
+model to model, within the exclusions of this document. The aim is that the cost of a batch is the sum of what its free
+parameters need, not a property of the combination, and that a new free parameter is a new instance of an existing
+mechanism, not a new hot path.
+
+## The classes
+
+Every per-model parameter is registered in `src/core/opensps_batch_registry.f90` with a class and a stage (the table is
+checked against `PARAMS_CORE` by the unit test `unit_batch_registry_covers_params`, so a new parameter cannot be
+forgotten). The class says how the parameter enters the model, which fixes the mechanism and what the cost grows with:
+
+| Class | Enters as | Mechanism | Cost grows with | Fields (today) |
+|---|---|---|---|---|
+| **C** closed form | read by uniform per-model kernels | the CSP stage: SFH weights, attenuation tables, dust emission, gas, AGN, redshift | nothing | SFH (`tau`, `tage`, `const`, `fburst`, `tburst`, `sf_*`, `sfh`), dust (`dust1`-`dust3`, `dust_index`, ...), `duste_*`, `gas_*`, `frac_obrun`, `fagn`, `agn_tau`, `zred`, `igm_factor` |
+| **L** linear mixture | the coefficient of a fixed set of sources | the batch is a sum over sources: metallicity (2 slabs), [alpha/Fe] (4 slabs), the modification groups (`ssp_opset_build_mods`) | the number of sources K | `logzsol`, `afe`, `fbhb`, `sbss`, `agb`, `pagb`, `redgb` |
+| **W** weights | per-point weights of the SSP | computed once per distinct value of the parameters (shared IMF weights, `SHARE_IMF_MIN_BATCH`) | the distinct values | `imf1`-`imf3`, `vdmc`, `mdave` |
+| **G** grouped discrete | selects a precomputed structure | one structure per distinct value, gathered per model (the TP-AGB pairs) | the distinct values | `delt`, `dell` |
+| **S** shared | must be equal across the batch, or is not a per-model quantity | status 2 if it differs | | `sigma_smooth` and the smoothing range (per-model smoothing is planned), `masscut`, `agb_dust`, `evtype`, `zmet`, `pmetals`, `wgp1`-`wgp3`, `fcstar`, `frac_xrb`, the file names and the output switches |
+
+The SSP stage has two sources behind these classes: the **resident basis** (the SSPs for one IMF and one set of
+modifications, built once; metallicity and [alpha/Fe] are blended per model from several resident bases) and the
+**operator** (`ssp_ops`; the SSP of each model from its IMF weights and the operators S; the modifications as a sum over
+groups). Which one a batch takes follows from which fields are free:
+
+| Free at the SSP level | Source | K |
+|---|---|---|
+| nothing | resident basis | 1 |
+| `logzsol` | resident bases, 2 slabs | 2 |
+| `logzsol`, `afe` | resident bases, 4 slabs | 4 |
+| IMF (W) | operator | 1 (2 with `logzsol`) |
+| `fbhb`..`redgb` (L), `delt`/`dell` (G) | operator, modification groups | 9 + distinct shift pairs |
+
+## Seeing the path
+
+`compute_csp_batch(..., info=info)` returns a `batch_info_t` (`opensps_batch_registry`): the fields that differ among
+the models, the number of distinct values of each (up to 16), whether a shared field differs, the SSP source and K.
+`batch_info_text(info)` formats it; with `OPENSPS_DEBUG_PATH=1` every batch prints that line to standard error. The
+classification costs a pass over the models and is made only on request, so the default path pays nothing.
+
+## Not yet free per model (each its own piece of work)
+
+* Class S fields that are physically per-model quantities: `sigma_smooth` and its range (velocity dispersion is a common
+  fit parameter).
+* The operator path with `afe`, `ssp_weights_z`, `add_neb_emission = 2`, `add_xrb_emission = 1` or `smooth_lsf`; cue with
+  a free IMF; `agb_dust`, `masscut`, `evtype` (they select stars: a rebuild per distinct value).
+
+## Where the cost goes
+
+Measured per-model costs at N = 10^4 (FP32; `doc/GPU_RESULTS.md`, `doc/TUNING.md` M6): resident basis 6.6 - 7.3 us on the
+R9700, IMF free through the operator 23, plus the isochrone factors 32 - 34. The matrix benchmark of the stack's second
+PR measures each parameter alone and in pairs against these.

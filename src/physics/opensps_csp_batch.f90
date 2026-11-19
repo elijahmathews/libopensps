@@ -115,6 +115,7 @@ module opensps_csp_batch
     use opensps_imf, only: imf_pack_params, IMF_NPAR, IMF_P_ALPHA, IMF_P_VDMC, IMF_P_MDAVE
     use opensps_ssp_operator, only: ssp_op_mod_signature, ssp_mod_coefficients, ssp_mod_coefficient_derivatives, MOD_NGRP, &
                                     N_MOD_SIG
+    use opensps_batch_registry, only: batch_info_t, batch_classify, batch_info_set_path, batch_info_print, batch_debug_path
     use opensps_ssp_batch, only: ssp_batch_age_sums_z, ssp_opset_t, ssp_batch_age_sums_adjoint, NIMFG, dot_lanes, &
                                  ssp_mods_prepare_pairs
     use opensps_sfh_tangent, only: sfh_weights_tangent, sfh_tangent_supported, NSFHT
@@ -371,7 +372,7 @@ contains
     subroutine compute_csp_batch(ctx, psets, mags, status, spec, mass, lbol, mdust, sfr, emlines, indx, ssp_weights, &
                                  spec_young, spec_old, mass_young, mass_old, lbol_young, lbol_old, zred_mags, &
                                  ssp_weights_z, ssp_ops, mags_bar, spec_bar, params_bar, weights_bar, mass_bar, lbol_bar, &
-                                 weights_z_bar)
+                                 weights_z_bar, info)
         type(opensps_context_t), intent(inout) :: ctx
 #if defined(__flang__)
         type(params), intent(in)            :: psets(:)
@@ -393,8 +394,13 @@ contains
         real(WP), intent(out), optional     :: params_bar(:,:), weights_bar(:,:)
         real(WP), intent(in), optional      :: mass_bar(:), lbol_bar(:)
         real(WP), intent(out), optional     :: weights_z_bar(:,:,:)
+        !> The batch as the registry sees it (opensps_batch_registry): the fields that differ among the models, their classes
+        !> and distinct values, and the SSP source of the path taken. Filled once the batch has passed the checks on its
+        !> modes; with OPENSPS_DEBUG_PATH set, also printed to standard error
+        type(batch_info_t), intent(out), optional :: info
 
         integer :: n_mod, nt, nspec, nbands, m, k
+        type(batch_info_t) :: binfo
         real(WP) :: zred, dust_age_log, w, mass_frac, sfr_norm, frac_linear, mk, lk, wa_m
         logical  :: igm, any_emis, neb, agn, smooth, zmode, zvar, given_w, host_w, parts, zw, host_m, imf, dev, zimf, grad
         logical  :: cue
@@ -773,6 +779,28 @@ contains
         ! [alpha/Fe]: not with weights over ages and metallicities (they would need a plane too) nor the IMF per model
         if (naf > 1 .and. (zw .or. imf)) then
             status = 2; return
+        end if
+        ! The path of the batch, for the caller (info) or the debug print: nothing is computed otherwise
+        if (present(info) .or. batch_debug_path()) then
+            call batch_classify(psets(1:n_mod)%params_core, binfo)
+            if (imf) then
+                if (ssp_ops%free_mods) then
+                    call batch_info_set_path(binfo, merge('operator groups, Z', 'operator groups   ', zimf), &
+                                             MOD_NGRP + ssp_ops%n_ext)
+                else
+                    call batch_info_set_path(binfo, merge('operator, Z', 'operator   ', zimf), merge(2, 1, zimf))
+                end if
+            else if (zw) then
+                call batch_info_set_path(binfo, 'resident bases, weights over Z', max(nzb, 1))
+            else if (naf > 1 .and. zmode) then
+                call batch_info_set_path(binfo, 'resident bases, Z x [alpha/Fe]', 4)
+            else if (zmode) then
+                call batch_info_set_path(binfo, 'resident bases, Z', 2)
+            else
+                call batch_info_set_path(binfo, 'resident basis', 1)
+            end if
+            if (batch_debug_path()) call batch_info_print(binfo)
+            if (present(info)) info = binfo
         end if
         ! (After the argument checks, so that a call that is invalid anyway keeps its status.)
         ! An offload build whose target regions run on the host (no device, OMP_TARGET_OFFLOAD=DISABLED): the
