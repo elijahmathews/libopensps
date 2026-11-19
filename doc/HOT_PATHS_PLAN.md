@@ -76,6 +76,12 @@ inline, as is the call of `batch_backward` with its 30 arguments; splitting thos
 `rpk`, `lpk`, `rout`) and the arrays the stages share, and the device rules about mapping derived types make each cut something to check
 on the R9700.
 
+**The file in stage order (done, #140).** The procedures of `opensps_csp_batch.f90` are arranged to follow the stages of a batch (the driver, stages 0 - 9
+with a banner each, a table of contents after `contains`), instead of in the order in which they were written. No procedure changed: each moved
+whole (a tool segmented the file into 84 units, and a check showed the new file holds exactly the old lines plus the banners). A split into
+several modules was considered and not done: the routines call each other across the stages (the reverse pass reuses the forward helpers,
+the types and constants are shared), so each module would need the common pieces in another one, for the gain that the order already gives.
+
 **The nebular code, surveyed (no step).** The family of about 2000 lines (`nebular_setup`, `add_nebular_batch`, `nebular_kernels`,
 `nebular_continuum_tiled`, `cue_nebular`, `cue_nebular_backward`, `backward_nebular`, `neb_run_block`, the line routines) is two
 physical models (the CLOUDY grids; cue, Li et al. 2024, a neural-network emulation of CLOUDY), each with a forward and a reverse pass,
