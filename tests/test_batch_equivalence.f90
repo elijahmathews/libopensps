@@ -71,6 +71,11 @@ program test_batch_equivalence
     call set_int('add_agn_dust', 1)
     call set_float('fagn', 0.05_wp)
     call set_int('compute_indices', 0)
+    ! The velocity smoothing is on (sigma_smooth can be free), with the nebular lines out of the spectrum: their profile table is
+    ! built once per batch from one sigma
+    call set_int('smooth_velocity', 1)
+    call set_int('smoothspec_fast', 1)
+    call set_int('nebemlineinspec', 0)
     call build_basis()
     call base_operators()
 

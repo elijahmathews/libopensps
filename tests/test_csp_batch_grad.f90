@@ -100,6 +100,7 @@ program test_csp_batch_grad
     integer :: seed = 12345
     logical :: zred_per_model = .false.
     real(WP) :: smooth_sigma = 0.0_wp   ! sigma_smooth of every model
+    logical  :: smooth_per_model = .false.   ! sigma_smooth of each model its own (one not smoothed at all)
     !> The IMF free per model: the batch takes the operator set opset (cb)
     logical :: use_ops = .false.
     !> The isochrone modification factors are free per model (a set of ssp_opset_build_mods): their rows are checked, and the
@@ -156,11 +157,18 @@ program test_csp_batch_grad
     call set_int('smooth_velocity', 1)
     smooth_sigma = 150.0_wp
     call check_grad(0, 0.513_wp, 1, 1, .true., "power law, z = 0.513, IGM, dust emission, AGN, sigma_smooth = 150 km/s")
+    ! ... with sigma_smooth per model (one model not smoothed, the others at 75 - 187 km/s: a kernel for each distinct value)
+    smooth_per_model = .true.
+    call check_grad(0, 0.513_wp, 1, 1, .true., "power law, z = 0.513, IGM, dust emission, AGN, sigma_smooth per model")
+    smooth_per_model = .false.
     smooth_sigma = 0.0_wp
     ! The host smoothing modes: the exact log-linear velocity convolution, constant width in wavelength
     call set_int('smoothspec_fast', 0)
     smooth_sigma = 150.0_wp
     call check_grad(2, 0.513_wp, 1, 1, .true., "Calzetti, z = 0.513, IGM, dust emission, AGN, exact velocity smoothing")
+    smooth_per_model = .true.
+    call check_grad(2, 0.513_wp, 1, 1, .true., "Calzetti, z = 0.513, IGM, dust emission, AGN, exact velocity smoothing per model")
+    smooth_per_model = .false.
     call set_int('smoothspec_fast', 1)
     call set_int('smooth_velocity', 0)
     ! (5.37 A, not 5: at 5 A the windows' edges, lambda +- 20 A, fall on pixels of the 5 A-spaced parts of
@@ -599,7 +607,7 @@ contains
         type(PARAMS) :: psets(N_MOD), pp(N_MOD)
         real(WP), allocatable :: mags(:, :), spec(:, :), mbar(:, :), sbar(:, :), pbar(:, :), wbar(:, :), wbar2(:, :)
         real(WP), allocatable :: w(:, :), wp_(:, :), wm(:, :), dir(:, :), t1(:), t2(:)
-        real(WP) :: lp, lm, l0, l3, g_fd, g_ad, h, worst, scale, gwa, gwf
+        real(WP) :: lp, lm, l0, l3, g_fd, g_ad, h, worst, scale, gwa, gwf, worst_m
         integer :: m, b, i, k, nspec, nbands, nt, status, k0
 
         call print_group("Gradients: " // label)
@@ -617,6 +625,7 @@ contains
             call opensps_context_prepare_pset(ctx)
             call opensps_context_get_pset(ctx, psets(m))
             if (mods_on) call set_mods(psets(m), m)
+            if (smooth_per_model) psets(m)%sigma_smooth = merge(0.0_wp, smooth_sigma * (0.5_wp + 0.25_wp * mod(m, 4)), m == 1)
             call sfh_weights_core(ctx, psets(m), psets(m)%tage, 1, w(:, m:m), t1, t2)
         end do
 
@@ -757,9 +766,13 @@ contains
         if (smooth_sigma > 0.0_wp) then
             h = merge(1.0e-2_wp, 1.0e-5_wp, LINEAR_ONLY) * smooth_sigma
             pp = psets
-            pp(:)%sigma_smooth = smooth_sigma + h
+            do m = 1, size(pp)
+                if (psets(m)%sigma_smooth > 0.0_wp) pp(m)%sigma_smooth = psets(m)%sigma_smooth + h
+            end do
             call loss(pp, w, given_w, lp)
-            pp(:)%sigma_smooth = smooth_sigma - h
+            do m = 1, size(pp)
+                if (psets(m)%sigma_smooth > 0.0_wp) pp(m)%sigma_smooth = psets(m)%sigma_smooth - h
+            end do
             call loss(pp, w, given_w, lm)
             g_fd = (lp - lm) / (2.0_wp * h)
             g_ad = sum(pbar(BGRAD_SIGMA_SMOOTH, :))
@@ -769,8 +782,31 @@ contains
             ! and its sigma gradient can be ~1e-9. FP64: the window-edge jumps leave the differences
             ! ~1e-10 absolute; the random cotangents can make the batch's sigma gradient ~1e-6, as with
             ! LLVM flang's draws at 5.37 A: 2.4e-10 = 1e-4 relative; nvfortran 1.3e-9: the floor is 3e-5)
-            call assert_true(abs(g_ad - g_fd) <= merge(2.0e-2_wp, 1.0e-4_wp, LINEAR_ONLY) * max(abs(g_fd), 3.0e-5_wp), &
-                             "d L / d sigma_smooth against finite differences", total_tests, total_failures)
+            ! (per model, the sum over the models' rows at different sigma meets more window edges: 3e-3 measured; each model is
+            ! checked on its own below)
+            call assert_true(abs(g_ad - g_fd) <= merge(2.0e-2_wp, merge(1.0e-2_wp, 1.0e-4_wp, smooth_per_model), LINEAR_ONLY) * &
+                             max(abs(g_fd), 3.0e-5_wp), "d L / d sigma_smooth against finite differences", &
+                             total_tests, total_failures)
+            ! Per model (each has its own sigma, so its own row): one model's sigma moved at a time against its own row, over a
+            ! quarter of the step: where a window edge crosses a pixel inside the step the differences jump (up to 2.5% of a row
+            ! at the full step, measured), and the quarter step's agree with the adjoint to 1e-5
+            if (smooth_per_model) then
+                worst_m = 0.0_wp
+                do m = 2, size(psets)
+                    pp = psets
+                    pp(m)%sigma_smooth = psets(m)%sigma_smooth + 0.25_wp * h
+                    call loss(pp, w, given_w, lp)
+                    pp(m)%sigma_smooth = psets(m)%sigma_smooth - 0.25_wp * h
+                    call loss(pp, w, given_w, lm)
+                    g_fd = (lp - lm) / (0.5_wp * h)
+                    worst_m = max(worst_m, abs(pbar(BGRAD_SIGMA_SMOOTH, m) - g_fd) / max(abs(g_fd), 1.0e-5_wp))
+                end do
+                write(*, '(A,ES10.2)') "# sigma_smooth per model: worst relative difference ", worst_m
+                call assert_true(worst_m <= merge(2.0e-2_wp, 1.0e-3_wp, LINEAR_ONLY), &
+                                 "d L / d sigma_smooth of each model against finite differences", total_tests, total_failures)
+                call assert_true(all(pbar(BGRAD_SIGMA_SMOOTH, 1:1) == 0.0_wp), &
+                                 "a model that is not smoothed has no sigma gradient", total_tests, total_failures)
+            end if
         end if
 
         ! Single ages of model 2: its oldest weighted age, its youngest, and an age with zero weight

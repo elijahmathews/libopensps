@@ -116,6 +116,7 @@ module opensps_csp_batch
     use opensps_ssp_operator, only: ssp_op_mod_signature, ssp_mod_coefficients, ssp_mod_coefficient_derivatives, MOD_NGRP, &
                                     N_MOD_SIG
     use opensps_batch_registry, only: batch_info_t, batch_classify, batch_info_set_path, batch_info_print, batch_debug_path
+    use opensps_value_classes, only: classify_columns
     use opensps_ssp_batch, only: ssp_batch_age_sums_z, ssp_opset_t, ssp_batch_age_sums_adjoint, NIMFG, dot_lanes, &
                                  ssp_mods_prepare_pairs
     use opensps_sfh_tangent, only: sfh_weights_tangent, sfh_tangent_supported, NSFHT
@@ -278,6 +279,21 @@ module opensps_csp_batch
     real(WP), parameter :: V_BAND_ANGSTROMS = 5500.0_wp   ! as in opensps_dust
 
     !> Nebular emission data of a batch (nebular_setup)
+    !> The velocity smoothing of a batch: the models grouped by their distinct (sigma_smooth, min_wave_smooth, max_wave_smooth),
+    !> one kernel per group (the fast device operator holds one kernel at a time, so a group is smoothed after the other
+    !> through a gather and a scatter of its columns). A batch whose models all have the same smoothed triple (the usual one)
+    !> is `uniform`: the kernel serves every column in place, as before. The host modes smooth a column at a time with the
+    !> model's own values (sigma_m, minl_m, maxl_m); a model with sigma <= SAFE_FLOOR is not smoothed in either.
+    integer, parameter :: MAX_SMOOTH_GROUPS = 16
+    type :: smooth_plan_t
+        logical :: any = .false.        ! some model is smoothed
+        logical :: uniform = .false.    ! every model has the same smoothed triple
+        integer :: ncls = 0
+        integer, allocatable :: ptr(:), cols(:)                 ! the columns of group g: cols(ptr(g) : ptr(g + 1) - 1)
+        real(WP), allocatable :: sigma(:), minl(:), maxl(:)     ! per group
+        real(WP), allocatable :: sigma_m(:), minl_m(:), maxl_m(:)    ! per model
+    end type smooth_plan_t
+
     type :: nebular_setup_t
         integer :: nt_neb = 0         !< ages with nebular emission (1..nt_neb)
         integer :: whlylim = 0        !< pixels below the Lyman limit
@@ -406,6 +422,8 @@ contains
         logical  :: cue
         type(ssp_opset_t), pointer :: refset => null()
         real(WP), allocatable :: cgm(:,:), dcm(:,:,:), dsh(:,:)
+        type(smooth_plan_t) :: splan
+        integer :: st_sm
         integer, allocatable :: ipair(:)
         integer :: ng, st_pair
         real(WP) :: sigm(N_MOD_SIG)
@@ -624,9 +642,7 @@ contains
         zred = psets(1)%zred
         zvar = .false.
         do m = 1, n_mod
-            if ((psets(m)%tage <= 0.0_wp .and. .not. given_w) .or. psets(m)%sigma_smooth /= psets(1)%sigma_smooth .or. &
-                psets(m)%min_wave_smooth /= psets(1)%min_wave_smooth .or. &
-                psets(m)%max_wave_smooth /= psets(1)%max_wave_smooth .or. &
+            if ((psets(m)%tage <= 0.0_wp .and. .not. given_w) .or. &
                 psets(m)%uvb < 0.0_wp .or. psets(m)%wgp1 < 1 .or. psets(m)%wgp2 < 1) then
                 status = 2; return
             end if
@@ -766,7 +782,18 @@ contains
 
         ! Smoothing as apply_smoothing (which does nothing for sigma <= SAFE_FLOOR): the fast
         ! velocity kernel on the device, the other modes on the host (smooth_columns_host)
-        smooth = psets(1)%sigma_smooth > SAFE_FLOOR
+        ! (per model: the models are grouped by their distinct smoothing triples; more than MAX_SMOOTH_GROUPS distinct on the fast
+        ! device operator is status 2)
+        call plan_smoothing(psets(1:n_mod), n_mod, smoothing_on_device(ctx), splan, st_sm)
+        if (st_sm /= 0) then
+            status = 2; return
+        end if
+        ! The nebular lines are broadened by sigma_smooth with a profile table built once per batch (gaussnebarr, from the
+        ! first model's): a sigma of each model's own with lines in the spectrum is not supported
+        if (ctx%add_neb_emission_val == 1 .and. ctx%nebemlineinspec_val == 1 .and. any(splan%sigma_m /= splan%sigma_m(1))) then
+            status = 2; return
+        end if
+        smooth = splan%any
 
         ! Per-model metallicity: a basis per metallicity of the context (interpolated at logzsol,
         ! unless the weights cover the metallicities)
@@ -940,9 +967,8 @@ contains
             call prepare_batch_grid(ctx, zred, psets(1)%igm_factor)
             igm = ctx%state%batch%igm
         end if
-        if (smooth .and. smoothing_on_device(ctx)) call prepare_smoothing_kernel(ctx, psets(1)%sigma_smooth, &
-                                                                             psets(1)%min_wave_smooth, &
-                                                                             psets(1)%max_wave_smooth)
+        if (smooth .and. smoothing_on_device(ctx) .and. splan%uniform) &
+            call prepare_smoothing_kernel(ctx, splan%sigma(1), splan%minl(1), splan%maxl(1))
 
         ! ------------------------------------------------------------------
         ! 2-7. Device: age sums, nebular emission, attenuation, dust emission, IGM, AGN, smoothing
@@ -1357,9 +1383,13 @@ contains
             end do
         end if
         if (smooth .and. smoothing_on_device(ctx)) then
-            call smooth_columns(ctx, total, n_mod)
+            if (splan%uniform) then
+                call smooth_columns(ctx, total, n_mod)
+            else
+                call smooth_groups(ctx, splan, total)
+            end if
         else if (smooth) then
-            call smooth_columns_host(ctx, psets(1), total(:, 1:n_mod))
+            call smooth_columns_host(ctx, splan, total(:, 1:n_mod))
         end if
 
         ! ------------------------------------------------------------------
@@ -1476,16 +1506,14 @@ contains
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
                                     it_tesc, zlo, zhi, dz, da, nzs, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
                                     absorbed, ysave, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
-                                    neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
-                                    psets(1)%min_wave_smooth, psets(1)%max_wave_smooth, &
+                                    neb, nb, w2, present(zred_mags), tsave, splan, &
                                     imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzbl, &
                                     mags_bar, spec_bar, params_bar, wbl, gas, cgm, dcm, ipair)
             else
                 call batch_backward(ctx, PBUF_ARG, n_mod, nspec, nt, nbands, zred, psets(1)%igm_factor, mags, fbk, zcm, &
                                     it_tesc, zlo, zhi, dz, da, nzs, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, &
                                     absorbed, yo, total, emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, &
-                                    neb, nb, w2, present(zred_mags), tsave, psets(1)%sigma_smooth, &
-                                    psets(1)%min_wave_smooth, psets(1)%max_wave_smooth, &
+                                    neb, nb, w2, present(zred_mags), tsave, splan, &
                                     imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzbl, &
                                     mags_bar, spec_bar, params_bar, wbl, gas, cgm, dcm, ipair)
             end if
@@ -1624,13 +1652,181 @@ contains
         end do
     end subroutine compute_csp_batch
 
+    !> The smoothing groups of a batch (smooth_plan_t): the models' own values, and (for the fast device operator, which
+    !> keeps one kernel) the groups of equal (sigma, min, max) with the columns of each. status 2: more distinct smoothed triples
+    !> than MAX_SMOOTH_GROUPS on the device operator.
+    subroutine plan_smoothing(psets, n_mod, device, plan, status)
+        type(params), intent(in) :: psets(:)
+        integer, intent(in) :: n_mod
+        logical, intent(in) :: device
+        type(smooth_plan_t), intent(out) :: plan
+        integer, intent(out) :: status
+        real(WP) :: vals(3, n_mod)
+        integer :: cls(n_mod), rep(n_mod), cnt(n_mod + 1), g, m, ncls
+        logical :: overflow
+
+        status = 0
+        allocate(plan%sigma_m(n_mod), plan%minl_m(n_mod), plan%maxl_m(n_mod))
+        do m = 1, n_mod
+            plan%sigma_m(m) = psets(m)%sigma_smooth
+            plan%minl_m(m) = psets(m)%min_wave_smooth
+            plan%maxl_m(m) = psets(m)%max_wave_smooth
+        end do
+        plan%any = any(plan%sigma_m > SAFE_FLOOR)
+        allocate(plan%ptr(1), plan%cols(1), plan%sigma(1), plan%minl(1), plan%maxl(1))
+        plan%ptr = 1
+        if (.not. plan%any .or. .not. device) return
+        vals(1, :) = plan%sigma_m
+        vals(2, :) = plan%minl_m
+        vals(3, :) = plan%maxl_m
+        ! (a model that is not smoothed has no triple of its own: its sigma is zero, whatever its range)
+        do m = 1, n_mod
+            if (vals(1, m) <= SAFE_FLOOR) vals(:, m) = 0.0_wp
+        end do
+        call classify_columns(vals, MAX_SMOOTH_GROUPS, 0, cls, rep, ncls, overflow)
+        if (overflow) then
+            status = 2
+            return
+        end if
+        plan%ncls = ncls
+        deallocate(plan%ptr, plan%cols, plan%sigma, plan%minl, plan%maxl)
+        allocate(plan%ptr(ncls + 1), plan%cols(n_mod), plan%sigma(ncls), plan%minl(ncls), plan%maxl(ncls))
+        cnt = 0
+        do m = 1, n_mod
+            cnt(cls(m)) = cnt(cls(m)) + 1
+        end do
+        plan%ptr(1) = 1
+        do g = 1, ncls
+            plan%ptr(g + 1) = plan%ptr(g) + cnt(g)
+            plan%sigma(g) = vals(1, rep(g))
+            plan%minl(g) = vals(2, rep(g))
+            plan%maxl(g) = vals(3, rep(g))
+        end do
+        cnt(1:ncls) = plan%ptr(1:ncls)
+        do m = 1, n_mod
+            plan%cols(cnt(cls(m))) = m
+            cnt(cls(m)) = cnt(cls(m)) + 1
+        end do
+        plan%uniform = ncls == 1 .and. plan%sigma(1) > SAFE_FLOOR
+    end subroutine plan_smoothing
+
+    !> The fast velocity smoothing for a batch whose models do not all have the same triple: each group's kernel (the operator
+    !> holds one at a time) applied to the group's columns, gathered into a work array and put back; models with sigma = 0 are
+    !> not touched.
+    subroutine smooth_groups(ctx, plan, total)
+        type(opensps_context_t), intent(inout) :: ctx
+        type(smooth_plan_t), intent(in) :: plan
+        real(KP), intent(inout), contiguous :: total(:,:)
+        real(KP), allocatable :: gt(:,:)
+        integer, allocatable :: cg(:)
+        integer :: g, j, k, ng, mx, nspec
+
+        nspec = size(total, 1)
+        mx = maxval(plan%ptr(2:plan%ncls + 1) - plan%ptr(1:plan%ncls))
+        allocate(gt(nspec, mx), cg(mx))
+#ifdef OMP_TARGET
+        !$omp target data map(alloc: gt, cg)
+#endif
+        do g = 1, plan%ncls
+            if (plan%sigma(g) <= SAFE_FLOOR) cycle
+            ng = plan%ptr(g + 1) - plan%ptr(g)
+            cg(1:ng) = plan%cols(plan%ptr(g):plan%ptr(g + 1) - 1)
+            call prepare_smoothing_kernel(ctx, plan%sigma(g), plan%minl(g), plan%maxl(g))
+#ifdef OMP_TARGET
+            !$omp target update to(cg(1:ng))
+            !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2)
+#endif
+            do j = 1, ng
+                do k = 1, nspec
+                    gt(k, j) = total(k, cg(j))
+                end do
+            end do
+            call smooth_columns(ctx, gt, ng)
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2)
+#endif
+            do j = 1, ng
+                do k = 1, nspec
+                    total(k, cg(j)) = gt(k, j)
+                end do
+            end do
+        end do
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine smooth_groups
+
+    !> The reverse of smooth_groups: per group, d L / d sigma_smooth of its models (dsg) and the transpose of its smoothing on the
+    !> cotangents of the smoothed spectra (gw(:, n_mod + m)), from the spectra before smoothing (tsave). Models that are not
+    !> smoothed keep their cotangents and have dsg = 0.
+    subroutine smooth_groups_adjoint(ctx, plan, tsave, gw, n_mod, dsg)
+        type(opensps_context_t), intent(inout) :: ctx
+        type(smooth_plan_t), intent(in) :: plan
+        real(KP), intent(in), contiguous :: tsave(:,:)
+        real(KP), intent(inout), contiguous :: gw(:,:)
+        integer, intent(in) :: n_mod
+        real(WP), intent(out) :: dsg(n_mod)
+        real(KP), allocatable :: ts(:,:), gb(:,:)
+        real(WP), allocatable :: dsg_g(:)
+        integer, allocatable :: cg(:)
+        integer :: g, j, k, ng, mx, nspec
+
+        nspec = size(tsave, 1)
+        dsg = 0.0_wp
+        mx = maxval(plan%ptr(2:plan%ncls + 1) - plan%ptr(1:plan%ncls))
+        allocate(ts(nspec, mx), gb(nspec, mx), dsg_g(mx), cg(mx))
+#ifdef OMP_TARGET
+        !$omp target data map(alloc: ts, gb, cg)
+#endif
+        do g = 1, plan%ncls
+            if (plan%sigma(g) <= SAFE_FLOOR) cycle
+            ng = plan%ptr(g + 1) - plan%ptr(g)
+            cg(1:ng) = plan%cols(plan%ptr(g):plan%ptr(g + 1) - 1)
+            call prepare_smoothing_kernel(ctx, plan%sigma(g), plan%minl(g), plan%maxl(g))
+#ifdef OMP_TARGET
+            !$omp target update to(cg(1:ng))
+            !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2)
+#endif
+            do j = 1, ng
+                do k = 1, nspec
+                    ts(k, j) = tsave(k, cg(j))
+                    gb(k, j) = gw(k, n_mod + cg(j))
+                end do
+            end do
+            call smooth_sigma_adjoint(ctx, plan%sigma(g), ts, gb, ng, dsg_g(1:ng))
+            call smooth_columns_adjoint(ctx, gb, ng)
+#if defined(OMP_TARGET)
+            !$omp target teams distribute parallel do collapse(2)
+#elif defined(_OPENMP)
+            !$omp parallel do collapse(2)
+#endif
+            do j = 1, ng
+                do k = 1, nspec
+                    gw(k, n_mod + cg(j)) = gb(k, j)
+                end do
+            end do
+            do j = 1, ng
+                dsg(cg(j)) = dsg_g(j)
+            end do
+        end do
+#ifdef OMP_TARGET
+        !$omp end target data
+#endif
+    end subroutine smooth_groups_adjoint
+
     !> Smoothing other than the fast velocity kernel (smooth_velocity = 0: constant width in
     !> wavelength; smoothspec_fast = 0: the exact log-linear velocity convolution), on the host
-    !> with compute_csp_scenario's routine (apply_smoothing), one column at a time in FP64: sp
-    !> (pixels x models, on the device in device builds) is copied to the host and back.
-    subroutine smooth_columns_host(ctx, pset, sp)
+    !> with compute_csp_scenario's routine (apply_smoothing), one column at a time in FP64 and with each model's own
+    !> sigma_smooth and range: sp (pixels x models, on the device in device builds) is copied to the host and back.
+    subroutine smooth_columns_host(ctx, plan, sp)
         type(opensps_context_t), intent(in) :: ctx
-        type(params), intent(in)         :: pset
+        type(smooth_plan_t), intent(in)  :: plan
         real(KP), intent(inout), contiguous :: sp(:,:)
         real(WP), allocatable :: col(:)
         integer :: m, nspec
@@ -1641,9 +1837,9 @@ contains
         !$omp target update from(sp)
 #endif
         do m = 1, size(sp, 2)
+            if (plan%sigma_m(m) <= SAFE_FLOOR) cycle
             col = real(sp(:, m), WP)
-            call apply_smoothing(ctx, ctx%state%spec_lambda(1:nspec), col, pset%sigma_smooth, pset%min_wave_smooth, &
-                                 pset%max_wave_smooth)
+            call apply_smoothing(ctx, ctx%state%spec_lambda(1:nspec), col, plan%sigma_m(m), plan%minl_m(m), plan%maxl_m(m))
             sp(:, m) = real(col, KP)
         end do
 #ifdef OMP_TARGET
@@ -1653,24 +1849,28 @@ contains
 
     !> The transpose of smooth_columns_host (the host smoothing modes) for the gradients: per model,
     !> apply_smoothing_adjoint on the smoothed spectrum's cotangent (gw(:, N + m)) and the spectrum
-    !> before smoothing (tsave), and d L / d sigma (dsg).
-    subroutine smooth_columns_host_adjoint(ctx, nspec, n_mod, sigma, minl, maxl, tsave, gw, dsg)
+    !> before smoothing (tsave), with the model's own sigma and range, and d L / d sigma (dsg); a model that is not smoothed
+    !> has dsg = 0 and keeps its cotangent.
+    subroutine smooth_columns_host_adjoint(ctx, nspec, n_mod, plan, tsave, gw, dsg)
         type(opensps_context_t), intent(in) :: ctx
         integer, intent(in)     :: nspec, n_mod
-        real(WP), intent(in)    :: sigma, minl, maxl
+        type(smooth_plan_t), intent(in) :: plan
         real(KP), intent(inout) :: tsave(:,:), gw(:,:)
         real(WP), intent(out)   :: dsg(n_mod)
         real(WP), allocatable :: col(:), gb(:)
         integer :: m
 
         allocate(col(nspec), gb(nspec))
+        dsg = 0.0_wp
 #ifdef OMP_TARGET
         !$omp target update from(tsave, gw)
 #endif
         do m = 1, n_mod
+            if (plan%sigma_m(m) <= SAFE_FLOOR) cycle
             col = real(tsave(1:nspec, m), WP)
             gb = real(gw(1:nspec, n_mod + m), WP)
-            call apply_smoothing_adjoint(ctx, ctx%state%spec_lambda(1:nspec), col, gb, sigma, minl, maxl, dsg(m))
+            call apply_smoothing_adjoint(ctx, ctx%state%spec_lambda(1:nspec), col, gb, plan%sigma_m(m), plan%minl_m(m), &
+                                         plan%maxl_m(m), dsg(m))
             gw(1:nspec, n_mod + m) = real(gb, KP)
         end do
 #ifdef OMP_TARGET
@@ -4887,7 +5087,7 @@ contains
     subroutine batch_backward(ctx, pbuf, n_mod, nspec, nt, nbands, zred, igm_factor, mags, fband, zcm, it_tesc, &
                               zlo, zhi, dz, da, nzs, zmode, igm, zvar, agn_on, ita, wta, lsum, lum_linear, tdiff, tau, yo, total, &
                               emis, iq, iu, wq, wu, gam, s_abs, s_esc, dchain, smooth, neb, nb, w2, lzm, tsave, &
-                              sigma, minl, maxl, imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzb_out, mags_bar, &
+                              splan, imf, zimf, pm, wsfh, slum, smass, ssp_ops, lbx, mbx, zw, wzb_out, mags_bar, &
                               spec_bar, params_bar, weights_bar, gas, cgm, dcm, ipairm)
         type(opensps_context_t), intent(inout) :: ctx
         !> The isochrone modification groups' coefficients and their derivatives with respect to fbhb .. redgb
@@ -4921,7 +5121,7 @@ contains
         logical, intent(in)              :: lzm   ! the magnitudes at zred_mags (not at zred)
         ! Smoothing: the spectra before it (nspec x N when smooth), and sigma_smooth
         real(KP), intent(inout), contiguous :: tsave(:,:)
-        real(WP), intent(in)             :: sigma, minl, maxl   ! (the smoothing window: host modes)
+        type(smooth_plan_t), intent(in)  :: splan   ! the smoothing groups, and the model's own values (the host modes)
         ! The IMF per model (ssp_ops): its flags, parameters, masked SFH weights, L_bol per age, operators
         logical, intent(in)              :: imf, zimf
         real(WP), intent(in), contiguous :: pm(:,:), wsfh(:,:), slum(:,:), smass(:,:)
@@ -5074,12 +5274,16 @@ contains
         ! Velocity smoothing (the last stage of the spectrum): sigma_smooth's gradient (from the
         ! smoothed spectra's cotangents and the spectra before smoothing), then the transpose
         if (smooth .and. smoothing_on_device(ctx)) then
-            call smooth_sigma_adjoint(ctx, sigma, tsave, gw(:, n_mod + 1:2 * n_mod), n_mod, dsg)
-            call smooth_columns_adjoint(ctx, gw(:, n_mod + 1:2 * n_mod), n_mod)
+            if (splan%uniform) then
+                call smooth_sigma_adjoint(ctx, splan%sigma(1), tsave, gw(:, n_mod + 1:2 * n_mod), n_mod, dsg)
+                call smooth_columns_adjoint(ctx, gw(:, n_mod + 1:2 * n_mod), n_mod)
+            else
+                call smooth_groups_adjoint(ctx, splan, tsave, gw, n_mod, dsg)
+            end if
         else if (smooth) then
             ! The host modes (exact log-linear velocity convolution, constant width in wavelength): their
             ! transpose in FP64 on the host, a column at a time (as smooth_columns_host)
-            call smooth_columns_host_adjoint(ctx, nspec, n_mod, sigma, minl, maxl, tsave, gw, dsg)
+            call smooth_columns_host_adjoint(ctx, nspec, n_mod, splan, tsave, gw, dsg)
         end if
         if (any_agn) then
             call backward_agn(n_mod, nspec, ntau, pbuf, agn_on, ita, wta, lsum, ctx%state%agndust_spec, tdiff, gw, &

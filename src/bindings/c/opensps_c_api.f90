@@ -710,6 +710,8 @@ contains
         character(LEN=10), parameter :: IMF_PARAMS(5) = [character(LEN=10) :: 'imf1', 'imf2', 'imf3', 'vdmc', 'mdave']
         character(LEN=10), parameter :: MOD_PARAMS(7) = [character(LEN=10) :: 'fbhb', 'sbss', 'agb', 'pagb', 'redgb', &
                                                                             'delt', 'dell']
+        character(LEN=16), parameter :: SMOOTH_PARAMS(3) = [character(LEN=16) :: 'sigma_smooth', 'min_wave_smooth', &
+                                                                               'max_wave_smooth']
 
         status = 0
         if (handle < 1 .or. .not. ALLOCATED(ctx_pool) .or. handle > SIZE(ctx_pool)) then
@@ -769,7 +771,8 @@ contains
                 if (is_ssp_sensitive_float_param(trim(names(i))) .and. .not. &
                     (ctx%add_neb_emission_val /= 2 .and. any(trim(names(i)) == NEB_PARAMS)) .and. .not. &
                     (has_ops .and. any(trim(names(i)) == IMF_PARAMS)) .and. .not. &
-                    (has_mods .and. any(trim(names(i)) == MOD_PARAMS))) then
+                    (has_mods .and. any(trim(names(i)) == MOD_PARAMS)) .and. .not. &
+                    any(trim(names(i)) == SMOOTH_PARAMS)) then
                     status = 2
                     call opensps_set_error(2, 'compute_csp_batch: '//trim(names(i))//' changes the SSPs')
                     return

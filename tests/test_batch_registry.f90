@@ -51,7 +51,8 @@ contains
                          "indices out of range give empty answers", total_tests, total_failures)
         call assert_true(registry_class(F_LOGZSOL) == CLASS_L .and. registry_class(F_IMF1) == CLASS_W .and. &
                          registry_class(F_DELT) == CLASS_G .and. registry_class(F_DUST2) == CLASS_C .and. &
-                         registry_class(F_SIGMA_SMOOTH) == CLASS_S, "classes of representative fields", &
+                         registry_class(F_SIGMA_SMOOTH) == CLASS_G .and. registry_class(F_MASSCUT) == CLASS_S, &
+                         "classes of representative fields", &
                          total_tests, total_failures)
         call assert_true(trim(registry_class_name(CLASS_W)) == 'weights' .and. trim(registry_class_name(9)) == '?' .and. &
                          trim(registry_stage_name(STG_DUST)) == 'dust' .and. trim(registry_stage_name(0)) == '?', &
@@ -141,7 +142,7 @@ contains
         call assert_true(n_varied >= 30, "most per-model fields have a range", total_tests, total_failures)
         call registry_range(F_LOGZSOL, lo, hi)
         call assert_true(lo == -1.5_wp .and. hi == 0.05_wp, "the range of logzsol", total_tests, total_failures)
-        call registry_range(F_SIGMA_SMOOTH, lo, hi)
+        call registry_range(F_MASSCUT, lo, hi)
         call assert_true(lo == 0.0_wp .and. hi == 0.0_wp, "a shared field has no range", total_tests, total_failures)
         call registry_range(0, lo, hi)
         call assert_true(lo == 0.0_wp .and. hi == 0.0_wp, "an index out of range gives none", total_tests, total_failures)
@@ -180,11 +181,11 @@ contains
                          "free fields counted per class", total_tests, total_failures)
 
         ! a shared field that differs, and a character field
-        call registry_set(core(N), F_SIGMA_SMOOTH, 150.0_wp)
+        call registry_set(core(N), F_MASSCUT, 100.0_wp)
         call batch_classify(core, info)
-        call assert_true(info%shared_violation .and. info%free(F_SIGMA_SMOOTH) .and. info%n_free_class(CLASS_S) == 1, &
+        call assert_true(info%shared_violation .and. info%free(F_MASSCUT) .and. info%n_free_class(CLASS_S) == 1, &
                          "a shared field that differs is reported", total_tests, total_failures)
-        call registry_set(core(N), F_SIGMA_SMOOTH, 0.0_wp)
+        call registry_set(core(N), F_MASSCUT, 150.0_wp)
         core(2)%imf_filename = 'other'
         call batch_classify(core, info)
         call assert_true(info%shared_violation .and. info%free(F_IMF_FILENAME), "a character field that differs is reported", &
