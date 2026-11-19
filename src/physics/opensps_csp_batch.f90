@@ -2510,6 +2510,9 @@ contains
         end do
     end subroutine age_sums_host
 
+    !> The age sums of a batch whose models blend four slabs of the resident basis: two metallicity slabs (zlo, zlo + 1) of each of
+    !> two [alpha/Fe] planes (nzs slabs apart), with the weights (1 - dz)(1 - da), dz (1 - da), (1 - dz) da and dz da formed in FP64
+    !> and cast once. Builds the per-model descriptor (slab(4, N), wt(4, N)) and calls the K = 4 instance of age_sums_slabs.inc.
     subroutine age_sums_z4(nspec, nt, nsl, nzs, n_mod, basis, w2flat, it_tesc, zlo, dz, da, yo)
         integer, intent(in)  :: nspec, nt, nsl, nzs, n_mod, it_tesc(n_mod), zlo(n_mod)
         real(KP), intent(in) :: basis(nspec, nt, nsl), w2flat(nt * 2 * n_mod)
@@ -2592,7 +2595,19 @@ contains
         end if
     end subroutine add_nebular_batch
 
-    !> The kernels of add_nebular_batch, on the components of its nebular_setup_t.
+    !> The kernels of add_nebular_batch for the CLOUDY grids (nebular_model = 0), on the components of its nebular_setup_t (device
+    !> code never refers to the derived type itself). In order, the numbered steps of the body:
+    !>   1. Q: the ionizing photons of each young basis spectrum (per age and basis slab), as process_ionizing_radiation integrates
+    !>      them; skipped with the IMF per model (q_model), where they come from the operators.
+    !>   2. EUV rows: the age sums of the pixels below the Lyman limit redone for the nebular ages, with the escaping fraction
+    !>      (frac_obrun) on the young spectrum.
+    !>   3. The continuum: per (pixel, model), the sum over the nebular ages of the SFH weight x Q x 10**(the CLOUDY grid, interpolated
+    !>      in gas log Z, log U and age); per CLOUDY age interval a geometric progression, in kernel precision with the large
+    !>      factors scaled out (rules 3 and 5 of doc/MIXED_PRECISION.md). Only if `grid`.
+    !>   4. The line luminosities per (line, model), young and old: the same sum with the line in place of the pixel (nb_lum, also
+    !>      returned in eml).
+    !>   5. The line profiles: each line spread over the pixels its profile reaches (line_profiles).
+    !> `grid` false (cue): steps 1 and 2 only, and cue_nebular does the rest.
     subroutine nebular_kernels(ctx, n_mod, nspec, nt, nzb, nb1, nb2, nb3, nq0, basis, w2, it_tesc, zlo, zhi, dz, da, nzs, &
                                nb_nt_neb, nb_whlylim, nb_cont, nb_lines_in_spec, nb_xrb, nb_ia, nb_wa, nb_dwa, &
                                nb_newr, nb_q0, nb_iz, nb_wz, nb_iu, nb_wu, nb_fesc, nb_fabs, nb_cy, nb_co, nb_lns, &
