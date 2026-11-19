@@ -114,6 +114,7 @@ program test_csp_batch
     call check_imf_per_model()
     call check_imf_many_models()
     call check_imf_unsupported()
+    call check_basis_mods_guard()
     ! compute_csp_scenario: all-ages outputs against single-age calls, in each mode, on the
     ! one-metallicity basis
     call build_basis()
@@ -617,6 +618,40 @@ contains
         call ssp_opset_free(op)
         call set_int('imf_type', 1)
     end subroutine check_imf_unsupported
+
+    !> Without operators the batch uses the context's resident basis, built with the context's isochrone
+    !> modifications: a model whose modifications differ (it would silently get the basis's) is refused, status 2.
+    subroutine check_basis_mods_guard()
+        type(PARAMS) :: psets(3)
+        real(WP), allocatable :: mags(:, :)
+        integer :: m, status, j
+        character(len=16), parameter :: names(7) = [character(len=16) :: 'fbhb', 'sbss', 'delt', 'dell', 'agb', 'pagb', 'redgb']
+
+        call print_group("Batched CSP: resident basis, differing isochrone modifications return status 2")
+        allocate(mags(ctx%state%nbands, 3))
+        do m = 1, 3
+            call set_model(m, 0.5_wp)
+            call opensps_context_prepare_pset(ctx)
+            call opensps_context_get_pset(ctx, psets(m))
+        end do
+        call compute_csp_batch(ctx, psets, mags, status)
+        call assert_true(status == 0, "models with the context's modifications: status 0", total_tests, total_failures)
+        do j = 1, size(names)
+            psets(2) = psets(1)
+            select case (trim(names(j)))
+            case ('fbhb');  psets(2)%fbhb = 0.3_wp
+            case ('sbss');  psets(2)%sbss = 3.0_wp
+            case ('delt');  psets(2)%delt = 0.05_wp
+            case ('dell');  psets(2)%dell = -0.1_wp
+            case ('agb');   psets(2)%agb = 0.6_wp
+            case ('pagb');  psets(2)%pagb = 2.0_wp
+            case ('redgb'); psets(2)%redgb = 0.5_wp
+            end select
+            call compute_csp_batch(ctx, psets, mags, status)
+            call assert_true(status == 2, trim(names(j)) // " differing in one model: status 2", total_tests, total_failures)
+        end do
+        deallocate(mags)
+    end subroutine check_basis_mods_guard
 
     subroutine imf_case(label, imf_type, mlo, mhi)
         character(len=*), intent(in) :: label

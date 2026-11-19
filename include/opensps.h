@@ -101,8 +101,9 @@ const char *opensps_get_version_string(void);
 // Source revision of a development build (git describe), e.g. "v0.2.0-37-g6de9eb6"; "" for a
 // release build. Static storage; do not free.
 const char *opensps_get_build_id(void);
-// Rows of params_bar (the gradient entry points write every one, with no capacity argument): allocate with this,
-// not with OPENSPS_NBGRAD; the number may grow in any minor release (33 in 0.1.0, 37 in 0.2.0).
+// Rows of params_bar (opensps_context_compute_csp_batch_grad writes every one, with no capacity argument:
+// use opensps_context_compute_csp_batch_grad_rows, which takes the rows of the caller's array): allocate with
+// this, not with OPENSPS_NBGRAD; the number may grow in any minor release (33 in 0.1.0, 37 in 0.2.0).
 void opensps_get_nbgrad(int *nbgrad);
 void opensps_get_grad_param_name(int grad_idx, char *name, int max_len, int *status);
 void opensps_validate_params(int *status); // Note: Checks legacy global state context
@@ -328,6 +329,22 @@ void opensps_context_compute_csp_batch_grad(
     int *status
 );
 
+// The same with the row count of the caller's params_bar (its leading dimension: params_bar is
+// [params_bar_rows, n], column-major). The library writes the first OPENSPS_NBGRAD rows of each column (rows beyond
+// are left alone); with fewer rows than opensps_get_nbgrad() returns nothing is computed or written and status is
+// 3, so that a caller built for fewer rows gets a status instead of a heap overrun. Not looked at when params_bar
+// is NULL.
+void opensps_context_compute_csp_batch_grad_rows(
+    int handle, int n, int n_params, const char *const *names,
+    const double *const *values, const double *ssp_weights,
+    const double *ssp_weights_z, const double *zred_mags,
+    const double *mags_bar, const double *spec_bar, const double *mass_bar, const double *lbol_bar,
+    double *mags, double *spec, double *mass, double *lbol,
+    double *mdust, double *sfr, double *emlines, double *indx,
+    double *params_bar, int params_bar_rows, double *weights_bar, double *weights_z_bar,
+    int *status
+);
+
 // Struct-based configuration options for batched CSP computation with gradients
 typedef struct {
     int n;                          // Number of models
@@ -342,6 +359,7 @@ typedef struct {
     const double *spec_bar;         // nspec x n, or NULL
     const double *mass_bar;         // n, or NULL
     const double *lbol_bar;         // n, or NULL
+    int params_bar_rows;            // rows of the caller's params_bar; 0: OPENSPS_NBGRAD (the header's)
 } opensps_batch_options_t;
 
 // Struct-based result buffers for batched CSP computation and gradients
@@ -372,13 +390,14 @@ static inline void opensps_context_compute_csp_batch_ext(
         if (status) *status = 1;
         return;
     }
-    opensps_context_compute_csp_batch_grad(
+    opensps_context_compute_csp_batch_grad_rows(
         handle, opts->n, opts->n_params, opts->names, opts->values,
         opts->ssp_weights, opts->ssp_weights_z, opts->zred_mags,
         opts->mags_bar, opts->spec_bar, opts->mass_bar, opts->lbol_bar,
         res->mags, res->spec, res->mass, res->lbol,
         res->mdust, res->sfr, res->emlines, res->indx,
-        res->params_bar, res->weights_bar, res->weights_z_bar,
+        res->params_bar, opts->params_bar_rows > 0 ? opts->params_bar_rows : OPENSPS_NBGRAD,
+        res->weights_bar, res->weights_z_bar,
         status
     );
 }

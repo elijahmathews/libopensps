@@ -240,6 +240,77 @@ int main(void) {
     }
 
     // ------------------------------------------------------------------------
+    // Test 4b: the gradient entry point with the rows of the caller's params_bar (#98)
+    // ------------------------------------------------------------------------
+    {
+        const int ld = OPENSPS_NBGRAD + 3;
+        double *pb_ref = (double *)calloc((size_t)OPENSPS_NBGRAD * N_MOD, sizeof(double));
+        double *pb_rows = (double *)malloc(sizeof(double) * ld * N_MOD);
+        for (int i = 0; i < ld * N_MOD; i++) pb_rows[i] = -777.0;
+
+        opensps_context_compute_csp_batch_grad(h, N_MOD, 3, imf_names, imf_values, NULL, NULL, NULL, mags_bar,
+                                               NULL, NULL, NULL, mags, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                                               pb_ref, NULL, NULL, &status);
+        if (status != 0) { printf("FAIL: reference gradient status %d\n", status); failures++; }
+        opensps_context_compute_csp_batch_grad_rows(h, N_MOD, 3, imf_names, imf_values, NULL, NULL, NULL, mags_bar,
+                                                    NULL, NULL, NULL, mags, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                                                    pb_rows, ld, NULL, NULL, &status);
+        if (status != 0) {
+            printf("FAIL: the rows entry point with %d rows: status %d\n", ld, status);
+            failures++;
+        } else {
+            int same = 1, kept = 1;
+            /* (two calls of the same batch: bit for bit on the host; on a device the reverse pass's atomic adds
+               differ in order, so to a few kernel-precision epsilons of the model's largest gradient) */
+            for (int m = 0; m < N_MOD; m++) {
+                double gmax = 0.0;
+                for (int r = 0; r < OPENSPS_NBGRAD; r++) gmax = fmax(gmax, fabs(pb_ref[r + m * OPENSPS_NBGRAD]));
+                for (int r = 0; r < OPENSPS_NBGRAD; r++)
+                    if (fabs(pb_rows[r + m * ld] - pb_ref[r + m * OPENSPS_NBGRAD]) > 1e-4 * gmax) same = 0;
+                for (int r = OPENSPS_NBGRAD; r < ld; r++)
+                    if (pb_rows[r + m * ld] != -777.0) kept = 0;
+            }
+            if (!same) { printf("FAIL: the rows entry point's gradients differ from the plain entry point's\n"); failures++; }
+            if (!kept) { printf("FAIL: the rows entry point wrote beyond the library's rows\n"); failures++; }
+        }
+
+        /* Too few rows: a status, nothing computed or written */
+        double *pb_small = (double *)malloc(sizeof(double) * (OPENSPS_NBGRAD - 1) * N_MOD);
+        for (int i = 0; i < (OPENSPS_NBGRAD - 1) * N_MOD; i++) pb_small[i] = -777.0;
+        opensps_context_compute_csp_batch_grad_rows(h, N_MOD, 3, imf_names, imf_values, NULL, NULL, NULL, mags_bar,
+                                                    NULL, NULL, NULL, mags, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                                                    pb_small, OPENSPS_NBGRAD - 1, NULL, NULL, &status);
+        int untouched = 1;
+        for (int i = 0; i < (OPENSPS_NBGRAD - 1) * N_MOD; i++) if (pb_small[i] != -777.0) untouched = 0;
+        if (status != 3) { printf("FAIL: too few rows: status %d (expected 3)\n", status); failures++; }
+        if (!untouched) { printf("FAIL: too few rows: params_bar was written\n"); failures++; }
+        char msg[256];
+        int est = 0;
+        opensps_get_last_error(&est, msg, 256);
+        if (est != 3 || strstr(msg, "rows") == NULL) { printf("FAIL: the message names no rows: %d '%s'\n", est, msg); failures++; }
+
+        /* Without params_bar the row count is not looked at */
+        opensps_context_compute_csp_batch_grad_rows(h, N_MOD, 3, imf_names, imf_values, NULL, NULL, NULL, NULL,
+                                                    NULL, NULL, NULL, mags, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                                                    NULL, 0, NULL, NULL, &status);
+        if (status != 0) { printf("FAIL: no params_bar, 0 rows: status %d\n", status); failures++; }
+
+        /* The struct entry point: its params_bar_rows field, and the default (0: the header's OPENSPS_NBGRAD) */
+        opensps_batch_options_t o2 = {0};
+        o2.n = N_MOD; o2.n_params = 3; o2.names = imf_names; o2.values = imf_values; o2.mags_bar = mags_bar;
+        opensps_batch_results_t r2 = {0};
+        r2.mags = mags; r2.params_bar = pb_small;
+        o2.params_bar_rows = OPENSPS_NBGRAD - 1;
+        opensps_context_compute_csp_batch_ext(h, &o2, &r2, &status);
+        if (status != 3) { printf("FAIL: struct entry point, too few rows: status %d\n", status); failures++; }
+        r2.params_bar = pb_ref;
+        o2.params_bar_rows = 0;
+        opensps_context_compute_csp_batch_ext(h, &o2, &r2, &status);
+        if (status != 0) { printf("FAIL: struct entry point, default rows: status %d\n", status); failures++; }
+        free(pb_ref); free(pb_rows); free(pb_small);
+    }
+
+    // ------------------------------------------------------------------------
     // Test 5: Enrichment history weights (ssp_weights_z and weights_z_bar)
     // ------------------------------------------------------------------------
     {

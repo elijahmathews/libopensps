@@ -630,13 +630,43 @@ contains
                           c_null_ptr, c_null_ptr, c_null_ptr, c_null_ptr, c_null_ptr, c_null_ptr, status)
     end subroutine opensps_context_compute_csp_batch_grad_handle
 
+    !> @brief The gradient entry point with the row count of the caller's params_bar (#98).
+    !> @details As opensps_context_compute_csp_batch_grad, plus params_bar_rows: the leading dimension of
+    !> params_bar ([params_bar_rows, n], column-major). The library writes the first NBGRAD rows of each
+    !> column and leaves any rows beyond untouched; with fewer than NBGRAD rows nothing is computed or written
+    !> (status 3, the message names the rows needed), so a binding built for fewer gradient rows than the
+    !> library has gets a status, not a heap overrun. params_bar_rows is not looked at when params_bar is NULL.
+    subroutine opensps_context_compute_csp_batch_grad_rows_handle(handle, n, n_params, c_names, c_values, &
+                                                          c_weights, c_weights_z, c_zred_mags, &
+                                                          c_mags_bar, c_spec_bar, c_mass_bar, c_lbol_bar, &
+                                                          c_mags, c_spec, c_mass, c_lbol, c_mdust, c_sfr, &
+                                                          c_emlines, c_indx, c_params_bar, params_bar_rows, &
+                                                          c_weights_bar, c_weights_z_bar, status) &
+        bind(C, name="opensps_context_compute_csp_batch_grad_rows")
+        integer(c_int), value :: handle, n, n_params, params_bar_rows
+        type(c_ptr), value :: c_names, c_values, c_weights, c_weights_z, c_zred_mags
+        type(c_ptr), value :: c_mags_bar, c_spec_bar, c_mass_bar, c_lbol_bar
+        type(c_ptr), value :: c_mags, c_spec, c_mass, c_lbol, c_mdust, c_sfr, c_emlines, c_indx
+        type(c_ptr), value :: c_params_bar, c_weights_bar, c_weights_z_bar
+        integer(c_int), intent(OUT) :: status
+
+        call batch_handle(handle, n, n_params, c_names, c_values, c_weights, c_weights_z, c_zred_mags, &
+                          c_mags_bar, c_spec_bar, c_mass_bar, c_lbol_bar, &
+                          c_mags, c_spec, c_mass, c_lbol, c_mdust, c_sfr, c_emlines, c_indx, &
+                          c_params_bar, c_weights_bar, c_weights_z_bar, &
+                          c_null_ptr, c_null_ptr, c_null_ptr, c_null_ptr, c_null_ptr, c_null_ptr, status, &
+                          params_bar_rows)
+    end subroutine opensps_context_compute_csp_batch_grad_rows_handle
+
     !> The general batch driver covering forward, parts, and gradients.
     subroutine batch_handle(handle, n, n_params, c_names, c_values, c_weights, c_weights_z, c_zred_mags, &
                             c_mags_bar, c_spec_bar, c_mass_bar, c_lbol_bar, &
                             c_mags, c_spec, c_mass, c_lbol, c_mdust, c_sfr, c_emlines, c_indx, &
                             c_params_bar, c_weights_bar, c_weights_z_bar, &
-                            c_young, c_old, c_mass_young, c_mass_old, c_lbol_young, c_lbol_old, status)
+                            c_young, c_old, c_mass_young, c_mass_old, c_lbol_young, c_lbol_old, status, params_bar_rows)
         integer(c_int), intent(IN) :: handle, n, n_params
+        !> Rows of the caller's params_bar (absent: NBGRAD, the entry points without the argument)
+        integer(c_int), intent(IN), optional :: params_bar_rows
         type(c_ptr), intent(IN) :: c_names, c_values, c_weights, c_weights_z, c_zred_mags
         type(c_ptr), intent(IN) :: c_mags_bar, c_spec_bar, c_mass_bar, c_lbol_bar
         type(c_ptr), intent(IN) :: c_mags, c_spec, c_mass, c_lbol, c_mdust, c_sfr, c_emlines, c_indx
@@ -672,6 +702,8 @@ contains
         real(WP), allocatable :: vals(:, :)
         integer(int64) :: wa((storage_size(PARAMS_CORE()) + 63) / 64), wb((storage_size(PARAMS_CORE()) + 63) / 64)
         logical :: zmode, dirty, has_ops
+        integer :: prows
+        character(len=120) :: rows_msg
         real(WP), allocatable :: mass_l(:), lbol_l(:), mdust_l(:), sfr_l(:), eml_l(:, :)
         character(LEN=10), parameter :: NEB_PARAMS(3) = [character(LEN=10) :: 'gas_logu', 'gas_logz', 'frac_obrun']
         character(LEN=10), parameter :: IMF_PARAMS(5) = [character(LEN=10) :: 'imf1', 'imf2', 'imf3', 'vdmc', 'mdave']
@@ -686,6 +718,15 @@ contains
             return
         end if
         if (n <= 0) return
+        prows = NBGRAD
+        if (present(params_bar_rows)) prows = params_bar_rows
+        if (c_associated(c_params_bar) .and. prows < NBGRAD) then
+            write(rows_msg, '(A,I0,A,I0,A)') 'compute_csp_batch_grad: params_bar has ', prows, &
+                ' rows, the library writes ', NBGRAD, ' (opensps_get_nbgrad)'
+            status = 3
+            call opensps_set_error(3, trim(rows_msg))
+            return
+        end if
         associate(ctx => ctx_pool(handle)%c)
         nspec = ctx%state%nspec
         nt = ctx%state%ntfull
@@ -831,7 +872,7 @@ contains
         end if
 
         if (c_associated(c_params_bar)) then
-            call c_f_pointer(c_params_bar, params_bar, [NBGRAD, n]); allocate(params_bar_a, source=params_bar)
+            call c_f_pointer(c_params_bar, params_bar, [prows, n]); allocate(params_bar_a, source=params_bar(1:NBGRAD, :))
         end if
         if (c_associated(c_weights_bar)) then
             call c_f_pointer(c_weights_bar, weights_bar, [nt, n]); allocate(weights_bar_a, source=weights_bar)
@@ -865,7 +906,7 @@ contains
         end if
 
         if (st == 0) then
-            if (allocated(params_bar_a)) params_bar = params_bar_a
+            if (allocated(params_bar_a)) params_bar(1:NBGRAD, :) = params_bar_a
             if (allocated(weights_bar_a)) weights_bar = weights_bar_a
             if (allocated(weights_z_bar_a)) weights_z_bar = weights_z_bar_a
             if (c_associated(c_mass)) then
