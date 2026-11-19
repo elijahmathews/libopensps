@@ -67,9 +67,13 @@ the nebular continuum (forward and backward) and the interpolated mass and L_bol
 matches (five, plus the two of `model_sums`); the derivative forms and the sites with other structure stay as they are. The saving is
 a few lines: the point is one definition of the blend.
 
-**Step 4, the driver in stages.** Split `compute_csp_batch` into stage routines (SFH weights, SSP sums, nebular, attenuation, emission,
-AGN, IGM, smoothing, photometry) with a shared workspace type. Mechanical, long; the risk is the device rules (mapping derived
-types, temporaries): check on the R9700 after every cut.
+**Step 4, the driver in stages (first part done, #134).** `compute_csp_batch` was 1037 lines; four blocks that were host-only code with a
+clear input and output are routines now (867 lines): `batch_check_shapes` (the sizes of the optional arguments, and the modes they
+make: parts, grad, given_w), `batch_check_models` (the values of the models this path does not support, and zvar),
+`batch_imf_vectors` (the IMF parameter vector of every model and the operators' work arrays) and `batch_chain_derivatives` (the chain-rule
+factors of the reverse pass). What is not done: the device-steered stages themselves (SFH weights, the nebular and attenuation calls,
+smoothing, photometry) are still inline in the driver; splitting them needs a workspace type for the pointers into `ipk`, `rpk`, `lpk`
+and `rout` and the arrays they share, and the device rules about mapping derived types make each cut something to check on the R9700.
 
 **Step 5, backend consolidation (analysed, mostly not pursued).** The conditional count by kind (961 after step 2): about 586 are `OMP_TARGET`
 switches, of which 153 are the host arm (`#elif defined(_OPENMP)`) of one directive switch repeated at every parallel loop (`!$omp target
@@ -86,6 +90,15 @@ of sharing); a language change (nothing in the plan needs one).
 Order: Steps 0 and 1 first (safe, clear payoff), then 2; re-evaluate before 3 - 5.
 
 ## How to check a step (recipes)
+
+* **CPU bit identity needs `-fno-tree-vectorize`.** The CPU library calls glibc's vector math routines (`_ZGVbN2v_exp`, `_log`, `_log10`,
+  `_pow`, libmvec: `nm -D libopensps.so | grep _ZGV`): GCC vectorizes loops containing `exp`, `log` and `pow` with them, and libmvec differs
+  from the scalar libm by about an ulp. Which loops vectorize depends on the code around them, so a refactor that cannot change arithmetic
+  (step 4: moving shape checks into a routine) still changes about 7% of the models of a batch by 1e-16 relative (up to 7e-16 in a pixel, 1e-14 in
+  a gradient dump) at the default flags, and not at all with `-O1` or `-fno-tree-vectorize`. So: compare two CPU builds of a refactor
+  with `-Dfortran_args=-fno-tree-vectorize` (both built the same way: `~/scratch/forward-opt/novec_full.sh` does it for a baseline tree and
+  the worktree, forward and gradient dumps), and expect 1e-15 differences at the default flags. (The device kernels have no libmvec; their
+  dumps stayed bit-identical through every step.)
 
 * **The whole chain in one go:** `~/scratch/forward-opt/run_verify_chain.sh NAME` (host FP64 + FP32 suites, the R9700 device suite
   rebuilt from scratch, the nvfortran compile; one stage after the other, under a memory cap) after the forward and gradient dumps.
